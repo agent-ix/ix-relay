@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":"an earlier prompt"},"uuid":"u-1"}
+{"type":"user","origin":{"kind":"peer","msg_id":"6b1f0c1e-9d5a-4f3a-8a11-2c7e4d9a0b55"},"message":{"role":"user","content":"<cross-session-message from=\"uds:/x\" from-name=\"hub:EA:1\">\n[ix-relay] hi\n</cross-session-message>"},"uuid":"u-2"}

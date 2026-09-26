@@ -1,0 +1,3 @@
+<cross-session-message from="uds:/run/user/1000/cc-socks/7.sock" from-name="hub:EA:1">
+[ix-relay] hi
+</cross-session-message>

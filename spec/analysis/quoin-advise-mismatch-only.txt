@@ -1,0 +1,18 @@
+NFR-004-AC-1  authored=Inspection  recommend: property-based-testing (universal)  ⚠ mismatch
+NFR-004-AC-2  authored=Inspection  recommend: fuzzing (parser); property-based-testing (universal)  ⚠ mismatch
+NFR-002-M-1  authored=unit-testing  recommend: performance-benchmarking (quantified-threshold)  ⚠ mismatch
+NFR-002-M-2  authored=property-based-testing  recommend: performance-benchmarking (quantified-threshold)  ⚠ mismatch
+NFR-002-M-3  authored=property-based-testing  recommend: agent-behaviour-eval (agent-behaviour); performance-benchmarking (quantified-threshold)  ⚠ mismatch
+NFR-002-M-4  authored=integration-testing  recommend: performance-benchmarking (quantified-threshold)  ⚠ mismatch
+NFR-002-M-5  authored=integration-testing  recommend: performance-benchmarking (quantified-threshold)  ⚠ mismatch
+NFR-002-M-6  authored=fault-injection  recommend: performance-benchmarking (quantified-threshold)  ⚠ mismatch
+NFR-002-M-7  authored=fault-injection  recommend: performance-benchmarking (quantified-threshold)  ⚠ mismatch
+NFR-003-M-1  authored=fault-injection  recommend: performance-benchmarking (quantified-threshold)  ⚠ mismatch
+NFR-003-M-2  authored=fault-injection  recommend: model-checking (temporal); performance-benchmarking (quantified-threshold); runtime-monitoring (temporal)  ⚠ mismatch
+NFR-003-M-3  authored=fault-injection  recommend: model-checking (temporal); performance-benchmarking (quantified-threshold); runtime-monitoring (temporal)  ⚠ mismatch
+NFR-003-M-4  authored=fault-injection  recommend: performance-benchmarking (quantified-threshold)  ⚠ mismatch
+NFR-003-M-5  authored=integration-testing  recommend: combinatorial-tway (configuration-matrix); fuzzing (untrusted-input); negative-abuse-testing (input-validation)  ⚠ mismatch
+NFR-003-M-6  authored=unit-testing  recommend: performance-benchmarking (quantified-threshold)  ⚠ mismatch
+NFR-004-M-1  authored=inspection  recommend: performance-benchmarking (quantified-threshold)  ⚠ mismatch
+
+16 of 256 obligation(s) shown. Of all 256: 16 mismatch, 0 uncatalogued, 0 inconclusive. Recommendations, not verdicts: confirm the method in spec review.

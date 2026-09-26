@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent for `relay-watcher` (AGE-2013), for node-b (macOS). node-a and
+  hub use `relay-watcher.service` (systemd user unit) instead.
+
+  Not installed by this repo — see README.md "Installing the watcher" for how
+  to install it by hand. launchd does not expand `~` or `$HOME`: replace
+  YOUR_USER below with the real account name before loading this.
+
+  Machine-specific settings (Redis URL, key prefix, machine name) belong in
+  ~/.ix/relay/config.toml (see README.md "Configuration"), not env vars here.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.agent-ix.relay-watcher</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Adjust to wherever `cargo install --path crates/relay-watcher`
+             (or `make build`) put the binary on this machine. -->
+        <string>/Users/YOUR_USER/.cargo/bin/relay-watcher</string>
+    </array>
+
+    <!-- launchd agents don't inherit the login shell's PATH, so herdr must be
+         found explicitly. Literal paths only: launchd does not expand `~`.
+         Replace YOUR_USER here too. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/YOUR_USER/.local/bin:/Users/YOUR_USER/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USER/Library/Logs/relay-watcher.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USER/Library/Logs/relay-watcher.log</string>
+</dict>
+</plist>

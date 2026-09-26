@@ -1,0 +1,29 @@
+[licenses]
+version = 2
+allow = [
+    "AGPL-3.0-or-later",
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+# xxhash-rust comes in through `redis`. BSL-1.0 is a permissive, OSI-approved
+# license compatible with AGPL; allowed for this crate only.
+exceptions = [{ allow = ["BSL-1.0"], crate = "xxhash-rust" }]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "warn"
+
+[advisories]
+version = 2
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/agent-ix/ix-cli-kit"]

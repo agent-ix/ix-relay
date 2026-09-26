@@ -1,0 +1,454 @@
+//! Turning what a sender typed into a [`Target`].
+//!
+//! `agent-msg send hub:EA:1 ...` must work cold, with no `find` first, so
+//! resolution happens inside `send`, against the registry alone (each
+//! registration records its herdr [`Place`](crate::Place)) — no herdr or SSH
+//! call. Pure over the registry snapshot, so it is tested without Redis.
+
+use std::collections::BTreeSet;
+
+use crate::{
+    address::Address,
+    error::{Candidate, Error, Result, UnknownCause},
+    ids::{MachineName, PaneId, PaneRef},
+    message::Registration,
+    name::{AgentName, Target},
+};
+
+/// The most close matches an unknown-target error suggests.
+const MAX_SUGGESTIONS: usize = 5;
+
+/// Resolves `input` to who it addresses, trying, in order (the first form
+/// that matches wins, so anything that worked before still does):
+///
+/// 1. `all`;
+/// 2. a bus name or alias of a registered lead;
+/// 3. a raw herdr pane id (`wB:p1`) of a lead on `sender_machine` only: pane
+///    ids repeat across machines and mean nothing on another one, so a lead
+///    elsewhere is addressed by its address. More than one match on the
+///    sender's machine is an error;
+/// 4. a `server:workspace[:tab]` address, case-insensitive; without a tab it
+///    selects every tab of the workspace.
+///
+/// # Errors
+///
+/// [`Error::AmbiguousTarget`] when more than one lead matches — never a
+/// guess. [`Error::UnknownTarget`] when none does, with the likely cause and
+/// close matches. [`Error::InvalidAddress`] for text with colons that is not
+/// an address.
+pub fn resolve_target(
+    input: &str,
+    sender_machine: &MachineName,
+    registrations: &[Registration],
+    aliases: &[(AgentName, AgentName)],
+) -> Result<Target> {
+    if let Ok(target @ Target::All) = input.parse::<Target>() {
+        return Ok(target);
+    }
+
+    if let Ok(name) = input.parse::<AgentName>() {
+        let canonical = aliases
+            .iter()
+            .find(|(alias, _)| *alias == name)
+            .map_or(name, |(_, canonical)| canonical.clone());
+        if registrations.iter().any(|r| r.name == canonical) {
+            return Ok(Target::Agent(canonical));
+        }
+    }
+
+    // A pane id is only meaningful with its machine (FR-009): compare the pair.
+    let by_pane: Vec<&Registration> = match input.parse::<PaneId>() {
+        Ok(pane) => {
+            let wanted = PaneRef::new(sender_machine.clone(), pane);
+            registrations.iter().filter(|r| r.is_on(&wanted)).collect()
+        }
+        Err(_) => Vec::new(),
+    };
+    if !by_pane.is_empty() {
+        return one_or_ambiguous(input, by_pane);
+    }
+
+    if !input.contains(':') {
+        return Err(unknown(
+            input,
+            UnknownCause::NotRegistered,
+            registrations,
+            aliases,
+        ));
+    }
+    let query: Address = input.parse()?;
+    let matched: Vec<&Registration> = registrations
+        .iter()
+        .filter(|r| r.full_address().is_some_and(|a| query.selects(&a)))
+        .collect();
+    if matched.is_empty() {
+        let cause = classify(&query, registrations);
+        return Err(unknown(input, cause, registrations, aliases));
+    }
+    one_or_ambiguous(input, matched)
+}
+
+fn one_or_ambiguous(input: &str, mut matched: Vec<&Registration>) -> Result<Target> {
+    if let [only] = matched.as_slice() {
+        return Ok(Target::Agent(only.name.clone()));
+    }
+    matched.sort_by(|a, b| a.name.cmp(&b.name));
+    Err(Error::AmbiguousTarget {
+        input: input.to_owned(),
+        candidates: matched
+            .into_iter()
+            .map(|r| Candidate {
+                name: r.name.clone(),
+                address: r.full_address(),
+            })
+            .collect(),
+    })
+}
+
+/// The most specific reason an address matched no registration.
+fn classify(query: &Address, registrations: &[Registration]) -> UnknownCause {
+    // Compared the way `Address` cleans a server, so a machine name the address
+    // grammar would alter still matches itself.
+    let server_of = |r: &Registration| {
+        Address::new(r.machine.as_str(), "-", None)
+            .server()
+            .to_owned()
+    };
+    // Equality on `Address` folds case, like `selects` did when it matched the
+    // server: comparing the strings exactly would call a server unknown while
+    // listing it among `known` when its name has a non-ASCII capital.
+    let query_server = Address::new(query.server(), "-", None);
+    let on_server: Vec<&Registration> = registrations
+        .iter()
+        .filter(|r| Address::new(r.machine.as_str(), "-", None) == query_server)
+        .collect();
+    if on_server.is_empty() {
+        let known: BTreeSet<String> = registrations.iter().map(server_of).collect();
+        return UnknownCause::UnknownServer {
+            server: query.server().to_owned(),
+            known: known.into_iter().collect(),
+        };
+    }
+    let placed: Vec<Address> = on_server.iter().filter_map(|r| r.full_address()).collect();
+    let in_workspace: Vec<&Address> = placed
+        .iter()
+        .filter(|a| Address::new(query.server(), query.workspace(), None).selects(a))
+        .collect();
+    if in_workspace.is_empty() {
+        let available: BTreeSet<String> = placed.iter().map(|a| a.workspace().to_owned()).collect();
+        return UnknownCause::UnknownWorkspace {
+            server: query.server().to_owned(),
+            available: available.into_iter().collect(),
+        };
+    }
+    let available: BTreeSet<String> = in_workspace
+        .iter()
+        .filter_map(|a| a.tab().map(str::to_owned))
+        .collect();
+    UnknownCause::UnknownTab {
+        workspace: query.workspace().to_owned(),
+        available: available.into_iter().collect(),
+    }
+}
+
+fn unknown(
+    input: &str,
+    cause: UnknownCause,
+    registrations: &[Registration],
+    aliases: &[(AgentName, AgentName)],
+) -> Error {
+    Error::UnknownTarget {
+        input: input.to_owned(),
+        cause,
+        suggestions: suggest(input, registrations, aliases),
+    }
+}
+
+/// Names, aliases and full addresses close to `input`, best first: one
+/// contains the other (ignoring case), or they are a few edits apart.
+fn suggest(
+    input: &str,
+    registrations: &[Registration],
+    aliases: &[(AgentName, AgentName)],
+) -> Vec<String> {
+    let wanted = input.to_lowercase();
+    let allowed = (wanted.chars().count() / 4).max(2);
+    let mut pool: BTreeSet<String> = BTreeSet::new();
+    for r in registrations {
+        pool.insert(r.name.to_string());
+        if let Some(address) = r.full_address() {
+            pool.insert(address.to_string());
+        }
+    }
+    pool.extend(aliases.iter().map(|(alias, _)| alias.to_string()));
+
+    let mut scored: Vec<(usize, String)> = pool
+        .into_iter()
+        .filter_map(|candidate| {
+            let lower = candidate.to_lowercase();
+            let distance = edit_distance(&wanted, &lower);
+            let contained = lower.contains(&wanted) || wanted.contains(&lower);
+            (contained || distance <= allowed).then_some((distance, candidate))
+        })
+        .collect();
+    scored.sort();
+    scored
+        .into_iter()
+        .take(MAX_SUGGESTIONS)
+        .map(|(_, candidate)| candidate)
+        .collect()
+}
+
+/// Levenshtein distance over chars.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = if ca == *cb {
+                diagonal
+            } else {
+                1 + diagonal.min(above).min(row[j])
+            };
+            diagonal = above;
+        }
+    }
+    row[b.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::address::Place;
+
+    fn name(s: &str) -> AgentName {
+        s.parse().unwrap()
+    }
+
+    fn reg(n: &str, machine: &str, pane: &str, place: Option<(&str, &str, u32)>) -> Registration {
+        Registration {
+            name: name(n),
+            machine: machine.parse().unwrap(),
+            kind: "claude".into(),
+            session_id: None,
+            cwd: None,
+            herdr_pane: Some(pane.parse().unwrap()),
+            place: place.map(|(workspace, tab, tabs)| Place {
+                workspace: workspace.into(),
+                tab: tab.into(),
+                tabs_in_workspace: tabs,
+            }),
+            last_seen_ms: 1,
+        }
+    }
+
+    fn fleet() -> Vec<Registration> {
+        vec![
+            reg("ea-code", "hub", "wB:p1", Some(("EA", "code", 2))),
+            reg("ea-plan", "hub", "wB:p2", Some(("EA", "plan", 2))),
+            reg("research", "node-a", "wB:p1", Some(("research", "1", 1))),
+            reg("old-lead", "node-a", "wC:p1", None),
+        ]
+    }
+
+    fn target(input: &str) -> Result<Target> {
+        resolve_target(
+            input,
+            &"hub".parse().unwrap(),
+            &fleet(),
+            &[(name("ea"), name("ea-code"))],
+        )
+    }
+
+    fn agent(n: &str) -> Target {
+        Target::Agent(name(n))
+    }
+
+    #[test]
+    fn all_is_a_broadcast() {
+        assert_eq!(target("all").unwrap(), Target::All);
+    }
+
+    #[test]
+    fn a_bus_name_or_an_alias_still_resolves() {
+        assert_eq!(target("ea-plan").unwrap(), agent("ea-plan"));
+        assert_eq!(target("ea").unwrap(), agent("ea-code"));
+        assert_eq!(target("old-lead").unwrap(), agent("old-lead"));
+    }
+
+    #[test]
+    fn a_full_address_resolves_ignoring_case() {
+        assert_eq!(target("hub:EA:code").unwrap(), agent("ea-code"));
+        assert_eq!(target("HUB:ea:PLAN").unwrap(), agent("ea-plan"));
+    }
+
+    #[test]
+    fn the_tab_is_optional_when_the_workspace_has_one_lead() {
+        assert_eq!(target("node-a:research").unwrap(), agent("research"));
+        assert_eq!(target("node-a:research:1").unwrap(), agent("research"));
+    }
+
+    #[test]
+    fn a_missing_tab_is_ambiguous_when_the_workspace_has_several_and_lists_them() {
+        let Err(Error::AmbiguousTarget { input, candidates }) = target("hub:EA") else {
+            panic!("expected AmbiguousTarget");
+        };
+        assert_eq!(input, "hub:EA");
+        let names: Vec<_> = candidates.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["ea-code", "ea-plan"]);
+        assert_eq!(
+            candidates[0].address.as_ref().unwrap().to_string(),
+            "hub:EA:code"
+        );
+    }
+
+    #[test]
+    fn a_pane_id_resolves_on_the_senders_machine_only() {
+        // `wB:p1` is on both hub (ea-code) and node-a (research): each sender
+        // reaches its own machine's lead, never the other's.
+        assert_eq!(target("wB:p1").unwrap(), agent("ea-code"));
+        assert_eq!(
+            resolve_target("wB:p1", &"Node-A.local".parse().unwrap(), &fleet(), &[]).unwrap(),
+            agent("research")
+        );
+        // hub's `wB:p2` is not reachable by pane id from node-a.
+        assert!(resolve_target("wB:p2", &"node-a".parse().unwrap(), &fleet(), &[]).is_err());
+        assert!(resolve_target("wC:p1", &"hub".parse().unwrap(), &fleet(), &[]).is_err());
+        assert_eq!(
+            resolve_target("wC:p1", &"node-a".parse().unwrap(), &fleet(), &[]).unwrap(),
+            agent("old-lead")
+        );
+    }
+
+    #[test]
+    fn two_leads_on_the_senders_machine_with_one_pane_id_are_ambiguous() {
+        let mut regs = fleet();
+        regs.push(reg("ea-dup", "hub", "wB:p1", None));
+        assert!(matches!(
+            resolve_target("wB:p1", &"hub".parse().unwrap(), &regs, &[]),
+            Err(Error::AmbiguousTarget { candidates, .. }) if candidates.len() == 2
+        ));
+    }
+
+    #[test]
+    fn the_same_workspace_label_on_two_servers_never_crosses_servers() {
+        let mut regs = fleet();
+        regs.push(reg("ea-node-a", "node-a", "wZ:p1", Some(("EA", "code", 1))));
+        assert_eq!(
+            resolve_target("node-a:EA", &"hub".parse().unwrap(), &regs, &[]).unwrap(),
+            agent("ea-node-a")
+        );
+        assert_eq!(
+            resolve_target("hub:EA:code", &"hub".parse().unwrap(), &regs, &[]).unwrap(),
+            agent("ea-code")
+        );
+    }
+
+    #[test]
+    fn two_leads_in_one_tab_are_ambiguous() {
+        let mut regs = fleet();
+        regs.push(reg("ea-code-2", "hub", "wB:p9", Some(("EA", "code", 2))));
+        assert!(matches!(
+            resolve_target("hub:EA:code", &"hub".parse().unwrap(), &regs, &[]),
+            Err(Error::AmbiguousTarget { candidates, .. }) if candidates.len() == 2
+        ));
+    }
+
+    #[test]
+    fn a_lead_with_no_recorded_place_has_no_address() {
+        assert!(matches!(
+            target("node-a:wC"),
+            Err(Error::UnknownTarget {
+                cause: UnknownCause::UnknownWorkspace { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn an_unknown_server_names_the_servers_that_have_leads() {
+        let Err(Error::UnknownTarget { cause, .. }) = target("node-b:EA:code") else {
+            panic!("expected UnknownTarget");
+        };
+        assert_eq!(
+            cause,
+            UnknownCause::UnknownServer {
+                server: "node-b".into(),
+                known: vec!["hub".into(), "node-a".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn an_unknown_workspace_lists_the_workspaces_on_that_server_and_suggests_the_near_miss() {
+        let Err(Error::UnknownTarget {
+            cause, suggestions, ..
+        }) = target("hub:EAA:code")
+        else {
+            panic!("expected UnknownTarget");
+        };
+        assert_eq!(
+            cause,
+            UnknownCause::UnknownWorkspace {
+                server: "hub".into(),
+                available: vec!["EA".into()],
+            }
+        );
+        assert!(
+            suggestions.contains(&"hub:EA:code".to_owned()),
+            "{suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_tab_lists_the_tabs_that_have_a_lead() {
+        let Err(Error::UnknownTarget { cause, .. }) = target("hub:EA:nope") else {
+            panic!("expected UnknownTarget");
+        };
+        assert_eq!(
+            cause,
+            UnknownCause::UnknownTab {
+                workspace: "EA".into(),
+                available: vec!["code".into(), "plan".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn a_mistyped_name_is_not_registered_and_suggests_the_close_name() {
+        let Err(Error::UnknownTarget {
+            cause, suggestions, ..
+        }) = target("ea-cod")
+        else {
+            panic!("expected UnknownTarget");
+        };
+        assert_eq!(cause, UnknownCause::NotRegistered);
+        assert_eq!(suggestions.first().map(String::as_str), Some("ea-code"));
+    }
+
+    #[test]
+    fn colon_text_that_is_not_an_address_is_invalid() {
+        assert!(matches!(
+            target("a:b:c:d"),
+            Err(Error::InvalidAddress { .. })
+        ));
+    }
+
+    #[test]
+    fn the_error_text_carries_the_cause_and_the_suggestion() {
+        let text = target("hub:EAA:code").unwrap_err().to_string();
+        assert!(text.contains("workspaces: EA"), "{text}");
+        assert!(text.contains("did you mean"), "{text}");
+        assert!(text.contains("hub:EA:code"), "{text}");
+    }
+
+    #[test]
+    fn edit_distance_counts_single_character_edits() {
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+        assert_eq!(edit_distance("", "abc"), 3);
+        assert_eq!(edit_distance("same", "same"), 0);
+    }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "ix-relay",
+  "version": "0.1.0",
+  "description": "Connects a team lead's Claude Code session to the ix-relay message bus.",
+  "author": {
+    "name": "Agent IX"
+  }
+}

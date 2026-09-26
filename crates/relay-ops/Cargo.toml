@@ -1,0 +1,26 @@
+[package]
+name = "relay-ops"
+description = "Escalation orchestration shared by agent-msg and relay-tui: investigate/resolve/post-linear over herdr and linear."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+relay-core.workspace = true
+herdr-cli.workspace = true
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+redis.workspace = true
+relay-test-support.workspace = true

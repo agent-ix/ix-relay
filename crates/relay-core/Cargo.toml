@@ -1,0 +1,27 @@
+[package]
+name = "relay-core"
+description = "Redis-backed store and message types for the ix-relay lead-to-lead bus."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+gethostname.workspace = true
+redis.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+ix-cli-kit.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+relay-test-support.workspace = true
+tempfile.workspace = true

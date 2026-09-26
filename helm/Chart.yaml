@@ -1,0 +1,12 @@
+apiVersion: v2
+name: ix-relay
+description: The relay's own Redis (relay-redis), reached by leads over WireGuard
+type: application
+version: 0.1.0
+appVersion: "7"
+annotations:
+  org.agent-ix.deployable: "service"
+  org.agent-ix.title: "ix-relay bus (relay-redis)"
+  org.agent-ix.category: "data"
+  org.agent-ix.namespace: "relay"
+  org.opencontainers.image.source: "https://github.com/agent-ix/ix-relay"

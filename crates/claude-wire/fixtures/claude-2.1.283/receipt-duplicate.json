@@ -1,0 +1,1 @@
+{"type":"control","action":"peer_message_status","status":"dropped","status_detail":"duplicate","from":"uds:/run/user/1000/cc-socks/1.sock","orig_msg_id":"cb4ae227","msgV":1,"msg_id":"6f708192"}

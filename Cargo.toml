@@ -1,0 +1,57 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# ix-cli-kit's own rust-version is 1.98.1 (see relay-core's dependency below);
+# cargo refuses to build a dependency newer than the active toolchain, so this
+# floor and rust-toolchain.toml's pin move together.
+rust-version = "1.98.1"
+authors = ["Agent IX"]
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/agent-ix/ix-relay"
+
+[workspace.dependencies]
+relay-core = { path = "crates/relay-core" }
+herdr-cli = { path = "crates/herdr-cli" }
+relay-ops = { path = "crates/relay-ops" }
+relay-test-support = { path = "crates/relay-test-support" }
+claude-wire = { path = "crates/claude-wire" }
+clap = { version = "4.6", features = ["derive", "env"] }
+gethostname = "1.1"
+jiff = "0.2"
+proptest = "1"
+ratatui = "0.30"
+redis = { version = "1.7", default-features = false, features = ["streams", "script"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Already pulled in transitively (crossterm depends on it); made direct so
+# relay-tui can register a SIGTERM/SIGHUP flag with no unsafe signal-handler
+# code of its own — the "flag" module is signal-safe by construction.
+signal-hook = "0.3"
+tempfile = "3"
+thiserror = "2"
+toml = "1.1.6"
+# Shared CLI foundation: the flag > env > file > default precedence chain and
+# malformed-file-with-line/column reporting (AGE-2017). Consumed by git-rev
+# pin — one rev string, no vendoring and no tag pin (see agent-ix/ix-cli-kit
+# README, "Consuming this crate"). Same rev as ix-board.
+ix-cli-kit = { git = "https://github.com/agent-ix/ix-cli-kit", rev = "911666e4e316faa77e6e23d4f9f95f1ecb0f0def" }
+
+[workspace.lints.rust]
+missing_docs = "deny"
+# `deny`, not `forbid`: relay-core's test_env module is the one place that may
+# opt out (edition 2024 makes `std::env::set_var` unsafe), and `forbid` cannot
+# be relaxed by an inner `allow`.
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+allow_attributes_without_reason = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

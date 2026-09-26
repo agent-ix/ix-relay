@@ -1,0 +1,1 @@
+{"type":"control","action":"peer_message_status","status":"dropped","drop_reason":"queue_full","dropped_msg_ids":["cb4ae227","d4e5f607"],"from":"uds:/run/user/1000/cc-socks/1.sock","msgV":1,"msg_id":"5e6f7081"}

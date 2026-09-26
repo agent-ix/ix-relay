@@ -1,0 +1,33 @@
+# Contract fixtures for Claude Code 2.1.283 (claude_wire::CAPTURED_ON).
+# file <TAB> provenance <TAB> note
+# provenance is one of:
+#   captured                  unedited bytes observed live on Claude Code 2.1.283 (AGE-2030 spike, scratch runs).
+#   captured-shape            the shape was observed live (or is our own emitted bytes, asserted as a golden), but
+#                             the file was reconstructed or edited: ids, paths and text are placeholders.
+#   derived-from-program-text read from the installed 2.1.283 program's text, never observed live.
+#   synthetic                 written by us to model a change on Claude Code's side (a drift sample); it
+#                             was never emitted by any Claude Code.
+receipt-refused.json	captured-shape	live shape (expired/refused) as recorded in the AGE-2030 work; edited: ids and the from path are placeholders
+receipt-held.json	captured-shape	live shape (held, default-mode receiver with crossSessionInbound hold); ids and reason text reconstructed
+receipt-delivered.json	derived-from-program-text	status delivered
+receipt-denied.json	derived-from-program-text	status denied
+receipt-hold-timeout.json	derived-from-program-text	expired with detail hold_timeout
+receipt-dropped.json	derived-from-program-text	dropped with drop_reason and dropped_msg_ids
+receipt-duplicate.json	derived-from-program-text	dropped with detail duplicate
+liveness-blank.txt	captured	a connection that sends a blank line or nothing (liveness check), observed live
+session-record.json	captured-shape	shape of ~/.claude/sessions/<pid>.json; every value is a placeholder
+transcript-consumed.jsonl	captured-shape	shape of a consumed peer message's transcript line (origin.msg_id); surrounding fields reconstructed
+transcript-not-yet.jsonl	captured-shape	an arrangement: a transcript whose peer line is for another message
+envelope-line.json	captured-shape	our own emitted bytes, a golden of the line delivered live to an idle session; ids are placeholders
+wrapper.txt	captured-shape	our own emitted bytes, a golden of the wrapper text carried in the envelope content
+drift-receipt-unknown-status.json	synthetic	a status no known Claude Code sends
+drift-control-action-renamed.json	synthetic	action renamed
+drift-control-status-missing.json	synthetic	status field renamed
+drift-control-type-renamed.json	synthetic	type field renamed
+drift-not-json.txt	synthetic	a non-JSON control line
+drift-session-record-protocol-2.json	synthetic	peerProtocol bumped
+drift-session-record-old-version.json	synthetic	a version below the gate
+drift-session-record-no-socket.json	synthetic	messagingSocketPath absent
+drift-session-record-no-session-id.json	synthetic	sessionId absent
+drift-transcript-origin-renamed.jsonl	synthetic	origin renamed
+drift-transcript-origin-string.jsonl	synthetic	origin of another shape

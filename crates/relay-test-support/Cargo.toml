@@ -1,0 +1,17 @@
+[package]
+name = "relay-test-support"
+description = "Dev-only Redis test harness shared by relay-core's integration tests."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+relay-core.workspace = true
+redis.workspace = true

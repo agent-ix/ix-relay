@@ -1,0 +1,1 @@
+{"type":"control","action":"peer_message_status","status":"expired","status_detail":"refused","reason":"The recipient session is not accepting cross-session messages","from":"uds:/run/user/1000/cc-socks/1.sock","orig_msg_id":"cb4ae227","msgV":1,"msg_id":"076ae8e6"}

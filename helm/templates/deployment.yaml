@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # ix-cli restarts `deployment/<release>` after a source install.
+  name: {{ .Release.Name }}
+  labels:
+    app: relay-redis
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/part-of: {{ .Release.Name }}
+spec:
+  replicas: 1
+  # The data volume is ReadWriteOnce; never run two pods against it.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: relay-redis
+  template:
+    metadata:
+      labels:
+        app: relay-redis
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/part-of: {{ .Release.Name }}
+    spec:
+      initContainers:
+        # users.acl lives on the PVC so the per-machine users that
+        # `relay-admin add-user` creates (ACL SETUSER + ACL SAVE) survive a
+        # restart. Each start re-asserts only the two lines this chart owns:
+        # `default` off, and `admin` with the Secret's current password
+        # (stored as its SHA-256, never in clear).
+        - name: acl
+          image: {{ .Values.image }}
+          env:
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: relay-redis-admin
+                  key: ADMIN_PASSWORD
+          command: ["sh", "-ec"]
+          args:
+            - |
+              test -n "$ADMIN_PASSWORD" || { echo "ADMIN_PASSWORD is empty" >&2; exit 1; }
+              f=/data/users.acl
+              touch "$f"
+              hash=$(printf %s "$ADMIN_PASSWORD" | sha256sum | cut -d' ' -f1)
+              # Redis refuses to start on a line it cannot parse; set any line
+              # that is not a `user` line aside rather than crash-loop.
+              grep -v '^user [^ ][^ ]* ' "$f" >> "$f.rejected" || true
+              {
+                echo "user default off resetchannels -@all"
+                echo "user admin on #$hash ~* &* +@all"
+                grep '^user [^ ][^ ]* ' "$f" | grep -v -e '^user default ' -e '^user admin ' || true
+              } > "$f.new"
+              mv "$f.new" "$f"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: redis
+          image: {{ .Values.image }}
+          # AOF so queued inboxes survive a pod restart.
+          args:
+            - redis-server
+            - --appendonly
+            - "yes"
+            - --appendfsync
+            - everysec
+            - --dir
+            - /data
+            - --aclfile
+            - /data/users.acl
+          env:
+            # For `relay-admin`, which runs redis-cli inside this container.
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: relay-redis-admin
+                  key: ADMIN_PASSWORD
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            tcpSocket:
+              port: 6379
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "REDISCLI_AUTH=\"$ADMIN_PASSWORD\" redis-cli --no-auth-warning --user admin ping | grep -q PONG"]
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: relay-redis-pvc

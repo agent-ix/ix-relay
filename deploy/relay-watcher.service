@@ -1,0 +1,29 @@
+# systemd user unit for `relay-watcher` (AGE-2013). One instance per machine
+# (node-a, hub); node-b uses `com.agent-ix.relay-watcher.plist` instead.
+#
+# Not installed by this repo — see README.md "Installing the watcher" for how
+# to install it by hand. Machine-specific settings (Redis URL, key prefix,
+# machine name) belong in ~/.ix/relay/config.toml (see README.md
+# "Configuration"), not env vars here.
+[Unit]
+Description=ix-relay watcher: wakes idle team leads via herdr
+# The watcher never exits on Redis trouble (it retries with backoff), so a
+# restart loop means a real crash. Never let systemd give up on it: without
+# this, five crashes in ten seconds leave the unit `failed` until a human
+# notices.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# A user unit does not inherit the login shell's PATH, so `herdr` (and
+# `relay-watcher` itself, if invoked bare below) must be found explicitly.
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+# `cargo install --path crates/relay-watcher --locked` (README.md) puts the
+# binary in ~/.cargo/bin; %h is the user manager's home directory. Adjust if
+# you installed it somewhere else.
+ExecStart=%h/.cargo/bin/relay-watcher
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

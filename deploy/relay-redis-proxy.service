@@ -1,0 +1,15 @@
+# Started by relay-redis-proxy.socket; see there. A plain TCP relay to the
+# relay-redis NodePort (helm/values.yaml `nodePort`) on the kind node, so no
+# Kubernetes API stream sits in the path the way `kubectl port-forward` did.
+#
+# The kind node `platform-control-plane`'s address on docker's `kind` network
+# is looked up at each start, so a recreated cluster that gets a new address
+# is followed without an edit here.
+[Unit]
+Description=ix-relay bus forwarder to relay-redis
+Requires=relay-redis-proxy.socket
+After=relay-redis-proxy.socket
+
+[Service]
+# `$$` is a literal `$` for the shell; systemd would expand a single one.
+ExecStart=/bin/sh -ec 'node=$$(docker inspect -f "{{.NetworkSettings.Networks.kind.IPAddress}}" platform-control-plane); test -n "$$node"; exec /usr/lib/systemd/systemd-socket-proxyd "$$node:31379"'

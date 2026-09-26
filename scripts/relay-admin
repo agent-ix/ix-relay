@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# relay-admin: run on the hub (the machine running relay-redis) to manage the bus's transport.
+#
+#   relay-admin hub-init [--lan CIDR]      once: WireGuard wg0 + firewall (sudo)
+#   relay-admin add-peer <machine> <pubkey> WireGuard peer + ACL user; prints
+#                                           the peer's wg config and bus URL
+#   relay-admin remove-peer <machine>       drop the peer and its ACL user
+#   relay-admin add-user <machine>          ACL user only (the hub itself); prints URL
+#   relay-admin remove-user <machine>
+#   relay-admin migrate                     copy ixr:* keys from platform/redis
+#   relay-admin status                      wg0, forwarder, relay-redis
+#
+# See README.md "Transport". relay-redis is the `ix-relay` chart in helm/
+# (`ix local up ix-relay --from-source`); its admin password never leaves the
+# pod: every Redis command here runs inside it, fed on stdin.
+set -euo pipefail
+
+WG_CONF=/etc/wireguard/wg0.conf
+WG_NET=10.99.0
+HUB_ADDR=$WG_NET.1
+WG_PORT=51820
+BUS_PORT=6380
+NS=relay
+DEPLOY=deploy/ix-relay
+PREFIX='ixr:'
+# The commands the relay uses, on its own keys, and nothing that can change
+# the server (CONFIG, FLUSHALL, KEYS, ACL, ...).
+ACL_RULES="~${PREFIX}* resetchannels +@all -@admin -@dangerous"
+
+die() { echo "relay-admin: $*" >&2; exit 1; }
+
+valid_machine() {
+  [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || die "bad machine name: $1 (lowercase letters, digits, -)"
+  # The chart owns these two users; a machine by either name would rewrite them.
+  [[ $1 != admin && $1 != default ]] || die "$1 is reserved by relay-redis"
+}
+
+# Feed redis-cli commands on stdin to relay-redis, authenticated as admin.
+relay_cli() {
+  kubectl -n "$NS" exec -i "$DEPLOY" -c redis -- \
+    sh -c 'REDISCLI_AUTH="$ADMIN_PASSWORD" exec redis-cli --no-auth-warning --user admin'
+}
+
+bus_url() { echo "redis://$1:$2@$HUB_ADDR:$BUS_PORT"; }
+
+cmd_add_user() {
+  local machine=$1
+  valid_machine "$machine"
+  local pass
+  pass=$(od -An -tx1 -N24 /dev/urandom | tr -d ' \n')
+  local out
+  out=$(printf 'ACL SETUSER %s reset on >%s %s\nACL SAVE\n' "$machine" "$pass" "$ACL_RULES" | relay_cli)
+  [[ $out == $'OK\nOK' ]] || die "ACL SETUSER failed: $out"
+  echo "bus url for $machine (put in ~/.ix/relay/config.toml as url = \"...\"):"
+  echo "  $(bus_url "$machine" "$pass")"
+}
+
+cmd_remove_user() {
+  local machine=$1
+  valid_machine "$machine"
+  printf 'ACL DELUSER %s\nACL SAVE\n' "$machine" | relay_cli
+}
+
+cmd_hub_init() {
+  local lan
+  lan=$(hub_lan_net)
+  if [[ ${1:-} == --lan ]]; then lan=${2:?--lan needs a CIDR}; fi
+  command -v wg >/dev/null || die "install wireguard-tools first (sudo apt install wireguard-tools)"
+  command -v nft >/dev/null || die "install nftables first (sudo apt install nftables)"
+  # wg0's own firewall, loaded by wg-quick with the interface and removed with
+  # it: phase 1 takes WireGuard only from the LAN, and over wg0 peers reach
+  # the bus port and nothing else. It filters nothing else on the host, so it
+  # does not depend on (or change) ufw.
+  printf 'table inet ixrelay {\n  chain input {\n    type filter hook input priority 0; policy accept;\n    udp dport %s ip saddr != %s drop\n    iifname "wg0" tcp dport %s accept\n    iifname "wg0" drop\n  }\n}\n' \
+    "$WG_PORT" "$lan" "$BUS_PORT" | sudo tee /etc/wireguard/ixrelay.nft >/dev/null
+  if sudo test -e "$WG_CONF"; then
+    echo "$WG_CONF exists; leaving it as it is"
+  else
+    sudo sh -c "umask 077; k=\$(wg genkey); printf '[Interface]\n# ix-relay hub (relay-admin hub-init)\nAddress = %s/24\nListenPort = %s\nPrivateKey = %s\nPostUp = nft -f /etc/wireguard/ixrelay.nft\nPostDown = nft delete table inet ixrelay\n' '$HUB_ADDR' '$WG_PORT' \"\$k\" > '$WG_CONF'"
+  fi
+  sudo systemctl enable --now wg-quick@wg0
+  sudo nft list table inet ixrelay >/dev/null || die "wg0 is up without its firewall (table inet ixrelay)"
+  echo "hub public key: $(sudo wg show wg0 public-key)"
+}
+
+next_peer_ip() {
+  local used last=1
+  used=$(sudo grep -oE "^AllowedIPs = $WG_NET\.[0-9]+" "$WG_CONF" | grep -oE '[0-9]+$' || true)
+  for n in $used; do (( n > last )) && last=$n; done
+  (( last < 254 )) || die "no free peer address in $WG_NET.0/24"
+  echo "$WG_NET.$((last + 1))"
+}
+
+cmd_add_peer() {
+  local machine=$1 pubkey=$2
+  valid_machine "$machine"
+  [[ $pubkey =~ ^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$ ]] || die "not a WireGuard public key: $pubkey"
+  sudo test -e "$WG_CONF" || die "$WG_CONF is missing: run hub-init first"
+  sudo grep -q "^# peer: $machine\$" "$WG_CONF" && die "$machine is already a peer (remove-peer first)"
+  sudo grep -qF "PublicKey = $pubkey" "$WG_CONF" && die "that public key is already a peer"
+  # The ACL user first: if it fails, wg0 is untouched.
+  cmd_add_user "$machine"
+  local ip
+  ip=$(next_peer_ip)
+  printf '\n[Peer]\n# peer: %s\nPublicKey = %s\nAllowedIPs = %s/32\n' "$machine" "$pubkey" "$ip" \
+    | sudo tee -a "$WG_CONF" >/dev/null
+  sudo wg set wg0 peer "$pubkey" allowed-ips "$ip/32"
+  local hub_pub endpoint peer
+  hub_pub=$(sudo wg show wg0 public-key)
+  endpoint=${RELAY_ENDPOINT:-$(hub_lan_ip)}:$WG_PORT
+  peer=$(printf '[Peer]\\nPublicKey = %s\\nEndpoint = %s\\nAllowedIPs = %s/32\\nPersistentKeepalive = 25\\n' \
+    "$hub_pub" "$endpoint" "$HUB_ADDR")
+  cat <<EOF
+
+WireGuard for $machine, which reaches the hub at $endpoint.
+
+Linux: run on $machine (reads the key made there in /etc/wireguard/relay.key):
+----
+sudo sh -c 'umask 077; printf "[Interface]\\nPrivateKey = %s\\nAddress = $ip/32\\n\\n$peer" "\$(cat /etc/wireguard/relay.key)" > /etc/wireguard/relay.conf'
+sudo systemctl enable --now wg-quick@relay
+----
+
+macOS WireGuard app: keep the tunnel's generated PrivateKey line and add:
+----
+Address = $ip/32
+
+[Peer]
+PublicKey = $hub_pub
+Endpoint = $endpoint
+AllowedIPs = $HUB_ADDR/32
+PersistentKeepalive = 25
+----
+
+Check on $machine: nc -z -w3 $HUB_ADDR $BUS_PORT && echo bus-reachable
+(ping will not answer: over wg0 the hub accepts only tcp/$BUS_PORT.)
+EOF
+}
+
+# The hub's own LAN address: the source it uses for its default route. A peer
+# needs an address it can reach; override with RELAY_ENDPOINT (e.g. a DNS name).
+hub_lan_ip() {
+  ip -4 route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1)}'
+}
+
+# The LAN the hub sits on: the directly connected network of the interface
+# its default route leaves by. hub-init takes WireGuard only from here.
+hub_lan_net() {
+  local dev net
+  dev=$(ip -4 route get 1.1.1.1 | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}')
+  net=$(ip -4 route show dev "$dev" scope link proto kernel | awk 'NR == 1 {print $1}')
+  [[ -n $net ]] || die "cannot tell the hub's LAN; pass --lan <CIDR>"
+  echo "$net"
+}
+
+cmd_remove_peer() {
+  local machine=$1
+  valid_machine "$machine"
+  # Work section by section (each starts at a `[...]` header), so a peer's
+  # key and lines are only ever read from, or dropped with, its own section.
+  local pubkey
+  pubkey=$(sudo awk -v m="# peer: $machine" '
+    function flush() { if (hit && pk != "") print pk; hit = 0; pk = "" }
+    /^\[/ { flush() }
+    $0 == m { hit = 1 }
+    /^PublicKey *= */ { pk = $3 }
+    END { flush() }
+  ' "$WG_CONF")
+  [[ -n $pubkey && $pubkey != *$'\n'* ]] || die "$machine is not exactly one peer in $WG_CONF"
+  local next=/etc/wireguard/wg0next.conf
+  sudo awk -v m="# peer: $machine" '
+    function flush() { if (!drop) printf "%s", buf; buf = ""; drop = 0 }
+    /^\[/ { flush() }
+    $0 == m { drop = 1 }
+    { buf = buf $0 "\n" }
+    END { flush() }
+  ' "$WG_CONF" | sudo install -m 600 /dev/stdin "$next"
+  # Refuse to install a file wg-quick would not load.
+  sudo wg-quick strip "$next" >/dev/null || { sudo rm -f "$next"; die "the edited config does not parse; $WG_CONF is unchanged"; }
+  sudo mv "$next" "$WG_CONF"
+  sudo wg set wg0 peer "$pubkey" remove
+  cmd_remove_user "$machine"
+}
+
+cmd_migrate() {
+  # MIGRATE from inside platform/redis (no auth) to relay-redis, keeping TTLs
+  # and leaving the originals. The admin password is read from the Secret and
+  # travels on stdin, never in a command line. No REPLACE: in a staggered
+  # cutover a machine already on relay-redis may have written a newer copy of
+  # a key (a registration, an inbox), and that copy wins (BUSYKEY, counted as
+  # kept).
+  local admin
+  admin=$(kubectl -n "$NS" get secret relay-redis-admin -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d)
+  local keys
+  keys=$(kubectl -n platform exec deploy/redis -- redis-cli --scan --pattern "${PREFIX}*")
+  [[ -n $keys ]] || { echo "no ${PREFIX}* keys in platform/redis"; return; }
+  local out total ok
+  out=$({
+    while IFS= read -r k; do
+      # redis-cli reads `\` escapes inside double quotes: escape `\` then `"`.
+      local q=${k//\\/\\\\}
+      q=${q//\"/\\\"}
+      printf 'MIGRATE relay-redis.%s.svc 6379 "%s" 0 5000 COPY AUTH2 admin %s\n' \
+        "$NS" "$q" "$admin"
+    done <<<"$keys"
+  } | kubectl -n platform exec -i deploy/redis -- redis-cli)
+  # One reply per key: OK; `ERR Target instance replied with error: BUSYKEY
+  # ...` (relay-redis has it already); or NOKEY (it expired since the scan).
+  # redis-cli follows an error with a blank line, which is not a reply.
+  local kept gone
+  total=$(wc -l <<<"$keys")
+  ok=$(grep -c '^OK$' <<<"$out" || true)
+  kept=$(grep -c 'BUSYKEY' <<<"$out" || true)
+  gone=$(grep -c '^NOKEY$' <<<"$out" || true)
+  if (( ok + kept + gone != total )); then
+    grep -v -e '^OK$' -e 'BUSYKEY' -e '^NOKEY$' -e '^$' <<<"$out" | sort | uniq -c >&2
+    die "copied $ok, kept $kept newer, $gone expired; $((total - ok - kept - gone)) of $total failed"
+  fi
+  echo "copied $ok keys; kept $kept that relay-redis already had; $gone expired meanwhile"
+}
+
+cmd_status() {
+  echo "== wg0"; sudo wg show wg0 || true
+  echo "== forwarder"; systemctl --user --no-pager status relay-redis-proxy.socket | head -n 3 || true
+  echo "== relay-redis"; printf 'PING\nACL USERS\nDBSIZE\n' | relay_cli
+}
+
+case ${1:-} in
+  hub-init) shift; cmd_hub_init "$@" ;;
+  add-peer) [[ $# -eq 3 ]] || die "usage: add-peer <machine> <pubkey>"; cmd_add_peer "$2" "$3" ;;
+  remove-peer) [[ $# -eq 2 ]] || die "usage: remove-peer <machine>"; cmd_remove_peer "$2" ;;
+  add-user) [[ $# -eq 2 ]] || die "usage: add-user <machine>"; cmd_add_user "$2" ;;
+  remove-user) [[ $# -eq 2 ]] || die "usage: remove-user <machine>"; cmd_remove_user "$2" ;;
+  migrate) cmd_migrate ;;
+  status) cmd_status ;;
+  *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

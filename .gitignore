@@ -1,0 +1,18 @@
+# Rust build-artifact dirs, why "target" appears four times below:
+# *-target/ is a SUFFIX glob (catches q147-target/) but misses a
+# PREFIX-named dir. This org names target dirs at both ends -
+# target-codex-backends/ (quire-specification, quire-protocol,
+# quire-observation), target-fr151/ (quire-spec-language),
+# target-coverage and target-msrv (quire-analyze) all exist today and
+# survive only on hand-written anchored lines naming each one. target-*/
+# closes that gap so a future target-q999/ doesn't sail past this
+# pattern the way q147-target/ sailed past the old anchored /target.
+target/
+*-target/
+target-*/
+.worktrees/
+Cargo.lock.bak
+*.swp
+.DS_Store
+.idea/
+.vscode/

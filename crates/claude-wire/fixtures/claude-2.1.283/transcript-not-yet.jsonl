@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":"an earlier prompt"},"uuid":"u-1"}
+{"type":"user","origin":{"kind":"peer","msg_id":"11111111-2222-4333-8444-555555555555"},"uuid":"u-2"}

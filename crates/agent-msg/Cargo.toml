@@ -1,0 +1,28 @@
+[package]
+name = "agent-msg"
+description = "CLI and hook handler agents use to talk over the ix-relay bus."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+claude-wire.workspace = true
+relay-core.workspace = true
+relay-ops.workspace = true
+herdr-cli.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+redis.workspace = true
+tempfile.workspace = true

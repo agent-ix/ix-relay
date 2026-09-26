@@ -1,0 +1,5 @@
+image: redis:7
+storage: 1Gi
+# Fixed so the host forwarder on the hub (deploy/relay-redis-proxy.*) has a
+# stable target. Reachable only from the hub itself: kind maps no host port for it.
+nodePort: 31379
