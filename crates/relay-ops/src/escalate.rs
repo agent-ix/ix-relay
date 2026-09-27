@@ -519,18 +519,33 @@ pub fn run_resolve(
     })
 }
 
+/// Prefix used by [`resolution_comment_marker`] for machine-readable resolution comments.
+pub const RESOLUTION_COMMENT_MARKER_PREFIX: &str = "<!-- ix-relay-resolution:";
+
+/// Returns the stable marker identifying a Linear resolution comment for `id`.
+///
+/// The marker is stable for one [`EscalationId`] and is appended to comments
+/// posted by [`run_resolve`] and [`run_escalation_post_linear`]. Escalation ids
+/// are unique within one Relay key prefix; consumers aggregating multiple
+/// buses must also scope matching by source bus.
+#[must_use]
+pub fn resolution_comment_marker(id: &EscalationId) -> String {
+    format!("{RESOLUTION_COMMENT_MARKER_PREFIX}{id} -->")
+}
+
 /// The Markdown comment `resolve`/`escalation post-linear` posts to the
 /// Linear ticket: the escalation id and decision up front, the fuller
 /// context in a collapsible section so the ticket's comment thread stays
 /// scannable.
 fn render_linear_comment(esc: &Escalation, decision: &str) -> String {
     format!(
-        "**Escalation {} resolved:** {decision}\n\n<details>\n<summary>Context (from {})</summary>\n\n{}\n\n**Options:** {}\n\n**Recommendation:** {}\n\n</details>\n",
+        "**Escalation {} resolved:** {decision}\n\n<details>\n<summary>Context (from {})</summary>\n\n{}\n\n**Options:** {}\n\n**Recommendation:** {}\n\n</details>\n{}\n",
         esc.id,
         esc.filing.lead,
         esc.filing.context,
         esc.filing.options.join(", "),
-        esc.filing.recommendation
+        esc.filing.recommendation,
+        resolution_comment_marker(&esc.id)
     )
 }
 
@@ -791,6 +806,24 @@ mod tests {
         let calls = linear.calls.borrow();
         assert_eq!(calls[0].0, "AGE-2014");
         assert!(calls[0].1.contains("go with a"));
+        assert!(
+            calls[0]
+                .1
+                .ends_with(&format!("{}\n", resolution_comment_marker(&esc.id)))
+        );
+    }
+
+    #[test]
+    fn resolution_comment_marker_is_stable_and_machine_readable() {
+        let id: EscalationId = "e123".parse().unwrap();
+        assert_eq!(
+            resolution_comment_marker(&id),
+            "<!-- ix-relay-resolution:e123 -->"
+        );
+        assert_eq!(
+            resolution_comment_marker(&id),
+            resolution_comment_marker(&id)
+        );
     }
 
     // ---- investigate ------------------------------------------------------
