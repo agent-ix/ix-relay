@@ -209,17 +209,22 @@ fn log_since_returns_all_retained_messages_oldest_first() {
         return;
     };
     register(&mut r, "tl-lead");
-    for text in ["first", "second", "third"] {
+    r.send(&msg("qsl-lead", "tl-lead", "first", 1)).unwrap();
+    let first_entry_id = r.log_tail_id().unwrap();
+    let (first_entry_ms, _) = first_entry_id.split_once('-').unwrap();
+    let since_ms = first_entry_ms.parse().unwrap();
+    for text in ["second", "third"] {
         r.send(&msg("qsl-lead", "tl-lead", text, 1)).unwrap();
     }
 
     assert_eq!(
-        r.log_since(0)
+        r.log_since(since_ms)
             .unwrap()
             .iter()
             .map(|message| message.text.as_str())
             .collect::<Vec<_>>(),
-        ["first", "second", "third"]
+        ["first", "second", "third"],
+        "the actual first stream entry at the inclusive bound is retained"
     );
     assert!(r.log_since(i64::MAX).unwrap().is_empty());
 }
