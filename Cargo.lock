@@ -1670,6 +1670,7 @@ dependencies = [
  "redis",
  "relay-core",
  "relay-ops",
+ "serde",
  "serde_json",
  "signal-hook",
 ]
