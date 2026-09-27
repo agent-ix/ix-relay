@@ -23,7 +23,7 @@ from the most recent such event, and `agent-msg send` shall queue nothing.
 - If another lead now matches the old address, then the resolver shall resolve
   to that lead ([FR-003](./FR-003-address-matching-ignores-case.md)); an address
   names a place, not a lead.
-- This requirement governs `server:workspace[:tab]` addresses. Bus-name aliases
+- This requirement governs `server:workspace[:tab[:pane]]` addresses. Bus-name aliases
   kept after a `/rename` or a herdr agent rename
   ([FR-002](./FR-002-target-resolution-priority.md)) are a separate mechanism
   and are not changed by it.

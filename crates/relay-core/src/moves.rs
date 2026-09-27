@@ -105,7 +105,7 @@ mod tests {
             new_place: Some(Place {
                 workspace: "wsB".into(),
                 tab: "1".into(),
-                tabs_in_workspace: 1,
+                herdr_ids: None,
             }),
             at_ms: 9,
         }

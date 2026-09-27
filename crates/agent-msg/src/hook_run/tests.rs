@@ -418,7 +418,7 @@ impl Harness {
         self.world.borrow_mut().registered = Some(Place {
             workspace: "EA".into(),
             tab: "code".into(),
-            tabs_in_workspace: 2,
+            herdr_ids: None,
         });
         for op in [
             Op::Probe,
@@ -770,7 +770,7 @@ fn the_pane_place_scan_runs_only_when_the_lead_has_no_registered_place() {
     registered.world.borrow_mut().registered = Some(Place {
         workspace: "EA".into(),
         tab: "code".into(),
-        tabs_in_workspace: 2,
+        herdr_ids: None,
     });
     registered.run_event("UserPromptSubmit");
     assert!(!registered.world.borrow().calls.contains(&Op::PaneCheck));

@@ -48,7 +48,9 @@ impl FakeProcs {
         Self {
             alive: pids.iter().map(|p| (*p, START.to_owned())).collect(),
             domain: Some(DOMAIN.to_owned()),
-            uid: session::ProcFs.uid(),
+            // The process table is fake, but the sockets it validates are
+            // created by this process. `/tmp` can be root-owned.
+            uid: Some(nix::unistd::Uid::current().as_raw()),
         }
     }
 }
@@ -800,7 +802,8 @@ fn tc_044_10_each_receipt_maps_to_one_outcome() {
 #[test]
 fn tc_044_05_a_held_lead_is_not_sent_to_again_and_shows_in_the_status() {
     let rig = Rig::new(Act::Receipt("held", None));
-    assert!(matches!(rig.send("one"), Err(SocketError::Held(_))));
+    let sent = rig.send("one");
+    assert!(matches!(sent, Err(SocketError::Held(_))), "{sent:?}");
     let status = SocketStatus::read(&rig.home.status()).unwrap();
     assert_eq!(status.held, ["ea"]);
     // The socket says it holds mail for the lead, so none is popped for it; and a

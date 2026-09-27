@@ -312,7 +312,7 @@ fn tc_008_04_every_registry_and_alias_read_tolerates_bytes_that_are_not_utf8() {
     let place = Place {
         workspace: "EA".into(),
         tab: "1".into(),
-        tabs_in_workspace: 1,
+        herdr_ids: None,
     };
     assert!(matches!(
         bus.relay.refresh_place(&name("qsl"), &place, 5, true),

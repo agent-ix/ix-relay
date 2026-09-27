@@ -364,7 +364,7 @@ const PLACE_REFRESH_EVERY: Duration = Duration::from_secs(30);
 /// cannot fill the shared, capped moves stream.
 const RENAME_EVENT_GAP: Duration = Duration::from_secs(5 * 60);
 
-/// Keeps each local lead's registered `server:workspace[:tab]` place true to
+/// Keeps each local lead's registered `server:workspace[:tab[:pane]]` place true to
 /// herdr's live layout. Hooks record a place at `SessionStart` and cannot
 /// refresh it (they make no herdr calls mid-session); without this a closed
 /// tab, which renumbers herdr's unlabelled tabs, or a renamed workspace leaves
@@ -436,7 +436,20 @@ fn refresh_places(
         state.otlp.set_panes(Instant::now(), view, regs);
     }
     for reg in regs.iter_mut() {
-        if reg.machine != *machine || relink::pane_hosts_other_session(reg, &layout) {
+        if reg.machine != *machine {
+            continue;
+        }
+        if !relink::pane_has_current_location(reg, &layout) {
+            if reg.place.is_some() {
+                match relay.invalidate_place(reg) {
+                    Ok(true) => reg.place = None,
+                    Ok(false) => {}
+                    Err(e) => per_lead(
+                        e,
+                        format_args!("{}: could not invalidate its address", reg.name),
+                    )?,
+                }
+            }
             continue;
         }
         let Some(place) = reg
@@ -1329,7 +1342,7 @@ impl Inbox for RelayInbox<'_> {
             return PopOutcome::Empty;
         }
 
-        // Senders are shown by `server:workspace[:tab]` address, from the
+        // Senders are shown by `server:workspace[:tab[:pane]]` address, from the
         // registry the tick already read.
         let book = self
             .book
@@ -1517,7 +1530,37 @@ mod tests {
     }
 
     /// A `Herdr` whose only job is to report where panes sit.
-    struct LayoutHerdr(std::collections::HashMap<PaneId, relay_core::Place>);
+    struct LayoutHerdr(
+        std::collections::HashMap<PaneId, relay_core::Place>,
+        std::collections::HashMap<PaneId, Option<SessionId>>,
+    );
+
+    fn layout_herdr(
+        mut places: std::collections::HashMap<PaneId, relay_core::Place>,
+        sessions: &[(&str, &str)],
+    ) -> LayoutHerdr {
+        for (pane, place) in &mut places {
+            if let Some((_, session)) = sessions
+                .iter()
+                .find(|(listed_pane, _)| listed_pane.parse::<PaneId>().ok().as_ref() == Some(pane))
+            {
+                place.herdr_ids = Some(relay_core::HerdrPlaceIds {
+                    workspace: "test-workspace".parse().unwrap(),
+                    tab: "test-tab".parse().unwrap(),
+                    pane: pane.clone(),
+                    session_id: session.parse().unwrap(),
+                    verified_at_ms: now_ms(),
+                });
+            }
+        }
+        LayoutHerdr(
+            places,
+            sessions
+                .iter()
+                .map(|(pane, session)| (pane.parse().unwrap(), Some(session.parse().unwrap())))
+                .collect(),
+        )
+    }
 
     impl Herdr for LayoutHerdr {
         fn get(&self, _pane: &PaneId) -> Result<Option<AgentGet>, ProcessError> {
@@ -1529,7 +1572,7 @@ mod tests {
         fn layout(&self, _machine: &MachineName) -> Result<crate::herdr::Layout, ProcessError> {
             Ok(crate::herdr::Layout {
                 places: self.0.clone(),
-                sessions: std::collections::HashMap::new(),
+                sessions: self.1.clone(),
                 view: None,
             })
         }
@@ -1674,11 +1717,11 @@ mod tests {
         );
     }
 
-    fn place(workspace: &str, tab: &str, tabs: u32) -> relay_core::Place {
+    fn place(workspace: &str, tab: &str, _tabs: u32) -> relay_core::Place {
         relay_core::Place {
             workspace: workspace.into(),
             tab: tab.into(),
-            tabs_in_workspace: tabs,
+            herdr_ids: None,
         }
     }
 
@@ -1723,13 +1766,14 @@ mod tests {
         relay.register(&stale).unwrap();
 
         // herdr now: p1 is EA/code, p2 is what used to be tab "3", now "2".
-        let herdr = LayoutHerdr(
+        let herdr = layout_herdr(
             [
                 ("wB:p1".parse().unwrap(), place("EA", "code", 2)),
                 ("wB:p2".parse().unwrap(), place("EA", "2", 2)),
             ]
             .into_iter()
             .collect(),
+            &[("wB:p1", "s1"), ("wB:p2", "s2")],
         );
         let mut state = WatcherState::default();
         tick(
@@ -1744,13 +1788,17 @@ mod tests {
         let place_of = |relay: &mut Relay, name: &str| {
             relay.agent(&name.parse().unwrap()).unwrap().unwrap().place
         };
-        assert_eq!(
-            place_of(&mut relay, "here-old"),
-            Some(place("EA", "code", 2))
+        let old = place_of(&mut relay, "here-old").unwrap();
+        assert_eq!((old.workspace.as_str(), old.tab.as_str()), ("EA", "code"));
+        assert!(
+            old.herdr_ids.is_some(),
+            "the refreshed place carries Herdr proof"
         );
-        assert_eq!(
-            place_of(&mut relay, "here-stale"),
-            Some(place("EA", "2", 2))
+        let stale = place_of(&mut relay, "here-stale").unwrap();
+        assert_eq!((stale.workspace.as_str(), stale.tab.as_str()), ("EA", "2"));
+        assert!(
+            stale.herdr_ids.is_some(),
+            "the refreshed place carries Herdr proof"
         );
         assert_eq!(
             place_of(&mut relay, "there-lead"),
@@ -1773,10 +1821,11 @@ mod tests {
             Some("s1"),
             now_ms(),
         );
-        let herdr = LayoutHerdr(
+        let herdr = layout_herdr(
             [("wB:p1".parse().unwrap(), place("EA", "code", 2))]
                 .into_iter()
                 .collect(),
+            &[("wB:p1", "s1")],
         );
         let mut state = WatcherState::default();
         tick(
@@ -1788,10 +1837,11 @@ mod tests {
         )
         .unwrap();
         // herdr's layout changes, but the very next tick must not re-read it.
-        let moved = LayoutHerdr(
+        let moved = layout_herdr(
             [("wB:p1".parse().unwrap(), place("EA", "plan", 2))]
                 .into_iter()
                 .collect(),
+            &[("wB:p1", "s1")],
         );
         tick(
             &mut relay,
@@ -1806,7 +1856,12 @@ mod tests {
             .unwrap()
             .unwrap()
             .place;
-        assert_eq!(got, Some(place("EA", "code", 2)));
+        let got = got.unwrap();
+        assert_eq!((got.workspace.as_str(), got.tab.as_str()), ("EA", "code"));
+        assert!(
+            got.herdr_ids.is_some(),
+            "the refreshed place carries Herdr proof"
+        );
     }
 
     fn test_relay(test: &str) -> Option<Relay> {
@@ -3094,7 +3149,7 @@ mod tests {
         let mut state = WatcherState::default();
         let err = tick(
             &mut relay,
-            &LayoutHerdr(Default::default()),
+            &layout_herdr(Default::default(), &[]),
             &"node-a".parse().unwrap(),
             &mut state,
             &mut |_| {},
@@ -3296,14 +3351,22 @@ mod tests {
             return;
         };
         let mut relay = test_relay("lost-refreshing").unwrap();
-        register(&mut relay, "a-lead", "node-a", Some("wB:p1"), Some("s1"));
+        register_at(
+            &mut relay,
+            "a-lead",
+            "node-a",
+            Some("wB:p1"),
+            Some("s1"),
+            now_ms(),
+        );
         // The refresh reads the lead's record (HGET); that read is blackholed.
         let proxy = FaultProxy::start(&url, nth("HGET", 1, Fault::Silent));
         let mut via = relay_via(&proxy, "lost-refreshing");
-        let herdr = LayoutHerdr(
+        let herdr = layout_herdr(
             [("wB:p1".parse().unwrap(), place("EA", "code", 1))]
                 .into_iter()
                 .collect(),
+            &[("wB:p1", "s1")],
         );
         let err = tick(
             &mut via,

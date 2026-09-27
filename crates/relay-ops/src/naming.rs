@@ -2,7 +2,7 @@
 //! herdr inputs [`relay_core::naming::derive_agent_name`] needs, and the
 //! orchestration around it — resolving a cross-machine name collision
 //! against the bus registry, and the timeout budget the caller splits across
-//! the three herdr calls this makes.
+//! four herdr calls, including a combined identity snapshot.
 //!
 //! Kept in relay-ops (not relay-core) because it shells out to herdr and
 //! reads the bus registry — the same pattern this crate already uses for
@@ -16,22 +16,11 @@ use std::time::Duration;
 pub use herdr_cli::ProcessError;
 use herdr_cli::ProcessRunner;
 use relay_core::{
-    AgentName, AgentSlot, MachineName, PaneId, Place, Relay, SessionId, TabId, WorkspaceId,
+    AgentName, AgentSlot, HerdrPlaceIds, MachineName, PaneId, Place, Relay, SessionId, TabId,
+    WorkspaceId,
     naming::{PaneLocation, TabLocation, WorkspaceLocation, derive_agent_name},
 };
 use serde::Deserialize;
-
-/// Splits an overall timeout budget three ways — one per herdr call
-/// [`derive_from_herdr`] makes (`workspace list`, `tab list`, `pane list`) —
-/// floored at 50ms so a small budget still gives each call *something*
-/// rather than an instant, guaranteed timeout. The caller picks the overall
-/// budget appropriate to where it's calling from: generous at
-/// `SessionStart`, tight for a lazy mid-session derive (see `agent-msg`'s
-/// hook handler).
-#[must_use]
-pub fn call_timeout(overall_budget: Duration) -> Duration {
-    (overall_budget / 3).max(Duration::from_millis(50))
-}
 
 /// The herdr calls [`derive_from_herdr`] needs to work out where a pane
 /// sits: which workspace, which tab (and whether it's the workspace's
@@ -43,26 +32,20 @@ pub trait LocationHerdr {
     fn tab_list(&self, workspace_id: &WorkspaceId) -> Result<Vec<TabEntry>, ProcessError>;
     /// `herdr pane list --workspace <id>`.
     fn pane_list(&self, workspace_id: &WorkspaceId) -> Result<Vec<PaneEntry>, ProcessError>;
-    /// `herdr agent get <pane_id>`: the herdr-assigned agent name for the
-    /// pane, set by `herdr agent rename <target> <name>` or `agent start
-    /// <name>` and cleared by `herdr agent rename <target> --clear`. herdr
-    /// 0.9.1's JSON carries this as the `name` field, present only when a
-    /// deliberate rename is in effect — confirmed live (present after
-    /// rename, absent again after `--clear`). See `agent-msg::identity`'s
-    /// name-precedence chain (the operator's 2026-09-25 correction to AGE-2018),
-    /// which ranks it below an explicit `AGENT_MSG_NAME` and a Claude
-    /// `/rename` title. `Ok(None)` both when no rename is set and when
-    /// herdr reports no agent in that pane at all.
-    fn agent_name(&self, pane_id: &PaneId) -> Result<Option<String>, ProcessError>;
-    /// `herdr agent get <pane_id>`: the harness session id currently
-    /// occupying that pane, if herdr reports one. Used by
-    /// [`resolve_collision`] to tell a genuinely live same-machine
-    /// collision (AGE-2018 PR review, finding 8: two different,
-    /// still-running sessions independently landing on the same derived
-    /// name) apart from a stale registration a session left behind after
-    /// restarting in the same spot. `Ok(None)` both when herdr reports no
-    /// session id for that pane and when it reports no agent there at all.
-    fn pane_session(&self, pane_id: &PaneId) -> Result<Option<SessionId>, ProcessError>;
+    /// `herdr agent get <pane_id>`: one snapshot of the pane's optional
+    /// deliberately assigned name and current harness session id. The same
+    /// response verifies placement and participates in name derivation, so a
+    /// pane move cannot split those facts across separate reads.
+    fn agent(&self, pane_id: &PaneId) -> Result<Option<HerdrAgent>, ProcessError>;
+}
+
+/// Herdr's identity snapshot for one pane.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HerdrAgent {
+    /// A deliberately assigned Herdr name, if any.
+    pub name: Option<String>,
+    /// The harness session Herdr currently reports in the pane, if any.
+    pub session_id: Option<SessionId>,
 }
 
 /// One entry from `herdr workspace list`'s `workspaces` array. herdr's own
@@ -109,7 +92,8 @@ pub struct PaneEntry {
 /// managed pane.
 #[derive(Debug, Clone)]
 pub struct HerdrEnv {
-    /// `HERDR_PANE_ID`.
+    /// `HERDR_PANE_ID`, an inherited location claim that must be checked against
+    /// Herdr before it is used as a verified registration location.
     pub pane_id: PaneId,
     /// `HERDR_TAB_ID`.
     pub tab_id: TabId,
@@ -118,7 +102,7 @@ pub struct HerdrEnv {
 }
 
 impl HerdrEnv {
-    /// `HERDR_PANE_ID` alone: the pane this process runs in. `None` when it is
+    /// `HERDR_PANE_ID` alone: the pane this process claims. `None` when it is
     /// unset, empty, or not a pane id (see [`PaneId`]). The one reader of that
     /// variable, so a pane id reaches the registry only as a [`PaneId`].
     #[must_use]
@@ -151,8 +135,8 @@ pub struct RealLocationHerdr<R: ProcessRunner = herdr_cli::RealProcessRunner> {
 }
 
 impl RealLocationHerdr<herdr_cli::RealProcessRunner> {
-    /// The production `RealLocationHerdr`. `timeout` bounds each of the
-    /// three calls [`LocationHerdr`]'s methods make — see [`call_timeout`].
+    /// The production `RealLocationHerdr`. `timeout` is capped by the
+    /// remaining shared deadline before each Herdr call starts.
     #[must_use]
     pub fn new(timeout: Duration) -> Self {
         Self {
@@ -201,7 +185,7 @@ impl<R: ProcessRunner> LocationHerdr for RealLocationHerdr<R> {
         Ok(listing.panes)
     }
 
-    fn agent_name(&self, pane_id: &PaneId) -> Result<Option<String>, ProcessError> {
+    fn agent(&self, pane_id: &PaneId) -> Result<Option<HerdrAgent>, ProcessError> {
         #[derive(Deserialize)]
         struct GetResult {
             agent: AgentInfo,
@@ -221,27 +205,6 @@ impl<R: ProcessRunner> LocationHerdr for RealLocationHerdr<R> {
             // fired on nearly every pane regardless of any real rename.
             #[serde(default)]
             name: Option<String>,
-        }
-        let result = herdr_cli::call::<GetResult>(
-            &self.runner,
-            "herdr",
-            &["agent", "get", pane_id.as_str()],
-            self.timeout,
-        );
-        match result {
-            Ok(r) => Ok(r.agent.name),
-            Err(ProcessError::Reported { code, .. }) if code == "agent_not_found" => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    fn pane_session(&self, pane_id: &PaneId) -> Result<Option<SessionId>, ProcessError> {
-        #[derive(Deserialize)]
-        struct GetResult {
-            agent: AgentInfo,
-        }
-        #[derive(Deserialize)]
-        struct AgentInfo {
             #[serde(default)]
             agent_session: Option<crate::find::ListedSession>,
         }
@@ -253,7 +216,10 @@ impl<R: ProcessRunner> LocationHerdr for RealLocationHerdr<R> {
         );
         match result {
             // A session value that is not a session id cannot be the registered one.
-            Ok(r) => Ok(r.agent.agent_session.and_then(|s| s.session_id())),
+            Ok(r) => Ok(Some(HerdrAgent {
+                name: r.agent.name,
+                session_id: r.agent.agent_session.and_then(|s| s.session_id()),
+            })),
             Err(ProcessError::Reported { code, .. }) if code == "agent_not_found" => Ok(None),
             Err(e) => Err(e),
         }
@@ -303,10 +269,12 @@ pub struct HerdrLocation {
     /// location name" — an escalation fork must never join the bus under
     /// *any* precedence tier, not only the location one.
     pub is_escalation_fork: bool,
-    /// Where this pane sits (workspace and tab labels, tab count), for the
-    /// registration's `server:workspace[:tab]` address. `None` whenever `name`
+    /// Where this pane sits (Herdr's stable workspace/tab/pane ids and labels), for the
+    /// registration's `server:workspace[:tab[:pane]]` address. `None` whenever `name`
     /// is unresolvable for a location reason, and for an escalation fork.
     pub place: Option<Place>,
+    /// The agent identity snapshot used to verify the placement.
+    pub agent: Option<HerdrAgent>,
 }
 
 /// Turns one pane's herdr location into a derived bus name, per
@@ -321,7 +289,7 @@ pub struct HerdrLocation {
 ///
 /// # Errors
 ///
-/// Propagates [`ProcessError`] from any of the three herdr calls.
+/// Propagates [`ProcessError`] from any Herdr call.
 pub fn derive_from_herdr(
     herdr: &impl LocationHerdr,
     env: &HerdrEnv,
@@ -363,6 +331,7 @@ pub fn derive_from_herdr(
             name: None,
             is_escalation_fork: true,
             place: None,
+            agent: None,
         });
     }
 
@@ -388,15 +357,30 @@ pub fn derive_from_herdr(
         id_number: pane_id_number,
         is_lone,
     };
+    let agent = herdr.agent(&env.pane_id)?;
+    let session_id = agent.as_ref().and_then(|agent| agent.session_id.clone());
     Ok(HerdrLocation {
         name: derive_agent_name(&ws_loc, &tab_loc, &pane_loc),
         is_escalation_fork: false,
         place: Some(Place {
             workspace: workspace.label.clone(),
             tab: tab.label.clone(),
-            tabs_in_workspace: u32::try_from(tabs.len()).unwrap_or(u32::MAX),
+            herdr_ids: session_id.map(|session_id| HerdrPlaceIds {
+                workspace: env.workspace_id.clone(),
+                tab: env.tab_id.clone(),
+                pane: env.pane_id.clone(),
+                session_id,
+                verified_at_ms: herdr_verified_at_ms(),
+            }),
         }),
+        agent,
     })
+}
+
+fn herdr_verified_at_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 /// Whether a registered session is still running in its pane — the one
@@ -416,7 +400,11 @@ pub trait PaneLiveness {
 
 impl<T: LocationHerdr> PaneLiveness for T {
     fn hosts(&self, pane: &PaneId, session_id: &SessionId) -> Result<bool, ProcessError> {
-        Ok(self.pane_session(pane)?.as_ref() == Some(session_id))
+        Ok(self
+            .agent(pane)?
+            .and_then(|agent| agent.session_id)
+            .as_ref()
+            == Some(session_id))
     }
 }
 
@@ -614,14 +602,13 @@ mod tests {
         fn pane_list(&self, _workspace_id: &WorkspaceId) -> Result<Vec<PaneEntry>, ProcessError> {
             Ok(self.panes.clone())
         }
-        fn agent_name(&self, pane_id: &PaneId) -> Result<Option<String>, ProcessError> {
-            Ok(self.agent_names.get(pane_id.as_str()).cloned())
-        }
-        fn pane_session(&self, pane_id: &PaneId) -> Result<Option<SessionId>, ProcessError> {
-            Ok(self
+        fn agent(&self, pane_id: &PaneId) -> Result<Option<HerdrAgent>, ProcessError> {
+            let name = self.agent_names.get(pane_id.as_str()).cloned();
+            let session_id = self
                 .pane_sessions
                 .get(pane_id.as_str())
-                .and_then(|s| s.parse().ok()))
+                .and_then(|s| s.parse().ok());
+            Ok((name.is_some() || session_id.is_some()).then_some(HerdrAgent { name, session_id }))
         }
     }
 
@@ -658,7 +645,10 @@ mod tests {
                 })
                 .collect(),
             agent_names: std::collections::HashMap::new(),
-            pane_sessions: std::collections::HashMap::new(),
+            pane_sessions: panes
+                .iter()
+                .map(|pane| (pane.to_string(), "session-test".to_owned()))
+                .collect(),
             fail: RefCell::default(),
         }
     }
@@ -680,14 +670,15 @@ mod tests {
             display_number: 2,
         });
         let loc = derive_from_herdr(&herdr, &env()).unwrap();
-        assert_eq!(
-            loc.place,
-            Some(Place {
-                workspace: "EA".into(),
-                tab: "code".into(),
-                tabs_in_workspace: 2,
-            })
-        );
+        let place = loc.place.unwrap();
+        assert_eq!(place.workspace, "EA");
+        assert_eq!(place.tab, "code");
+        let ids = place.herdr_ids;
+        let ids = ids.as_ref().expect("verified Herdr ids");
+        assert_eq!(ids.workspace.as_str(), "wE");
+        assert_eq!(ids.tab.as_str(), "wE:t1");
+        assert_eq!(ids.session_id.as_str(), "session-test");
+        assert!(ids.verified_at_ms > 0);
     }
 
     #[test]
@@ -766,18 +757,6 @@ mod tests {
             ..FakeLocationHerdr::default()
         };
         assert!(derive_from_herdr(&herdr, &env()).is_err());
-    }
-
-    #[test]
-    fn call_timeout_splits_the_budget_three_ways_with_a_floor() {
-        assert_eq!(
-            call_timeout(Duration::from_millis(900)),
-            Duration::from_millis(300)
-        );
-        assert_eq!(
-            call_timeout(Duration::from_millis(10)),
-            Duration::from_millis(50)
-        );
     }
 
     // ---- resolve_collision -------------------------------------------------
@@ -1212,6 +1191,10 @@ mod tests {
                 (
                     "pane list",
                     r#"{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}"#,
+                ),
+                (
+                    "agent get",
+                    r#"{"result":{"agent":{"agent_session":{"kind":"id","value":"s"}}}}"#,
                 ),
             ]),
             timeout: Duration::from_secs(1),

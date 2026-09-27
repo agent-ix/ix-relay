@@ -44,7 +44,7 @@ defined here.
 
 This specification governs:
 
-- Addressing: the `server:workspace[:tab]` grammar, bus names, aliases, pane ids,
+- Addressing: the `server:workspace[:tab[:pane]]` grammar, bus names, aliases, pane ids,
   and how `agent-msg send` resolves what a sender typed to one recipient.
 - The registry: what a registration records and how it is kept current.
 - Delivery: queueing, broadcast, inbox pops, requeueing, and the watcher's

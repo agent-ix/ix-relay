@@ -68,7 +68,7 @@ interrupt them in person to say it, don't send it.
 
 ## Addressing
 
-Address a lead by where it sits, as `server:workspace[:tab]` — the machine,
+Address a lead by where it sits, as `server:workspace[:tab[:pane]]` — the machine,
 workspace label and tab label you see in herdr:
 
 ```
@@ -89,7 +89,7 @@ they see in herdr.
 ## Commands
 
 ```
-agent-msg send <address|all> "<text>"   # address is server:workspace[:tab]
+agent-msg send <address|all> "<text>"   # address is server:workspace[:tab[:pane]]
 agent-msg inbox                      # print and remove your pending messages
 agent-msg who                        # who else is registered
 agent-msg find [<query>]             # look around: who is live, and at what address

@@ -241,13 +241,19 @@ mod tests {
             name: "qsl-lead".parse().unwrap(),
             machine: "hub".parse().unwrap(),
             kind: "claude".into(),
-            session_id: None,
+            session_id: Some("session-1".parse().unwrap()),
             cwd: None,
-            herdr_pane: None,
+            herdr_pane: Some("w1:p1".parse().unwrap()),
             place: Some(relay_core::Place {
                 workspace: "EA".into(),
                 tab: "1".into(),
-                tabs_in_workspace: 2,
+                herdr_ids: Some(relay_core::HerdrPlaceIds {
+                    workspace: "w1".parse().unwrap(),
+                    tab: "w1:t1".parse().unwrap(),
+                    pane: "w1:p1".parse().unwrap(),
+                    session_id: "session-1".parse().unwrap(),
+                    verified_at_ms: 1,
+                }),
             }),
             last_seen_ms: 1,
         }]);

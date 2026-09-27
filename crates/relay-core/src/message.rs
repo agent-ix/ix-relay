@@ -1,9 +1,9 @@
 //! What travels on the bus and what the registry stores.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
-    address::{MAX_LABEL_BYTES, Place},
+    address::{HerdrPlaceIds, MAX_LABEL_BYTES, Place},
     ids::{MachineName, PaneId, PaneRef, SessionId},
     name::{AgentName, Target},
 };
@@ -93,7 +93,7 @@ impl Message {
     }
 
     /// [`Message::render`], signed with `sender` instead of the bare bus name —
-    /// normally the sender's `server:workspace[:tab]` address (see
+    /// normally the sender's `server:workspace[:tab[:pane]]` address (see
     /// [`crate::AddressBook::render`]). `sender` must be a single line: an
     /// [`crate::Address`] or an [`AgentName`] always is.
     pub fn render_from(&self, sender: &str) -> String {
@@ -115,6 +115,41 @@ impl Message {
 }
 
 impl Registration {
+    /// Classifies location evidence without treating absence of a
+    /// contradiction as verification.
+    #[must_use]
+    pub fn placement_state(&self) -> PlacementState<'_> {
+        match (&self.herdr_pane, &self.session_id, &self.place) {
+            (None, _, None) => PlacementState::Unplaced,
+            (Some(pane), _, None) => PlacementState::Claimed { pane },
+            (Some(_), Some(session), Some(place))
+                if place.herdr_ids.as_ref().is_some_and(|ids| {
+                    &ids.session_id == session && Some(&ids.pane) == self.herdr_pane.as_ref()
+                }) =>
+            {
+                PlacementState::Verified { place }
+            }
+            (claimed, _, Some(verified)) => PlacementState::Unverifiable {
+                claimed: claimed.as_ref(),
+                verified,
+            },
+        }
+    }
+
+    /// Returns only a place carrying Herdr's stable location and the same
+    /// harness session ID as the registration. The watcher creates this
+    /// session-bound evidence only after joining the exact session to the
+    /// claimed pane in a current Herdr layout.
+    #[must_use]
+    pub fn verified_place(&self) -> Option<&Place> {
+        match self.placement_state() {
+            PlacementState::Verified { place } => Some(place),
+            PlacementState::Unplaced
+            | PlacementState::Claimed { .. }
+            | PlacementState::Unverifiable { .. } => None,
+        }
+    }
+
     /// Whether this lead is in `pane`: its machine and its pane, compared as the
     /// [`PaneRef`] pair, without building one from this registration.
     #[must_use]
@@ -139,13 +174,31 @@ impl Registration {
     }
 }
 
+/// The address evidence currently represented by a registration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlacementState<'a> {
+    /// No Herdr pane claim or verified location is present.
+    Unplaced,
+    /// A process supplied a pane claim, but Herdr has not verified it.
+    Claimed { pane: &'a PaneId },
+    /// The claim and verified Herdr pane identity agree.
+    Verified { place: &'a Place },
+    /// A location record contradicts the process's pane claim.
+    Unverifiable {
+        /// The pane id claimed by the process, if one is available.
+        claimed: Option<&'a PaneId>,
+        /// The conflicting verified Herdr location.
+        verified: &'a Place,
+    },
+}
+
 /// A lead's entry in the registry: where it runs and what session it is.
 ///
 /// Deliberately tolerant of unknown fields: registrations are read by every
 /// machine on the bus, and a newer binary may add a field an older one has
 /// never heard of. Refusing the record would hide a live lead from the older
 /// machines (see [`crate::Relay::agents`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Registration {
     /// The lead's bus name.
     pub name: AgentName,
@@ -162,14 +215,86 @@ pub struct Registration {
     /// `relay-watcher` needs this to type messages into an idle lead through
     /// `herdr agent prompt`. Absent for a lead not running under herdr.
     pub herdr_pane: Option<PaneId>,
-    /// Where the pane sits in herdr (workspace and tab labels), when known:
-    /// what `server:workspace[:tab]` addressing resolves against. Absent for a
-    /// lead whose place is not known: it stays reachable by name, alias or
-    /// pane id but has no address.
+    /// Where the pane sits in Herdr (workspace and tab labels), when known:
+    /// what `server:workspace[:tab[:pane]]` addressing resolves against. A
+    /// place is routable only when its stable Herdr identity is verified against
+    /// this registration's exact session and pane; unverified leads remain
+    /// reachable by bus name or explicit alias.
     pub place: Option<Place>,
     /// When the lead last registered or, while its pane is alive in herdr, when
     /// `relay-watcher` last saw it there, Unix milliseconds (FR-042).
     pub last_seen_ms: i64,
+}
+
+impl<'de> Deserialize<'de> for Registration {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct LegacyPlaceIds {
+            workspace: crate::ids::WorkspaceId,
+            tab: crate::ids::TabId,
+            #[serde(default)]
+            pane: Option<PaneId>,
+            #[serde(default)]
+            session_id: Option<SessionId>,
+            #[serde(default)]
+            verified_at_ms: i64,
+        }
+
+        #[derive(Deserialize)]
+        struct LegacyPlace {
+            workspace: String,
+            tab: String,
+            #[serde(default)]
+            herdr_ids: Option<LegacyPlaceIds>,
+        }
+
+        #[derive(Deserialize)]
+        struct WireRegistration {
+            name: AgentName,
+            machine: MachineName,
+            kind: String,
+            #[serde(default)]
+            session_id: Option<SessionId>,
+            #[serde(default)]
+            cwd: Option<String>,
+            #[serde(default)]
+            herdr_pane: Option<PaneId>,
+            #[serde(default)]
+            place: Option<LegacyPlace>,
+            last_seen_ms: i64,
+        }
+
+        let wire = WireRegistration::deserialize(deserializer)?;
+        let place = wire.place.map(|legacy| {
+            let ids = legacy.herdr_ids.and_then(|ids| {
+                Some(HerdrPlaceIds {
+                    workspace: ids.workspace,
+                    tab: ids.tab,
+                    pane: ids.pane?,
+                    session_id: ids.session_id?,
+                    verified_at_ms: ids.verified_at_ms,
+                })
+            });
+            Place {
+                workspace: legacy.workspace,
+                tab: legacy.tab,
+                herdr_ids: ids,
+            }
+        });
+        Ok(Self {
+            name: wire.name,
+            machine: wire.machine,
+            kind: wire.kind,
+            session_id: wire.session_id,
+            cwd: wire.cwd,
+            herdr_pane: wire.herdr_pane,
+            place,
+            last_seen_ms: wire.last_seen_ms,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -239,11 +364,15 @@ mod tests {
 
     #[test]
     fn registration_and_place_with_unknown_fields_still_decode() {
-        let json = r#"{"name":"qsl-lead","machine":"node-a","kind":"claude","session_id":null,
-            "cwd":null,"last_seen_ms":1,"added_later":1,
-            "place":{"workspace":"EA","tab":"1","tabs_in_workspace":2,"also_later":"x"}}"#;
+        let json = r#"{"name":"qsl-lead","machine":"node-a","kind":"claude","session_id":"s",
+            "cwd":null,"herdr_pane":"w1:p1","last_seen_ms":1,"added_later":1,
+            "place":{"workspace":"EA","tab":"1","tabs_in_workspace":2,"herdr_ids":{"workspace":"w1","tab":"w1:t1","pane":"w1:p1"},"also_later":"x"}}"#;
         let reg: Registration = serde_json::from_str(json).unwrap();
-        assert_eq!(reg.place.unwrap().workspace, "EA");
+        assert_eq!(
+            reg.place.unwrap().herdr_ids,
+            None,
+            "legacy pane and Herdr IDs have no session binding and are not proof"
+        );
     }
 
     /// The stored registration and message JSON have exactly these members:
@@ -260,7 +389,7 @@ mod tests {
             place: Some(Place {
                 workspace: "EA".into(),
                 tab: "1".into(),
-                tabs_in_workspace: 2,
+                herdr_ids: None,
             }),
             last_seen_ms: 7,
         };
@@ -269,7 +398,7 @@ mod tests {
             serde_json::json!({
                 "name": "qsl-lead", "machine": "node-a", "kind": "claude",
                 "session_id": "s", "cwd": "/w", "herdr_pane": "w1:p1",
-                "place": {"workspace": "EA", "tab": "1", "tabs_in_workspace": 2},
+                "place": {"workspace": "EA", "tab": "1", "herdr_ids": null},
                 "last_seen_ms": 7,
             })
         );
@@ -282,6 +411,81 @@ mod tests {
             4,
             "from, to, text, sent_at_ms"
         );
+    }
+
+    /// Tracing: TC-047-01
+    /// ACs: FR-047-AC-1, FR-047-AC-2
+    #[test]
+    fn placement_state_requires_pane_session_and_herdr_identity() {
+        let verified_ids = Some(HerdrPlaceIds {
+            workspace: "w1".parse().unwrap(),
+            tab: "w1:t1".parse().unwrap(),
+            pane: "w1:p1".parse().unwrap(),
+            session_id: "s1".parse().unwrap(),
+            verified_at_ms: 1,
+        });
+        let place = Place {
+            workspace: "dev".into(),
+            tab: "code".into(),
+            herdr_ids: verified_ids,
+        };
+        let mut unplaced = Registration {
+            name: "unplaced".parse().unwrap(),
+            machine: "hub".parse().unwrap(),
+            kind: "codex".into(),
+            session_id: None,
+            cwd: None,
+            herdr_pane: None,
+            place: None,
+            last_seen_ms: 1,
+        };
+        assert!(matches!(
+            unplaced.placement_state(),
+            PlacementState::Unplaced
+        ));
+        unplaced.herdr_pane = Some("w1:p1".parse().unwrap());
+        assert!(matches!(
+            unplaced.placement_state(),
+            PlacementState::Claimed { .. }
+        ));
+        let mut reg = Registration {
+            name: "lead".parse().unwrap(),
+            machine: "hub".parse().unwrap(),
+            kind: "codex".into(),
+            session_id: Some("s1".parse().unwrap()),
+            cwd: None,
+            herdr_pane: Some("w1:p1".parse().unwrap()),
+            place: Some(place.clone()),
+            last_seen_ms: 1,
+        };
+        assert!(matches!(
+            reg.placement_state(),
+            PlacementState::Verified { .. }
+        ));
+        reg.session_id = Some("different-session".parse().unwrap());
+        assert!(matches!(
+            reg.placement_state(),
+            PlacementState::Unverifiable { .. }
+        ));
+        reg.session_id = Some("s1".parse().unwrap());
+        reg.session_id = None;
+        assert!(matches!(
+            reg.placement_state(),
+            PlacementState::Unverifiable { .. }
+        ));
+        reg.session_id = Some("s1".parse().unwrap());
+        reg.herdr_pane = None;
+        assert!(matches!(
+            reg.placement_state(),
+            PlacementState::Unverifiable { .. }
+        ));
+        reg.herdr_pane = Some("w1:p1".parse().unwrap());
+        reg.place.as_mut().unwrap().herdr_ids = None;
+        assert!(matches!(
+            reg.placement_state(),
+            PlacementState::Unverifiable { .. }
+        ));
+        assert!(reg.verified_place().is_none());
     }
 
     #[test]

@@ -127,7 +127,7 @@ pub trait Herdr {
     fn notify(&self, title: &str, body: &str) -> Result<(), ProcessError>;
     /// Where every live agent on this machine sits and which session it hosts,
     /// keyed by pane id, so the watcher can keep registered
-    /// `server:workspace[:tab]` addresses true and follow a session to the pane
+    /// `server:workspace[:tab[:pane]]` addresses true and follow a session to the pane
     /// it moved to. The default reports none: an implementation that cannot say
     /// leaves every registration as it is.
     fn layout(&self, _machine: &MachineName) -> Result<Layout, ProcessError> {

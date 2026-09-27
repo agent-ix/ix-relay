@@ -1,11 +1,9 @@
-//! Human-readable agent addresses: `server:workspace[:tab]`, e.g. `hub:EA:1`
+//! Human-readable agent addresses: `server:workspace[:tab[:pane]]`, e.g. `hub:EA:1`
 //! or `node-a:research`.
 //!
-//! Bus names and herdr pane ids stay valid, but neither tells a person where
-//! an agent is: pane ids repeat across machines, and derived names are slugs.
-//! An [`Address`] is built from what herdr shows on screen — the machine, the
-//! workspace label and the tab label — so what an agent reports is what the operator
-//! sees.
+//! Addresses follow Herdr's machine/workspace/tab/pane hierarchy. Workspace
+//! and tab labels are used for readable prefixes; the optional pane segment is
+//! Herdr's pane id, with stable Herdr IDs cached underneath the labels.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -18,16 +16,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::Error,
-    ids::MachineName,
+    ids::{MachineName, PaneId, SessionId, TabId, WorkspaceId},
     message::{Message, Registration},
     name::{AgentName, Target},
 };
 
-/// Where a lead's pane sits in herdr, captured when it registered.
+/// A verified Herdr location for one registered lead.
 ///
-/// Stored on the [`Registration`] so `send` can resolve an address, and every
-/// listing can print one, without shelling out to herdr (over SSH, for a
-/// remote machine) on each call.
+/// Stored on the [`Registration`] after Herdr confirms the location and its
+/// harness session matches. Address resolution and listings use this verified
+/// value without a Herdr call per send.
 ///
 /// Tolerant of unknown fields, like [`Registration`]: a newer binary may record
 /// more about the pane than this one knows.
@@ -38,37 +36,50 @@ pub struct Place {
     /// The tab's label, e.g. `code`; herdr's own display number, rendered as a
     /// string (e.g. `1`), for an unlabelled tab.
     pub tab: String,
-    /// How many tabs the workspace had when this was captured. The tab is left
-    /// out of the shown address when it is `1`: there is nothing to tell apart.
-    pub tabs_in_workspace: u32,
+    /// Herdr's stable workspace and tab ids, plus when Herdr confirmed
+    /// this location. Legacy label-only records are decoded as unplaced.
+    pub herdr_ids: Option<HerdrPlaceIds>,
+}
+
+/// Herdr identity backing a human-readable [`Place`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HerdrPlaceIds {
+    /// Stable identity of the workspace on this machine's Herdr instance.
+    pub workspace: WorkspaceId,
+    /// Stable identity of the tab within its workspace.
+    pub tab: TabId,
+    /// Herdr pane whose current location this identity describes.
+    pub pane: PaneId,
+    /// Harness session Herdr reported in the pane when this location was read.
+    pub session_id: SessionId,
+    /// Unix milliseconds when Herdr last confirmed these IDs and labels.
+    pub verified_at_ms: i64,
+}
+
+impl HerdrPlaceIds {
+    /// Whether this mapping is past the three-refresh-interval freshness window.
+    #[must_use]
+    pub fn is_stale(&self, now_ms: i64) -> bool {
+        now_ms.saturating_sub(self.verified_at_ms) > 90_000
+    }
 }
 
 impl Place {
-    /// The address to show for a lead at this place on `machine` *when this is
-    /// all that is known*: the tab is included unless this place's recorded count
-    /// says its workspace has exactly one — with nothing to tell apart it is
-    /// noise, but when the count is unknown (`0`) a missing tab could make two
-    /// leads look like one, so it stays.
-    ///
-    /// A recorded count can be stale, so this is not the rule a listing of
-    /// registered leads uses: [`AddressBook`] drops the tab only when no other
-    /// registered lead shares the workspace either. This is for a place seen
-    /// live, with no registry to compare against.
+    /// The human-readable server/workspace/tab prefix for this place.
     #[must_use]
     pub fn address(&self, machine: &MachineName) -> Address {
-        let tab = (self.tabs_in_workspace != 1).then_some(self.tab.as_str());
-        Address::new(machine.as_str(), &self.workspace, tab)
+        self.tab_address(machine)
     }
 
-    /// The address with its tab always included — what an address query is
-    /// matched against.
+    /// The preferred address for a tab, without a pane qualifier.
     #[must_use]
-    pub fn full_address(&self, machine: &MachineName) -> Address {
+    pub fn tab_address(&self, machine: &MachineName) -> Address {
         Address::new(machine.as_str(), &self.workspace, Some(&self.tab))
     }
 }
 
-/// `server:workspace[:tab]`.
+/// `server:workspace[:tab[:pane]]`; omitted tab/pane segments select broader
+/// Herdr containers.
 ///
 /// Segments are made safe to type and to print on one line: whitespace,
 /// control characters and `:` become `-`. Both sides of a comparison go
@@ -76,14 +87,15 @@ impl Place {
 /// `hub:My-Work`.
 ///
 /// Equality and hashing ignore case — the one definition of "the same
-/// address", so `hub:EA:Code` equals `HUB:ea:code` and either finds the
-/// other in a set or map. [`Address::selects`] is the query form of the same
+/// address", so `hub:EA:Code:w1-p1` equals `HUB:ea:code:W1-P1`. Prefix queries
+/// select wider Herdr containers. [`Address::selects`] is the query form of the same
 /// comparison. Neither allocates.
 #[derive(Debug, Clone)]
 pub struct Address {
     server: String,
     workspace: String,
     tab: Option<String>,
+    pane: Option<String>,
 }
 
 impl Address {
@@ -95,7 +107,16 @@ impl Address {
             server: clean(&MachineName::normalise(server)),
             workspace: clean(workspace),
             tab: tab.map(clean),
+            pane: None,
         }
+    }
+
+    /// Builds an address down to an optional Herdr pane id.
+    #[must_use]
+    pub fn with_pane(server: &str, workspace: &str, tab: &str, pane: &str) -> Self {
+        let mut address = Self::new(server, workspace, Some(tab));
+        address.pane = Some(clean(pane));
+        address
     }
 
     /// The machine the agent runs on.
@@ -116,6 +137,12 @@ impl Address {
         self.tab.as_deref()
     }
 
+    /// The Herdr pane id, when the address names one.
+    #[must_use]
+    pub fn pane(&self) -> Option<&str> {
+        self.pane.as_deref()
+    }
+
     /// Whether this address, read as a query, selects `target`: the same
     /// server and workspace, ignoring case, and — only when this address
     /// names a tab — the same tab. An address without a tab selects every tab
@@ -126,7 +153,13 @@ impl Address {
             && eq_fold(&self.workspace, &target.workspace)
             && match (&self.tab, &target.tab) {
                 (None, _) => true,
-                (Some(want), Some(have)) => eq_fold(want, have),
+                (Some(want), Some(have)) if eq_fold(want, have) => match (&self.pane, &target.pane)
+                {
+                    (None, _) => true,
+                    (Some(want), Some(have)) => eq_fold(want, have),
+                    (Some(_), None) => false,
+                },
+                (Some(_), Some(_)) => false,
                 (Some(_), None) => false,
             }
     }
@@ -137,6 +170,11 @@ impl PartialEq for Address {
         eq_fold(&self.server, &other.server)
             && eq_fold(&self.workspace, &other.workspace)
             && match (&self.tab, &other.tab) {
+                (None, None) => true,
+                (Some(a), Some(b)) => eq_fold(a, b),
+                _ => false,
+            }
+            && match (&self.pane, &other.pane) {
                 (None, None) => true,
                 (Some(a), Some(b)) => eq_fold(a, b),
                 _ => false,
@@ -154,6 +192,10 @@ impl Hash for Address {
         self.tab.is_some().hash(state);
         if let Some(tab) = &self.tab {
             hash_fold(tab, state);
+        }
+        self.pane.is_some().hash(state);
+        if let Some(pane) = &self.pane {
+            hash_fold(pane, state);
         }
     }
 }
@@ -226,6 +268,14 @@ impl FromStr for Address {
             {
                 Ok(Self::new(server, workspace, Some(tab)))
             }
+            [server, workspace, tab, pane]
+                if !server.is_empty()
+                    && !workspace.is_empty()
+                    && !tab.is_empty()
+                    && !pane.is_empty() =>
+            {
+                Ok(Self::with_pane(server, workspace, tab, pane))
+            }
             _ => Err(bad()),
         }
     }
@@ -237,6 +287,9 @@ impl fmt::Display for Address {
         if let Some(tab) = &self.tab {
             write!(f, ":{tab}")?;
         }
+        if let Some(pane) = &self.pane {
+            write!(f, ":{pane}")?;
+        }
         Ok(())
     }
 }
@@ -246,11 +299,18 @@ impl Registration {
     /// query is matched against.
     #[must_use]
     pub fn full_address(&self) -> Option<Address> {
-        Some(self.place.as_ref()?.full_address(&self.machine))
+        let place = self.verified_place()?;
+        let pane = self.herdr_pane.as_ref()?;
+        Some(Address::with_pane(
+            self.machine.as_str(),
+            &place.workspace,
+            &place.tab,
+            pane.as_str(),
+        ))
     }
 }
 
-/// Longest address (`server:workspace[:tab]`) shown in place of a bus name, in
+/// Longest address (`server:workspace[:tab[:pane]]`) shown in place of a bus name, in
 /// bytes. A workspace or tab label is whatever a person typed, so an address has
 /// no length of its own; a longer one is not shown and the sender's bus name
 /// (at most 32 bytes) is printed instead. This bounds a rendered message, which
@@ -273,12 +333,9 @@ impl AddressBook {
     /// Indexes every registration that has a place, in time linear in the
     /// registry.
     ///
-    /// A lead's shown address omits the tab only when its recorded count says
-    /// its workspace has one tab **and** no other registered lead is in that
-    /// server and workspace. A count is written when the lead registered and
-    /// refreshed by the watcher, so it can be stale: trusting it alone printed a
-    /// lead as `hub:EA` beside a lead at `hub:EA:plan`, an address that
-    /// selects both. An unknown count (`0`) keeps the tab, as before.
+    /// A lead's canonical displayed address always includes its tab, so the
+    /// printed address can be pasted back into `send` without depending on a
+    /// tab-count snapshot.
     ///
     /// Leads whose address another lead shares (two panes in one tab) are then
     /// printed by bus name: an address that names two leads cannot say who sent
@@ -288,30 +345,29 @@ impl AddressBook {
     pub fn from_registrations(registrations: &[Registration]) -> Self {
         let placed: Vec<(&Registration, &Place)> = registrations
             .iter()
-            .filter_map(|r| Some((r, r.place.as_ref()?)))
-            .collect();
-        // How many placed leads share each server and workspace (a tab-less
-        // address compares equal for a shared workspace whatever the case).
-        let mut in_workspace: HashMap<Address, usize> = HashMap::new();
-        for (r, place) in &placed {
-            *in_workspace
-                .entry(Address::new(r.machine.as_str(), &place.workspace, None))
-                .or_default() += 1;
-        }
-        let addressed: Vec<(&Registration, Address)> = placed
-            .iter()
-            .map(|(r, place)| {
-                let workspace = Address::new(r.machine.as_str(), &place.workspace, None);
-                let alone = in_workspace.get(&workspace).copied() == Some(1);
-                let address = if place.tabs_in_workspace == 1 && alone {
-                    workspace
-                } else {
-                    place.full_address(&r.machine)
-                };
-                (*r, address)
+            .filter_map(|r| {
+                let place = r.verified_place()?;
+                Some((r, place))
             })
+            .collect();
+        let mut addressed: Vec<(&Registration, Address)> = placed
+            .iter()
+            .map(|(r, place)| (*r, place.tab_address(&r.machine)))
             .filter(|(_, address)| address.to_string().len() <= MAX_LABEL_BYTES)
             .collect();
+        let shared_tabs: HashSet<Address> =
+            duplicated(addressed.iter().map(|(_, address)| address))
+                .into_iter()
+                .cloned()
+                .collect();
+        for (registration, address) in &mut addressed {
+            if shared_tabs.contains(address)
+                && let Some(full) = registration.full_address()
+            {
+                *address = full;
+            }
+        }
+        addressed.retain(|(_, address)| address.to_string().len() <= MAX_LABEL_BYTES);
         let shared = duplicated(addressed.iter().map(|(_, address)| address));
         Self {
             placed: addressed
@@ -392,7 +448,7 @@ mod tests {
             name: name.parse().unwrap(),
             machine: machine.parse().unwrap(),
             kind: "claude".into(),
-            session_id: None,
+            session_id: Some("test-session".parse().unwrap()),
             cwd: None,
             herdr_pane: Some("wB:p1".parse().unwrap()),
             place,
@@ -400,22 +456,32 @@ mod tests {
         }
     }
 
-    fn place(workspace: &str, tab: &str, tabs: u32) -> Place {
+    fn place(workspace: &str, tab: &str, _tabs: u32) -> Place {
         Place {
             workspace: workspace.into(),
             tab: tab.into(),
-            tabs_in_workspace: tabs,
+            herdr_ids: Some(HerdrPlaceIds {
+                workspace: format!("workspace-{workspace}").parse().unwrap(),
+                tab: format!("workspace-{workspace}:t1").parse().unwrap(),
+                pane: "wB:p1".parse().unwrap(),
+                session_id: "test-session".parse().unwrap(),
+                verified_at_ms: 1,
+            }),
         }
     }
 
     #[test]
-    fn parses_and_prints_server_workspace_and_optional_tab() {
+    fn parses_and_prints_optional_tab_and_pane() {
         let a: Address = "hub:EA:1".parse().unwrap();
         assert_eq!(
             (a.server(), a.workspace(), a.tab()),
             ("hub", "EA", Some("1"))
         );
         assert_eq!(a.to_string(), "hub:EA:1");
+        let c = Address::with_pane("hub", "EA", "code", "wA:p1");
+        let parsed: Address = "hub:EA:code:wA-p1".parse().unwrap();
+        assert_eq!(parsed, c);
+        assert_eq!(c.pane(), Some("wA-p1"));
         let b: Address = "node-a:research".parse().unwrap();
         assert_eq!(b.tab(), None);
         assert_eq!(b.to_string(), "node-a:research");
@@ -423,7 +489,7 @@ mod tests {
 
     #[test]
     fn malformed_addresses_are_refused() {
-        for bad in ["", "hub", "hub:", ":EA", "hub::1", "a:b:c:d", "hub:EA:"] {
+        for bad in ["", "hub", "hub:", ":EA", "hub::1", "a:b:c:d:", "hub:EA:"] {
             assert!(
                 matches!(bad.parse::<Address>(), Err(Error::InvalidAddress { input }) if input == bad),
                 "{bad:?} was accepted"
@@ -445,23 +511,72 @@ mod tests {
     }
 
     #[test]
-    fn selects_ignores_case_and_a_missing_tab_selects_every_tab() {
+    fn selects_ignores_case_and_missing_tab_or_pane_selects_the_container() {
         let target: Address = "hub:EA:Code".parse().unwrap();
         assert!("hub:ea:code".parse::<Address>().unwrap().selects(&target));
         assert!("HUB:EA".parse::<Address>().unwrap().selects(&target));
+        let pane_target: Address = "hub:EA:code:wA-p1".parse().unwrap();
+        assert!("hub:EA".parse::<Address>().unwrap().selects(&pane_target));
+        assert!(
+            "hub:EA:code"
+                .parse::<Address>()
+                .unwrap()
+                .selects(&pane_target)
+        );
+        assert!(
+            "hub:EA:code:wA-p1"
+                .parse::<Address>()
+                .unwrap()
+                .selects(&pane_target)
+        );
+        assert!(
+            !"hub:EA:code:wA-p2"
+                .parse::<Address>()
+                .unwrap()
+                .selects(&pane_target)
+        );
         assert!(!"hub:EA:plan".parse::<Address>().unwrap().selects(&target));
         assert!(!"node-a:EA".parse::<Address>().unwrap().selects(&target));
         assert!(!"hub:QSL".parse::<Address>().unwrap().selects(&target));
     }
 
     #[test]
-    fn the_shown_address_drops_the_tab_only_for_a_lone_lead_in_a_one_tab_workspace() {
+    fn the_shown_address_always_includes_the_tab() {
         let a = |regs: &[Registration]| AddressBook::from_registrations(regs).label(&name("a"));
         let one = reg("a", "node-a", Some(place("research", "1", 1)));
-        assert_eq!(a(std::slice::from_ref(&one)), "node-a:research");
-        assert_eq!(one.full_address().unwrap().to_string(), "node-a:research:1");
+        assert_eq!(a(std::slice::from_ref(&one)), "node-a:research:1");
+        assert_eq!(
+            one.full_address().unwrap().to_string(),
+            "node-a:research:1:wB-p1"
+        );
         let many = reg("a", "hub", Some(place("EA", "1", 3)));
         assert_eq!(a(&[many]), "hub:EA:1");
+    }
+
+    /// Tracing: TC-005-01
+    /// ACs: FR-005-AC-1
+    #[test]
+    fn a_shared_tab_uses_herdr_pane_ids_to_disambiguate() {
+        let mut a = reg("a", "hub", Some(place("EA", "code", 2)));
+        let mut b = reg("b", "hub", Some(place("EA", "code", 2)));
+        a.herdr_pane = Some("wA:p1".parse().unwrap());
+        b.herdr_pane = Some("wA:p2".parse().unwrap());
+        a.place.as_mut().unwrap().herdr_ids.as_mut().unwrap().pane = "wA:p1".parse().unwrap();
+        b.place.as_mut().unwrap().herdr_ids.as_mut().unwrap().pane = "wA:p2".parse().unwrap();
+        let registrations = [a, b];
+        let book = AddressBook::from_registrations(&registrations);
+        assert_eq!(book.label(&name("a")), "hub:EA:code:wA-p1");
+        assert_eq!(book.label(&name("b")), "hub:EA:code:wA-p2");
+        assert_eq!(
+            crate::resolve_target(
+                "hub:EA:code:wA-p1",
+                &"hub".parse().unwrap(),
+                &registrations,
+                &[]
+            )
+            .unwrap(),
+            Target::Agent(name("a"))
+        );
     }
 
     fn name(s: &str) -> AgentName {
@@ -471,13 +586,10 @@ mod tests {
     /// Tracing: TC-005-08
     /// ACs: FR-005-AC-8
     ///
-    /// A recorded count of 1 is not enough to drop the tab: `stale` registered
-    /// while `code` was the workspace's only tab and was never refreshed, and
-    /// `fresh` registered later in `plan` with the real count 2. Trusting the
-    /// count printed `stale` as `hub:EA`, which selects both. The tab is kept
-    /// while another lead shares the workspace, and dropped once it is alone.
+    /// Tab cardinality is not part of the stored address model. Leads in
+    /// different tabs retain their tab-qualified addresses.
     #[test]
-    fn tc_005_08_a_stale_tab_count_does_not_print_an_address_that_selects_two_leads() {
+    fn tc_005_08_different_tabs_keep_distinct_tab_addresses() {
         let stale = reg("stale", "hub", Some(place("EA", "code", 1)));
         let fresh = reg("fresh", "hub", Some(place("EA", "plan", 2)));
         let book = AddressBook::from_registrations(&[stale.clone(), fresh]);
@@ -488,17 +600,16 @@ mod tests {
             Some("hub:EA:code".to_owned())
         );
 
-        // Alone in the workspace with a count of 1, the tab is noise again. The
-        // workspace is compared as the resolver compares it: server and label,
-        // ignoring case.
+        // The same address remains stable when alone or when another server has
+        // the same workspace label.
         let alone = AddressBook::from_registrations(std::slice::from_ref(&stale));
-        assert_eq!(alone.label(&name("stale")), "hub:EA");
+        assert_eq!(alone.label(&name("stale")), "hub:EA:code");
         let other_machine = reg("far", "node-a", Some(place("EA", "plan", 2)));
         let apart = AddressBook::from_registrations(&[stale.clone(), other_machine]);
         assert_eq!(
             apart.label(&name("stale")),
-            "hub:EA",
-            "another server's EA is not shared"
+            "hub:EA:code",
+            "another server's EA does not change its canonical address"
         );
         let cased = reg("cased", "HUB", Some(place("ea", "plan", 2)));
         let same = AddressBook::from_registrations(&[stale, cased]);
@@ -594,25 +705,27 @@ mod tests {
     fn quadratic_oracle(registrations: &[Registration]) -> HashMap<AgentName, String> {
         let placed: Vec<(&Registration, &Place)> = registrations
             .iter()
-            .filter_map(|r| Some((r, r.place.as_ref()?)))
-            .collect();
-        let shown: Vec<(&Registration, Address)> = placed
-            .iter()
-            .enumerate()
-            .map(|(i, (r, place))| {
-                let workspace = Address::new(r.machine.as_str(), &place.workspace, None);
-                let shares_workspace = placed.iter().enumerate().any(|(j, (other, p))| {
-                    i != j && Address::new(other.machine.as_str(), &p.workspace, None) == workspace
-                });
-                let address = if place.tabs_in_workspace == 1 && !shares_workspace {
-                    workspace
-                } else {
-                    place.full_address(&r.machine)
-                };
-                (*r, address)
+            .filter_map(|r| {
+                let place = r.verified_place()?;
+                Some((r, place))
             })
+            .collect();
+        let mut shown: Vec<(&Registration, Address)> = placed
+            .iter()
+            .map(|(r, place)| (*r, place.tab_address(&r.machine)))
             .filter(|(_, address)| address.to_string().len() <= MAX_LABEL_BYTES)
             .collect();
+        let shared_tabs: HashSet<Address> = duplicated(shown.iter().map(|(_, address)| address))
+            .into_iter()
+            .cloned()
+            .collect();
+        for (registration, address) in &mut shown {
+            if shared_tabs.contains(address)
+                && let Some(full) = registration.full_address()
+            {
+                *address = full;
+            }
+        }
         shown
             .iter()
             .enumerate()
@@ -639,10 +752,16 @@ mod tests {
         // A small alphabet in both cases so collisions, case-only collisions
         // and near-misses are common, not rare.
         let label = "[a-cA-C]{1,2}";
-        let place = (label, label, 0u32..3).prop_map(|(workspace, tab, tabs_in_workspace)| Place {
+        let place = (label, label).prop_map(|(workspace, tab)| Place {
+            herdr_ids: Some(HerdrPlaceIds {
+                workspace: format!("workspace-{workspace}").parse().unwrap(),
+                tab: format!("workspace-{workspace}:t1").parse().unwrap(),
+                pane: "wB:p1".parse().unwrap(),
+                session_id: "test-session".parse().unwrap(),
+                verified_at_ms: 1,
+            }),
             workspace,
             tab,
-            tabs_in_workspace,
         });
         (
             prop::sample::select(vec!["hub", "HUB", "node-a", "Node-A.local"])
@@ -712,6 +831,30 @@ mod tests {
                 .place_address(&name("a"))
                 .is_none()
         );
+    }
+
+    /// Tracing: TC-005-10
+    /// ACs: FR-005-AC-10
+    #[test]
+    fn a_registration_without_herdr_ids_is_not_advertised_as_an_address() {
+        let mut registration = reg("legacy", "hub", Some(place("EA", "code", 2)));
+        registration.place = None;
+        let book = AddressBook::from_registrations(&[registration]);
+        assert_eq!(book.label(&name("legacy")), "legacy");
+        assert_eq!(book.place_address(&name("legacy")), None);
+    }
+
+    #[test]
+    fn cache_freshness_uses_three_watcher_refresh_intervals() {
+        let ids = HerdrPlaceIds {
+            workspace: "w1".parse().unwrap(),
+            tab: "w1:t1".parse().unwrap(),
+            pane: "w1:p1".parse().unwrap(),
+            session_id: "test-session".parse().unwrap(),
+            verified_at_ms: 1_000,
+        };
+        assert!(!ids.is_stale(91_000));
+        assert!(ids.is_stale(91_001));
     }
 
     #[test]

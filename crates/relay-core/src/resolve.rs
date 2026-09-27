@@ -1,9 +1,10 @@
 //! Turning what a sender typed into a [`Target`].
 //!
 //! `agent-msg send hub:EA:1 ...` must work cold, with no `find` first, so
-//! resolution happens inside `send`, against the registry alone (each
-//! registration records its herdr [`Place`](crate::Place)) — no herdr or SSH
-//! call. Pure over the registry snapshot, so it is tested without Redis.
+//! resolution happens inside `send`, against the Redis-cached registration
+//! snapshot — no Herdr call or SSH per send. Address matches require a Herdr
+//! ID-backed place; legacy label-only records are not trusted for routing.
+//! Pure over the registry snapshot, so it is tested without Redis.
 
 use std::collections::BTreeSet;
 
@@ -27,7 +28,7 @@ const MAX_SUGGESTIONS: usize = 5;
 ///    ids repeat across machines and mean nothing on another one, so a lead
 ///    elsewhere is addressed by its address. More than one match on the
 ///    sender's machine is an error;
-/// 4. a `server:workspace[:tab]` address, case-insensitive; without a tab it
+/// 4. a `server:workspace[:tab[:pane]]` address, case-insensitive; without a tab it
 ///    selects every tab of the workspace.
 ///
 /// # Errors
@@ -60,7 +61,10 @@ pub fn resolve_target(
     let by_pane: Vec<&Registration> = match input.parse::<PaneId>() {
         Ok(pane) => {
             let wanted = PaneRef::new(sender_machine.clone(), pane);
-            registrations.iter().filter(|r| r.is_on(&wanted)).collect()
+            registrations
+                .iter()
+                .filter(|r| r.verified_place().is_some() && r.is_on(&wanted))
+                .collect()
         }
         Err(_) => Vec::new(),
     };
@@ -79,7 +83,10 @@ pub fn resolve_target(
     let query: Address = input.parse()?;
     let matched: Vec<&Registration> = registrations
         .iter()
-        .filter(|r| r.full_address().is_some_and(|a| query.selects(&a)))
+        .filter(|r| {
+            r.full_address()
+                .is_some_and(|address| query.selects(&address))
+        })
         .collect();
     if matched.is_empty() {
         let cause = classify(&query, registrations);
@@ -100,6 +107,14 @@ fn one_or_ambiguous(input: &str, mut matched: Vec<&Registration>) -> Result<Targ
             .map(|r| Candidate {
                 name: r.name.clone(),
                 address: r.full_address(),
+                workspace_id: r
+                    .place
+                    .as_ref()
+                    .and_then(|p| p.herdr_ids.as_ref().map(|ids| ids.workspace.clone())),
+                tab_id: r
+                    .place
+                    .as_ref()
+                    .and_then(|p| p.herdr_ids.as_ref().map(|ids| ids.tab.clone())),
             })
             .collect(),
     })
@@ -174,9 +189,10 @@ fn suggest(
     let wanted = input.to_lowercase();
     let allowed = (wanted.chars().count() / 4).max(2);
     let mut pool: BTreeSet<String> = BTreeSet::new();
+    let book = crate::AddressBook::from_registrations(registrations);
     for r in registrations {
         pool.insert(r.name.to_string());
-        if let Some(address) = r.full_address() {
+        if let Some(address) = book.place_address(&r.name) {
             pool.insert(address.to_string());
         }
     }
@@ -233,13 +249,19 @@ mod tests {
             name: name(n),
             machine: machine.parse().unwrap(),
             kind: "claude".into(),
-            session_id: None,
+            session_id: Some("test-session".parse().unwrap()),
             cwd: None,
             herdr_pane: Some(pane.parse().unwrap()),
-            place: place.map(|(workspace, tab, tabs)| Place {
+            place: place.map(|(workspace, tab, _tabs)| Place {
                 workspace: workspace.into(),
                 tab: tab.into(),
-                tabs_in_workspace: tabs,
+                herdr_ids: Some(crate::HerdrPlaceIds {
+                    workspace: format!("workspace-{workspace}").parse().unwrap(),
+                    tab: format!("workspace-{workspace}:t1").parse().unwrap(),
+                    pane: pane.parse().unwrap(),
+                    session_id: "test-session".parse().unwrap(),
+                    verified_at_ms: 1,
+                }),
             }),
             last_seen_ms: 1,
         }
@@ -285,6 +307,56 @@ mod tests {
         assert_eq!(target("HUB:ea:PLAN").unwrap(), agent("ea-plan"));
     }
 
+    /// Tracing: TC-003-08
+    /// ACs: FR-003-AC-8
+    #[test]
+    fn workspace_and_tab_prefixes_require_specificity_only_when_multiple_leads_match() {
+        let at = |name: &str, tab: &str, tab_id: &str, pane: &str| {
+            let mut registration = reg(name, "hub", pane, Some(("EA", tab, 2)));
+            registration.place.as_mut().unwrap().herdr_ids = Some(crate::HerdrPlaceIds {
+                workspace: "wA".parse().unwrap(),
+                tab: tab_id.parse().unwrap(),
+                pane: pane.parse().unwrap(),
+                session_id: "test-session".parse().unwrap(),
+                verified_at_ms: 1,
+            });
+            registration
+        };
+        let registrations = [
+            at("ea-code-1", "code", "wA:t1", "wA:p1"),
+            at("ea-code-2", "code", "wA:t1", "wA:p2"),
+            at("ea-plan", "plan", "wA:t2", "wA:p3"),
+        ];
+        for input in ["hub:EA", "hub:EA:code"] {
+            let Err(Error::AmbiguousTarget { candidates, .. }) =
+                resolve_target(input, &"hub".parse().unwrap(), &registrations, &[])
+            else {
+                panic!("{input} should be a valid broader Herdr address, then ambiguous by lead");
+            };
+            assert!(!candidates.is_empty());
+            assert!(candidates.iter().all(|candidate| {
+                candidate
+                    .address
+                    .as_ref()
+                    .is_some_and(|address| address.pane().is_some())
+            }));
+        }
+        assert_eq!(
+            resolve_target(
+                "hub:EA:code:wA-p1",
+                &"hub".parse().unwrap(),
+                &registrations,
+                &[]
+            )
+            .unwrap(),
+            agent("ea-code-1")
+        );
+        assert_eq!(
+            resolve_target("hub:EA:plan", &"hub".parse().unwrap(), &registrations, &[]).unwrap(),
+            agent("ea-plan")
+        );
+    }
+
     #[test]
     fn the_tab_is_optional_when_the_workspace_has_one_lead() {
         assert_eq!(target("node-a:research").unwrap(), agent("research"));
@@ -301,7 +373,64 @@ mod tests {
         assert_eq!(names, ["ea-code", "ea-plan"]);
         assert_eq!(
             candidates[0].address.as_ref().unwrap().to_string(),
-            "hub:EA:code"
+            "hub:EA:code:wB-p1"
+        );
+    }
+
+    /// Tracing: TC-003-07
+    /// ACs: FR-003-AC-7
+    #[test]
+    fn tc_003_07_equal_labels_on_distinct_herdr_ids_are_ambiguous_with_ids() {
+        let mut regs = vec![
+            reg("dev-one", "hub", "wA:p1", Some(("dev", "code", 1))),
+            reg("dev-two", "hub", "wB:p1", Some(("dev", "code", 1))),
+        ];
+        for (reg, workspace) in regs.iter_mut().zip(["wA", "wB"]) {
+            let place = reg.place.as_mut().unwrap();
+            place.herdr_ids = Some(crate::HerdrPlaceIds {
+                workspace: workspace.parse().unwrap(),
+                tab: format!("{workspace}:t1").parse().unwrap(),
+                pane: reg.herdr_pane.clone().unwrap(),
+                session_id: "test-session".parse().unwrap(),
+                verified_at_ms: 1,
+            });
+        }
+        let Err(Error::AmbiguousTarget { candidates, .. }) =
+            resolve_target("hub:dev:code", &"hub".parse().unwrap(), &regs, &[])
+        else {
+            panic!("duplicate human labels must not choose a Herdr identity");
+        };
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].workspace_id.as_ref().unwrap().as_str(), "wA");
+        assert_eq!(candidates[1].workspace_id.as_ref().unwrap().as_str(), "wB");
+    }
+
+    /// Tracing: TC-005-10
+    /// ACs: FR-005-AC-10
+    #[test]
+    fn legacy_label_only_registration_is_not_routable_by_address() {
+        let mut legacy = reg("legacy", "hub", "wB:p1", Some(("EA", "code", 1)));
+        legacy.place = None;
+        assert!(matches!(
+            resolve_target("hub:EA:code", &"hub".parse().unwrap(), &[legacy], &[]),
+            Err(Error::UnknownTarget { .. })
+        ));
+    }
+
+    /// Tracing: TC-009-05
+    /// ACs: FR-009-AC-5
+    #[test]
+    fn tc_009_05_a_pane_claim_without_session_bound_herdr_proof_is_not_a_send_target() {
+        let claimed = reg("claimed", "hub", "wC:p1", None);
+        let verified = reg("verified", "hub", "wB:p1", Some(("EA", "code", 1)));
+
+        assert!(matches!(
+            resolve_target("wC:p1", &"hub".parse().unwrap(), &[claimed], &[]),
+            Err(Error::UnknownTarget { .. })
+        ));
+        assert_eq!(
+            resolve_target("wB:p1", &"hub".parse().unwrap(), &[verified], &[]).unwrap(),
+            agent("verified")
         );
     }
 
@@ -316,17 +445,14 @@ mod tests {
         );
         // hub's `wB:p2` is not reachable by pane id from node-a.
         assert!(resolve_target("wB:p2", &"node-a".parse().unwrap(), &fleet(), &[]).is_err());
+        // An unplaced pane claim is not routing proof, even on the sender's machine.
         assert!(resolve_target("wC:p1", &"hub".parse().unwrap(), &fleet(), &[]).is_err());
-        assert_eq!(
-            resolve_target("wC:p1", &"node-a".parse().unwrap(), &fleet(), &[]).unwrap(),
-            agent("old-lead")
-        );
     }
 
     #[test]
     fn two_leads_on_the_senders_machine_with_one_pane_id_are_ambiguous() {
         let mut regs = fleet();
-        regs.push(reg("ea-dup", "hub", "wB:p1", None));
+        regs.push(reg("ea-dup", "hub", "wB:p1", Some(("EA", "duplicate", 1))));
         assert!(matches!(
             resolve_target("wB:p1", &"hub".parse().unwrap(), &regs, &[]),
             Err(Error::AmbiguousTarget { candidates, .. }) if candidates.len() == 2
@@ -432,7 +558,7 @@ mod tests {
     #[test]
     fn colon_text_that_is_not_an_address_is_invalid() {
         assert!(matches!(
-            target("a:b:c:d"),
+            target("a:b:c:d:e"),
             Err(Error::InvalidAddress { .. })
         ));
     }

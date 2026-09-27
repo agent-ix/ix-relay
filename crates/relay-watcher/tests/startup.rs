@@ -141,7 +141,7 @@ impl Drop for KillOnDrop {
 /// A watcher started with `env` against a Redis nothing listens on (it retries
 /// forever, so it stays up), its stderr lines arriving on a channel.
 struct Running {
-    child: KillOnDrop,
+    _child: KillOnDrop,
     lines: std::sync::mpsc::Receiver<String>,
     /// Every line taken off the channel so far, in order, for failure messages
     /// and for checks over the whole log.
@@ -173,7 +173,7 @@ fn start_watcher(dir: &Path, env: &[(&str, String)]) -> Running {
         }
     });
     Running {
-        child: KillOnDrop(child),
+        _child: KillOnDrop(child),
         lines,
         seen: std::cell::RefCell::new(Vec::new()),
     }
@@ -205,8 +205,9 @@ impl Running {
         self.line_with_any(&[needle])
     }
 
+    #[cfg(target_os = "linux")]
     fn pid(&self) -> u32 {
-        self.child.0.id()
+        self._child.0.id()
     }
 }
 

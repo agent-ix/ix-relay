@@ -1041,11 +1041,11 @@ fn next_investigation_attempt_increments_per_escalation() {
 
 // ---- refresh_place ------------------------------------------------------
 
-fn place(workspace: &str, tab: &str, tabs: u32) -> relay_core::Place {
+fn place(workspace: &str, tab: &str, _tabs: u32) -> relay_core::Place {
     relay_core::Place {
         workspace: workspace.into(),
         tab: tab.into(),
-        tabs_in_workspace: tabs,
+        herdr_ids: None,
     }
 }
 
@@ -1085,6 +1085,41 @@ fn refresh_place_updates_only_the_place_and_reports_whether_it_changed() {
             .unwrap()
             == PlaceRefresh::Unchanged
     );
+}
+
+/// Tracing: TC-047-05
+/// ACs: FR-047-AC-5
+#[test]
+fn invalidate_place_clears_only_the_registration_snapshot_that_lost_proof() {
+    let Some(mut r) = relay("invalidate-place") else {
+        return;
+    };
+    let mut seen = reg_at("lead", "sid-1", "w1:p1");
+    seen.place = Some(relay_core::Place {
+        workspace: "EA".into(),
+        tab: "code".into(),
+        herdr_ids: Some(relay_core::HerdrPlaceIds {
+            workspace: "w1".parse().unwrap(),
+            tab: "w1:t1".parse().unwrap(),
+            pane: "w1:p1".parse().unwrap(),
+            session_id: "sid-1".parse().unwrap(),
+            verified_at_ms: 10,
+        }),
+    });
+    r.register(&seen).unwrap();
+
+    let mut replacement = seen.clone();
+    replacement.session_id = Some("sid-2".parse().unwrap());
+    assert!(replacement.verified_place().is_none());
+    r.register(&replacement).unwrap();
+    assert!(
+        !r.invalidate_place(&seen).unwrap(),
+        "stale snapshot cannot clear a new session"
+    );
+
+    let current = r.agent(&name("lead")).unwrap().unwrap();
+    assert!(r.invalidate_place(&current).unwrap());
+    assert!(r.agent(&name("lead")).unwrap().unwrap().place.is_none());
 }
 
 // ---- commit_identity demotions (AGE-2018 PR review) ------------
@@ -1757,7 +1792,7 @@ fn refresh_place_keeps_registration_members_this_binary_does_not_know() {
     let place = relay_core::Place {
         workspace: "EA".into(),
         tab: "code".into(),
-        tabs_in_workspace: 2,
+        herdr_ids: None,
     };
     assert!(
         r.refresh_place(&name("newer-lead"), &place, 5, true)

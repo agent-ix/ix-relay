@@ -1,4 +1,4 @@
-//! End-to-end tests for `server:workspace[:tab]` addressing (AGE-2022/2023/
+//! End-to-end tests for `server:workspace[:tab[:pane]]` addressing (AGE-2022/2023/
 //! 2024), run against the built binary with a fake `herdr` first on `PATH`
 //! (see `support::fake_herdr_dir`). Redis-backed: skipped with a clear
 //! message without `IX_RELAY_TEST_URL` (`make test-redis` sets it).
@@ -6,11 +6,17 @@
 //! The point under test: a sender fires `agent-msg send hub:EA:code ...`
 //! cold — no `find` first — and every listing and the `[ix-relay] from <x>:`
 //! line show that same form.
+#![expect(
+    clippy::unwrap_used,
+    reason = "integration test fixture helper uses fixed valid IDs and expects Redis"
+)]
 
 mod support;
 
 use std::path::Path;
+use std::time::Duration;
 
+use relay_core::{HerdrPlaceIds, Place, Registration, Relay, SessionId};
 use support::{Run, base_cmd, fake_herdr_dir, run};
 
 /// Workspace `EA` (`wB`) with two labelled tabs, one pane in each.
@@ -20,10 +26,16 @@ const EA_TABS: &str = r#"[{"tab_id":"wB:t1","label":"code","number":1},
 const EA_PANES: &str =
     r#"[{"pane_id":"wB:p1","tab_id":"wB:t1"},{"pane_id":"wB:p2","tab_id":"wB:t2"}]"#;
 
-/// Workspace `quoin` with one unlabelled tab: its address has no tab segment.
+/// Workspace `quoin` with one unlabelled tab: its tab address uses `1`.
 const Q_WORKSPACES: &str = r#"[{"workspace_id":"wC","label":"quoin","number":1,"tab_count":1}]"#;
 const Q_TABS: &str = r#"[{"tab_id":"wC:t1","label":"1","number":1}]"#;
 const Q_PANES: &str = r#"[{"pane_id":"wC:p1","tab_id":"wC:t1"}]"#;
+
+fn agent_session_case(pane: &str, session: &str) -> String {
+    format!(
+        r#"{pane:?}) echo '{{"result":{{"agent":{{"agent_session":{{"kind":"id","value":"{session}"}}}}}}}}' ;;"#
+    )
+}
 
 fn test_url() -> Option<String> {
     let Ok(url) = std::env::var("IX_RELAY_TEST_URL") else {
@@ -92,6 +104,48 @@ fn scratch(tag: &str) -> support::Scratch {
     support::Scratch::new(&format!("ix-relay-address-{tag}-"))
 }
 
+/// Seeds the watcher-verified snapshot after the hook has registered its
+/// unverified pane claim. Address resolution must only use this exact proof.
+fn seed_verified_registration(
+    url: &str,
+    prefix: &str,
+    name: &str,
+    pane: &Pane<'_>,
+    workspace_label: &str,
+    tab_label: &str,
+) {
+    let mut relay = Relay::connect(url, Duration::from_secs(2))
+        .unwrap()
+        .with_prefix(prefix.to_owned());
+    let session_id: SessionId = pane.session.parse().unwrap();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    relay
+        .register(&Registration {
+            name: name.parse().unwrap(),
+            machine: pane.machine.parse().unwrap(),
+            kind: "claude".into(),
+            session_id: Some(session_id.clone()),
+            cwd: Some("/work".into()),
+            herdr_pane: Some(pane.pane.parse().unwrap()),
+            place: Some(Place {
+                workspace: workspace_label.into(),
+                tab: tab_label.into(),
+                herdr_ids: Some(HerdrPlaceIds {
+                    workspace: pane.workspace.parse().unwrap(),
+                    tab: pane.tab.parse().unwrap(),
+                    pane: pane.pane.parse().unwrap(),
+                    session_id,
+                    verified_at_ms: now_ms,
+                }),
+            }),
+            last_seen_ms: now_ms,
+        })
+        .unwrap();
+}
+
 #[test]
 fn send_resolves_an_address_cold_and_every_surface_shows_the_address() {
     let Some(url) = test_url() else { return };
@@ -101,39 +155,41 @@ fn send_resolves_an_address_cold_and_every_surface_shows_the_address() {
         EA_WORKSPACES,
         EA_TABS,
         EA_PANES,
-        "",
+        &agent_session_case("wB:p1", "address-ea"),
         &dir.join("ea.log"),
         false,
     );
-    let quoin = fake_herdr_dir(Q_WORKSPACES, Q_TABS, Q_PANES, "", &dir.join("q.log"), false);
-
-    start_session(
-        &url,
-        &prefix,
-        &Pane {
-            machine: "hub",
-            herdr_dir: &ea,
-            pane: "wB:p1",
-            tab: "wB:t1",
-            workspace: "wB",
-            session: "address-ea",
-        },
-    );
-    start_session(
-        &url,
-        &prefix,
-        &Pane {
-            machine: "node-a",
-            herdr_dir: &quoin,
-            pane: "wC:p1",
-            tab: "wC:t1",
-            workspace: "wC",
-            session: "address-q",
-        },
+    let quoin = fake_herdr_dir(
+        Q_WORKSPACES,
+        Q_TABS,
+        Q_PANES,
+        &agent_session_case("wC:p1", "address-q"),
+        &dir.join("q.log"),
+        false,
     );
 
-    // `who`: the address leads each row; the tab is shown only where the
-    // workspace has more than one.
+    let ea_pane = Pane {
+        machine: "hub",
+        herdr_dir: &ea,
+        pane: "wB:p1",
+        tab: "wB:t1",
+        workspace: "wB",
+        session: "address-ea",
+    };
+    let quoin_pane = Pane {
+        machine: "node-a",
+        herdr_dir: &quoin,
+        pane: "wC:p1",
+        tab: "wC:t1",
+        workspace: "wC",
+        session: "address-q",
+    };
+    start_session(&url, &prefix, &ea_pane);
+    start_session(&url, &prefix, &quoin_pane);
+    seed_verified_registration(&url, &prefix, "ea-code", &ea_pane, "EA", "code");
+    seed_verified_registration(&url, &prefix, "quoin", &quoin_pane, "quoin", "1");
+
+    // `who`: every address includes its tab, including a workspace with one tab.
     let who = as_lead(&url, &prefix, "quoin", &["who"]);
     assert_eq!(who.status, 0, "stderr: {}", who.stderr);
     assert!(
@@ -141,7 +197,11 @@ fn send_resolves_an_address_cold_and_every_surface_shows_the_address() {
         "{}",
         who.stdout
     );
-    assert!(who.stdout.contains("node-a:quoin  quoin"), "{}", who.stdout);
+    assert!(
+        who.stdout.contains("node-a:quoin:1  quoin"),
+        "{}",
+        who.stdout
+    );
 
     // Cold send, case-insensitively, straight from an address (no `find`).
     let sent = as_lead(&url, &prefix, "quoin", &["send", "HUB:ea:Code", "hello"]);
@@ -167,7 +227,9 @@ fn send_resolves_an_address_cold_and_every_surface_shows_the_address() {
     // The `[ix-relay] from <x>:` line names the sender by address.
     let inbox = as_lead(&url, &prefix, "ea-code", &["inbox"]);
     assert!(
-        inbox.stdout.contains("[ix-relay] from node-a:quoin: hello"),
+        inbox
+            .stdout
+            .contains("[ix-relay] from node-a:quoin:1: hello"),
         "{}",
         inbox.stdout
     );
@@ -182,7 +244,7 @@ fn send_resolves_an_address_cold_and_every_surface_shows_the_address() {
     // `log` prints addresses on both sides.
     let log = as_lead(&url, &prefix, "quoin", &["log"]);
     assert!(
-        log.stdout.contains("node-a:quoin -> hub:EA:code: hello"),
+        log.stdout.contains("node-a:quoin:1 -> hub:EA:code: hello"),
         "{}",
         log.stdout
     );
@@ -221,22 +283,35 @@ fn an_ambiguous_address_errors_and_lists_the_candidates_without_sending() {
         EA_WORKSPACES,
         EA_TABS,
         EA_PANES,
-        "",
+        &format!(
+            "{}\n{}",
+            agent_session_case("wB:p1", "amb-1"),
+            agent_session_case("wB:p2", "amb-2")
+        ),
         &dir.join("ea.log"),
         false,
     );
     for (pane, tab, session) in [("wB:p1", "wB:t1", "amb-1"), ("wB:p2", "wB:t2", "amb-2")] {
-        start_session(
+        let lead = Pane {
+            machine: "hub",
+            herdr_dir: &ea,
+            pane,
+            tab,
+            workspace: "wB",
+            session,
+        };
+        start_session(&url, &prefix, &lead);
+        seed_verified_registration(
             &url,
             &prefix,
-            &Pane {
-                machine: "hub",
-                herdr_dir: &ea,
-                pane,
-                tab,
-                workspace: "wB",
-                session,
+            if pane == "wB:p1" {
+                "ea-code"
+            } else {
+                "ea-plan"
             },
+            &lead,
+            "EA",
+            if pane == "wB:p1" { "code" } else { "plan" },
         );
     }
 
@@ -246,8 +321,8 @@ fn an_ambiguous_address_errors_and_lists_the_candidates_without_sending() {
     assert!(r.stdout.is_empty(), "nothing may be sent: {}", r.stdout);
     for expected in [
         "matches 2 leads",
-        "hub:EA:code (ea-code)",
-        "hub:EA:plan (ea-plan)",
+        "hub:EA:code:wB-p1 (ea-code",
+        "hub:EA:plan:wB-p2 (ea-plan",
     ] {
         assert!(
             r.stderr.contains(expected),
@@ -274,22 +349,20 @@ fn an_unknown_address_says_why_and_suggests_the_near_miss() {
         EA_WORKSPACES,
         EA_TABS,
         EA_PANES,
-        "",
+        &agent_session_case("wB:p1", "unk-1"),
         &dir.join("ea.log"),
         false,
     );
-    start_session(
-        &url,
-        &prefix,
-        &Pane {
-            machine: "hub",
-            herdr_dir: &ea,
-            pane: "wB:p1",
-            tab: "wB:t1",
-            workspace: "wB",
-            session: "unk-1",
-        },
-    );
+    let lead = Pane {
+        machine: "hub",
+        herdr_dir: &ea,
+        pane: "wB:p1",
+        tab: "wB:t1",
+        workspace: "wB",
+        session: "unk-1",
+    };
+    start_session(&url, &prefix, &lead);
+    seed_verified_registration(&url, &prefix, "ea-code", &lead, "EA", "code");
 
     let r = as_lead(&url, &prefix, "sender", &["send", "hub:EAA:code", "hi"]);
     assert_ne!(r.status, 0);
@@ -317,7 +390,7 @@ fn a_pane_id_shared_with_another_machine_never_leaks_its_place_or_its_messages()
         EA_WORKSPACES,
         EA_TABS,
         EA_PANES,
-        "",
+        &agent_session_case("wB:p1", "same-hub"),
         &dir.join("l.log"),
         false,
     );
@@ -329,7 +402,7 @@ fn a_pane_id_shared_with_another_machine_never_leaks_its_place_or_its_messages()
         node_a_workspaces,
         node_a_tabs,
         node_a_panes,
-        "",
+        &agent_session_case("wB:p1", "same-node-a"),
         &dir.join("t.log"),
         false,
     );
@@ -354,10 +427,12 @@ fn a_pane_id_shared_with_another_machine_never_leaks_its_place_or_its_messages()
     // hub registered most recently; node-a's next prompt must not adopt its place.
     start_session(&url, &prefix, &hub_pane);
     run_hook(&url, &prefix, &node_a_pane, "UserPromptSubmit");
+    seed_verified_registration(&url, &prefix, "ea-code", &hub_pane, "EA", "code");
+    seed_verified_registration(&url, &prefix, "research", &node_a_pane, "research", "1");
 
     let who = as_lead(&url, &prefix, "sender", &["who"]);
     assert!(
-        who.stdout.contains("node-a:research  research"),
+        who.stdout.contains("node-a:research:1  research"),
         "{}",
         who.stdout
     );

@@ -61,9 +61,8 @@ pub enum PlaceRefresh {
     /// The registration is absent, has that place already, or was registered again
     /// meanwhile: nothing changed.
     Unchanged,
-    /// The place changed and no event was recorded: only the workspace's tab count
-    /// differs (no label changed), the caller asked for no event, or the lead had
-    /// no place before.
+    /// The verified place or its freshness changed without a workspace/tab label
+    /// change, the caller asked for no event, or the lead had no place before.
     Refreshed,
     /// A workspace or tab label of the lead changed: the place is updated and this
     /// event is recorded.
@@ -103,14 +102,14 @@ static SWAP_AND_RECORD: LazyLock<redis::Script> = LazyLock::new(|| {
 
 impl Relay {
     /// Sets `name`'s recorded [`Place`] to `place` — how `relay-watcher`, which
-    /// sees herdr's live state, keeps `server:workspace[:tab]` addresses true
+    /// sees herdr's live state, keeps `server:workspace[:tab[:pane]]` addresses true
     /// after a tab closes (herdr renumbers unlabelled tabs) or a workspace or
     /// tab is renamed.
     ///
     /// When the lead's own workspace or tab *label* changed and `record` is set,
     /// a [`MoveKind::Rename`] event at `at_ms` is recorded in the same script
-    /// ([`PlaceRefresh::Renamed`]). A change of the workspace's tab count alone is
-    /// not a rename ([`PlaceRefresh::Refreshed`]). Nothing changes, and
+    /// ([`PlaceRefresh::Renamed`]). A change to stable identity or freshness with
+    /// the same workspace/tab labels is not a rename ([`PlaceRefresh::Refreshed`]). Nothing changes, and
     /// [`PlaceRefresh::Unchanged`] is returned, when `name` is not registered,
     /// already has `place`, or re-registered while this ran (that registration
     /// carries a fresher place of its own, so it is dropped rather than
@@ -129,6 +128,33 @@ impl Relay {
         record: bool,
     ) -> Result<PlaceRefresh> {
         self.refresh_place_between(name, place, at_ms, record, |_| Ok(()))
+    }
+
+    /// Removes cached address evidence when the watcher can no longer verify
+    /// this exact registration against Herdr. The whole stored record is used
+    /// as a compare-and-set guard so a concurrent re-registration is untouched.
+    pub fn invalidate_place(&mut self, seen: &Registration) -> Result<bool> {
+        let key = self.keys.agents_key();
+        let raw: Option<Vec<u8>> = self.conn.hget(&key, seen.name.as_str())?;
+        let Some(raw) = raw else {
+            return Ok(false);
+        };
+        let current: Registration = decode_bytes(&key, &raw)?;
+        if current != *seen || current.place.is_none() {
+            return Ok(false);
+        }
+        self.swap_recorded(
+            &raw,
+            &current.name,
+            &current.machine,
+            None,
+            false,
+            |_| Ok(()),
+            |members| {
+                members.insert("place".to_owned(), serde_json::Value::Null);
+                Ok(())
+            },
+        )
     }
 
     /// [`Relay::refresh_place`] running `between` after the read and before the
@@ -476,7 +502,7 @@ mod tests {
         Place {
             workspace: workspace.into(),
             tab: "1".into(),
-            tabs_in_workspace: 1,
+            herdr_ids: None,
         }
     }
 

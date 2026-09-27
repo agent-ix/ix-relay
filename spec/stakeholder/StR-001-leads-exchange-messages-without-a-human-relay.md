@@ -33,7 +33,7 @@ second.
 
 | ID | Criteria | Validation |
 |----|----------|------------|
-| StR-001-VC-1 | A lead on one machine sends to a lead on another by its on-screen `server:workspace[:tab]` address and the recipient sees the message, signed with the sender, on its next turn or when idle. | Demonstration |
+| StR-001-VC-1 | A lead on one machine sends to a lead on another by its on-screen `server:workspace[:tab[:pane]]` address and the recipient sees the message, signed with the sender, on its next turn or when idle. | Demonstration |
 | StR-001-VC-2 | A send whose target matches two leads is refused, lists both, and neither receives it. | Demonstration |
 | StR-001-VC-3 | With Redis unreachable, a lead's turn proceeds with no error surfaced by the hook. | Demonstration |
 

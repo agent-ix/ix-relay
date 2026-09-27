@@ -20,8 +20,8 @@ use std::{
 pub use herdr_cli::ProcessError;
 use herdr_cli::ProcessRunner;
 use relay_core::{
-    Address, AgentName, MachineName, PaneId, PaneRef, Place, Registration, SessionId, TabId,
-    WorkspaceId,
+    Address, AgentName, HerdrPlaceIds, MachineName, PaneId, PaneRef, Place, Registration,
+    SessionId, TabId, WorkspaceId,
 };
 use serde::Deserialize;
 
@@ -42,7 +42,7 @@ pub struct HerdrAgent {
     pub status: String,
     /// A best-effort session/agent name herdr shows for this pane
     /// (`terminal_title_stripped` — see
-    /// [`crate::naming::LocationHerdr::agent_name`]'s own doc comment on
+    /// [`crate::naming::LocationHerdr::agent`]'s own doc comment on
     /// why this is an approximation).
     pub session_name: Option<String>,
     /// The harness session id herdr reports for the pane (`agent_session.value`),
@@ -105,7 +105,7 @@ pub struct FoundAgent {
     pub aliases: Vec<AgentName>,
     /// The machine this agent runs on.
     pub machine: MachineName,
-    /// Its `server:workspace[:tab]` address, when the workspace label is known.
+    /// Its `server:workspace[:tab[:pane]]` address, when the workspace label is known.
     pub address: Option<Address>,
     /// The workspace's label, if known.
     pub workspace_label: Option<String>,
@@ -156,11 +156,23 @@ pub fn join(
 
     let mut rows = Vec::new();
     for view in machines {
-        let places = place_map(view, PlaceKnown::Lenient);
+        let places = place_map(view);
 
         for agent in &view.agents {
             let pane = PaneRef::new(view.machine.clone(), agent.pane_id.clone());
-            let reg = registrations.iter().find(|r| r.is_on(&pane));
+            let on_pane: Vec<&Registration> =
+                registrations.iter().filter(|r| r.is_on(&pane)).collect();
+            let reg = match agent.session_id.as_ref() {
+                Some(session) => {
+                    let matching: Vec<_> = on_pane
+                        .iter()
+                        .copied()
+                        .filter(|r| r.session_id.as_ref() == Some(session))
+                        .collect();
+                    (matching.len() == 1).then(|| matching[0])
+                }
+                None => None,
+            };
             let bus_name = reg.map(|r| r.name.clone());
             let alias_names = bus_name
                 .as_ref()
@@ -169,17 +181,32 @@ pub fn join(
                 .unwrap_or_default();
 
             let place = places.get(&agent.pane_id);
-            // The address comes from the same `Place` a registration carries,
-            // so the tab rule is `Place::address`'s alone. With no tab label
-            // there is no place to build; the workspace alone still is an
-            // address.
-            let address = place.map_or_else(
-                || {
-                    workspace_label(view, agent)
-                        .map(|w| Address::new(view.machine.as_str(), w, None))
-                },
-                |p| Some(p.address(&view.machine)),
-            );
+            // A Herdr location becomes a send address only when this row joins
+            // one registered lead by exact session id.
+            let address = reg.and_then(|_| {
+                place.map(|p| {
+                    let tab_address = p.tab_address(&view.machine);
+                    let shared = registrations
+                        .iter()
+                        .filter_map(|r| {
+                            let verified = r.verified_place()?;
+                            (r.machine == view.machine).then(|| verified.tab_address(&r.machine))
+                        })
+                        .filter(|candidate| candidate == &tab_address)
+                        .count()
+                        > 1;
+                    if shared {
+                        Address::with_pane(
+                            view.machine.as_str(),
+                            &p.workspace,
+                            &p.tab,
+                            agent.pane_id.as_str(),
+                        )
+                    } else {
+                        tab_address
+                    }
+                })
+            });
             let workspace_label = workspace_label(view, agent);
             let tab_label = tab_label(view, agent);
 
@@ -219,50 +246,51 @@ fn tab_label<'a>(view: &'a MachineView, agent: &HerdrAgent) -> Option<&'a str> {
         .map(|t| t.label.as_str())
 }
 
-/// Which panes [`place_map`] keeps.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PlaceKnown {
-    /// Every pane whose workspace and tab labels are known; an unknown tab
-    /// count is kept as `0`, which [`Place::address`] reads as "show the tab".
-    Lenient,
-    /// Only panes whose tab count is known too: what may be *written* to a
-    /// registration, where a guess is worse than no update.
-    Complete,
-}
-
-fn place_map(view: &MachineView, known: PlaceKnown) -> HashMap<&PaneId, Place> {
+fn place_map(view: &MachineView) -> HashMap<&PaneId, Place> {
     view.agents
         .iter()
         .filter_map(|agent| {
+            let session_id = agent.session_id.clone()?;
             let workspace = view
                 .workspaces
                 .iter()
                 .find(|w| w.workspace_id == agent.workspace_id)?;
             let tab = tab_label(view, agent)?;
-            (known == PlaceKnown::Lenient || workspace.tab_count > 0).then(|| {
-                (
-                    &agent.pane_id,
-                    Place {
-                        workspace: workspace.label.clone(),
-                        tab: tab.to_owned(),
-                        tabs_in_workspace: workspace.tab_count,
-                    },
-                )
-            })
+            Some((
+                &agent.pane_id,
+                Place {
+                    workspace: workspace.label.clone(),
+                    tab: tab.to_owned(),
+                    herdr_ids: Some(HerdrPlaceIds {
+                        workspace: workspace.workspace_id.clone(),
+                        tab: agent.tab_id.clone(),
+                        pane: agent.pane_id.clone(),
+                        session_id,
+                        verified_at_ms: herdr_verified_at_ms(),
+                    }),
+                },
+            ))
         })
         .collect()
+}
+
+fn herdr_verified_at_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 /// Where every live agent on `view`'s machine sits, keyed by pane id — the
 /// same [`Place`] a hook records at `SessionStart`, read from herdr's state
 /// now. `relay-watcher` compares this with what each lead registered, so a
 /// tab closing (herdr renumbers unlabelled tabs) or a workspace or tab rename
-/// does not leave a stale `server:workspace[:tab]` address resolving to the
-/// wrong lead. A pane whose workspace label, tab label or tab count is unknown
-/// is left out: better no update than a wrong one.
+/// does not leave a stale `server:workspace[:tab[:pane]]` address resolving to
+/// the wrong lead. A pane without an exact session ID or stable location labels
+/// is left out: better no update than a wrong one. Tab counts do not establish
+/// identity and are not part of this decision.
 #[must_use]
 pub fn places(view: &MachineView) -> HashMap<PaneId, Place> {
-    place_map(view, PlaceKnown::Complete)
+    place_map(view)
         .into_iter()
         .map(|(pane, place)| (pane.clone(), place))
         .collect()
@@ -620,12 +648,9 @@ mod tests {
 
     #[test]
     fn a_live_agent_registered_on_the_bus_joins_its_name_and_labels() {
-        let machines = vec![machine_view(
-            "node-a",
-            vec![agent("wQ:p1", "wQ:t1", "wQ", "idle")],
-            "QSL",
-            "review",
-        )];
+        let mut live = agent("wQ:p1", "wQ:t1", "wQ", "idle");
+        live.session_id = Some("sid-qsl-review".parse().unwrap());
+        let machines = vec![machine_view("node-a", vec![live], "QSL", "review")];
         let regs = vec![reg("qsl-review", "node-a", "wQ:p1")];
         let rows = join(&machines, &regs, &[]);
         assert_eq!(rows.len(), 1);
@@ -634,6 +659,36 @@ mod tests {
         assert_eq!(rows[0].tab_label.as_deref(), Some("review"));
         assert!(rows[0].on_bus);
         assert_eq!(rows[0].herdr_status, "idle");
+    }
+
+    #[test]
+    fn a_live_session_does_not_join_the_first_stale_registration_on_its_pane() {
+        let mut live = agent("wQ:p1", "wQ:t1", "wQ", "working");
+        live.session_id = Some("current-session".parse().unwrap());
+        let mut stale = reg("stale-lead", "node-a", "wQ:p1");
+        stale.session_id = Some("old-session".parse().unwrap());
+        let machines = vec![machine_view("node-a", vec![live], "QSL", "review")];
+        let rows = join(&machines, &[stale], &[]);
+        assert_eq!(rows[0].bus_name, None);
+        assert!(!rows[0].on_bus);
+    }
+
+    #[test]
+    fn a_sessionless_herdr_agent_does_not_verify_a_pane_claim() {
+        let machines = vec![machine_view(
+            "node-a",
+            vec![agent("wQ:p1", "wQ:t1", "wQ", "working")],
+            "QSL",
+            "review",
+        )];
+        let regs = vec![reg("claimed-lead", "node-a", "wQ:p1")];
+        let rows = join(&machines, &regs, &[]);
+        assert_eq!(rows[0].bus_name, None);
+        assert!(!rows[0].on_bus);
+        assert!(
+            rows[0].address.is_none(),
+            "an unverified pane is not a send address"
+        );
     }
 
     /// A row carries the typed ids of its pane, tab, workspace and session, so a
@@ -671,25 +726,83 @@ mod tests {
     }
 
     #[test]
-    fn a_row_carries_its_address_and_drops_the_tab_only_for_a_one_tab_workspace() {
+    fn a_row_carries_its_full_address_independent_of_tab_count() {
         let mut view = machine_view(
             "hub",
             vec![agent("wQ:p1", "wQ:t1", "wQ", "idle")],
             "EA",
             "code",
         );
+        view.agents[0].session_id = Some("sid-qsl-review".parse().unwrap());
         view.workspaces[0].tab_count = 3;
-        let rows = join(&[view.clone()], &[], &[]);
+        let mut registered = reg("qsl-review", "hub", "wQ:p1");
+        registered.place = Some(Place {
+            workspace: "EA".into(),
+            tab: "code".into(),
+            herdr_ids: Some(HerdrPlaceIds {
+                workspace: "wQ".parse().unwrap(),
+                tab: "wQ:t1".parse().unwrap(),
+                pane: "wQ:p1".parse().unwrap(),
+                session_id: "sid-qsl-review".parse().unwrap(),
+                verified_at_ms: 1,
+            }),
+        });
+        let rows = join(&[view.clone()], &[registered.clone()], &[]);
         assert_eq!(rows[0].address.as_ref().unwrap().to_string(), "hub:EA:code");
 
         view.workspaces[0].tab_count = 1;
-        let rows = join(&[view.clone()], &[], &[]);
-        assert_eq!(rows[0].address.as_ref().unwrap().to_string(), "hub:EA");
+        let rows = join(&[view.clone()], &[registered.clone()], &[]);
+        assert_eq!(rows[0].address.as_ref().unwrap().to_string(), "hub:EA:code");
 
         // Unknown count (0): conservative, the tab stays.
         view.workspaces[0].tab_count = 0;
-        let rows = join(&[view], &[], &[]);
+        let rows = join(&[view], &[registered], &[]);
         assert_eq!(rows[0].address.as_ref().unwrap().to_string(), "hub:EA:code");
+    }
+
+    /// Tracing: TC-005-01
+    /// ACs: FR-005-AC-1
+    #[test]
+    fn find_adds_the_pane_when_registered_agents_share_a_tab() {
+        let mut first = agent("wQ:p1", "wQ:t1", "wQ", "idle");
+        first.session_id = Some("sid-first".parse().unwrap());
+        let mut second = agent("wQ:p2", "wQ:t1", "wQ", "working");
+        second.session_id = Some("sid-second".parse().unwrap());
+        let view = machine_view("hub", vec![first, second], "EA", "code");
+        let mut first_reg = reg("first", "hub", "wQ:p1");
+        first_reg.session_id = Some("sid-first".parse().unwrap());
+        let mut second_reg = reg("second", "hub", "wQ:p2");
+        second_reg.session_id = Some("sid-second".parse().unwrap());
+        let proof = |session: &str| {
+            Some(Place {
+                workspace: "EA".into(),
+                tab: "code".into(),
+                herdr_ids: Some(HerdrPlaceIds {
+                    workspace: "wQ".parse().unwrap(),
+                    tab: "wQ:t1".parse().unwrap(),
+                    pane: if session == "sid-first" {
+                        "wQ:p1"
+                    } else {
+                        "wQ:p2"
+                    }
+                    .parse()
+                    .unwrap(),
+                    session_id: session.parse().unwrap(),
+                    verified_at_ms: 1,
+                }),
+            })
+        };
+        first_reg.place = proof("sid-first");
+        second_reg.place = proof("sid-second");
+        let rows = join(&[view], &[first_reg, second_reg], &[]);
+        assert_eq!(
+            rows[0].address.as_ref().unwrap().to_string(),
+            "hub:EA:code:wQ-p1"
+        );
+        assert_eq!(
+            rows[1].address.as_ref().unwrap().to_string(),
+            "hub:EA:code:wQ-p2"
+        );
     }
 
     #[test]
@@ -700,32 +813,32 @@ mod tests {
             "EA",
             "code",
         );
+        view.agents[0].session_id = Some("sid-qsl-review".parse().unwrap());
         view.workspaces[0].tab_count = 3;
         let places = places(&view);
-        assert_eq!(
-            places.get(&"wQ:p1".parse().unwrap()),
-            Some(&Place {
-                workspace: "EA".into(),
-                tab: "code".into(),
-                tabs_in_workspace: 3,
-            })
-        );
+        let place = places.get(&"wQ:p1".parse().unwrap()).unwrap();
+        assert_eq!(place.workspace, "EA");
+        assert_eq!(place.tab, "code");
+        let ids = place.herdr_ids.as_ref().expect("verified Herdr ids");
+        assert_eq!(ids.workspace.as_str(), "wQ");
+        assert_eq!(ids.tab.as_str(), "wQ:t1");
+        assert_eq!(ids.session_id.as_str(), "sid-qsl-review");
     }
 
     #[test]
-    fn places_leaves_out_a_pane_whose_tab_count_or_labels_are_unknown() {
+    fn places_ignores_tab_count_but_leaves_out_unknown_labels() {
+        let mut known = agent("wQ:p1", "wQ:t1", "wQ", "idle");
+        known.session_id = Some("sid-known".parse().unwrap());
         let mut view = machine_view(
             "hub",
-            vec![
-                agent("wQ:p1", "wQ:t1", "wQ", "idle"),
-                agent("wX:p1", "wX:t1", "wX", "idle"),
-            ],
+            vec![known, agent("wX:p1", "wX:t1", "wX", "idle")],
             "EA",
             "code",
         );
         // wX has no workspace/tab entry at all; wQ's tab count is unknown (0).
         view.workspaces[0].tab_count = 0;
-        assert!(places(&view).is_empty());
+        assert_eq!(places(&view).len(), 1);
+        assert!(places(&view).contains_key(&"wQ:p1".parse().unwrap()));
     }
 
     #[test]
@@ -753,12 +866,9 @@ mod tests {
 
     #[test]
     fn aliases_are_attached_to_their_canonicals_row() {
-        let machines = vec![machine_view(
-            "node-a",
-            vec![agent("wQ:p1", "wQ:t1", "wQ", "idle")],
-            "QSL",
-            "1",
-        )];
+        let mut live = agent("wQ:p1", "wQ:t1", "wQ", "idle");
+        live.session_id = Some("sid-custom-herdr-name".parse().unwrap());
+        let machines = vec![machine_view("node-a", vec![live], "QSL", "1")];
         let regs = vec![reg("custom-herdr-name", "node-a", "wQ:p1")];
         let aliases = vec![(name("qsl"), name("custom-herdr-name"))];
         let rows = join(&machines, &regs, &aliases);
