@@ -204,6 +204,27 @@ fn log_returns_the_most_recent_max_entries_oldest_first() {
 }
 
 #[test]
+fn log_since_returns_all_retained_messages_oldest_first() {
+    let Some(mut r) = relay("log-since") else {
+        return;
+    };
+    register(&mut r, "tl-lead");
+    for text in ["first", "second", "third"] {
+        r.send(&msg("qsl-lead", "tl-lead", text, 1)).unwrap();
+    }
+
+    assert_eq!(
+        r.log_since(0)
+            .unwrap()
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second", "third"]
+    );
+    assert!(r.log_since(i64::MAX).unwrap().is_empty());
+}
+
+#[test]
 fn pop_inbox_returns_good_messages_and_reports_bad_ones() {
     let Some(mut r) = relay("badentry") else {
         return;
