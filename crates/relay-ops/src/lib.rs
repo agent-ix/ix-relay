@@ -19,6 +19,7 @@ pub mod linear;
 pub mod naming;
 
 pub use errors::{OpsError, Result};
+pub use escalate::{RESOLUTION_COMMENT_MARKER_PREFIX, resolution_comment_marker};
 
 /// Local wall-clock time for display, e.g. `09-24 19:40`. Shared by
 /// `agent-msg`'s `escalations`/`log` output and `relay-tui`'s detail pane.

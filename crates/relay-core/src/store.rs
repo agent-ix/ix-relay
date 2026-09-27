@@ -769,6 +769,26 @@ impl Relay {
             .collect()
     }
 
+    /// Every retained logged message at or after `since_ms` (Unix milliseconds,
+    /// the log's Redis stream clock), oldest first. The stream is already
+    /// retention-capped, so this reads the complete retained window without a
+    /// second caller-chosen limit.
+    pub fn log_since(&mut self, since_ms: i64) -> Result<Vec<Message>> {
+        let key = self.keys.log_key();
+        let start = format!("{}-0", since_ms.max(0));
+        let reply: StreamRangeReply = redis::cmd("XRANGE")
+            .arg(&key)
+            .arg(start)
+            .arg("+")
+            .query(&mut self.conn)?;
+        reply
+            .ids
+            .iter()
+            .filter_map(|entry| entry.get::<String>("msg"))
+            .map(|json| decode(&key, &json))
+            .collect()
+    }
+
     /// Files a new escalation and returns it, status [`EscalationStatus::Waiting`].
     /// The id is drawn from an `INCR` counter (`e1`, `e2`, ...): short and
     /// human-typeable, unique for this bus regardless of prefix collisions
