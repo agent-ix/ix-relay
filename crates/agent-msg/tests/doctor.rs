@@ -429,7 +429,7 @@ fn tc_029_07_a_missing_herdr_fails_and_an_unaskable_service_manager_does_not() {
     assert!(codes(&report, "unknown").contains(&"service_unknown".to_owned()));
     assert_eq!(report["ok"], false);
 
-    // Restore herdr: only the unknown remains, and the exit is 0.
+    // Restore herdr: only the service state remains unknown, and the exit is 0.
     stub(world.bin.path(), "herdr", HERDR_OK);
     let run = world.run(&["--json"]);
     assert_eq!(run.status, 0, "{}", run.stdout);
@@ -627,7 +627,7 @@ fn tc_043_07_doctor_lists_recorded_moves_without_failing() {
     let place = |workspace: &str| relay_core::Place {
         workspace: workspace.into(),
         tab: "1".into(),
-        tabs_in_workspace: 1,
+        herdr_ids: None,
     };
     let mut relay = world.relay();
     let seen = Registration {
@@ -669,7 +669,7 @@ fn tc_043_07_doctor_lists_recorded_moves_without_failing() {
     assert!(details[0].contains("renamed"), "{details:?}");
     assert!(
         details[1].contains("hub-lead moved pane w1:p3 to w2:p2")
-            && details[1].contains("hub:wsA -> hub:wsB"),
+            && details[1].contains("hub:wsA:1 -> hub:wsB:1"),
         "{details:?}"
     );
 }

@@ -12,8 +12,9 @@ relationships:
 
 When a lead registers, the store shall record under its bus name the lead's
 normalised machine name, harness kind, harness session id and working directory
-when known, herdr pane id when known, place (workspace label, tab label and the
-number of tabs in the workspace) when known, and the registration time.
+when known, and its Herdr pane claim when known. The store shall record a place
+only when Herdr's workspace, tab, and pane identities bind to the exact harness
+session; labels and environment values alone are claims, not a verified place.
 
 ## Behavior
 
@@ -33,7 +34,7 @@ number of tabs in the workspace) when known, and the registration time.
 
 | ID | Criteria | Verification |
 |----|----------|--------------|
-| FR-006-AC-1 | Given a `SessionStart` hook inside a herdr pane on `Node-B.local`, the stored registration has machine `node-b`, the pane id, the session id, the working directory and a place whose workspace, tab and tab count equal herdr's. | Test |
+| FR-006-AC-1 | A stored verified place includes Herdr's workspace, tab, and pane IDs and the same session ID as the registration. | Test |
 | FR-006-AC-2 | Given a lead registered with a place, a `UserPromptSubmit` re-registration (which reads no herdr state) leaves the recorded place unchanged. | Test |
 | FR-006-AC-3 | Given a lead renamed so its old name becomes an alias, the new registration carries the place the pane had under the old name. | Test |
 | FR-006-AC-4 | For every sequence of register and alias operations, no name is both a key of the registry and a key of the alias table afterwards. | Test |

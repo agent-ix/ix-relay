@@ -57,19 +57,29 @@ const SENDERS: [(&str, usize); 3] = [("a", 87), ("b", 1), ("c", 300)];
 fn book() -> AddressBook {
     let regs: Vec<Registration> = SENDERS
         .iter()
-        .map(|(n, label)| Registration {
-            name: name(n),
-            machine: "node-a".parse().unwrap(),
-            kind: "claude".into(),
-            session_id: None,
-            cwd: None,
-            herdr_pane: None,
-            place: Some(Place {
-                workspace: "w".repeat(*label),
-                tab: "1".into(),
-                tabs_in_workspace: 2,
-            }),
-            last_seen_ms: 1,
+        .map(|(n, label)| {
+            let pane: crate::PaneId = format!("w{}:p1", n).parse().unwrap();
+            let session_id: crate::SessionId = format!("session-{n}").parse().unwrap();
+            Registration {
+                name: name(n),
+                machine: "node-a".parse().unwrap(),
+                kind: "claude".into(),
+                session_id: Some(session_id.clone()),
+                cwd: None,
+                herdr_pane: Some(pane.clone()),
+                place: Some(Place {
+                    workspace: "w".repeat(*label),
+                    tab: "1".into(),
+                    herdr_ids: Some(crate::HerdrPlaceIds {
+                        workspace: format!("workspace-{n}").parse().unwrap(),
+                        tab: format!("workspace-{n}:t1").parse().unwrap(),
+                        pane,
+                        session_id,
+                        verified_at_ms: 1,
+                    }),
+                }),
+                last_seen_ms: 1,
+            }
         })
         .collect();
     AddressBook::from_registrations(&regs)

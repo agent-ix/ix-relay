@@ -7,7 +7,7 @@
 //!    (Claude only — Codex and opencode have no transcript to read);
 //! 3. a herdr agent name (`herdr agent rename`/`agent start <name>`), read
 //!    from `herdr agent get`'s `name` field, present only while a rename is
-//!    in effect (see [`relay_ops::naming::LocationHerdr::agent_name`]'s own
+//!    in effect (see [`relay_ops::naming::LocationHerdr::agent`]'s own
 //!    doc comment);
 //! 4. a name derived from this pane's herdr location.
 //!
@@ -59,8 +59,7 @@ use relay_core::{
 pub use relay_ops::naming::CollisionError;
 use relay_ops::naming::{
     AssumeHosted, HerdrEnv, HerdrLocation, LocationHerdr, PaneEntry, ProcessError,
-    RealLocationHerdr, TabEntry, WorkspaceEntry, call_timeout, derive_from_herdr,
-    resolve_collision,
+    RealLocationHerdr, TabEntry, WorkspaceEntry, derive_from_herdr, resolve_collision,
 };
 
 use crate::{budget::Budget, hook::Event};
@@ -132,7 +131,7 @@ pub enum WhoamiJson<'a> {
         source: &'a str,
         /// The location name, if kept reachable as an alias.
         location_alias: Option<&'a str>,
-        /// The lead's `server:workspace[:tab]` address, when it registered
+        /// The lead's `server:workspace[:tab[:pane]]` address, when it registered
         /// one — what other leads send to.
         address: Option<&'a str>,
     },
@@ -318,7 +317,7 @@ pub enum HookIdentity {
 /// What [`resolve_chain`] found.
 enum ChainOutcome {
     /// A precedence tier won.
-    Winner(Chain),
+    Winner(Box<Chain>),
     /// This session must never join the bus at all — an escalation
     /// investigation fork, by tab label or herdr agent name (finding 1).
     /// Distinct from [`ChainOutcome::None`]: a caller must actively
@@ -408,27 +407,25 @@ where
         self.next()?.pane_list(workspace_id)
     }
 
-    fn agent_name(&self, pane_id: &PaneId) -> Result<Option<String>, ProcessError> {
-        self.next()?.agent_name(pane_id)
-    }
-
-    fn pane_session(&self, pane_id: &PaneId) -> Result<Option<SessionId>, ProcessError> {
-        self.next()?.pane_session(pane_id)
+    fn agent(
+        &self,
+        pane_id: &PaneId,
+    ) -> Result<Option<relay_ops::naming::HerdrAgent>, ProcessError> {
+        self.next()?.agent(pane_id)
     }
 }
 
-/// The real herdr, bounded as [`BoundedHerdr`] says: each call gets a
-/// `share` of `total` (see [`call_timeout`]) at most, and never more than what
-/// is left of `budget`.
+/// The real Herdr client: every command can use the remaining shared deadline,
+/// so shorter earlier calls leave more room for later subprocesses.
 fn real_herdr<'a>(
     total: Duration,
     budget: Option<&'a Budget<'a>>,
 ) -> BoundedHerdr<'a, fn(Duration) -> RealLocationHerdr> {
-    BoundedHerdr::new(call_timeout(total), budget, RealLocationHerdr::new)
+    BoundedHerdr::new(total, budget, RealLocationHerdr::new)
 }
 
-/// Runs the name-precedence chain (see this module's doc comment). Each herdr
-/// call gets a third of `herdr_budget` at most, and never more than what is
+/// Runs the name-precedence chain (see this module's doc comment). Each Herdr
+/// call gets the remaining overall deadline, never more than what is
 /// left of `budget`. `transcript_path` is `None` for anything but a Claude
 /// hook call.
 fn resolve_chain(
@@ -469,20 +466,15 @@ where
     }
     let mut winner = location.name.clone().map(|name| (name, Source::Location));
 
-    match herdr.agent_name(&env.pane_id) {
-        Ok(Some(raw)) => {
-            if raw.starts_with(relay_core::naming::ESCALATION_TAB_PREFIX) {
-                return ChainOutcome::Suppressed;
-            }
-            winner = Some((relay_core::naming::slugify(&raw), Source::HerdrAgentName));
+    if let Some(raw) = location
+        .agent
+        .as_ref()
+        .and_then(|agent| agent.name.as_deref())
+    {
+        if raw.starts_with(relay_core::naming::ESCALATION_TAB_PREFIX) {
+            return ChainOutcome::Suppressed;
         }
-        Ok(None) => {}
-        Err(e) => {
-            herdr_failed = true;
-            crate::report::line(format_args!(
-                "agent-msg: herdr agent name lookup failed: {e}"
-            ));
-        }
+        winner = Some((relay_core::naming::slugify(raw), Source::HerdrAgentName));
     }
 
     if let Some(path) = transcript_path
@@ -494,13 +486,13 @@ where
     match winner {
         Some((canonical, source)) => {
             let location_alias = location.name.filter(|loc| *loc != canonical);
-            ChainOutcome::Winner(Chain {
+            ChainOutcome::Winner(Box::new(Chain {
                 canonical,
                 source,
                 location_alias,
                 pane_id: env.pane_id.clone(),
                 place: location.place,
-            })
+            }))
         }
         None if herdr_failed => ChainOutcome::HerdrFailed {
             budget_spent: herdr.budget_was_spent(),
@@ -1003,17 +995,13 @@ mod tests {
         fn pane_list(&self, _: &WorkspaceId) -> Result<Vec<PaneEntry>, ProcessError> {
             Ok(Vec::new())
         }
-        fn agent_name(&self, _: &PaneId) -> Result<Option<String>, ProcessError> {
-            Ok(None)
-        }
-        fn pane_session(&self, _: &PaneId) -> Result<Option<SessionId>, ProcessError> {
+        fn agent(&self, _: &PaneId) -> Result<Option<relay_ops::naming::HerdrAgent>, ProcessError> {
             Ok(None)
         }
     }
 
-    /// Four herdr calls of a `SessionStart` derivation, each as slow as its
-    /// timeout allows, can never run past the deadline: every call is bounded
-    /// by what is left of it, not by a fixed third of a budget.
+    /// Each Herdr call can use the shared remaining deadline, and no call
+    /// starts after that deadline is spent.
     #[test]
     fn herdr_calls_are_bounded_by_the_remaining_deadline() {
         let clock = FakeClock::default();
@@ -1023,37 +1011,37 @@ mod tests {
             SESSION_START_HERDR_BUDGET + Duration::from_millis(300),
         );
         let timeouts = RefCell::new(Vec::new());
-        let herdr = BoundedHerdr::new(
-            call_timeout(SESSION_START_HERDR_BUDGET),
-            Some(&budget),
-            |t| {
-                timeouts.borrow_mut().push(t);
-                clock.advance(t); // a call that hangs until its timeout
-                NoHerdr
-            },
-        );
-        // Three calls take a full second each; the collision check's own 800ms
-        // budget would be a fourth. Sixty ms is left for it, then nothing.
+        let herdr = BoundedHerdr::new(SESSION_START_HERDR_BUDGET, Some(&budget), |t| {
+            timeouts.borrow_mut().push(t);
+            clock.advance(Duration::from_millis(100));
+            NoHerdr
+        });
+        // Each call can use the full remaining budget, but quick calls leave
+        // time for the rest of the identity snapshot.
         herdr.workspace_list().unwrap();
         herdr.tab_list(&"w".parse().unwrap()).unwrap();
         herdr.pane_list(&"w".parse().unwrap()).unwrap();
-        // Spend most of what remains, as a slow Redis call would.
-        clock.advance(Duration::from_millis(240));
-        herdr.agent_name(&"p".parse().unwrap()).unwrap();
+        herdr.agent(&"p".parse().unwrap()).unwrap();
         assert_eq!(
             *timeouts.borrow(),
             [
-                Duration::from_millis(1000),
-                Duration::from_millis(1000),
-                Duration::from_millis(1000),
-                Duration::from_millis(60),
+                SESSION_START_HERDR_BUDGET,
+                SESSION_START_HERDR_BUDGET,
+                SESSION_START_HERDR_BUDGET,
+                SESSION_START_HERDR_BUDGET,
             ]
         );
         assert!(clock.elapsed() <= SESSION_START_HERDR_BUDGET + Duration::from_millis(300));
-        // Nothing left: the next call fails at once and never starts herdr.
-        let err = herdr.pane_session(&"p".parse().unwrap()).unwrap_err();
+        assert_eq!(herdr.agent(&"p".parse().unwrap()).unwrap(), None);
+        assert_eq!(
+            timeouts.borrow().last(),
+            Some(&(SESSION_START_HERDR_BUDGET - Duration::from_millis(100)))
+        );
+        // After the full overall deadline, another call cannot start.
+        clock.advance(SESSION_START_HERDR_BUDGET);
+        let err = herdr.agent(&"p".parse().unwrap()).unwrap_err();
         assert!(matches!(err, ProcessError::Timeout { .. }), "{err:?}");
-        assert_eq!(timeouts.borrow().len(), 4);
+        assert_eq!(timeouts.borrow().len(), 5);
     }
 
     /// A herdr that fails every call.
@@ -1076,10 +1064,7 @@ mod tests {
         fn pane_list(&self, _: &WorkspaceId) -> Result<Vec<PaneEntry>, ProcessError> {
             Err(gone())
         }
-        fn agent_name(&self, _: &PaneId) -> Result<Option<String>, ProcessError> {
-            Err(gone())
-        }
-        fn pane_session(&self, _: &PaneId) -> Result<Option<SessionId>, ProcessError> {
+        fn agent(&self, _: &PaneId) -> Result<Option<relay_ops::naming::HerdrAgent>, ProcessError> {
             Err(gone())
         }
     }

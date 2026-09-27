@@ -20,7 +20,7 @@ pub struct InboxMessage {
     pub sent_at_ms: i64,
     /// The signed line a lead's context sees, from [`AddressBook::render`] —
     /// the one renderer, so callers never re-derive the `[ix-relay] from ...`
-    /// format themselves. It signs with the sender's `server:workspace[:tab]`
+    /// format themselves. It signs with the sender's `server:workspace[:tab[:pane]]`
     /// address when known; `from` stays the bus name.
     pub rendered: String,
 }

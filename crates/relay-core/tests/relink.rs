@@ -23,11 +23,11 @@ fn name(s: &str) -> AgentName {
     s.parse().unwrap()
 }
 
-fn place(workspace: &str, tab: &str, tabs: u32) -> Place {
+fn place(workspace: &str, tab: &str, _tabs: u32) -> Place {
     Place {
         workspace: workspace.into(),
         tab: tab.into(),
-        tabs_in_workspace: tabs,
+        herdr_ids: None,
     }
 }
 
@@ -227,13 +227,13 @@ fn tc_043_03_a_rename_records_one_event_and_an_unchanged_place_none() {
     }
     assert_eq!(bus.relay.recent_moves(20).unwrap().entries, [*event]);
 
-    // Only the workspace's tab count changed (a tab was opened): the address is
-    // kept true and no rename is recorded (AGE-2033 review, finding 7).
+    // Only the workspace's tab count changed (a tab was opened). Tab count is
+    // not part of a Place, so this is unchanged and no rename is recorded.
     assert_eq!(
         bus.relay
             .refresh_place(&name("lead-a"), &place("wsA-renamed", "1", 3), 400, true)
             .unwrap(),
-        PlaceRefresh::Refreshed
+        PlaceRefresh::Unchanged
     );
     assert_eq!(
         bus.relay.agent(&name("lead-a")).unwrap().unwrap().place,

@@ -34,7 +34,7 @@ where
     );
 }
 
-const REGISTRATION_FULL: &str = r#"{"name":"qsl-lead","machine":"node-a","kind":"claude","session_id":"sid-1","cwd":"/wörk/日本","herdr_pane":"w1:p1","place":{"workspace":"QSL","tab":"review","tabs_in_workspace":2},"last_seen_ms":1700000000000}"#;
+const REGISTRATION_FULL: &str = r#"{"name":"qsl-lead","machine":"node-a","kind":"claude","session_id":"sid-1","cwd":"/wörk/日本","herdr_pane":"w1:p1","place":{"workspace":"QSL","tab":"review","herdr_ids":{"workspace":"w1","tab":"w1:t1","pane":"w1:p1","session_id":"sid-1","verified_at_ms":1700000000000}},"last_seen_ms":1700000000000}"#;
 const REGISTRATION_MIN: &str = r#"{"name":"hub-lead","machine":"hub","kind":"codex","session_id":null,"cwd":null,"herdr_pane":null,"place":null,"last_seen_ms":0}"#;
 const MESSAGE_BROADCAST: &str =
     r#"{"from":"qsl-lead","to":"all","text":"hi \"q\"\n é","sent_at_ms":5}"#;
@@ -57,7 +57,13 @@ fn registration_full() -> Registration {
         place: Some(Place {
             workspace: "QSL".into(),
             tab: "review".into(),
-            tabs_in_workspace: 2,
+            herdr_ids: Some(relay_core::HerdrPlaceIds {
+                workspace: "w1".parse().unwrap(),
+                tab: "w1:t1".parse().unwrap(),
+                pane: "w1:p1".parse().unwrap(),
+                session_id: "sid-1".parse().unwrap(),
+                verified_at_ms: 1_700_000_000_000,
+            }),
         }),
         last_seen_ms: 1_700_000_000_000,
     }

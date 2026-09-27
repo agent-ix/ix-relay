@@ -24,8 +24,9 @@ pane ids repeat across machines.
 - When the watcher refreshes places, checks liveness before pruning, or types into
   a pane, the watcher shall act only on registrations on its own machine.
 - When a sender types a pane id as a `send` target, the resolver shall match
-  only registrations on the sender's machine; a lead elsewhere is reached by
-  its address ([FR-002](./FR-002-target-resolution-priority.md)).
+  only registrations on the sender's machine whose Herdr location is verified
+  against the exact harness session; a lead elsewhere is reached by its address
+  ([FR-002](./FR-002-target-resolution-priority.md)).
 - If more than one registration on the local machine carries the local pane id,
   then `agent-msg` shall use the one registered most recently.
 
@@ -37,7 +38,7 @@ pane ids repeat across machines.
 | FR-009-AC-2 | Given the same setup, `agent-msg send` run on `hub` in pane `wB:p1` never signs a message as `node-a-lead`. | Test |
 | FR-009-AC-3 | Given registrations with pane `wB:p1` on both `hub` and `node-a`, a `SessionStart` hook on `hub` carries over only the hub registration's place. | Test |
 | FR-009-AC-4 | For every registry and local machine, every registration the watcher refreshes, prunes or types into has the local machine. | Test |
-| FR-009-AC-5 | Given pane `wB:p1` registered only on `node-a`, `agent-msg send wB:p1 hi` run on `hub` exits non-zero and queues nothing. | Test |
+| FR-009-AC-5 | A pane claim without a session-bound Herdr verification is not a `send` target, even on the sender's machine. | Test |
 
 ## Dependencies
 

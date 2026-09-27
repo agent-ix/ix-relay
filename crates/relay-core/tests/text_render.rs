@@ -242,7 +242,7 @@ proptest! {
             session_id: None,
             cwd: None,
             herdr_pane: None,
-            place: placed.then(|| Place { workspace: "EA".into(), tab: "code".into(), tabs_in_workspace: 2 }),
+            place: placed.then(|| Place { workspace: "EA".into(), tab: "code".into(), herdr_ids: None }),
             last_seen_ms: 1,
         }];
         let book = AddressBook::from_registrations(&regs);

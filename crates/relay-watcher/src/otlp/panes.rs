@@ -181,10 +181,9 @@ mod tests {
             ],
             "review",
         );
-        let regs = [
-            reg("qsl-lead", "hub", "w1:p1"),
-            reg("elsewhere", "node-a", "w1:p2"),
-        ];
+        let mut qsl_lead = reg("qsl-lead", "hub", "w1:p1");
+        qsl_lead.session_id = Some("sess-1".parse().unwrap());
+        let regs = [qsl_lead, reg("elsewhere", "node-a", "w1:p2")];
         let panes = panes_of(&hub(), &v, &regs);
         assert_eq!(panes.len(), 2);
         assert_eq!(
@@ -251,7 +250,9 @@ mod tests {
             vec![agent("w1:p1", "w1:t1", "w1", "idle", Some("s1"))],
             "review",
         );
-        let panes = panes_of(&hub(), &v, &[reg("qsl-lead", "hub", "w1:p1")]);
+        let mut qsl_lead = reg("qsl-lead", "hub", "w1:p1");
+        qsl_lead.session_id = Some("s1".parse().unwrap());
+        let panes = panes_of(&hub(), &v, &[qsl_lead]);
         let mut r = Registry::new(2, 1);
         fill(&mut r, &panes);
         let keys = |p: &crate::otlp::registry::Point| {

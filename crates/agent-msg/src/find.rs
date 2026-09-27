@@ -138,7 +138,7 @@ pub fn run(
     Ok(FindReport { rows, skipped })
 }
 
-/// One plain-text line for `row`: its `server:workspace[:tab]` address first
+/// One plain-text line for `row`: its `server:workspace[:tab[:pane]]` address first
 /// (`-` when herdr gave no workspace label), then the bus name and detail.
 #[must_use]
 pub fn render_line(row: &FoundAgent) -> String {
@@ -175,7 +175,7 @@ pub fn render_line(row: &FoundAgent) -> String {
 /// module's tests.
 #[derive(Debug, serde::Serialize)]
 pub struct FoundJson<'a> {
-    /// The `server:workspace[:tab]` address, when the row has one.
+    /// The `server:workspace[:tab[:pane]]` address, when the row has one.
     address: Option<String>,
     /// The bus name, when the row is on the bus.
     bus_name: Option<&'a str>,
@@ -219,7 +219,7 @@ impl<'a> From<&'a FoundAgent> for FoundJson<'a> {
 }
 
 /// What `find` ends its output with — "what to give `send`": each row that is
-/// on the bus, by its `server:workspace[:tab]` address, or by bus name when
+/// on the bus, by its `server:workspace[:tab[:pane]]` address, or by bus name when
 /// it has no address or another listed row shares it (an address `send`
 /// would refuse as ambiguous).
 #[must_use]

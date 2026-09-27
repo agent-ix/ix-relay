@@ -91,9 +91,10 @@ struct Cli {
 enum Cmd {
     /// Send a message to one lead, or to `all`.
     Send {
-        /// Who to send to: `server:workspace[:tab]` (e.g. `hub:EA:1` or
-        /// `node-a:research`; the tab is optional when the workspace has one
-        /// lead), or `all`. A bus name, alias or herdr pane id also works.
+        /// Who to send to: `server:workspace[:tab[:pane]]` (e.g. `hub:EA:1` or
+        /// `hub:EA:code:wA-p1`; without a tab this selects the workspace and
+        /// without a pane it selects the whole tab),
+        /// or `all`. A bus name, alias or herdr pane id also works.
         /// Resolved here, so no `find` is needed first.
         to: String,
         /// The message.
@@ -130,7 +131,7 @@ enum Cmd {
     /// List registered leads.
     Who,
     /// Look up an agent by name, alias, workspace/tab label, session name,
-    /// pane id or `server:workspace[:tab]` address, joining the bus registry
+    /// pane id or `server:workspace[:tab[:pane]]` address, joining the bus registry
     /// against live herdr state on this machine and every saved one
     /// (AGE-2018). Ends with the address(es) to use with `send`. Not needed
     /// before `send`: `send` resolves an address itself.
@@ -589,6 +590,16 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 let pane = r.herdr_pane.as_ref().map_or("-", PaneId::as_str);
                 let (machine, kind) = (r.machine.as_str(), line(&r.kind));
                 let seen = clock(r.last_seen_ms);
+                let place_cache = match r
+                    .verified_place()
+                    .and_then(|place| place.herdr_ids.as_ref())
+                {
+                    Some(ids) if ids.is_stale(now_ms()) => {
+                        format!("cache stale: {}:{}", ids.workspace, ids.tab)
+                    }
+                    Some(ids) => format!("Herdr {}:{}", ids.workspace, ids.tab),
+                    None => "location unverified".to_owned(),
+                };
                 // AGE-2018: any name(s) this lead is also reachable as
                 // (e.g. its herdr-location name, kept as an alias once a
                 // `/rename` or a herdr agent name takes over as canonical).
@@ -596,7 +607,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 let aliases = aliases_by_canonical.get(&r.name).unwrap_or(&empty);
                 write!(
                     out,
-                    "{address}  {}  {machine}  {kind}  seen {seen}  pane {pane}  {cwd}",
+                    "{address}  {}  {machine}  {kind}  seen {seen}  pane {pane}  {cwd}  {place_cache}",
                     r.name
                 )?;
                 if !aliases.is_empty() {
@@ -834,11 +845,19 @@ fn registration(
     kind: &str,
     session_id: Option<SessionId>,
     cwd: Option<String>,
-    place: Option<Place>,
+    _place: Option<Place>,
 ) -> Registration {
     // Set whenever this process runs inside a herdr-managed pane (every lead
     // session does); `relay-watcher` needs it to type messages in later.
     let herdr_pane = HerdrEnv::pane_id_from_process_env();
+    // Hook and interactive processes may inherit Herdr's pane variables from a
+    // shared harness daemon. Keep the human labels as a claim, but only the
+    // watcher may attach the verified Herdr IDs after matching the registered
+    // harness session to a live Herdr agent.
+    // Human labels from this process are not a verification source. The
+    // watcher will attach a complete Place only after Herdr confirms the
+    // registration's session at the claimed pane.
+    let place = None;
     Registration {
         name,
         machine,
@@ -855,7 +874,7 @@ fn registration(
 struct SendTarget {
     target: relay_core::Target,
     /// Every decodable registration, present only for a pane id or a
-    /// `server:workspace[:tab]` address.
+    /// `server:workspace[:tab[:pane]]` address.
     registry: Option<Vec<Registration>>,
     /// The named lead's record exists but this binary cannot read it.
     unreadable: bool,
@@ -884,7 +903,7 @@ fn recipient_registration(
 /// is checked against just that one registration (two point reads: the alias
 /// table and the agent), so one undecodable record elsewhere in the registry
 /// cannot block a plain send and its cost does not grow with the number of
-/// leads; only a pane id or a `server:workspace[:tab]` address reads the whole
+/// leads; only a pane id or a `server:workspace[:tab[:pane]]` address reads the whole
 /// registry.
 fn resolve_send_target(
     relay: &mut Relay,

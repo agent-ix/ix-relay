@@ -26,7 +26,10 @@ use std::{
     thread,
 };
 
-use relay_core::{AgentName, IdentityCommit, Message, Place, Registration, Relay, Target};
+use relay_core::{
+    AgentName, HerdrPlaceIds, IdentityCommit, Message, Place, Registration, Relay, SessionId,
+    Target,
+};
 use support::{base_cmd, run};
 
 /// One request as the proxy saw it: the command names it carried and its raw bytes.
@@ -197,24 +200,35 @@ fn seeded(url: &str, prefix: &str, queued: usize) -> Relay {
     let mut relay = Relay::connect(url, std::time::Duration::from_secs(2))
         .unwrap()
         .with_prefix(prefix);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let session_id: SessionId = "s1".parse().unwrap();
     let registration = Registration {
         name: name("receiver"),
         machine: "hub".parse().unwrap(),
         kind: "claude".into(),
-        session_id: Some("s1".parse().unwrap()),
+        session_id: Some(session_id.clone()),
         cwd: Some("/work".into()),
         herdr_pane: Some(PANE.parse().unwrap()),
         place: Some(Place {
             workspace: "EA".into(),
             tab: "code".into(),
-            tabs_in_workspace: 2,
+            herdr_ids: Some(HerdrPlaceIds {
+                workspace: "workspace-id".parse().unwrap(),
+                tab: "tab-id".parse().unwrap(),
+                pane: PANE.parse().unwrap(),
+                session_id: session_id.clone(),
+                verified_at_ms: now_ms,
+            }),
         }),
-        last_seen_ms: 1,
+        last_seen_ms: now_ms,
     };
     relay
         .commit_identity(&IdentityCommit {
             registration: Some(registration),
-            session_name: Some(("s1".parse().unwrap(), name("receiver"))),
+            session_name: Some((session_id, name("receiver"))),
             ..IdentityCommit::default()
         })
         .unwrap();

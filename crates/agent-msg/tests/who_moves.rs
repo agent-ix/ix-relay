@@ -23,7 +23,7 @@ fn registration(last_seen_ms: i64, pane: &str) -> Registration {
         place: Some(Place {
             workspace: "wsA".into(),
             tab: "1".into(),
-            tabs_in_workspace: 1,
+            herdr_ids: None,
         }),
         last_seen_ms,
     }

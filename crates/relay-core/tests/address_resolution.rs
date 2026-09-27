@@ -10,13 +10,14 @@
     clippy::expect_used,
     reason = "test code: a failed expect is the failure signal"
 )]
+#![expect(clippy::unwrap_used, reason = "fixed valid IDs in test fixtures")]
 
 use std::collections::BTreeSet;
 
 use proptest::prelude::*;
 use relay_core::{
-    Address, AddressBook, AgentName, Error, Place, Registration, Target, UnknownCause, duplicated,
-    resolve_target,
+    Address, AddressBook, AgentName, Error, HerdrPlaceIds, Place, Registration, Target,
+    UnknownCause, duplicated, resolve_target,
 };
 
 // ---------------------------------------------------------------------------
@@ -70,13 +71,21 @@ fn fleet() -> impl Strategy<Value = Fleet> {
                     name: name(&format!("lead-{i}")),
                     machine: machine.parse().expect("valid id"),
                     kind: "claude".to_owned(),
-                    session_id: None,
+                    session_id: Some("sid-test".parse().unwrap()),
                     cwd: None,
                     herdr_pane: pane.map(|p| p.parse().expect("valid id")),
-                    place: place.map(|(workspace, tab, tabs)| Place {
+                    place: place.map(|(workspace, tab, _tabs)| Place {
                         workspace: workspace.to_owned(),
                         tab: tab.to_owned(),
-                        tabs_in_workspace: tabs,
+                        herdr_ids: Some(HerdrPlaceIds {
+                            workspace: format!("workspace-{workspace}").parse().expect("valid id"),
+                            tab: format!("workspace-{workspace}:t1")
+                                .parse()
+                                .expect("valid id"),
+                            pane: pane.unwrap_or("wB:p1").parse().unwrap(),
+                            session_id: "sid-test".parse().unwrap(),
+                            verified_at_ms: 1,
+                        }),
                     }),
                     last_seen_ms: 1,
                 })
@@ -218,17 +227,20 @@ struct Placed {
     server: String,
     workspace: String,
     tab: String,
+    pane: String,
 }
 
 fn placed(regs: &[Registration]) -> Vec<Placed> {
     regs.iter()
         .filter_map(|r| {
-            let p = r.place.as_ref()?;
+            let p = r.verified_place()?;
+            let pane = r.herdr_pane.as_ref()?;
             Some(Placed {
                 name: r.name.to_string(),
                 server: m_server(r.machine.as_str()),
                 workspace: m_clean(&p.workspace),
                 tab: m_clean(&p.tab),
+                pane: m_clean(pane.as_str()),
             })
         })
         .collect()
@@ -257,7 +269,8 @@ fn model(input: &str, sender: &str, fleet: &Fleet) -> Outcome {
         .regs
         .iter()
         .filter(|r| {
-            r.herdr_pane.as_ref().map(|v| v.as_str()) == Some(input)
+            r.verified_place().is_some()
+                && r.herdr_pane.as_ref().map(|v| v.as_str()) == Some(input)
                 && m_server(r.machine.as_str()) == sender
         })
         .collect();
@@ -274,10 +287,13 @@ fn model(input: &str, sender: &str, fleet: &Fleet) -> Outcome {
         return Outcome::NotRegistered;
     }
     let parts: Vec<&str> = input.split(':').collect();
-    let (server, workspace, tab) = match parts.as_slice() {
-        [s, w] if !s.is_empty() && !w.is_empty() => (m_server(s), m_clean(w), None),
+    let (server, workspace, tab, pane) = match parts.as_slice() {
+        [s, w] if !s.is_empty() && !w.is_empty() => (m_server(s), m_clean(w), None, None),
         [s, w, t] if !s.is_empty() && !w.is_empty() && !t.is_empty() => {
-            (m_server(s), m_clean(w), Some(m_clean(t)))
+            (m_server(s), m_clean(w), Some(m_clean(t)), None)
+        }
+        [s, w, t, p] if !s.is_empty() && !w.is_empty() && !t.is_empty() && !p.is_empty() => {
+            (m_server(s), m_clean(w), Some(m_clean(t)), Some(m_clean(p)))
         }
         _ => return Outcome::Invalid,
     };
@@ -288,6 +304,7 @@ fn model(input: &str, sender: &str, fleet: &Fleet) -> Outcome {
             m_eq(&l.server, &server)
                 && m_eq(&l.workspace, &workspace)
                 && tab.as_ref().is_none_or(|t| m_eq(&l.tab, t))
+                && pane.as_ref().is_none_or(|p| m_eq(&l.pane, p))
         })
         .collect();
     match selected.as_slice() {
@@ -328,7 +345,7 @@ fn model(input: &str, sender: &str, fleet: &Fleet) -> Outcome {
 /// Whether `s` is one of the two forms FR-001 accepts, stated independently.
 fn is_address_text(s: &str) -> bool {
     let parts: Vec<&str> = s.split(':').collect();
-    matches!(parts.len(), 2 | 3) && parts.iter().all(|p| !p.is_empty())
+    matches!(parts.len(), 2..=4) && parts.iter().all(|p| !p.is_empty())
 }
 
 /// The property FR-001-AC-1 states over every input, shared by the always-run
@@ -360,10 +377,19 @@ fn parts_of(s: &str) -> usize {
 /// Tracing: TC-001-01
 /// ACs: FR-001-AC-1
 ///
-/// The seven named forms, then the same predicate over generated text.
+/// The named malformed forms, then the same predicate over generated text.
 #[test]
 fn tc_001_01_the_named_malformed_forms_are_refused_verbatim() {
-    for bad in ["", "hub", "hub:", ":EA", "hub::1", "a:b:c:d", "hub:EA:"] {
+    for bad in [
+        "",
+        "hub",
+        "hub:",
+        ":EA",
+        "hub::1",
+        "hub:EA:",
+        "hub:EA:code:",
+        "a:b:c:d:e",
+    ] {
         let err = bad.parse::<Address>().expect_err(bad);
         assert!(
             matches!(err, Error::InvalidAddress { ref input } if input == bad),
@@ -378,7 +404,7 @@ proptest! {
     /// Tracing: TC-001-01
     /// ACs: FR-001-AC-1
     #[test]
-    fn tc_001_01_parse_accepts_exactly_two_or_three_nonempty_segments(
+    fn tc_001_01_parse_accepts_two_to_four_nonempty_segments(
         s in prop_oneof![label(), "[a-c:]{0,8}", ".{0,20}"],
     ) {
         check_parse_accepts_exactly_the_grammar(&s)?;
@@ -388,9 +414,12 @@ proptest! {
     /// ACs: FR-001-AC-2
     #[test]
     fn tc_001_02_a_built_address_parses_back_from_its_printed_form(
-        server in label(), workspace in label(), tab in proptest::option::of(label()),
+        server in label(), workspace in label(), tab in proptest::option::of(label()), pane in proptest::option::of(label()),
     ) {
-        let built = Address::new(&server, &workspace, tab.as_deref());
+        let built = match (tab.as_deref(), pane.as_deref()) {
+            (Some(tab), Some(pane)) => Address::with_pane(&server, &workspace, tab, pane),
+            (tab, _) => Address::new(&server, &workspace, tab),
+        };
         let printed = built.to_string();
         let reparsed: Address = printed.parse().map_err(|e| TestCaseError::fail(format!("{printed:?}: {e}")))?;
         prop_assert_eq!(&reparsed, &built);
@@ -618,7 +647,8 @@ proptest! {
             prop_assert!(suggestions.len() <= 5, "{suggestions:?}");
             let mut pool: BTreeSet<String> = f.regs.iter().map(|r| r.name.to_string()).collect();
             pool.extend(f.aliases.iter().map(|(a, _)| a.to_string()));
-            pool.extend(f.regs.iter().filter_map(|r| r.full_address()).map(|a| a.to_string()));
+            let book = AddressBook::from_registrations(&f.regs);
+            pool.extend(f.regs.iter().filter_map(|r| book.place_address(&r.name)).map(|a| a.to_string()));
             for s in &suggestions {
                 prop_assert!(pool.contains(s), "{s:?} is not a registered name, alias or full address");
             }
@@ -652,13 +682,21 @@ fn tc_003_04_the_same_workspace_on_two_servers_never_crosses_servers() {
         name: name(n),
         machine: machine.parse().expect("valid id"),
         kind: "claude".into(),
-        session_id: None,
+        session_id: Some("sid-test".parse().unwrap()),
         cwd: None,
-        herdr_pane: None,
+        herdr_pane: Some("w1:p1".parse().unwrap()),
         place: Some(Place {
             workspace: "EA".into(),
             tab: "code".into(),
-            tabs_in_workspace: 1,
+            herdr_ids: Some(HerdrPlaceIds {
+                workspace: if machine == "hub" { "wA" } else { "wB" }.parse().unwrap(),
+                tab: if machine == "hub" { "wA:t1" } else { "wB:t1" }
+                    .parse()
+                    .unwrap(),
+                pane: "w1:p1".parse().unwrap(),
+                session_id: "sid-test".parse().unwrap(),
+                verified_at_ms: 1,
+            }),
         }),
         last_seen_ms: 1,
     };
@@ -677,29 +715,22 @@ fn tc_003_04_the_same_workspace_on_two_servers_never_crosses_servers() {
 // FR-005: the shown-address rule
 // ---------------------------------------------------------------------------
 
-/// The address FR-005 says lead `i` is printed with, before sharing is
-/// considered: none without a place; the tab dropped only when the lead's
-/// recorded count is 1 and no other placed lead is in its server and workspace
-/// (compared ignoring case, as the resolver does); none when it is longer than
-/// the label cap.
+/// The address FR-005 says lead `i` is printed with: none without a verified
+/// place; always include the tab; none when it is longer than the label cap.
 fn model_shown(regs: &[Registration], i: usize) -> Option<Address> {
     let r = &regs[i];
-    let place = r.place.as_ref()?;
-    let workspace_of = |r: &Registration, p: &Place| {
-        (
-            m_server(r.machine.as_str()).to_lowercase(),
-            m_clean(&p.workspace).to_lowercase(),
-        )
-    };
-    let mine = workspace_of(r, place);
-    let alone = !regs
-        .iter()
-        .enumerate()
-        .any(|(j, o)| j != i && o.place.as_ref().is_some_and(|p| workspace_of(o, p) == mine));
-    let shown = if place.tabs_in_workspace == 1 && alone {
-        Address::new(r.machine.as_str(), &place.workspace, None)
+    let place = r.verified_place()?;
+    let tab_address = place.tab_address(&r.machine);
+    let shared_tab = regs.iter().enumerate().any(|(j, other)| {
+        j != i
+            && other
+                .verified_place()
+                .is_some_and(|p| p.tab_address(&other.machine) == tab_address)
+    });
+    let shown = if shared_tab {
+        r.full_address()?
     } else {
-        place.full_address(&r.machine)
+        tab_address
     };
     (shown.to_string().len() <= relay_core::MAX_LABEL_BYTES).then_some(shown)
 }
@@ -710,21 +741,14 @@ proptest! {
     /// Tracing: TC-005-02, TC-005-06
     /// ACs: FR-005-AC-2, FR-005-AC-6
     ///
-    /// The tab is omitted from the shown address if and only if the recorded
-    /// tab count is exactly 1.
+    /// The full address always includes a tab, independent of cached tab count.
     #[test]
-    fn tc_005_02_the_tab_is_omitted_iff_the_recorded_count_is_one(
-        ws in label(), tab in label(), tabs in 0u32..5,
-    ) {
-        let place = Place { workspace: ws.clone(), tab: tab.clone(), tabs_in_workspace: tabs };
+    fn tc_005_02_the_tab_is_always_included(ws in label(), tab in label()) {
+        let place = Place { workspace: ws.clone(), tab: tab.clone(), herdr_ids: Some(HerdrPlaceIds { workspace: "wA".parse().unwrap(), tab: "wA:t1".parse().unwrap(), pane: "w1:p1".parse().unwrap(), session_id: "sid-test".parse().unwrap(), verified_at_ms: 1 }) };
         let shown = place.address(&"hub".parse().expect("valid id"));
-        prop_assert_eq!(shown.tab().is_some(), tabs != 1);
-        if tabs == 0 {
-            let cleaned = Address::new("hub", &ws, Some(&tab));
-            prop_assert_eq!(shown.tab(), cleaned.tab());
-        }
+        prop_assert_eq!(&shown, &Address::new("hub", &ws, Some(&tab)));
         // The full address always carries the tab.
-        prop_assert!(place.full_address(&"hub".parse().expect("valid id")).tab().is_some());
+        prop_assert!(place.address(&"hub".parse().expect("valid id")).tab().is_some());
     }
 
     /// Tracing: TC-005-01, TC-005-03
@@ -781,9 +805,7 @@ proptest! {
     /// ACs: FR-005-AC-4
     ///
     /// Every printed address resolves back, through the resolver, to exactly
-    /// the lead it labels, for every registry snapshot. A recorded tab count can
-    /// be stale, so the address book drops the tab only for a lead that is alone
-    /// in its workspace (AGE-2028).
+    /// the lead it labels, for every registry snapshot.
     #[test]
     fn tc_005_04_every_printed_address_resolves_back_to_its_lead(f in fleet()) {
         let book = AddressBook::from_registrations(&f.regs);
@@ -803,29 +825,30 @@ proptest! {
 /// Tracing: TC-005-04
 /// ACs: FR-005-AC-4
 ///
-/// The counterexample, deterministically. `stale` registered while `code` was
-/// the workspace's only tab (count 1) and was not refreshed; `fresh` registered
-/// later in `plan` with the real count 2. `stale` is printed `hub:EA`, which
-/// selects both. (Two leads that both recorded 1 do not reproduce it: their
-/// shown addresses are equal, so both are printed by bus name.) Fixed by
-/// AGE-2028: the tab is kept while another lead shares the workspace.
+/// The shown addresses include tab labels regardless of Herdr topology counts.
 #[test]
-fn tc_005_04_a_lead_with_a_stale_tab_count_still_resolves_from_its_label() {
-    let mk = |n: &str, tab: &str, tabs: u32| Registration {
+fn tc_005_04_tab_addresses_resolve_back_to_their_verified_lead() {
+    let mk = |n: &str, tab: &str, pane: &str| Registration {
         name: name(n),
         machine: "hub".parse().expect("valid id"),
         kind: "claude".into(),
-        session_id: None,
+        session_id: Some("sid-test".parse().unwrap()),
         cwd: None,
-        herdr_pane: None,
+        herdr_pane: Some(pane.parse().unwrap()),
         place: Some(Place {
             workspace: "EA".into(),
             tab: tab.into(),
-            tabs_in_workspace: tabs,
+            herdr_ids: Some(HerdrPlaceIds {
+                workspace: "wA".parse().unwrap(),
+                tab: "wA:t1".parse().unwrap(),
+                pane: pane.parse().unwrap(),
+                session_id: "sid-test".parse().unwrap(),
+                verified_at_ms: 1,
+            }),
         }),
         last_seen_ms: 1,
     };
-    let regs = [mk("stale", "code", 1), mk("fresh", "plan", 2)];
+    let regs = [mk("stale", "code", "wA:p1"), mk("fresh", "plan", "wA:p2")];
     let book = AddressBook::from_registrations(&regs);
     for r in &regs {
         let label = book.label(&r.name);

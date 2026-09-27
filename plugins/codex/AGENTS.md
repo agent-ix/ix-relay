@@ -67,18 +67,20 @@ interrupt them in person to say it, don't send it.
 
 ## Addressing
 
-Address a lead by where it sits, as `server:workspace[:tab]` — the machine,
-workspace label and tab label you see in herdr:
+Address a lead by its Herdr location as `server:workspace[:tab[:pane]]`: server,
+workspace, optional tab, optional Herdr pane ID. Omitting a level selects the
+whole workspace or tab. Claude/Codex's internal agent alias does not affect the
+location:
 
 ```
 agent-msg send hub:EA:1 "<text>"       # workspace EA, tab 1, on hub
-agent-msg send node-a:research "<text>"  # tab left out: one lead in that workspace
+agent-msg send node-a:research:1 "<text>"  # full address, including the tab
 ```
 
 `send` resolves the address itself, so send cold: **do not run `agent-msg find`
-first.** Case doesn't matter. Leave the tab out only when the workspace has
-one lead; if the address matches more than one lead, the send is refused and
-lists the candidates, never guessing. A send that matches nothing says why
+first.** Case doesn't matter. `server:workspace:tab` selects a tab, while a
+four-part address selects a particular Herdr pane. If the address matches more than one
+lead or Herdr identity, the send is refused and lists candidates, never guessing. A send that matches nothing says why
 (the server, workspace or tab that doesn't exist, and what does) and suggests
 the closest address. Bus names, aliases and herdr pane ids (panes on your own machine only) are still accepted,
 but report and use addresses — `who`, `find`, `whoami`, `log` and the
@@ -88,7 +90,7 @@ they see in herdr.
 ## Commands
 
 ```
-agent-msg send <address|all> "<text>"   # address is server:workspace[:tab]
+agent-msg send <address|all> "<text>"   # address is server:workspace[:tab[:pane]]
 agent-msg inbox                      # print and remove your pending messages
 agent-msg who                        # who else is registered
 agent-msg find [<query>]             # look around: who is live, and at what address

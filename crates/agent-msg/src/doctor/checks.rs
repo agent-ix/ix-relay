@@ -1733,7 +1733,7 @@ mod tests {
             place: pane.map(|_| Place {
                 workspace: "EA".into(),
                 tab: "1".into(),
-                tabs_in_workspace: 1,
+                herdr_ids: None,
             }),
             last_seen_ms: NOW - seen_ago_ms,
         }
@@ -2579,7 +2579,7 @@ mod tests {
             Some(Place {
                 workspace: workspace.into(),
                 tab: "1".into(),
-                tabs_in_workspace: 1,
+                herdr_ids: None,
             })
         };
         let event = |kind, at_ms, old: &str, new: &str| MoveEvent {
@@ -2614,7 +2614,7 @@ mod tests {
         assert_eq!(moves.details.len(), 2, "{:?}", moves.details);
         assert!(
             moves.details[0].contains("lead-a moved pane w1:p3 to w2:p2")
-                && moves.details[0].contains("hub:wsA -> hub:ws"),
+                && moves.details[0].contains("hub:wsA:1 -> hub:ws"),
             "{:?}",
             moves.details
         );

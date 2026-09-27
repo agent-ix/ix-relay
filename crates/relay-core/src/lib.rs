@@ -24,7 +24,7 @@ mod store;
 mod test_env;
 pub mod text;
 
-pub use address::{Address, AddressBook, MAX_LABEL_BYTES, Place, duplicated};
+pub use address::{Address, AddressBook, HerdrPlaceIds, MAX_LABEL_BYTES, Place, duplicated};
 pub use env::machine_name;
 pub use error::{Candidate, Error, LinkFault, Result, UnknownCause};
 pub use escalation::{

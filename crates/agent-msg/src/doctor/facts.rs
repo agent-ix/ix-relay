@@ -869,6 +869,7 @@ mod socket_tests {
     /// A watcher is alive by pid and start time: a pid that a later process reuses (its
     /// start time differs) is a dead watcher, and a status with no start time is judged
     /// by the pid alone.
+    #[cfg(target_os = "linux")]
     #[test]
     fn tc_044_09_a_reused_pid_is_not_the_watcher_that_wrote_the_status() {
         let own = std::process::id();

@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 # ix-cli-kit's own rust-version is 1.98.1 (see relay-core's dependency below);
 # cargo refuses to build a dependency newer than the active toolchain, so this
@@ -22,6 +22,7 @@ claude-wire = { path = "crates/claude-wire" }
 clap = { version = "4.6", features = ["derive", "env"] }
 gethostname = "1.1"
 jiff = "0.2"
+nix = { version = "0.29", features = ["user"] }
 proptest = "1"
 ratatui = "0.30"
 redis = { version = "1.7", default-features = false, features = ["streams", "script"] }

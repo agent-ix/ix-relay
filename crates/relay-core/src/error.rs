@@ -2,7 +2,11 @@
 
 use std::fmt;
 
-use crate::{address::Address, name::AgentName};
+use crate::{
+    address::Address,
+    ids::{TabId, WorkspaceId},
+    name::AgentName,
+};
 
 /// Everything that can go wrong talking to the bus.
 #[derive(Debug, thiserror::Error)]
@@ -18,16 +22,16 @@ pub enum Error {
     /// A message was addressed to a lead that has never registered.
     #[error("unknown agent {0}: it has not registered on the bus (see `agent-msg who`)")]
     UnknownAgent(AgentName),
-    /// Text was not a `server:workspace[:tab]` address.
+    /// Text was not a `server:workspace[:tab[:pane]]` address.
     #[error(
-        "invalid address {input:?}: expected server:workspace[:tab], e.g. hub:EA:1 or node-a:research"
+        "invalid address {input:?}: expected server:workspace[:tab[:pane]], e.g. hub:EA:1 or node-a:research"
     )]
     InvalidAddress {
         /// The rejected input.
         input: String,
     },
     /// A target matched more than one lead. Never resolved by guessing: the
-    /// sender picks one, by a longer address (add the tab) or a bus name.
+    /// sender picks one, by a more specific address (add tab/pane detail) or a bus name.
     #[error("{input:?} matches {} leads, so nothing was sent: {}", .candidates.len(), list_candidates(.candidates))]
     AmbiguousTarget {
         /// What the sender typed.
@@ -313,13 +317,24 @@ pub struct Candidate {
     pub name: AgentName,
     /// Its full address (tab included), when it registered a place.
     pub address: Option<Address>,
+    /// Stable Herdr workspace identity when the mapping is available.
+    pub workspace_id: Option<WorkspaceId>,
+    /// Stable Herdr tab identity when the mapping is available.
+    pub tab_id: Option<TabId>,
 }
 
 impl fmt::Display for Candidate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.address {
-            Some(address) => write!(f, "{address} ({})", self.name),
-            None => write!(f, "{}", self.name),
+        match (&self.address, &self.workspace_id, &self.tab_id) {
+            (Some(address), Some(workspace), Some(tab)) => {
+                write!(
+                    f,
+                    "{address} ({}, workspace {workspace}, tab {tab})",
+                    self.name
+                )
+            }
+            (Some(address), _, _) => write!(f, "{address} ({})", self.name),
+            (None, _, _) => write!(f, "{}", self.name),
         }
     }
 }

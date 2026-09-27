@@ -6,6 +6,7 @@ use std::{
     collections::HashMap,
     fs,
     io::{BufRead, BufReader, Write},
+    os::unix::fs::MetadataExt,
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
     sync::{
@@ -48,7 +49,11 @@ impl FakeProcs {
         Self {
             alive: pids.iter().map(|p| (*p, START.to_owned())).collect(),
             domain: Some(DOMAIN.to_owned()),
-            uid: session::ProcFs.uid(),
+            // The process table is fake, so use the owner of the temporary
+            // test filesystem rather than asking the Linux-only ProcFs.
+            uid: fs::metadata(std::env::temp_dir())
+                .ok()
+                .map(|metadata| metadata.uid()),
         }
     }
 }

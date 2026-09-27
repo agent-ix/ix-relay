@@ -84,15 +84,20 @@ pub fn judge(
     }
 }
 
-/// Whether `reg`'s pane shows a session that is not the one it registered: the
-/// pane now belongs to someone else, so its place is not the lead's and must not
-/// be copied onto the registration as a rename.
+/// Whether Herdr currently confirms the claimed pane and its workspace/tab for
+/// this exact harness session. A missing Herdr session id is unknown evidence,
+/// not confirmation.
 #[must_use]
-pub fn pane_hosts_other_session(reg: &Registration, layout: &Layout) -> bool {
-    let (Some(session), Some(pane)) = (reg.session_id.as_ref(), reg.herdr_pane.as_ref()) else {
+pub fn pane_has_current_location(reg: &Registration, layout: &Layout) -> bool {
+    let (Some(pane), Some(session)) = (reg.herdr_pane.as_ref(), reg.session_id.as_ref()) else {
         return false;
     };
-    matches!(layout.sessions.get(pane), Some(Some(live)) if live != session)
+    layout
+        .places
+        .get(pane)
+        .and_then(|place| place.herdr_ids.as_ref())
+        .is_some_and(|ids| &ids.session_id == session && &ids.pane == pane)
+        && matches!(layout.sessions.get(pane), Some(Some(live)) if live == session)
 }
 
 /// What was already reported, so a condition that lasts is logged once per
@@ -377,6 +382,69 @@ mod tests {
 
     fn pane(s: &str) -> PaneId {
         s.parse().unwrap()
+    }
+
+    /// Tracing: TC-043-02
+    /// ACs: FR-043-AC-2
+    #[test]
+    fn address_location_requires_a_matching_herdr_session_id() {
+        let reg = Registration {
+            name: name("lead"),
+            machine: hub(),
+            kind: "codex".into(),
+            session_id: Some(sid("session-current")),
+            cwd: None,
+            herdr_pane: Some(pane("wB:p1")),
+            place: None,
+            last_seen_ms: 1,
+        };
+        let layout = |session| Layout {
+            sessions: [(pane("wB:p1"), session)].into_iter().collect(),
+            ..Layout::default()
+        };
+        let with_place = |session| {
+            let mut layout = layout(session);
+            layout.places.insert(
+                pane("wB:p1"),
+                relay_core::Place {
+                    workspace: "EA".into(),
+                    tab: "code".into(),
+                    herdr_ids: Some(relay_core::HerdrPlaceIds {
+                        workspace: "wB".parse().unwrap(),
+                        tab: "wB:t1".parse().unwrap(),
+                        pane: "wB:p1".parse().unwrap(),
+                        session_id: "session-current".parse().unwrap(),
+                        verified_at_ms: 1,
+                    }),
+                },
+            );
+            layout
+        };
+        assert!(pane_has_current_location(
+            &reg,
+            &with_place(Some(sid("session-current")))
+        ));
+        assert!(!pane_has_current_location(
+            &reg,
+            &with_place(Some(sid("session-old")))
+        ));
+        let mut mismatched_proof = with_place(Some(sid("session-current")));
+        mismatched_proof
+            .places
+            .get_mut(&pane("wB:p1"))
+            .unwrap()
+            .herdr_ids
+            .as_mut()
+            .unwrap()
+            .session_id = sid("session-old");
+        assert!(!pane_has_current_location(&reg, &mismatched_proof));
+        assert!(!pane_has_current_location(&reg, &with_place(None)));
+        let mut unplaced = reg;
+        unplaced.session_id = None;
+        assert!(!pane_has_current_location(
+            &unplaced,
+            &with_place(Some(sid("session-current")))
+        ));
     }
 
     fn name(s: &str) -> AgentName {
@@ -688,11 +756,11 @@ mod tests {
         (kind, lead.into(), from.map(str::to_owned), Some(to.into()))
     }
 
-    fn place(workspace: &str, tab: &str, tabs: u32) -> Place {
+    fn place(workspace: &str, tab: &str, _tabs: u32) -> Place {
         Place {
             workspace: workspace.into(),
             tab: tab.into(),
-            tabs_in_workspace: tabs,
+            herdr_ids: None,
         }
     }
 
@@ -739,11 +807,14 @@ mod tests {
         let mut seen = moves(&mut bus);
         seen.sort_by(|a, b| a.1.cmp(&b.1));
         assert_eq!(seen, expect);
-        assert_eq!(
-            get(&mut bus, "lead-c").place,
-            Some(place("wsA-renamed", "1", 2))
-        );
-        assert_eq!(get(&mut bus, "lead-d").place, Some(place("wsB", "1", 1)));
+        assert!(place_matches(
+            &get(&mut bus, "lead-c").place,
+            &place("wsA-renamed", "1", 2)
+        ));
+        assert!(place_matches(
+            &get(&mut bus, "lead-d").place,
+            &place("wsB", "1", 1)
+        ));
 
         // Tab `tabB` renamed: only its lead.
         refresh(&mut bus, &replayed("tab-renamed"), &mut state, &mut log);
@@ -768,10 +839,10 @@ mod tests {
         expect.push(row(rename, "lead-c", None, "w1:p3"));
         assert_eq!(moves(&mut bus).last(), expect.last());
         assert_eq!(get(&mut bus, "lead-c").herdr_pane, Some(pane("w1:p3")));
-        assert_eq!(
-            get(&mut bus, "lead-c").place,
-            Some(place("wsA-renamed", "tabB-renamed", 2))
-        );
+        assert!(place_matches(
+            &get(&mut bus, "lead-c").place,
+            &place("wsA-renamed", "tabB-renamed", 2)
+        ));
 
         // `w1:p3` moved to workspace `wsB`: herdr gave it the id `w2:p2` and kept
         // its session, so the registration follows the session.
@@ -785,7 +856,7 @@ mod tests {
         assert_eq!(moves(&mut bus).last(), expect.last());
         let moved = get(&mut bus, "lead-c");
         assert_eq!(moved.herdr_pane, Some(pane("w2:p2")));
-        assert_eq!(moved.place, Some(place("wsB", "1", 1)));
+        assert!(place_matches(&moved.place, &place("wsB", "1", 1)));
         assert_eq!(moved.session_id, Some(sid("sess-A3")));
         assert!(
             log.iter()
@@ -793,8 +864,8 @@ mod tests {
         );
 
         // Neighbours closed (lead-a's tab, and with it its pane and session): the
-        // survivors stay, lead-a is left as registered (the prune rule owns it),
-        // and lead-b's workspace now has one tab.
+        // lead remains registered for the prune rule, but its location proof is
+        // invalidated because Herdr can no longer verify that pane.
         let before_a = get(&mut bus, "lead-a");
         refresh(
             &mut bus,
@@ -804,15 +875,19 @@ mod tests {
         );
         // Only the workspace's tab count changed for lead-b: its address is kept
         // true and no rename is recorded.
-        assert_eq!(
-            get(&mut bus, "lead-b").place,
-            Some(place("wsA-renamed", "tabB-renamed", 1))
-        );
-        assert_eq!(get(&mut bus, "lead-a"), before_a);
+        assert!(place_matches(
+            &get(&mut bus, "lead-b").place,
+            &place("wsA-renamed", "tabB-renamed", 1)
+        ));
+        let after_a = get(&mut bus, "lead-a");
+        assert_eq!(after_a.place, None);
+        assert_eq!(after_a.herdr_pane, before_a.herdr_pane);
+        assert_eq!(after_a.session_id, before_a.session_id);
         assert_eq!(moves(&mut bus), expect);
 
         // The server restarted: every pane id survived but no harness has
-        // reported a session yet, so herdr lists no agent. Nothing changes.
+        // reported a session yet, so old place proofs are invalidated. The leads
+        // stay registered and no move is recorded.
         let before: Vec<_> = ["lead-a", "lead-b", "lead-c", "lead-d"]
             .map(|n| get(&mut bus, n))
             .into();
@@ -825,7 +900,12 @@ mod tests {
         let after: Vec<_> = ["lead-a", "lead-b", "lead-c", "lead-d"]
             .map(|n| get(&mut bus, n))
             .into();
-        assert_eq!(before, after);
+        for (before, after) in before.iter().zip(&after) {
+            assert_eq!(before.name, after.name);
+            assert_eq!(before.session_id, after.session_id);
+            assert_eq!(before.herdr_pane, after.herdr_pane);
+            assert_eq!(after.place, None);
+        }
         assert_eq!(moves(&mut bus), expect);
         assert!(
             markers_of(&mut bus, &["lead-a", "lead-b", "lead-c", "lead-d"]).is_empty(),
@@ -834,11 +914,33 @@ mod tests {
     }
 
     fn layout_with(rows: &[(&str, Option<&str>)], places: &[(&str, Place)]) -> Layout {
+        let sessions = listed(rows);
+        let mut places: HashMap<PaneId, Place> =
+            places.iter().map(|(p, at)| (pane(p), at.clone())).collect();
+        for (pane, place) in &mut places {
+            if let Some(Some(session_id)) = sessions.get(pane) {
+                place.herdr_ids = Some(relay_core::HerdrPlaceIds {
+                    workspace: "test-workspace".parse().unwrap(),
+                    tab: "test-tab".parse().unwrap(),
+                    pane: pane.clone(),
+                    session_id: session_id.clone(),
+                    verified_at_ms: 1,
+                });
+            }
+        }
         Layout {
-            places: places.iter().map(|(p, at)| (pane(p), at.clone())).collect(),
-            sessions: listed(rows),
+            places,
+            sessions,
             view: None,
         }
+    }
+
+    fn place_matches(actual: &Option<Place>, expected: &Place) -> bool {
+        actual.as_ref().is_some_and(|actual| {
+            actual.workspace == expected.workspace
+                && actual.tab == expected.tab
+                && actual.herdr_ids.is_some()
+        })
     }
 
     fn run_pass(
@@ -972,7 +1074,11 @@ mod tests {
         let other = layout_with(&[("w1:p3", Some("s9"))], &[("w1:p3", place("wsZ", "9", 4))]);
         let mut state = WatcherState::default();
         refresh(&mut bus, &FakeHerdr(Ok(other)), &mut state, &mut Vec::new());
-        assert_eq!(get(&mut bus, "lead-a").place, Some(place("wsA", "1", 1)));
+        assert_eq!(
+            get(&mut bus, "lead-a").place,
+            None,
+            "another session in the pane invalidates its previous location proof"
+        );
         assert!(moves(&mut bus).is_empty());
 
         // The lead's session is in its pane again (a resume): the marker ends.
@@ -1422,10 +1528,9 @@ mod tests {
         for label in ["w1", "w2", "w1", "w2"] {
             let layout = layout_with(&[("w1:p1", Some("s1"))], &[("w1:p1", place(label, "1", 1))]);
             refresh_now(&mut bus, &FakeHerdr(Ok(layout)), &mut state, &mut log);
-            assert_eq!(
-                get(&mut bus, "lead-a").place,
-                Some(place(label, "1", 1)),
-                "the address follows"
+            assert!(
+                place_matches(&get(&mut bus, "lead-a").place, &place(label, "1", 1)),
+                "the address follows with current Herdr proof"
             );
         }
         assert_eq!(

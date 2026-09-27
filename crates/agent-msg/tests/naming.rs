@@ -1062,11 +1062,11 @@ fn a_second_rename_keeps_every_earlier_name_working_as_a_one_hop_alias() {
         Some(&prefix),
         "",
     );
-    // `who` leads each row with the address (kept across the renames, which
-    // make no herdr call), then the canonical bus name.
+    // These hooks did not observe a session-bound Herdr identity, so the
+    // canonical lead remains explicitly unplaced until the watcher verifies it.
     assert!(
-        who.stdout.contains(":QSL  c  "),
-        "canonical must be \"c\", listed under its address: {}",
+        who.stdout.contains("-  c  draco") && who.stdout.contains("location unverified"),
+        "canonical must be \"c\" and its inherited pane claim must stay unverified: {}",
         who.stdout
     );
     assert!(

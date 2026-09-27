@@ -35,7 +35,7 @@ pub fn dir_in(state_dir: &Path) -> PathBuf {
 
 /// The user id this process runs as, `None` where `/proc` cannot say.
 fn current_uid() -> Option<u32> {
-    fs::metadata("/proc/self").ok().map(|m| m.uid())
+    Some(nix::unistd::geteuid().as_raw())
 }
 
 /// Whether `meta` (from `symlink_metadata`, so a symlink is not a directory) is a

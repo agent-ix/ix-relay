@@ -28,7 +28,7 @@ any other inbox.
 - When the target is a bus name or an alias, the sender shall resolve it by
   reading the alias table and that one lead's record only, never the whole
   registry, and shall confirm the send with the lead's bus name; a pane id or a
-  `server:workspace[:tab]` address, which need the registry to resolve, read it
+  `server:workspace[:tab[:pane]]` address, which need the registry to resolve, read it
   once and confirm with the shown address.
 - Combined with atomic pops ([FR-012](./FR-012-inbox-pops-are-atomic-and-budgeted.md)),
   each sent message is delivered at most once to its recipient.
