@@ -27,6 +27,7 @@ serde_json.workspace = true
 signal-hook.workspace = true
 
 [dev-dependencies]
+nix.workspace = true
 proptest.workspace = true
 redis.workspace = true
 relay-test-support.workspace = true

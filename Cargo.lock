@@ -1681,6 +1681,7 @@ dependencies = [
  "clap",
  "claude-wire",
  "herdr-cli",
+ "nix",
  "proptest",
  "redis",
  "relay-core",
