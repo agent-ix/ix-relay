@@ -219,63 +219,12 @@ fn refresh(settings: &CoreSettings, pane_id: Option<&str>) -> Refresh {
 
 fn read_tracker() -> Result<TrackerState, String> {
     let source = LinearGraphQlSource::from_env().map_err(|error| error.to_string())?;
-    let cache_path = tracker_cache_path()?;
-    let mut service = ReadService::open(source, &cache_path).map_err(|error| error.to_string())?;
+    let mut service = ReadService::open_default(source).map_err(|error| error.to_string())?;
     let snapshot = service
         .workspace_snapshot()
         .map_err(|error| error.to_string())?;
     let queue = service.next("SWM").map_err(|error| error.to_string())?;
     Ok(summarize(&snapshot, &queue))
-}
-
-fn tracker_cache_path() -> Result<std::path::PathBuf, String> {
-    if let Some(path) = std::env::var_os("IX_BOARD_CACHE_PATH") {
-        return Ok(path.into());
-    }
-    let cache_dir = default_tracker_cache_dir()?;
-    std::fs::create_dir_all(&cache_dir).map_err(|error| error.to_string())?;
-    Ok(cache_dir.join("linear.sqlite3"))
-}
-
-#[cfg(target_os = "macos")]
-fn default_tracker_cache_dir() -> Result<std::path::PathBuf, String> {
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .ok_or_else(|| "could not determine the ix-board cache directory".to_owned())?;
-    Ok(home.join("Library/Caches/com.agent-ix.ix-board"))
-}
-
-#[cfg(target_os = "windows")]
-fn default_tracker_cache_dir() -> Result<std::path::PathBuf, String> {
-    let local_app_data = std::env::var_os("LOCALAPPDATA")
-        .map(std::path::PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .ok_or_else(|| "could not determine the ix-board cache directory".to_owned())?;
-    Ok(local_app_data.join("agent-ix/ix-board/cache"))
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn default_tracker_cache_dir() -> Result<std::path::PathBuf, String> {
-    let xdg_cache_home = std::env::var_os("XDG_CACHE_HOME").map(std::path::PathBuf::from);
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    linux_tracker_cache_dir(xdg_cache_home.as_deref(), home.as_deref())
-        .ok_or_else(|| "could not determine the ix-board cache directory".to_owned())
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn linux_tracker_cache_dir(
-    xdg_cache_home: Option<&std::path::Path>,
-    home: Option<&std::path::Path>,
-) -> Option<std::path::PathBuf> {
-    xdg_cache_home
-        .filter(|path| path.is_absolute())
-        .map(std::path::Path::to_path_buf)
-        .or_else(|| {
-            home.filter(|path| path.is_absolute())
-                .map(|path| path.join(".cache"))
-        })
-        .map(|root| root.join("ix-board"))
 }
 
 fn read_herdr(pane_id: Option<&str>) -> Result<HerdrState, String> {
@@ -365,26 +314,6 @@ mod tests {
     };
 
     use super::*;
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    #[test]
-    fn linux_cache_path_matches_ix_board_xdg_policy() {
-        assert_eq!(
-            linux_tracker_cache_dir(
-                Some(std::path::Path::new("/cache")),
-                Some(std::path::Path::new("/home/user")),
-            ),
-            Some(std::path::PathBuf::from("/cache/ix-board")),
-        );
-        assert_eq!(
-            linux_tracker_cache_dir(
-                Some(std::path::Path::new("relative-cache")),
-                Some(std::path::Path::new("/home/user")),
-            ),
-            Some(std::path::PathBuf::from("/home/user/.cache/ix-board")),
-        );
-        assert_eq!(linux_tracker_cache_dir(None, None), None);
-    }
 
     #[test]
     fn partial_registry_decode_failures_are_retained_for_the_monitor() {
