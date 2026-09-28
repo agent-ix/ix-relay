@@ -35,7 +35,6 @@ signal-hook = "0.3"
 tempfile = "3"
 thiserror = "2"
 toml = "1.1.6"
-directories = "5"
 # Shared CLI foundation: the flag > env > file > default precedence chain and
 # malformed-file-with-line/column reporting (AGE-2017). Consumed by git-rev
 # pin — one rev string, no vendoring and no tag pin (see agent-ix/ix-cli-kit

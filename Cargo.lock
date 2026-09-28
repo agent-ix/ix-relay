@@ -2096,7 +2096,6 @@ name = "relay-tui"
 version = "0.2.0"
 dependencies = [
  "clap",
- "directories",
  "herdr-cli",
  "ix-board",
  "ratatui",
