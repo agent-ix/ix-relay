@@ -29,6 +29,8 @@ ratatui.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 signal-hook.workspace = true
+ix-board.workspace = true
+directories.workspace = true
 
 [dev-dependencies]
 redis.workspace = true

@@ -4,6 +4,7 @@
 
 mod monitor;
 mod monitor_ops;
+mod monitor_tracker;
 mod monitor_ui;
 
 use std::{
@@ -58,12 +59,18 @@ fn run(settings: relay_core::config::CoreSettings) -> io::Result<()> {
 
     let pane_id = std::env::var("HERDR_PANE_ID").ok();
     let mut worker = Some(monitor_ops::Worker::spawn(settings, pane_id)?);
+    let mut tracker_worker = Some(monitor_ops::TrackerWorker::spawn()?);
     let mut app = App::default();
     loop {
         terminal.draw(|frame| monitor_ui::render(frame, &app, Instant::now()))?;
         if let Some(active_worker) = &worker {
             while let Ok(refresh) = active_worker.events.try_recv() {
                 app.apply_refresh(refresh.herdr, refresh.bus, Instant::now());
+            }
+        }
+        if let Some(active_worker) = &tracker_worker {
+            while let Ok(refresh) = active_worker.events.try_recv() {
+                app.apply_tracker_refresh(refresh, Instant::now());
             }
         }
         if event::poll(TICK)?
@@ -75,6 +82,9 @@ fn run(settings: relay_core::config::CoreSettings) -> io::Result<()> {
                 if let Some(active_worker) = &worker {
                     active_worker.refresh_now();
                 }
+                if let Some(active_worker) = &tracker_worker {
+                    active_worker.refresh_now();
+                }
                 app.refresh_now = false;
             }
         }
@@ -83,6 +93,9 @@ fn run(settings: relay_core::config::CoreSettings) -> io::Result<()> {
         }
         if app.should_quit {
             if let Some(active_worker) = worker.take() {
+                active_worker.stop();
+            }
+            if let Some(active_worker) = tracker_worker.take() {
                 active_worker.stop();
             }
             return Ok(());

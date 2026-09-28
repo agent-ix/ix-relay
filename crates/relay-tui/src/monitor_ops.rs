@@ -13,7 +13,9 @@ use std::{
 };
 
 use crate::monitor::{BusAgent, BusMessage, BusState, HerdrResult, HerdrState, display_text};
+use crate::monitor_tracker::{TrackerState, summarize};
 use herdr_cli::{RealProcessRunner, call};
+use ix_board::{LinearGraphQlSource, ReadService};
 use relay_core::{AgentList, Relay, SkippedRegistration, config::CoreSettings};
 
 /// Interval between refresh attempts.
@@ -22,6 +24,10 @@ pub const REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const HERDR_TIMEOUT: Duration = Duration::from_secs(3);
 /// Maximum time spent on a Redis connection and read.
 const REDIS_TIMEOUT: Duration = Duration::from_secs(2);
+/// Linear tracker snapshots refresh less often than local activity sources.
+const TRACKER_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+/// Limit retries after Linear or its cached workspace read returns an error.
+const TRACKER_MAX_RETRY_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// How far back to read the capped Redis message log.
 const MESSAGE_WINDOW_MS: i64 = 60 * 60 * 1000;
 /// Number of recent bus messages shown at most.
@@ -45,7 +51,21 @@ pub struct Worker {
     handle: JoinHandle<()>,
 }
 
+/// Independent Linear snapshot refresh worker.
+pub struct TrackerWorker {
+    /// Latest available Linear refresh results.
+    pub events: Receiver<Result<TrackerState, String>>,
+    commands: SyncSender<TrackerCommand>,
+    stop_requested: Arc<AtomicBool>,
+    handle: JoinHandle<()>,
+}
+
 enum WorkerCommand {
+    Refresh,
+    Stop,
+}
+
+enum TrackerCommand {
     Refresh,
     Stop,
 }
@@ -108,11 +128,110 @@ impl Worker {
     }
 }
 
+impl TrackerWorker {
+    /// Starts Linear refreshes on a worker separate from Herdr and Redis.
+    pub fn spawn() -> std::io::Result<Self> {
+        Self::spawn_with_read(read_tracker)
+    }
+
+    fn spawn_with_read(
+        read: impl FnMut() -> Result<TrackerState, String> + Send + 'static,
+    ) -> std::io::Result<Self> {
+        Self::spawn_with_read_and_intervals(
+            read,
+            TRACKER_REFRESH_INTERVAL,
+            TRACKER_MAX_RETRY_INTERVAL,
+        )
+    }
+
+    fn spawn_with_read_and_intervals(
+        mut read: impl FnMut() -> Result<TrackerState, String> + Send + 'static,
+        refresh_interval: Duration,
+        max_retry_interval: Duration,
+    ) -> std::io::Result<Self> {
+        let (event_tx, events) = mpsc::sync_channel(1);
+        let (commands, command_rx) = mpsc::sync_channel(1);
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let worker_stop_requested = Arc::clone(&stop_requested);
+        let handle = thread::Builder::new()
+            .name("herdr-monitor-linear-refresh".to_owned())
+            .spawn(move || {
+                let mut retry_interval = refresh_interval;
+                loop {
+                    if worker_stop_requested.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let result = read();
+                    retry_interval = if result.is_ok() {
+                        refresh_interval
+                    } else {
+                        retry_interval
+                            .saturating_mul(2)
+                            .min(max_retry_interval.max(refresh_interval))
+                    };
+                    let _ = event_tx.try_send(result);
+                    if worker_stop_requested.load(Ordering::Acquire) {
+                        break;
+                    }
+                    match command_rx.recv_timeout(retry_interval) {
+                        Ok(TrackerCommand::Refresh) | Err(mpsc::RecvTimeoutError::Timeout) => {
+                            if worker_stop_requested.load(Ordering::Acquire) {
+                                break;
+                            }
+                        }
+                        Ok(TrackerCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            break;
+                        }
+                    }
+                }
+            })?;
+        Ok(Self {
+            events,
+            commands,
+            stop_requested,
+            handle,
+        })
+    }
+
+    /// Requests a read without blocking the terminal input thread.
+    pub fn refresh_now(&self) {
+        let _ = self.commands.try_send(TrackerCommand::Refresh);
+    }
+
+    /// Stops the worker and waits for any bounded in-flight request.
+    pub fn stop(self) {
+        self.stop_requested.store(true, Ordering::Release);
+        let _ = self.commands.try_send(TrackerCommand::Stop);
+        let _ = self.handle.join();
+    }
+}
+
 fn refresh(settings: &CoreSettings, pane_id: Option<&str>) -> Refresh {
     Refresh {
         herdr: read_herdr(pane_id),
         bus: read_bus(settings),
     }
+}
+
+fn read_tracker() -> Result<TrackerState, String> {
+    let source = LinearGraphQlSource::from_env().map_err(|error| error.to_string())?;
+    let cache_path = tracker_cache_path()?;
+    let mut service = ReadService::open(source, &cache_path).map_err(|error| error.to_string())?;
+    let snapshot = service
+        .workspace_snapshot()
+        .map_err(|error| error.to_string())?;
+    let queue = service.next("SWM").map_err(|error| error.to_string())?;
+    Ok(summarize(&snapshot, &queue))
+}
+
+fn tracker_cache_path() -> Result<std::path::PathBuf, String> {
+    if let Some(path) = std::env::var_os("IX_BOARD_CACHE_PATH") {
+        return Ok(path.into());
+    }
+    let project_dirs = directories::ProjectDirs::from("com", "agent-ix", "ix-board")
+        .ok_or_else(|| "ix-board cache directory is unavailable".to_owned())?;
+    std::fs::create_dir_all(project_dirs.cache_dir()).map_err(|error| error.to_string())?;
+    Ok(project_dirs.cache_dir().join("linear.sqlite3"))
 }
 
 fn read_herdr(pane_id: Option<&str>) -> Result<HerdrState, String> {
@@ -220,6 +339,61 @@ mod tests {
         assert_eq!(state.skipped_registrations.len(), 1);
         assert!(state.skipped_registrations[0].starts_with("bad-entry:"));
         assert!(!state.skipped_registrations[0].contains('\u{1b}'));
+    }
+
+    #[test]
+    fn slow_linear_refresh_does_not_delay_local_source_updates() {
+        let (linear_entered_tx, linear_entered_rx) = mpsc::channel();
+        let (release_linear_tx, release_linear_rx) = mpsc::channel();
+        let tracker = TrackerWorker::spawn_with_read(move || {
+            linear_entered_tx.send(()).unwrap();
+            release_linear_rx.recv().unwrap();
+            Err("offline".to_owned())
+        })
+        .unwrap();
+        let local = Worker::spawn_with_refresh(|| Refresh {
+            herdr: Err("herdr offline".to_owned()),
+            bus: Err("bus offline".to_owned()),
+        })
+        .unwrap();
+
+        let tracker_started = linear_entered_rx.recv_timeout(Duration::from_secs(2));
+        let local_update = local.events.recv_timeout(Duration::from_secs(2));
+        let _ = release_linear_tx.send(());
+        tracker.stop();
+        local.stop();
+
+        assert!(tracker_started.is_ok());
+        assert!(local_update.is_ok());
+    }
+
+    #[test]
+    fn failed_linear_refreshes_back_off_and_obey_the_configured_cap() {
+        let (calls_tx, calls_rx) = mpsc::channel();
+        let mut call_number = 0;
+        let worker = TrackerWorker::spawn_with_read_and_intervals(
+            move || {
+                call_number += 1;
+                calls_tx.send(call_number).unwrap();
+                Err("Linear rate limited".to_owned())
+            },
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+        )
+        .unwrap();
+
+        assert_eq!(calls_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+        assert!(calls_rx.recv_timeout(Duration::from_millis(120)).is_err());
+        assert_eq!(
+            calls_rx.recv_timeout(Duration::from_millis(200)).unwrap(),
+            2
+        );
+        assert!(calls_rx.recv_timeout(Duration::from_millis(120)).is_err());
+        assert_eq!(
+            calls_rx.recv_timeout(Duration::from_millis(200)).unwrap(),
+            3
+        );
+        worker.stop();
     }
 
     #[test]

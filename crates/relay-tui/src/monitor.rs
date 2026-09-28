@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use serde::Deserialize;
 
+pub(crate) const TRACKER_STALE_AFTER: Duration = Duration::from_secs(90);
+
 /// How long a successfully read source remains fresh without another update.
 pub const STALE_AFTER: Duration = Duration::from_secs(15);
 /// A registration not refreshed for this long may be abandoned or offline.
@@ -157,6 +159,8 @@ pub struct App {
     pub herdr: Source<HerdrState>,
     /// Relay bus source state.
     pub bus: Source<BusState>,
+    /// Selected ix-board and ix-projects tracker state from Linear.
+    pub tracker: Source<crate::monitor_tracker::TrackerState>,
     /// Set by `q` or Escape.
     pub should_quit: bool,
     /// Set by `r` to request an immediate refresh.
@@ -164,7 +168,7 @@ pub struct App {
 }
 
 impl App {
-    /// Applies one independently successful/failed refresh for both sources.
+    /// Applies one local refresh result for Herdr and the relay bus.
     pub fn apply_refresh(
         &mut self,
         herdr: Result<HerdrState, String>,
@@ -180,6 +184,26 @@ impl App {
             Err(error) => self.bus.failure(error),
         }
     }
+
+    /// Applies an independently refreshed Linear tracker result.
+    pub fn apply_tracker_refresh(
+        &mut self,
+        tracker: Result<crate::monitor_tracker::TrackerState, String>,
+        now: Instant,
+    ) {
+        match tracker {
+            Ok(data) => self.tracker.success(data, now),
+            Err(error) => self.tracker.failure(error),
+        }
+    }
+}
+
+/// Whether tracker state is stale or has never loaded.
+#[must_use]
+pub fn tracker_is_stale(source: &Source<impl Sized>, now: Instant) -> bool {
+    source
+        .last_success
+        .is_none_or(|last| now.saturating_duration_since(last) > TRACKER_STALE_AFTER)
 }
 
 /// Handles the monitor's read-only keyboard controls.
