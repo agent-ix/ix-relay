@@ -1064,15 +1064,20 @@ fn a_second_rename_keeps_every_earlier_name_working_as_a_one_hop_alias() {
     );
     // These hooks did not observe a session-bound Herdr identity, so the
     // canonical lead remains explicitly unplaced until the watcher verifies it.
+    let canonical = who.stdout.lines().find(|line| line.starts_with("-  c  "));
     assert!(
-        who.stdout.contains("-  c  draco") && who.stdout.contains("location unverified"),
-        "canonical must be \"c\" and its inherited pane claim must stay unverified: {}",
+        canonical.is_some(),
+        "canonical name must be \"c\": {}",
         who.stdout
     );
+    let canonical = canonical.unwrap_or_default();
     assert!(
-        who.stdout.contains("aka b, qsl"),
-        "both earlier names must be listed as aliases: {}",
-        who.stdout
+        canonical.contains("location unverified"),
+        "the inherited pane claim must stay unverified: {canonical}"
+    );
+    assert!(
+        canonical.contains("aka b, qsl"),
+        "both earlier names must remain aliases: {canonical}"
     );
 
     for old_name in ["qsl", "b"] {
