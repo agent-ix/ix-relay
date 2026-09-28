@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Agent-IX
-//! Herdr pane entry point for the read-only activity monitor (SWM-21).
+//! Entry point for the read-only team-leader dashboard (SWM-21).
 
 mod monitor;
 mod monitor_ops;
@@ -32,23 +32,16 @@ use crate::monitor::App;
 const TICK: Duration = Duration::from_millis(100);
 
 fn main() -> ExitCode {
-    let settings = match relay_core::config::load_core(relay_core::config::CoreFlags::default()) {
-        Ok(settings) => settings,
-        Err(error) => {
-            eprintln!("herdr-monitor: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    match run(settings) {
+    match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("herdr-monitor: {error}");
+            eprintln!("team-leader-dashboard: {error}");
             ExitCode::FAILURE
         }
     }
 }
 
-fn run(settings: relay_core::config::CoreSettings) -> io::Result<()> {
+fn run() -> io::Result<()> {
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
     install_panic_hook();
@@ -57,17 +50,13 @@ fn run(settings: relay_core::config::CoreSettings) -> io::Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
 
-    let pane_id = std::env::var("HERDR_PANE_ID").ok();
-    let mut worker = Some(monitor_ops::Worker::spawn(settings, pane_id)?);
     let mut tracker_worker = Some(monitor_ops::TrackerWorker::spawn()?);
-    let mut app = App::default();
+    let mut app = App {
+        lead_name: std::env::var("AGENT_MSG_NAME").unwrap_or_else(|_| "SWM team lead".to_owned()),
+        ..App::default()
+    };
     loop {
         terminal.draw(|frame| monitor_ui::render(frame, &app, Instant::now()))?;
-        if let Some(active_worker) = &worker {
-            while let Ok(refresh) = active_worker.events.try_recv() {
-                app.apply_refresh(refresh.herdr, refresh.bus, Instant::now());
-            }
-        }
         if let Some(active_worker) = &tracker_worker {
             while let Ok(refresh) = active_worker.events.try_recv() {
                 app.apply_tracker_refresh(refresh, Instant::now());
@@ -79,9 +68,6 @@ fn run(settings: relay_core::config::CoreSettings) -> io::Result<()> {
         {
             monitor::handle_key(&mut app, key);
             if app.refresh_now {
-                if let Some(active_worker) = &worker {
-                    active_worker.refresh_now();
-                }
                 if let Some(active_worker) = &tracker_worker {
                     active_worker.refresh_now();
                 }
@@ -92,9 +78,6 @@ fn run(settings: relay_core::config::CoreSettings) -> io::Result<()> {
             app.should_quit = true;
         }
         if app.should_quit {
-            if let Some(active_worker) = worker.take() {
-                active_worker.stop();
-            }
             if let Some(active_worker) = tracker_worker.take() {
                 active_worker.stop();
             }

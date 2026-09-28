@@ -14,7 +14,7 @@ name = "relay-tui"
 path = "src/main.rs"
 
 [[bin]]
-name = "herdr-monitor"
+name = "team-leader-dashboard"
 path = "src/monitor_main.rs"
 
 [lints]
