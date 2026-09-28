@@ -8,9 +8,6 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
 pub(crate) const TRACKER_STALE_AFTER: Duration = Duration::from_secs(90);
 
-/// A tracker snapshot that has not refreshed within this duration is stale.
-pub const STALE_AFTER: Duration = Duration::from_secs(15);
-
 /// One independently refreshed source, retaining its last good snapshot
 /// while reporting an error or stale age.
 #[derive(Debug, Clone)]
@@ -44,13 +41,6 @@ impl<T> Source<T> {
     /// Keeps the last good value but exposes the newest failure.
     pub fn failure(&mut self, error: impl Into<String>) {
         self.error = Some(error.into());
-    }
-
-    /// Whether this source has never succeeded or has exceeded the stale age.
-    #[must_use]
-    pub fn is_stale(&self, now: Instant) -> bool {
-        self.last_success
-            .is_none_or(|last| now.saturating_duration_since(last) > STALE_AFTER)
     }
 }
 
@@ -107,22 +97,20 @@ pub fn display_text(raw: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::*;
 
     #[test]
-    fn source_retains_last_good_value_and_marks_stale_after_threshold() {
+    fn source_retains_last_good_value_and_reports_latest_error() {
         let started = Instant::now();
         let mut source = Source::default();
         source.success("good", started);
         source.failure("Linear unavailable");
         assert_eq!(source.value, Some("good"));
         assert_eq!(source.error.as_deref(), Some("Linear unavailable"));
-        assert!(!source.is_stale(started + STALE_AFTER));
-        assert!(source.is_stale(started + STALE_AFTER + Duration::from_millis(1)));
     }
 
     #[test]
