@@ -13,6 +13,10 @@ publish = false
 name = "relay-tui"
 path = "src/main.rs"
 
+[[bin]]
+name = "team-leader-dashboard"
+path = "src/monitor_main.rs"
+
 [lints]
 workspace = true
 
@@ -23,7 +27,9 @@ herdr-cli.workspace = true
 clap.workspace = true
 ratatui.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 signal-hook.workspace = true
+ix-board.workspace = true
 
 [dev-dependencies]
 redis.workspace = true

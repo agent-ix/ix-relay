@@ -1,0 +1,209 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Agent-IX
+//! Background Linear refresh for the read-only team-leader dashboard.
+
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, SyncSender},
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
+
+use crate::monitor_tracker::{TrackerState, summarize};
+use ix_board::{LinearGraphQlSource, ReadService};
+
+/// Linear tracker snapshots refresh every 30 seconds.
+pub const TRACKER_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+/// Limit retries after Linear or its cached workspace read returns an error.
+const TRACKER_MAX_RETRY_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// Independent Linear snapshot refresh worker.
+pub struct TrackerWorker {
+    /// Latest available Linear refresh results.
+    pub events: Receiver<Result<TrackerState, String>>,
+    commands: SyncSender<TrackerCommand>,
+    stop_requested: Arc<AtomicBool>,
+    handle: JoinHandle<()>,
+}
+
+enum TrackerCommand {
+    Refresh,
+    Stop,
+}
+
+impl TrackerWorker {
+    /// Starts Linear refreshes away from the terminal input thread.
+    pub fn spawn() -> std::io::Result<Self> {
+        Self::spawn_with_read(read_tracker)
+    }
+
+    fn spawn_with_read(
+        read: impl FnMut() -> Result<TrackerState, String> + Send + 'static,
+    ) -> std::io::Result<Self> {
+        Self::spawn_with_read_and_intervals(
+            read,
+            TRACKER_REFRESH_INTERVAL,
+            TRACKER_MAX_RETRY_INTERVAL,
+        )
+    }
+
+    fn spawn_with_read_and_intervals(
+        mut read: impl FnMut() -> Result<TrackerState, String> + Send + 'static,
+        refresh_interval: Duration,
+        max_retry_interval: Duration,
+    ) -> std::io::Result<Self> {
+        let (event_tx, events) = mpsc::sync_channel(1);
+        let (commands, command_rx) = mpsc::sync_channel(1);
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let worker_stop_requested = Arc::clone(&stop_requested);
+        let handle = thread::Builder::new()
+            .name("team-leader-dashboard-linear-refresh".to_owned())
+            .spawn(move || {
+                let mut retry_interval = refresh_interval;
+                loop {
+                    if worker_stop_requested.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let result = read();
+                    retry_interval = if result.is_ok() {
+                        refresh_interval
+                    } else {
+                        retry_interval
+                            .saturating_mul(2)
+                            .min(max_retry_interval.max(refresh_interval))
+                    };
+                    let _ = event_tx.try_send(result);
+                    if worker_stop_requested.load(Ordering::Acquire) {
+                        break;
+                    }
+                    match command_rx.recv_timeout(retry_interval) {
+                        Ok(TrackerCommand::Refresh) | Err(mpsc::RecvTimeoutError::Timeout) => {
+                            if worker_stop_requested.load(Ordering::Acquire) {
+                                break;
+                            }
+                        }
+                        Ok(TrackerCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            break;
+                        }
+                    }
+                }
+            })?;
+        Ok(Self {
+            events,
+            commands,
+            stop_requested,
+            handle,
+        })
+    }
+
+    /// Requests a read without blocking the terminal input thread.
+    pub fn refresh_now(&self) {
+        let _ = self.commands.try_send(TrackerCommand::Refresh);
+    }
+
+    /// Stops future refreshes without waiting for an in-flight Linear request.
+    pub fn stop(self) {
+        self.stop_requested.store(true, Ordering::Release);
+        let _ = self.commands.try_send(TrackerCommand::Stop);
+        // ix-board paginates a complete workspace snapshot and the blocking
+        // HTTP client can spend up to 30 seconds per page. Detach the worker
+        // during shutdown; it observes the stop flag and exits after the
+        // current read returns, while the dashboard can quit immediately.
+        drop(self.handle);
+    }
+}
+
+fn read_tracker() -> Result<TrackerState, String> {
+    let source = LinearGraphQlSource::from_env().map_err(|error| error.to_string())?;
+    let mut service = ReadService::open_default(source).map_err(|error| error.to_string())?;
+    let snapshot = service
+        .workspace_snapshot()
+        .map_err(|error| error.to_string())?;
+    let queue = service.next("SWM").map_err(|error| error.to_string())?;
+    Ok(summarize(&snapshot, &queue))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::mpsc, thread, time::Duration};
+
+    use super::*;
+
+    #[test]
+    fn stopping_does_not_wait_for_an_in_flight_linear_read() {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (read_finished_tx, read_finished_rx) = mpsc::channel();
+        let worker = TrackerWorker::spawn_with_read(move || {
+            entered_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+            read_finished_tx.send(()).unwrap();
+            Err("read canceled by test".to_owned())
+        })
+        .unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let (stopped_tx, stopped_rx) = mpsc::channel();
+        let stopper = thread::spawn(move || {
+            worker.stop();
+            stopped_tx.send(()).unwrap();
+        });
+        let returned_before_release = stopped_rx.recv_timeout(Duration::from_millis(200)).is_ok();
+        let _ = release_tx.send(());
+        stopper.join().unwrap();
+        read_finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        assert!(returned_before_release, "stop waited for the Linear read");
+    }
+
+    #[test]
+    fn failed_linear_refreshes_back_off_and_obey_the_configured_cap() {
+        let (calls_tx, calls_rx) = mpsc::channel();
+        let mut call_number = 0;
+        let worker = TrackerWorker::spawn_with_read_and_intervals(
+            move || {
+                call_number += 1;
+                calls_tx.send(call_number).unwrap();
+                Err("Linear rate limited".to_owned())
+            },
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+        )
+        .unwrap();
+
+        assert_eq!(calls_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+        assert!(calls_rx.recv_timeout(Duration::from_millis(120)).is_err());
+        assert_eq!(
+            calls_rx.recv_timeout(Duration::from_millis(200)).unwrap(),
+            2
+        );
+        assert!(calls_rx.recv_timeout(Duration::from_millis(120)).is_err());
+        assert_eq!(
+            calls_rx.recv_timeout(Duration::from_millis(200)).unwrap(),
+            3
+        );
+        worker.stop();
+    }
+
+    #[test]
+    fn manual_refresh_runs_again_after_current_read() {
+        let (calls_tx, calls_rx) = mpsc::channel();
+        let mut call_number = 0;
+        let worker = TrackerWorker::spawn_with_read(move || {
+            call_number += 1;
+            calls_tx.send(call_number).unwrap();
+            Err("offline".to_owned())
+        })
+        .unwrap();
+
+        assert_eq!(calls_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 1);
+        worker.refresh_now();
+        assert_eq!(calls_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 2);
+        worker.stop();
+    }
+}
