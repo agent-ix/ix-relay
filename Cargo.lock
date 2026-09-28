@@ -1111,7 +1111,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 [[package]]
 name = "ix-board"
 version = "0.1.0"
-source = "git+https://github.com/agent-ix/ix-board?rev=e344e5da49d0a47d9d9e40e3d441b02a27253adb#e344e5da49d0a47d9d9e40e3d441b02a27253adb"
+source = "git+https://github.com/agent-ix/ix-board?rev=29a12f5951f1634dabd654495ed44102eee312f5#29a12f5951f1634dabd654495ed44102eee312f5"
 dependencies = [
  "clap",
  "ix-cli-kit",
@@ -2532,7 +2532,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
