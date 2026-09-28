@@ -22,6 +22,8 @@ const BORDER: Color = Color::Rgb(42, 46, 53); // Cloud Command #2a2e35
 const SUCCESS: Color = Color::Rgb(87, 201, 138); // Cloud Command #57c98a
 const WARNING: Color = Color::Rgb(224, 161, 92); // Cloud Command #e0a15c
 const ERROR: Color = Color::Rgb(240, 163, 163); // Cloud Command #f0a3a3
+const MAX_BLOCKERS_IN_LINE: usize = 3;
+const MAX_BLOCKER_ID_CHARS: usize = 24;
 
 /// Renders only the current lead's assigned team and project tracker state.
 pub fn render(frame: &mut Frame, app: &App, now: Instant) {
@@ -222,9 +224,22 @@ fn ticket_line(label: &str, ticket: &TicketSummary) -> Line<'static> {
 fn blocker_line(blockers: &BlockerState) -> String {
     match blockers {
         BlockerState::Unblocked => "no blockers".to_owned(),
-        BlockerState::Blocked(ids) => format!("blocked by {}", ids.join(", ")),
-        BlockerState::Unknown(ids) => format!("blockers unknown: {}", ids.join(", ")),
+        BlockerState::Blocked(ids) => format!("blocked by {}", blocker_ids_line(ids)),
+        BlockerState::Unknown(ids) => format!("blockers unknown: {}", blocker_ids_line(ids)),
     }
+}
+
+fn blocker_ids_line(ids: &[String]) -> String {
+    let mut labels: Vec<_> = ids
+        .iter()
+        .take(MAX_BLOCKERS_IN_LINE)
+        .map(|id| display_text(id, MAX_BLOCKER_ID_CHARS))
+        .collect();
+    let omitted = ids.len().saturating_sub(MAX_BLOCKERS_IN_LINE);
+    if omitted > 0 {
+        labels.push(format!("+{omitted} more"));
+    }
+    labels.join(", ")
 }
 
 fn lane_health(app: &App, now: Instant) -> String {
@@ -236,6 +251,13 @@ fn lane_health(app: &App, now: Instant) -> String {
     };
     if tracker.projects.iter().any(|project| !project.available) {
         return "UNKNOWN · assigned project missing".to_owned();
+    }
+    if tracker
+        .current
+        .iter()
+        .any(|ticket| matches!(ticket.blockers, BlockerState::Unknown(_)))
+    {
+        return "UNKNOWN · open ticket blocker data missing".to_owned();
     }
     if tracker
         .current
@@ -376,5 +398,66 @@ mod tests {
         assert!(content.contains("ix-board"));
         assert!(!content.contains("session"));
         assert!(!content.contains("registrations"));
+    }
+
+    /// Tracing: SWM-21 AC-3 (terminal-safe bounded blocker identifiers).
+    #[test]
+    fn blocker_identifiers_are_sanitized_and_bounded_before_rendering() {
+        let ids = vec![
+            "SWM-1\u{1b}[2J\u{202e}".to_owned(),
+            "A".repeat(80),
+            "SWM-3".to_owned(),
+            "SWM-4".to_owned(),
+        ];
+        let line = blocker_line(&BlockerState::Blocked(ids));
+        assert!(!line.contains('\u{1b}'));
+        assert!(!line.contains('\u{202e}'));
+        assert!(line.contains("SWM-1�[2J�"));
+        assert!(line.contains(&"A".repeat(MAX_BLOCKER_ID_CHARS)));
+        assert!(line.ends_with("+1 more"));
+    }
+
+    /// Tracing: SWM-21 AC-3 (missing dependency data cannot imply lane progress).
+    #[test]
+    fn unknown_blocker_state_makes_aggregate_lane_signal_unknown() {
+        let now = Instant::now();
+        let mut app = App {
+            lead_name: "swm-lead".into(),
+            ..App::default()
+        };
+        app.tracker.success(
+            TrackerState {
+                projects: vec![
+                    ProjectSummary {
+                        name: "ix-board".into(),
+                        status: "Started".into(),
+                        active_count: 1,
+                        done_count: 0,
+                        available: true,
+                    },
+                    ProjectSummary {
+                        name: "ix-projects".into(),
+                        status: "Started".into(),
+                        active_count: 0,
+                        done_count: 0,
+                        available: true,
+                    },
+                ],
+                current: vec![TicketSummary {
+                    identifier: "SWM-21".into(),
+                    title: "Unknown prerequisite".into(),
+                    project: "ix-board".into(),
+                    state: "Coding".into(),
+                    priority: "High".into(),
+                    blockers: BlockerState::Unknown(vec!["unknown-id".into()]),
+                }],
+                next: None,
+            },
+            now,
+        );
+
+        let content = rendered(&app, 120, 30, now);
+        assert!(content.contains("Lane signal: UNKNOWN"));
+        assert!(content.contains("blockers unknown: unknown-id"));
     }
 }
