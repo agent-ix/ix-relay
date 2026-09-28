@@ -64,8 +64,10 @@ pub struct HerdrAgent {
 /// Current bus registrations and the most recent retained message entries.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BusState {
-    /// Registered team leads, sorted by newest registration first.
+    /// Registered team leads, sorted by their bus name as returned by `Relay::agents`.
     pub registrations: Vec<BusAgent>,
+    /// Unreadable registration records returned by the bus store.
+    pub skipped_registrations: Vec<String>,
     /// Recent messages, oldest first within the retained display window.
     pub messages: Vec<BusMessage>,
 }
@@ -429,5 +431,12 @@ mod tests {
     #[test]
     fn display_text_strips_controls_and_bounds_length() {
         assert_eq!(display_text("hi\u{1b}[31mthere\nagain", 8), "hi�[31mt");
+    }
+
+    #[test]
+    fn registration_staleness_handles_old_and_future_timestamps() {
+        assert!(registration_is_stale(1_000, 92_000));
+        assert!(!registration_is_stale(10_000, 10_000));
+        assert!(!registration_is_stale(20_000, 10_000));
     }
 }

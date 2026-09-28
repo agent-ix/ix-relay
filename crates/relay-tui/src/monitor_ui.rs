@@ -19,9 +19,9 @@ use crate::monitor::{App, BusState, HerdrState, display_text, registration_is_st
 pub fn render(frame: &mut Frame, app: &App, now: Instant) {
     let [header, current, body, footer] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(2),
+        Constraint::Length(3),
         Constraint::Min(5),
-        Constraint::Length(2),
+        Constraint::Length(3),
     ])
     .areas(frame.area());
 
@@ -39,34 +39,46 @@ pub fn render(frame: &mut Frame, app: &App, now: Instant) {
 }
 
 fn render_current(frame: &mut Frame, state: Option<&HerdrState>, area: ratatui::layout::Rect) {
-    let text = state.and_then(|state| state.current.as_ref()).map_or_else(
-        || {
-            "Current pane: unavailable (HERDR_PANE_ID missing or pane absent from snapshot)"
-                .to_owned()
-        },
-        |pane| {
-            let location = [pane.workspace.as_deref(), pane.tab.as_deref()]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join("/");
-            let title = pane.terminal_title.as_deref().unwrap_or("untitled");
-            let agent = pane.agent.as_deref().unwrap_or("no agent");
-            let session = pane.session.as_deref().unwrap_or("no session id");
-            format!(
-                "Current pane: {} {} · {} · {} · {} · {} · {}",
-                pane.pane_id,
-                if location.is_empty() { "" } else { "@" },
-                location,
-                display_text(title, 48),
-                agent,
-                display_text(session, 20),
-                pane.status
-            )
-        },
-    );
+    let lines = state
+        .and_then(|state| state.current.as_ref())
+        .map_or_else(
+            || {
+                vec![
+                    Line::from(
+                        "Current pane: unavailable (HERDR_PANE_ID missing or pane absent from snapshot)",
+                    ),
+                    Line::from("Session and activity unavailable"),
+                ]
+            },
+            |pane| {
+                let location = [pane.workspace.as_deref(), pane.tab.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .map(|part| display_text(part, 16))
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let title = pane.terminal_title.as_deref().unwrap_or("untitled");
+                let agent = pane.agent.as_deref().unwrap_or("no agent");
+                let session = pane.session.as_deref().unwrap_or("no session id");
+                vec![
+                    Line::from(format!(
+                        "Current: {} {} · {} · {}",
+                        display_text(&pane.pane_id, 16),
+                        if location.is_empty() { "" } else { "@" },
+                        location,
+                        display_text(&pane.status, 10)
+                    )),
+                    Line::from(format!(
+                        "Session: {} {} · {}",
+                        display_text(agent, 12),
+                        display_text(session, 16),
+                        display_text(title, 32)
+                    )),
+                ]
+            },
+        );
     frame.render_widget(
-        Paragraph::new(text)
+        Paragraph::new(lines)
             .wrap(Wrap { trim: true })
             .block(Block::default().borders(Borders::BOTTOM)),
         area,
@@ -165,11 +177,10 @@ fn render_bus(frame: &mut Frame, state: Option<&BusState>, area: ratatui::layout
             Row::new(["Lead", "Kind", "Machine", "Herdr place", "Seen"])
                 .style(Style::default().add_modifier(Modifier::BOLD)),
         )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Relay registrations"),
-        ),
+        .block(Block::default().borders(Borders::ALL).title(format!(
+            "Relay registrations ({} unreadable)",
+            state.map_or(0, |bus| bus.skipped_registrations.len())
+        ))),
         registrations_area,
     );
 
@@ -201,9 +212,28 @@ fn render_footer(frame: &mut Frame, app: &App, now: Instant, area: ratatui::layo
     let herdr_state = source_label("Herdr", &app.herdr, now);
     let bus_state = source_label("Bus", &app.bus, now);
     let notes = "Collaboration subagents appear only if registered in Herdr/relay.";
+    let partial = app
+        .bus
+        .value
+        .as_ref()
+        .filter(|bus| !bus.skipped_registrations.is_empty())
+        .map(|bus| {
+            format!(
+                "Bus partial: {} unreadable registration(s): {}",
+                bus.skipped_registrations.len(),
+                bus.skipped_registrations
+                    .iter()
+                    .take(2)
+                    .map(|label| display_text(label, 48))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        })
+        .unwrap_or_default();
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(format!("{herdr_state}  |  {bus_state}")),
+            Line::from(partial),
             Line::from(notes),
         ])
         .style(Style::default().fg(Color::Gray))
@@ -280,6 +310,7 @@ mod tests {
                     place: Some("SWM/build".into()),
                     ..BusAgent::default()
                 }],
+                skipped_registrations: vec!["bad-entry: invalid JSON".into()],
                 messages: vec![BusMessage {
                     from: "swm-lead".into(),
                     text: "starting first draft".into(),
@@ -299,12 +330,49 @@ mod tests {
             .chunks(width)
             .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect::<String>();
-        assert!(content.contains("Current pane: w1:p2"));
+        assert!(content.contains("Current: w1:p2"));
         assert!(content.contains("session-7"));
         assert!(content.contains("Implement monitor"));
         assert!(content.contains("swm-lead"));
         assert!(content.contains("STALE"));
+        assert!(content.contains("unreadable registration(s)"));
         assert!(content.contains("starting first draft"));
         assert!(content.contains("unavailable: Redis unavailable"));
+    }
+
+    #[test]
+    fn current_pane_herdr_fields_are_sanitized_before_rendering() {
+        let now = Instant::now();
+        let mut app = App::default();
+        app.herdr.success(
+            HerdrState {
+                current: Some(CurrentPane {
+                    pane_id: "w1:p2\u{1b}[2J".into(),
+                    workspace: Some("SWM\u{202e}fake".into()),
+                    tab: Some("build\nforged".into()),
+                    terminal_title: Some("safe title".into()),
+                    agent: Some("codex\u{1b}[31m".into()),
+                    session: Some("session-7".into()),
+                    status: "working\u{202e}blocked".into(),
+                }),
+                agents: Vec::new(),
+            },
+            now,
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 14)).unwrap();
+        terminal.draw(|frame| render(frame, &app, now)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let width = usize::from(buffer.area.width);
+        let content = buffer
+            .content()
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<String>();
+        assert!(!content.contains('\u{1b}'));
+        assert!(!content.contains('\u{202e}'));
+        assert!(content.contains("w1:p2"));
+        assert!(content.contains("SWM"));
+        assert!(content.contains("working"));
     }
 }
