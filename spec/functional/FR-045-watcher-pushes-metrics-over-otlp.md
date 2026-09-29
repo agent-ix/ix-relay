@@ -196,6 +196,27 @@ exports.
 | `ix.relay.hook.failures.recent` | gauge | `{failure}` | stage, error_kind | Hook failures of this machine still in the capped `health:hooks` stream that happened since the watcher started. A gauge, not a counter: it falls when the stream drops old entries. |
 | `ix.relay.watcher.tick.duration` | histogram | `s` | none | How long each watcher tick took, buckets 5 ms to 10 s, since the watcher started. |
 | `ix.relay.registrations` | gauge | `{registration}` | machine | Leads registered on this machine. |
+| `ix.relay.watcher.health_snapshot.read_failures` | sum | `{failure}` | snapshot | Failed reads used to build the relay-health snapshot, cumulative since this watcher started; `snapshot` is `lead_overviews` or `hook_health_newest`. |
+
+The health-read failure sum starts at zero for both `snapshot` values and is
+monotonic for the lifetime of this watcher process; it resets when the watcher
+restarts and is not persisted. Each failed `lead_overviews` result for a local
+lead counts once (including a per-lead Redis error such as a wrong-type queue
+key); a top-level failure of the `lead_overviews` read counts once. A failed
+`hook_health_newest` read counts once. These are counts of read results, not
+outage episodes, failed fields, skipped entries or ticks: a successful read
+with malformed hook records does not count as a read failure because that
+reader intentionally skips malformed entries. The `snapshot` attribute has
+exactly the two values shown above and is the only attribute on this
+instrument, so at most two series are emitted. The metric has no machine,
+host, lead, pane, Redis key, error text or other secret or high-cardinality
+attribute; the collector's `host.name` resource remains as already specified.
+Each push includes both cumulative points, including zero values, and a later
+successful push reports failures accumulated while earlier reads failed.
+
+**SWM-5 scope:** Linear SWM-5 has been respecified to match this requirement:
+export Redis health-snapshot read failures through FR-045's existing OTLP push
+path. This metric adds no Prometheus pull `/metrics` endpoint.
 
 Not in phase 1: `ix.relay.inflight.batches`, `ix.relay.messages` outcomes `sent` and `denied` (a count from the log
 stream would need a reader of its own), `ix.relay.delivery.latency` (send to
@@ -253,6 +274,7 @@ acknowledgement needs a send time per message that the watcher does not keep), a
 | FR-045-AC-25 | On an injected resolver: a push after every address failed to connect makes another lookup with no time passed; a push whose deadline ended before an address was tried, twice, makes one lookup in all and leaves the cache in place. | Test |
 | FR-045-AC-26 | On an injected resolver: a lookup that failed or returned no address is not cached and is repeated on the next push; at the end of the 5 minutes a failed or empty lookup leaves the expired addresses in use, the push succeeds, and the next push looks up again. | Test |
 | FR-045-AC-27 | A lookup that takes longer than the whole request budget still lets the push succeed; a resolver that returns 6 addresses leaves 4 in use, in the order returned. | Test |
+| FR-045-AC-28 | Given a local lead whose queue overview read returns a Redis error, including one lead with a wrong-type key among otherwise readable leads, the next OTLP push increments only `snapshot=lead_overviews` once per failed lead and preserves the other leads' gauges; a failed `hook_health_newest` read increments only `snapshot=hook_health_newest` once; one whole-read connection error counts once for that read source; malformed entries in a successful hook read do not increment either counter; repeated failed pushes accumulate, a recovered read adds nothing, and both zero-valued points are present before any failure and on every later push. The sum is monotonic from zero for one watcher process and resets on process restart, uses `{failure}`, and carries only the bounded `snapshot` attribute with values `lead_overviews` and `hook_health_newest`; no host, machine, lead, key, error, credential or other high-cardinality value is an attribute. | Test |
 
 ## Dependencies
 
