@@ -69,6 +69,7 @@ struct Active {
     stats: relay::Stats,
     started_unix_nanos: u64,
     started_ms: i64,
+    read_failures: relay::ReadFailures,
     /// A failed read of the store's health data is logged once per episode.
     read_failed_reported: bool,
 }
@@ -211,6 +212,7 @@ impl Publisher {
                 stats: relay::Stats::default(),
                 started_unix_nanos: unix_nanos(),
                 started_ms: i64::try_from(unix_nanos() / 1_000_000).unwrap_or(0),
+                read_failures: relay::ReadFailures::default(),
                 read_failed_reported: false,
             }),
             status,
@@ -279,6 +281,7 @@ impl Publisher {
             panes::fill(&mut registry, panes);
         }
         health.fill(&mut registry, &a.machine);
+        a.read_failures.fill(&mut registry);
         a.stats.fill(&mut registry);
         registry
     }
@@ -306,7 +309,16 @@ impl Publisher {
             return;
         }
         a.next_due = Some(next_due_after(now, a.interval));
-        let (health, failed) = relay::read(relay, &a.machine, regs, a.started_ms, now_ms);
+        let (health, read_failures, failed) =
+            relay::read(relay, &a.machine, regs, a.started_ms, now_ms);
+        a.read_failures.lead_overviews = a
+            .read_failures
+            .lead_overviews
+            .saturating_add(read_failures.lead_overviews);
+        a.read_failures.hook_health_newest = a
+            .read_failures
+            .hook_health_newest
+            .saturating_add(read_failures.hook_health_newest);
         match failed {
             Some(e) if !std::mem::replace(&mut a.read_failed_reported, true) => log(format!(
                 "cannot read the relay's health for the metrics push ({e}); those series are \

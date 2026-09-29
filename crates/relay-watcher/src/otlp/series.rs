@@ -95,6 +95,14 @@ pub static REGISTRATIONS: Instrument = Instrument {
     kind: Kind::Gauge,
 };
 
+/// Failed reads used to build the watcher's relay-health snapshot, by bounded source.
+pub static HEALTH_SNAPSHOT_READ_FAILURES: Instrument = Instrument {
+    name: "ix.relay.watcher.health_snapshot.read_failures",
+    unit: "{failure}",
+    description: "Failed reads used to build the relay-health snapshot since this watcher started, by snapshot source.",
+    kind: Kind::Sum,
+};
+
 /// Every instrument the watcher emits, with the attribute keys each carries.
 /// The spec (FR-045) lists the same, and tests compare the two and what a full
 /// push actually exports.
@@ -122,4 +130,5 @@ pub(crate) const CATALOGUE: &[(&Instrument, &[&str])] = &[
     (&HOOK_FAILURES, &["stage", "error_kind"]),
     (&TICK_DURATION, &[]),
     (&REGISTRATIONS, &["machine"]),
+    (&HEALTH_SNAPSHOT_READ_FAILURES, &["snapshot"]),
 ];

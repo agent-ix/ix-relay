@@ -1430,6 +1430,8 @@ impl RelayInbox<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use relay_core::{Message, Target};
 
     use super::*;
@@ -3914,6 +3916,217 @@ mod tests {
                 !body.contains(name),
                 "{name} was sent after a failed read: {body}"
             );
+        }
+    }
+
+    /// A wrong-type key is one failed lead read, leaves its siblings' gauges intact,
+    /// malformed successful hook records do not count, totals accumulate through a
+    /// recovery, and a fresh publisher starts at zero. Redis lane.
+    ///
+    /// Tracing: TC-045-28
+    /// ACs: FR-045-AC-28
+    #[test]
+    fn tc_045_28_health_snapshot_read_failures_are_bounded_cumulative_and_reset() {
+        let Some(url) = test_url() else {
+            eprintln!("skipping: IX_RELAY_TEST_URL unset (run `make test-redis`)");
+            return;
+        };
+        let test = "health-snapshot-failures";
+        let prefix = test_prefix(test);
+        let mut relay = test_relay(test).unwrap();
+        for (index, name) in ["a-lead", "b-lead", "c-lead"].into_iter().enumerate() {
+            register_at(
+                &mut relay,
+                name,
+                "node-a",
+                Some(&format!("w1:p{index}")),
+                Some("s1"),
+                now_ms(),
+            );
+        }
+        let hooks = format!("{prefix}health:hooks");
+        assert!(
+            raw_command(
+                &url,
+                &[
+                    "XADD",
+                    &hooks,
+                    "*",
+                    "machine",
+                    "node-a",
+                    "lead",
+                    "a-lead",
+                    "rec",
+                    "{{bad json"
+                ]
+            )
+            .starts_with('$')
+        );
+
+        let herdr = CountingHerdr::new(AgentStatus::Idle, "s1");
+        let node_a: MachineName = "node-a".parse().unwrap();
+        let (publisher, bodies) = recording_publisher(&node_a, Duration::ZERO);
+        let mut state = WatcherState {
+            otlp: publisher,
+            ..WatcherState::default()
+        };
+        let push = |relay: &mut Relay,
+                    state: &mut WatcherState,
+                    bodies: &std::sync::mpsc::Receiver<Vec<u8>>| {
+            tick(relay, &herdr, &node_a, state, &mut |_| {}).unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bodies.recv().unwrap()).unwrap()
+        };
+        let initial = push(&mut relay, &mut state, &bodies);
+        assert_eq!(
+            read_failure_counts(&initial),
+            BTreeMap::from([
+                ("hook_health_newest".to_owned(), "0".to_owned()),
+                ("lead_overviews".to_owned(), "0".to_owned()),
+            ])
+        );
+
+        let inbox = format!("{prefix}inbox:b-lead");
+        assert!(matches!(
+            raw_command(&url, &["DEL", &inbox]).as_str(),
+            ":0" | ":1"
+        ));
+        assert_eq!(raw_command(&url, &["SET", &inbox, "wrong type"]), "+OK");
+        let failed = push(&mut relay, &mut state, &bodies);
+        assert_eq!(
+            read_failure_counts(&failed),
+            BTreeMap::from([
+                ("hook_health_newest".to_owned(), "0".to_owned()),
+                ("lead_overviews".to_owned(), "1".to_owned()),
+            ])
+        );
+        let exported = serde_json::to_string(&failed).unwrap();
+        assert!(exported.contains("a-lead") && exported.contains("c-lead"));
+        assert!(!exported.contains("b-lead"));
+        assert!(!exported.contains("wrong type"));
+        assert!(!exported.contains("bad json"));
+
+        let failed_again = push(&mut relay, &mut state, &bodies);
+        assert_eq!(
+            read_failure_counts(&failed_again),
+            BTreeMap::from([
+                ("hook_health_newest".to_owned(), "0".to_owned()),
+                ("lead_overviews".to_owned(), "2".to_owned()),
+            ])
+        );
+        assert!(matches!(
+            raw_command(&url, &["DEL", &inbox]).as_str(),
+            ":0" | ":1"
+        ));
+        let recovered = push(&mut relay, &mut state, &bodies);
+        assert_eq!(
+            read_failure_counts(&recovered),
+            BTreeMap::from([
+                ("hook_health_newest".to_owned(), "0".to_owned()),
+                ("lead_overviews".to_owned(), "2".to_owned()),
+            ])
+        );
+
+        let (publisher, restarted_bodies) = recording_publisher(&node_a, Duration::ZERO);
+        state.otlp = publisher;
+        let restarted = push(&mut relay, &mut state, &restarted_bodies);
+        assert_eq!(
+            read_failure_counts(&restarted),
+            BTreeMap::from([
+                ("hook_health_newest".to_owned(), "0".to_owned()),
+                ("lead_overviews".to_owned(), "0".to_owned()),
+            ])
+        );
+    }
+
+    fn read_failure_counts(body: &serde_json::Value) -> BTreeMap<String, String> {
+        let metrics = body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+            .as_array()
+            .unwrap();
+        let metric = metrics
+            .iter()
+            .find(|metric| metric["name"] == "ix.relay.watcher.health_snapshot.read_failures")
+            .unwrap();
+        assert_eq!(metric["unit"], "{failure}");
+        assert_eq!(metric["sum"]["isMonotonic"], true);
+        let points = metric["sum"]["dataPoints"].as_array().unwrap();
+        assert_eq!(points.len(), 2, "both bounded source points are emitted");
+        let mut counts = BTreeMap::new();
+        for point in points {
+            let attrs = point["attributes"].as_array().unwrap();
+            assert_eq!(attrs.len(), 1, "only the bounded source is an attribute");
+            let source = attrs[0]["value"]["stringValue"].as_str().unwrap();
+            assert!(matches!(source, "lead_overviews" | "hook_health_newest"));
+            counts.insert(
+                source.to_owned(),
+                point["asInt"].as_str().unwrap().to_owned(),
+            );
+        }
+        counts
+    }
+
+    /// Whole-source failures count once for their bounded source while a successful
+    /// sibling source retains its readings. Redis lane.
+    ///
+    /// Tracing: TC-045-28
+    /// ACs: FR-045-AC-28
+    #[test]
+    fn tc_045_28_whole_health_source_failures_count_once() {
+        let Some(url) = test_url() else {
+            eprintln!("skipping: IX_RELAY_TEST_URL unset (run `make test-redis`)");
+            return;
+        };
+        for (test, fault_command, failed_source) in [
+            (
+                "health-lead-source-failure",
+                Some("LINDEX"),
+                "lead_overviews",
+            ),
+            ("health-hook-source-failure", None, "hook_health_newest"),
+        ] {
+            let mut relay = test_relay(test).unwrap();
+            register_at(
+                &mut relay,
+                "a-lead",
+                "node-a",
+                Some("w1:p0"),
+                Some("s1"),
+                now_ms(),
+            );
+            let mut via = if let Some(fault_command) = fault_command {
+                let proxy = FaultProxy::start(&url, move |name| {
+                    if name == fault_command {
+                        Fault::Cut
+                    } else {
+                        Fault::Forward
+                    }
+                });
+                relay_via(&proxy, test)
+            } else {
+                let key = format!("{}health:hooks", test_prefix(test));
+                let _ = raw_command(&url, &["DEL", &key]);
+                assert_eq!(raw_command(&url, &["SET", &key, "wrong type"]), "+OK");
+                relay
+            };
+            let herdr = CountingHerdr::new(AgentStatus::Idle, "s1");
+            let node_a: MachineName = "node-a".parse().unwrap();
+            let (publisher, bodies) = recording_publisher(&node_a, Duration::ZERO);
+            let mut state = WatcherState {
+                otlp: publisher,
+                ..WatcherState::default()
+            };
+            tick(&mut via, &herdr, &node_a, &mut state, &mut |_| {}).unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bodies.recv().unwrap()).unwrap();
+            let counts = read_failure_counts(&body);
+            assert_eq!(counts.get(failed_source).map(String::as_str), Some("1"));
+            let healthy_source = if failed_source == "lead_overviews" {
+                "hook_health_newest"
+            } else {
+                "lead_overviews"
+            };
+            if healthy_source == "lead_overviews" {
+                assert_eq!(counts.get(healthy_source).map(String::as_str), Some("0"));
+                assert!(body.to_string().contains("a-lead"), "{body}");
+            }
         }
     }
 
