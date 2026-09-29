@@ -214,11 +214,9 @@ attribute; the collector's `host.name` resource remains as already specified.
 Each push includes both cumulative points, including zero values, and a later
 successful push reports failures accumulated while earlier reads failed.
 
-**Scope proposal for SWM-5:** the Linear ticket still describes a Prometheus
-pull endpoint. This spec PR proposes the missing Redis health-snapshot read
-failure signal on FR-045's existing OTLP push path; it does not change the
-ticket or add a pull `/metrics` endpoint. The ticket's scope must be reconciled
-with this proposal before implementation is considered complete.
+**SWM-5 scope:** Linear SWM-5 has been respecified to match this requirement:
+export Redis health-snapshot read failures through FR-045's existing OTLP push
+path. This metric adds no Prometheus pull `/metrics` endpoint.
 
 Not in phase 1: `ix.relay.inflight.batches`, `ix.relay.messages` outcomes `sent` and `denied` (a count from the log
 stream would need a reader of its own), `ix.relay.delivery.latency` (send to
