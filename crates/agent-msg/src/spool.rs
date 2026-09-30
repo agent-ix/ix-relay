@@ -194,6 +194,7 @@ impl ErrorKind {
             | E::InflightUnreadable { .. }
             | E::MoveUnreadable { .. } => Self::Corrupt,
             E::InvalidName { .. } => Self::InvalidName,
+            E::Work(_) => Self::Rejected,
             E::UnknownAgent(_)
             | E::InvalidAddress { .. }
             | E::AmbiguousTarget { .. }

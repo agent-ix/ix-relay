@@ -1,463 +1,646 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Agent-IX
-//! Rendering for the read-only team-leader dashboard.
+//! Compact, scrollable session monitor. Ticket stage and activity stay separate.
 
-use std::time::Instant;
-
+use crate::{
+    monitor::{App, Source, display_text},
+    monitor_tracker::{DashboardView, TicketSummary, summarize},
+};
+use ix_board::{Clock, SystemClock};
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Cell, Paragraph, Row, Table, Wrap},
 };
+use relay_core::work::{AgentWork, WorkStatus};
+use std::time::Instant;
 
-use crate::monitor::{App, display_text, tracker_is_stale};
-use crate::monitor_tracker::{BlockerState, TicketSummary};
+const PRIMARY: Color = Color::Rgb(79, 141, 247);
+const FOREGROUND: Color = Color::Rgb(230, 230, 230);
+const MUTED: Color = Color::Rgb(139, 146, 156);
+const WARNING: Color = Color::Rgb(224, 161, 92);
+const ERROR: Color = Color::Rgb(240, 163, 163);
 
-const PRIMARY: Color = Color::Rgb(79, 141, 247); // Cloud Command #4f8df7
-const FOREGROUND: Color = Color::Rgb(230, 230, 230); // Cloud Command #e6e6e6
-const MUTED: Color = Color::Rgb(139, 146, 156); // Cloud Command #8b929c
-const BORDER: Color = Color::Rgb(42, 46, 53); // Cloud Command #2a2e35
-const SUCCESS: Color = Color::Rgb(87, 201, 138); // Cloud Command #57c98a
-const WARNING: Color = Color::Rgb(224, 161, 92); // Cloud Command #e0a15c
-const ERROR: Color = Color::Rgb(240, 163, 163); // Cloud Command #f0a3a3
-const MAX_BLOCKERS_IN_LINE: usize = 3;
-const MAX_BLOCKER_ID_CHARS: usize = 24;
-
-/// Renders only the current lead's assigned team and project tracker state.
-pub fn render(frame: &mut Frame, app: &App, now: Instant) {
-    let [header, identity, projects, tickets, footer] = Layout::vertical([
+/// Renders one bound session, retaining visibly labeled snapshots on source failure.
+pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
+    let [identity, scope, focus, work, footer] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(3),
-        Constraint::Length(5),
-        Constraint::Min(5),
+        Constraint::Length(2),
+        Constraint::Length(2),
+        Constraint::Min(3),
         Constraint::Length(2),
     ])
     .areas(frame.area());
-
-    frame.render_widget(
-        Paragraph::new("◆  TEAM LEADER DASHBOARD  ·  r refresh  q quit")
-            .style(Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD)),
-        header,
-    );
-    render_identity(frame, app, now, identity);
-    render_projects(frame, app, now, projects);
-    render_tickets(frame, app, now, tickets);
-    render_footer(frame, app, now, footer);
-}
-
-fn render_identity(frame: &mut Frame, app: &App, now: Instant, area: ratatui::layout::Rect) {
-    let health = lane_health(app, now);
-    let health_style = if health.contains("BLOCKED") {
-        Style::default().fg(WARNING).add_modifier(Modifier::BOLD)
-    } else if health == "NEXT TICKET READY" {
-        Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD)
-    } else if health.starts_with("NO READY WORK") {
-        Style::default().fg(WARNING).add_modifier(Modifier::BOLD)
+    let runtime_fresh = fresh(&app.runtime, now, 10);
+    let status = if app.session_ended {
+        "session ended/replaced · restart to rebind"
+    } else if !runtime_fresh {
+        "activity unknown"
     } else {
-        Style::default().fg(MUTED).add_modifier(Modifier::BOLD)
+        app.runtime
+            .value
+            .as_ref()
+            .map_or("activity unknown", |r| activity(&r.status))
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                display_text(&app.lead_name, 40),
+                Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(
+                " · {} · {status}",
+                app.binding.as_ref().map_or("unknown", |b| b.kind.as_str())
+            )),
+        ]))
+        .style(Style::default().fg(FOREGROUND)),
+        identity,
+    );
+    let report = app.report.value.as_ref().and_then(Option::as_ref);
+    let computed = app
+        .tracker
+        .value
+        .as_ref()
+        .zip(report)
+        .map(|(snapshot, report)| summarize(snapshot, report))
+        .transpose();
+    let (view, scope_error) = match computed {
+        Ok(view) => (view.flatten(), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+    let snapshot_old = app.tracker.error.is_some()
+        || app.report.error.is_some()
+        || app.session_ended
+        || app.tracker.value.as_ref().is_some_and(|s| {
+            SystemClock.now_epoch_seconds().saturating_sub(s.fetched_at)
+                >= ix_board::CACHE_TTL_SECONDS
+        });
+    let summary = view.as_ref().map_or_else(
+        || {
+            scope_error.clone().unwrap_or_else(|| {
+                if report.and_then(|r| r.scope.as_ref()).is_none() {
+                    "Scope: not reported".into()
+                } else {
+                    "Scope: waiting for Linear".into()
+                }
+            })
+        },
+        |v| {
+            let stage = v
+                .scope
+                .remaining_by_stage
+                .iter()
+                .map(|(stage, count)| format!("{count} {}", display_text(stage, 32)))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            format!(
+                "Scope: {}{}\nTasks: {}/{} done{}{}",
+                v.labels
+                    .iter()
+                    .map(|label| display_text(label, 128))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if snapshot_old { " [last snapshot]" } else { "" },
+                v.scope.done,
+                v.scope.leaf_ids.len(),
+                if stage.is_empty() { "" } else { " · " },
+                stage
+            )
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(summary)
+            .style(Style::default().fg(FOREGROUND))
+            .wrap(Wrap { trim: true }),
+        scope,
+    );
+    let focus_line = report.and_then(|r| r.focus.as_ref()).map_or_else(
+        || "Focus: not reported".into(),
+        |f| {
+            format!(
+                "Focus: {} · reported {} ago",
+                display_text(&f.summary, 512),
+                age_ms(f.reported_at_ms)
+            )
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(focus_line)
+            .style(Style::default().fg(MUTED))
+            .wrap(Wrap { trim: true }),
+        focus,
+    );
+    if let Some(view) = &view {
+        render_work(frame, app, view, work, runtime_fresh);
+    } else {
+        app.row_count = 0;
+        frame.render_widget(Paragraph::new("Ticket/agent assignments unavailable until scope and Linear load.\nNo assignment or focus is inferred from open tickets.").style(Style::default().fg(MUTED)).wrap(Wrap { trim: true }), work);
+    }
+    let linear = app.tracker.value.as_ref().map_or_else(
+        || "Linear: no data".into(),
+        |s| {
+            let seconds = SystemClock
+                .now_epoch_seconds()
+                .saturating_sub(s.fetched_at)
+                .max(0);
+            format!(
+                "Linear: {}{} ago",
+                if seconds >= ix_board::CACHE_TTL_SECONDS {
+                    "stale "
+                } else {
+                    "updated "
+                },
+                duration(seconds)
+            )
+        },
+    );
+    let footer_line = format!(
+        "{linear} · Herdr: {} · Reports: {}",
+        source_age(&app.runtime, now),
+        source_age(&app.report, now)
+    );
+    let errors = [
+        scope_error.as_deref(),
+        app.tracker.error.as_deref(),
+        app.runtime.error.as_deref(),
+        app.report.error.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" · ");
+    let controls = if errors.is_empty() {
+        "↑↓ select · d details · r refresh · q quit".to_owned()
+    } else {
+        display_text(&errors, usize::from(footer.width))
     };
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled("Lead ", Style::default().fg(MUTED)),
-                Span::styled(
-                    display_text(&app.lead_name, 36),
-                    Style::default().fg(WARNING).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("   Team "),
-                Span::styled(
-                    "SWM",
-                    Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("   Projects ix-board · ix-projects"),
-            ]),
-            Line::from(vec![
-                Span::raw("Lane signal: "),
-                Span::styled(health, health_style),
-            ]),
+            Line::from(display_text(&footer_line, usize::from(footer.width))),
+            Line::from(Span::styled(
+                controls,
+                Style::default().fg(if errors.is_empty() { PRIMARY } else { ERROR }),
+            )),
         ])
-        .style(Style::default().fg(FOREGROUND)),
-        area,
+        .style(Style::default().fg(MUTED)),
+        footer,
     );
 }
 
-fn render_projects(frame: &mut Frame, app: &App, now: Instant, area: ratatui::layout::Rect) {
-    let fresh = app
-        .tracker
-        .value
-        .as_ref()
-        .filter(|_| !tracker_is_stale(&app.tracker, now) && app.tracker.error.is_none());
-    let rows: Vec<Row> = ["ix-board", "ix-projects"]
-        .into_iter()
-        .map(|name| {
-            let project =
-                fresh.and_then(|tracker| tracker.projects.iter().find(|p| p.name == name));
-            let values = project.filter(|project| project.available).map_or_else(
-                || {
-                    vec![
-                        name.to_owned(),
-                        "unknown".to_owned(),
-                        "?".to_owned(),
-                        "?".to_owned(),
-                    ]
+fn fresh<T>(source: &Source<T>, now: Instant, max_seconds: u64) -> bool {
+    source.error.is_none()
+        && source
+            .last_success
+            .is_some_and(|last| now.saturating_duration_since(last).as_secs() < max_seconds)
+}
+
+fn source_age<T>(source: &Source<T>, now: Instant) -> String {
+    let age = source.last_success.map_or_else(
+        || "no data".into(),
+        |last| format!("{}s ago", now.saturating_duration_since(last).as_secs()),
+    );
+    if source.error.is_some() {
+        format!("error ({age})")
+    } else {
+        age
+    }
+}
+
+fn duration(seconds: i64) -> String {
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}h", seconds / 3600)
+    }
+}
+
+fn age_ms(timestamp: i64) -> String {
+    duration(
+        SystemClock
+            .now_epoch_seconds()
+            .saturating_sub(timestamp / 1000)
+            .max(0),
+    )
+}
+
+fn activity(status: &str) -> &str {
+    match status {
+        "working" => "working",
+        "blocked" => "waiting for input",
+        "idle" | "done" => "ready for input",
+        _ => "activity unknown",
+    }
+}
+
+fn reported_status(status: WorkStatus) -> &'static str {
+    match status {
+        WorkStatus::Running => "running",
+        WorkStatus::Waiting => "waiting",
+        WorkStatus::Done => "stage done",
+        WorkStatus::Failed => "failed",
+        WorkStatus::Canceled => "canceled",
+    }
+}
+
+fn agent_activity(app: &App, agent: &AgentWork, runtime_fresh: bool) -> String {
+    if app.session_ended {
+        return "last report".into();
+    }
+    if let Some(pane) = &agent.pane {
+        if !runtime_fresh {
+            return "activity unknown".into();
+        }
+        let observed = app.runtime.value.as_ref().and_then(|r| {
+            r.panes
+                .iter()
+                .find(|p| &p.pane == pane && p.session == agent.session)
+        });
+        return observed.map_or_else(
+            || "session unavailable".into(),
+            |p| activity(&p.status).into(),
+        );
+    }
+    format!("reported {}", reported_status(agent.status))
+}
+
+fn render_work(
+    frame: &mut Frame,
+    app: &mut App,
+    view: &DashboardView,
+    area: Rect,
+    runtime_fresh: bool,
+) {
+    let mut rows = Vec::new();
+    let mut tickets = Vec::new();
+    for ticket in &view.tickets {
+        let agents: Vec<Option<&AgentWork>> = if ticket.agents.is_empty() {
+            vec![None]
+        } else {
+            ticket.agents.iter().map(Some).collect()
+        };
+        for agent in agents {
+            let work = format!(
+                "{}{}",
+                if ticket.in_scope {
+                    ""
+                } else {
+                    "OUT OF SCOPE · "
                 },
-                |project| {
-                    vec![
-                        display_text(&project.name, 24),
-                        display_text(&project.status, 18),
-                        project.active_count.to_string(),
-                        project.done_count.to_string(),
-                    ]
+                display_text(&ticket.title, 160)
+            );
+            let agent_cell = agent.map_or_else(
+                || "unassigned\nnot reported".into(),
+                |a| {
+                    format!(
+                        "{}\n{}",
+                        display_text(&a.name, 32),
+                        display_text(&a.role, 32)
+                    )
                 },
             );
-            Row::new(values.into_iter().map(Cell::from))
-        })
-        .collect();
-    frame.render_widget(
-        Table::new(
-            rows,
-            [
-                Constraint::Percentage(36),
-                Constraint::Percentage(30),
-                Constraint::Percentage(17),
-                Constraint::Percentage(17),
-            ],
-        )
-        .header(
-            Row::new(["Project", "Status", "Active", "Done"])
-                .style(Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD)),
-        )
-        .style(Style::default().fg(FOREGROUND))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(BORDER))
-                .title("Assigned projects"),
-        ),
-        area,
-    );
-}
-
-fn render_tickets(frame: &mut Frame, app: &App, now: Instant, area: ratatui::layout::Rect) {
-    let tracker = app
-        .tracker
-        .value
-        .as_ref()
-        .filter(|_| !tracker_is_stale(&app.tracker, now) && app.tracker.error.is_none());
-    let mut lines = Vec::new();
-    if let Some(tracker) = tracker {
-        lines.push(Line::from(format!(
-            "Current open tickets · {}",
-            tracker.current.len()
-        )));
-        if tracker.current.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "No open tickets in ix-board or ix-projects",
-                Style::default().fg(MUTED),
-            )));
-        } else {
-            for ticket in tracker.current.iter().take(max_ticket_lines(area.height)) {
-                lines.push(ticket_line("Current", ticket));
-            }
-            let omitted = tracker
-                .current
-                .len()
-                .saturating_sub(max_ticket_lines(area.height));
-            if omitted > 0 {
-                lines.push(Line::from(Span::styled(
-                    format!("… and {omitted} more open tickets"),
-                    Style::default().fg(MUTED),
-                )));
-            }
+            let activity_cell = agent.map_or_else(
+                || {
+                    if ticket.ready {
+                        "ready in queue".into()
+                    } else {
+                        "not reported".into()
+                    }
+                },
+                |a| {
+                    format!(
+                        "{}\n{} ago",
+                        agent_activity(app, a, runtime_fresh),
+                        age_ms(a.reported_at_ms)
+                    )
+                },
+            );
+            rows.push(
+                Row::new([
+                    Cell::from(format!(
+                        "{}\n{}",
+                        display_text(&ticket.identifier, 20),
+                        display_text(&ticket.state, 20)
+                    )),
+                    Cell::from(work),
+                    Cell::from(agent_cell),
+                    Cell::from(activity_cell),
+                ])
+                .height(2)
+                .style(Style::default().fg(if ticket.in_scope { FOREGROUND } else { WARNING })),
+            );
+            tickets.push(ticket);
         }
-        if let Some(ticket) = tracker.next.as_ref() {
-            lines.push(ticket_line("Next", ticket));
-        } else {
-            lines.push(Line::from(Span::styled(
-                "Next: no ready project ticket",
-                Style::default().fg(MUTED),
-            )));
-        }
-    } else {
-        lines.push(Line::from(
-            "Tickets · unknown while Linear data is stale or unavailable",
-        ));
     }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: true })
-            .style(Style::default().fg(FOREGROUND))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(BORDER))
-                    .title("Current work and next ready ticket"),
-            ),
-        area,
-    );
-}
-
-fn max_ticket_lines(height: u16) -> usize {
-    usize::from(height.saturating_sub(5).max(1))
-}
-
-fn ticket_line(label: &str, ticket: &TicketSummary) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{label}: "), Style::default().fg(PRIMARY)),
-        Span::styled(
-            display_text(&ticket.identifier, 16),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!(
-            " · {} · {} · {} · {}",
-            display_text(&ticket.state, 14),
-            display_text(&ticket.project, 18),
-            ticket.priority,
-            blocker_line(&ticket.blockers)
-        )),
-        Span::raw(format!(" · {}", display_text(&ticket.title, 64))),
+    app.row_count = rows.len();
+    let selected = app
+        .table
+        .selected()
+        .unwrap_or(0)
+        .min(rows.len().saturating_sub(1));
+    app.table.select((!rows.is_empty()).then_some(selected));
+    let compact_details = app.details && area.height < 12;
+    let [table_area, detail_area] = Layout::vertical([
+        Constraint::Min(if compact_details { 0 } else { 3 }),
+        Constraint::Length(if compact_details {
+            area.height
+        } else if app.details {
+            area.height.saturating_sub(5).min(9)
+        } else {
+            0
+        }),
     ])
-}
-
-fn blocker_line(blockers: &BlockerState) -> String {
-    match blockers {
-        BlockerState::Unblocked => "no blockers".to_owned(),
-        BlockerState::Blocked(ids) => format!("blocked by {}", blocker_ids_line(ids)),
-        BlockerState::Unknown(ids) => format!("blockers unknown: {}", blocker_ids_line(ids)),
-    }
-}
-
-fn blocker_ids_line(ids: &[String]) -> String {
-    let mut labels: Vec<_> = ids
-        .iter()
-        .take(MAX_BLOCKERS_IN_LINE)
-        .map(|id| display_text(id, MAX_BLOCKER_ID_CHARS))
-        .collect();
-    let omitted = ids.len().saturating_sub(MAX_BLOCKERS_IN_LINE);
-    if omitted > 0 {
-        labels.push(format!("+{omitted} more"));
-    }
-    labels.join(", ")
-}
-
-fn lane_health(app: &App, now: Instant) -> String {
-    if tracker_is_stale(&app.tracker, now) || app.tracker.error.is_some() {
-        return "UNKNOWN · tracker data stale or unavailable".to_owned();
-    }
-    let Some(tracker) = app.tracker.value.as_ref() else {
-        return "UNKNOWN · waiting for tracker data".to_owned();
-    };
-    if tracker.projects.iter().any(|project| !project.available) {
-        return "UNKNOWN · assigned project missing".to_owned();
-    }
-    if tracker
-        .current
-        .iter()
-        .any(|ticket| matches!(ticket.blockers, BlockerState::Unknown(_)))
-    {
-        return "UNKNOWN · open ticket blocker data missing".to_owned();
-    }
-    if tracker
-        .current
-        .iter()
-        .any(|ticket| matches!(ticket.blockers, BlockerState::Blocked(_)))
-    {
-        return "OPEN WORK BLOCKED".to_owned();
-    }
-    if tracker.next.is_some() {
-        "NEXT TICKET READY".to_owned()
-    } else {
-        "NO READY WORK".to_owned()
-    }
-}
-
-fn render_footer(frame: &mut Frame, app: &App, now: Instant, area: ratatui::layout::Rect) {
-    let freshness = match app.tracker.last_success {
-        Some(last) if !tracker_is_stale(&app.tracker, now) => {
-            format!(
-                "Linear: fresh {}s ago",
-                now.saturating_duration_since(last).as_secs()
-            )
-        }
-        Some(last) => format!(
-            "Linear: STALE {}s ago",
-            now.saturating_duration_since(last).as_secs()
-        ),
-        None => "Linear: no data".to_owned(),
-    };
-    let error = app
-        .tracker
-        .error
-        .as_deref()
-        .map_or_else(String::new, |error| {
-            format!(" · {}", display_text(error, 72))
-        });
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(freshness, Style::default().fg(MUTED)),
-            Span::styled(error, Style::default().fg(ERROR)),
-        ]))
-        .wrap(Wrap { trim: true }),
-        area,
+    .areas(area);
+    let title = format!(
+        "Tickets / agents · {} rows · {} ready",
+        rows.len(),
+        view.ready_count
     );
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(12),
+            Constraint::Min(12),
+            Constraint::Length(16),
+            Constraint::Length(19),
+        ],
+    )
+    .header(
+        Row::new(["Ticket/stage", "Work", "Agent/role", "Activity"])
+            .style(Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD)),
+    )
+    .block(Block::default().title(Line::from(Span::styled(
+        title,
+        Style::default().fg(PRIMARY),
+    ))))
+    .row_highlight_style(Style::default().bg(Color::Rgb(31, 41, 55)))
+    .highlight_symbol("› ");
+    frame.render_stateful_widget(table, table_area, &mut app.table);
+    if rows_empty(view) {
+        frame.render_widget(
+            Paragraph::new("No open tickets or agent assignments in this scope.")
+                .style(Style::default().fg(MUTED)),
+            table_area,
+        );
+    }
+    if app.details {
+        let text = tickets.get(selected).map_or_else(
+            || "No ticket selected".into(),
+            |ticket| ticket_details(view, ticket),
+        );
+        frame.render_widget(
+            Paragraph::new(text)
+                .style(Style::default().fg(FOREGROUND))
+                .wrap(Wrap { trim: true })
+                .block(
+                    Block::default().title(Span::styled("Details", Style::default().fg(PRIMARY))),
+                ),
+            detail_area,
+        );
+    }
+}
+
+fn rows_empty(view: &DashboardView) -> bool {
+    view.tickets.is_empty()
+}
+
+fn ticket_details(view: &DashboardView, ticket: &TicketSummary) -> String {
+    let projects = view
+        .projects
+        .iter()
+        .map(|p| format!("{} {}/{} done", p.name, p.done, p.total))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let blockers = if ticket.blockers.is_empty() {
+        "none".into()
+    } else {
+        ticket
+            .blockers
+            .iter()
+            .map(|id| display_text(id, 80))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "{}: {}\nProject: {} · Stage: {} · Priority: {}\nBlockers: {}\n{}",
+        display_text(&ticket.identifier, 32),
+        display_text(&ticket.title, 512),
+        display_text(&ticket.project, 128),
+        display_text(&ticket.state, 64),
+        ticket
+            .priority
+            .to_string()
+            .parse::<ix_board::ProjectPriority>()
+            .map_or_else(
+                |_| ticket.priority.to_string(),
+                |priority| priority.label().to_owned()
+            ),
+        blockers,
+        display_text(&projects, 512)
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
-    use ratatui::{Terminal, backend::TestBackend};
-
     use super::*;
-    use crate::monitor_tracker::{ProjectSummary, TrackerState};
+    use ix_board::{
+        Issue, IssueId, Project, ProjectId, TeamKey, WorkflowStateType, WorkspaceSnapshot,
+    };
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
+    };
+    use relay_core::work::{WorkBinding, WorkReport, WorkScope};
 
-    fn rendered(app: &App, width: u16, height: u16, now: Instant) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| render(frame, app, now)).unwrap();
-        let buffer = terminal.backend().buffer().clone();
-        let width = usize::from(buffer.area.width);
-        buffer
-            .content()
-            .chunks(width)
-            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
-            .collect()
-    }
-
-    #[test]
-    fn dashboard_focuses_on_assigned_projects_work_and_freshness() {
+    fn app() -> App {
         let now = Instant::now();
+        let binding = WorkBinding {
+            machine: "luna".parse().unwrap(),
+            pane: "w1:p1".parse().unwrap(),
+            session: "session-a".parse().unwrap(),
+            process_id: 42,
+            kind: "codex".into(),
+            address: "luna:SWM:code".into(),
+        };
+        let project = Project {
+            id: ProjectId("project".into()),
+            identifier: None,
+            name: "Product".into(),
+            description: String::new(),
+            content: None,
+            status: "Started".into(),
+            priority: 2,
+            sort_order: 0.0,
+            team_keys: vec![TeamKey("SWM".into())],
+            milestones: vec![],
+            initiatives: vec![],
+        };
+        let issue = |n, category, parent: Option<&str>| Issue {
+            id: IssueId(format!("id-{n}")),
+            identifier: format!("SWM-{n}"),
+            title: "Shared Rust settings and OS credential store".into(),
+            description: None,
+            state: if category == WorkflowStateType::Completed {
+                "Done".into()
+            } else {
+                "Review".into()
+            },
+            state_type: category,
+            parent_id: parent.map(|id| IssueId(id.into())),
+            team_key: TeamKey("SWM".into()),
+            project_id: Some(ProjectId("project".into())),
+            priority: 2.0,
+            sort_order: 0.0,
+            blocked_by: vec![],
+        };
         let mut app = App {
+            binding: Some(binding.clone()),
             lead_name: "luna:SWM:code".into(),
-            ..App::default()
+            ..Default::default()
         };
         app.tracker.success(
-            TrackerState {
-                projects: vec![
-                    ProjectSummary {
-                        name: "ix-board".into(),
-                        status: "Started".into(),
-                        active_count: 2,
-                        done_count: 1,
-                        available: true,
-                    },
-                    ProjectSummary {
-                        name: "ix-projects".into(),
-                        status: "Paused".into(),
-                        active_count: 1,
-                        done_count: 3,
-                        available: true,
-                    },
+            WorkspaceSnapshot {
+                projects: vec![project],
+                issues: vec![
+                    issue(1, WorkflowStateType::Completed, None),
+                    issue(2, WorkflowStateType::Completed, Some("id-1")),
+                    issue(12, WorkflowStateType::Started, None),
                 ],
-                current: vec![TicketSummary {
-                    identifier: "SWM-21".into(),
-                    title: "Team Leader Dashboard".into(),
-                    project: "ix-relay".into(),
-                    state: "Coding".into(),
-                    priority: "High".into(),
-                    blockers: BlockerState::Blocked(vec!["SWM-20".into()]),
-                }],
-                next: Some(TicketSummary {
-                    identifier: "SWM-22".into(),
-                    title: "Next project work".into(),
-                    project: "ix-board".into(),
-                    state: "Specced".into(),
-                    priority: "Medium".into(),
-                    blockers: BlockerState::Unblocked,
+                fetched_at: SystemClock.now_epoch_seconds(),
+            },
+            now,
+        );
+        app.report.success(
+            Some(WorkReport {
+                binding,
+                scope: Some(WorkScope {
+                    projects: vec!["project".into()],
+                    ..Default::default()
                 }),
-            },
+                focus: None,
+                agents: vec![],
+            }),
             now,
         );
-        let content = rendered(&app, 120, 30, now);
-        assert!(content.contains("TEAM LEADER DASHBOARD"));
-        assert!(content.contains("luna:SWM:code"));
-        assert!(content.contains("ix-board"));
-        assert!(content.contains("ix-projects"));
-        assert!(content.contains("SWM-21"));
-        assert!(content.contains("SWM-22"));
-        assert!(content.contains("blocked by SWM-20"));
-        assert!(content.contains("Linear: fresh"));
-        assert!(!content.contains("Herdr sessions"));
-        assert!(!content.contains("Relay registrations"));
-        assert!(!content.contains("Recent bus messages"));
-        assert!(!content.contains("Agent Status"));
+        app
+    }
+    fn screen(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| render(frame, app, Instant::now()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
+    /// Trace: FR-048-AC-3, FR-048-AC-4, FR-048-AC-5
     #[test]
-    fn dashboard_shows_tracker_errors_and_unknown_lane_state() {
+    fn compact_monitor_counts_leaves_and_details_fit_the_actual_short_pane() {
+        let mut app = app();
+        let compact = screen(&mut app, 69, 15);
+        assert!(compact.contains("Tasks: 1/2 done"));
+        assert!(compact.contains("SWM-12"));
+        assert!(compact.contains("unassigned"));
+        assert!(compact.contains("Focus: not reported"));
+        app.details = true;
+        let details = screen(&mut app, 69, 15);
+        assert!(details.contains("OS credential store"));
+        assert!(details.contains("Priority: High"));
+        assert!(details.contains("Blockers: none"));
+        assert!(details.contains("Product 1/2 done"));
+        app.tracker.failure("offline");
+        let stale = screen(&mut app, 69, 15);
+        assert!(stale.contains("last snapshot"));
+        assert!(stale.contains("Tasks: 1/2 done"));
+        app.report.value = None;
+        assert!(screen(&mut app, 69, 15).contains("Scope: not reported"));
+    }
+
+    /// Trace: FR-048-AC-4
+    #[test]
+    fn pane_activity_requires_the_reported_native_session() {
+        let mut app = app();
+        let binding = app.binding.clone().unwrap();
         let now = Instant::now();
-        let mut app = App {
-            lead_name: "swm-lead".into(),
-            ..App::default()
-        };
-        app.tracker.failure("Linear API unavailable");
-        let content = rendered(&app, 100, 20, now);
-        assert!(content.contains("UNKNOWN"));
-        assert!(content.contains("Linear API unavailable"));
-        assert!(content.contains("ix-board"));
-        assert!(!content.contains("session"));
-        assert!(!content.contains("registrations"));
-    }
-
-    /// Tracing: SWM-21 AC-3 (terminal-safe bounded blocker identifiers).
-    #[test]
-    fn blocker_identifiers_are_sanitized_and_bounded_before_rendering() {
-        let ids = vec![
-            "SWM-1\u{1b}[2J\u{202e}".to_owned(),
-            "A".repeat(80),
-            "SWM-3".to_owned(),
-            "SWM-4".to_owned(),
-        ];
-        let line = blocker_line(&BlockerState::Blocked(ids));
-        assert!(!line.contains('\u{1b}'));
-        assert!(!line.contains('\u{202e}'));
-        assert!(line.contains("SWM-1�[2J�"));
-        assert!(line.contains(&"A".repeat(MAX_BLOCKER_ID_CHARS)));
-        assert!(line.ends_with("+1 more"));
-    }
-
-    /// Tracing: SWM-21 AC-3 (missing dependency data cannot imply lane progress).
-    #[test]
-    fn unknown_blocker_state_makes_aggregate_lane_signal_unknown() {
-        let now = Instant::now();
-        let mut app = App {
-            lead_name: "swm-lead".into(),
-            ..App::default()
-        };
-        app.tracker.success(
-            TrackerState {
-                projects: vec![
-                    ProjectSummary {
-                        name: "ix-board".into(),
-                        status: "Started".into(),
-                        active_count: 1,
-                        done_count: 0,
-                        available: true,
-                    },
-                    ProjectSummary {
-                        name: "ix-projects".into(),
-                        status: "Started".into(),
-                        active_count: 0,
-                        done_count: 0,
-                        available: true,
-                    },
-                ],
-                current: vec![TicketSummary {
-                    identifier: "SWM-21".into(),
-                    title: "Unknown prerequisite".into(),
-                    project: "ix-board".into(),
-                    state: "Coding".into(),
-                    priority: "High".into(),
-                    blockers: BlockerState::Unknown(vec!["unknown-id".into()]),
+        app.runtime.success(
+            relay_ops::work::WorkObservation {
+                binding,
+                status: "working".into(),
+                panes: vec![relay_ops::work::PaneActivity {
+                    pane: "w1:p2".parse().unwrap(),
+                    session: Some("replacement".parse().unwrap()),
+                    status: "working".into(),
                 }],
-                next: None,
             },
             now,
         );
+        let agent = AgentWork {
+            agent_id: "review".into(),
+            name: "reviewer".into(),
+            ticket: "SWM-12".parse().unwrap(),
+            role: "reviewer".into(),
+            status: WorkStatus::Done,
+            pane: Some("w1:p2".parse().unwrap()),
+            session: Some("original".parse().unwrap()),
+            reported_at_ms: 100,
+        };
+        assert_eq!(agent_activity(&app, &agent, true), "session unavailable");
+        app.runtime.value.as_mut().unwrap().panes[0].session = agent.session.clone();
+        assert_eq!(agent_activity(&app, &agent, true), "working");
+        assert_eq!(agent_activity(&app, &agent, false), "activity unknown");
+        app.report
+            .value
+            .as_mut()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .agents
+            .push(agent);
+        let rendered = screen(&mut app, 77, 15);
+        assert!(
+            rendered.contains("Review"),
+            "agent stage completion does not complete the Linear ticket"
+        );
+    }
 
-        let content = rendered(&app, 120, 30, now);
-        assert!(content.contains("Lane signal: UNKNOWN"));
-        assert!(content.contains("blockers unknown: unknown-id"));
+    /// Trace: FR-048-AC-4
+    #[test]
+    fn multiple_internal_agents_are_reported_and_can_be_scrolled() {
+        let mut app = app();
+        let report = app.report.value.as_mut().unwrap().as_mut().unwrap();
+        report.agents = (0..12)
+            .map(|n| AgentWork {
+                agent_id: n.to_string(),
+                name: format!("worker-{n:02}"),
+                ticket: "SWM-12".parse().unwrap(),
+                role: "reviewer".into(),
+                status: WorkStatus::Running,
+                pane: None,
+                session: None,
+                reported_at_ms: 100,
+            })
+            .collect();
+        let first = screen(&mut app, 77, 15);
+        assert!(first.contains("worker-00"));
+        assert!(first.contains("reported running"));
+        for _ in 0..11 {
+            crate::monitor::handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        let last = screen(&mut app, 77, 15);
+        assert!(last.contains("worker-11"));
+        assert!(!last.contains("worker-00"));
+        app.session_ended = true;
+        assert!(screen(&mut app, 77, 15).contains("last report"));
     }
 }

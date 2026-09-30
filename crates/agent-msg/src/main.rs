@@ -23,6 +23,7 @@ mod send_state;
 mod since;
 mod spool;
 mod stdin;
+mod work;
 
 use std::{
     io::{self, Write},
@@ -89,6 +90,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Report session scope, focus and agent assignments for the dashboard.
+    Work(work::WorkArgs),
     /// Send a message to one lead, or to `all`.
     Send {
         /// Who to send to: `server:workspace[:tab[:pane]]` (e.g. `hub:EA:1` or
@@ -415,6 +418,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
     let mut relay = redial.dial(CLI_TIMEOUT)?;
     let mut out = io::stdout().lock();
     match cli.cmd {
+        Cmd::Work(args) => work::run(args, &mut relay, settings, &mut out)?,
         Cmd::Send { to, text } => {
             let resolved = resolve_send_target(&mut relay, &settings.machine.value, &to)?;
             let broadcast = matches!(resolved.target, relay_core::Target::All);

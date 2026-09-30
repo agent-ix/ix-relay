@@ -23,6 +23,7 @@ mod store;
 #[cfg(test)]
 mod test_env;
 pub mod text;
+pub mod work;
 
 pub use address::{Address, AddressBook, HerdrPlaceIds, MAX_LABEL_BYTES, Place, duplicated};
 pub use env::machine_name;

@@ -40,7 +40,7 @@ toml = "1.1.6"
 # pin — one rev string, no vendoring and no tag pin (see agent-ix/ix-cli-kit
 # README, "Consuming this crate"). Same rev as ix-board.
 ix-cli-kit = { git = "https://github.com/agent-ix/ix-cli-kit", rev = "911666e4e316faa77e6e23d4f9f95f1ecb0f0def" }
-ix-board = { git = "https://github.com/agent-ix/ix-board", rev = "29a12f5951f1634dabd654495ed44102eee312f5" }
+ix-board = { git = "https://github.com/agent-ix/ix-board", rev = "484042311fbf705defb547f572f5c2a3ea3c310a" }
 
 [workspace.lints.rust]
 missing_docs = "deny"

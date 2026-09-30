@@ -25,6 +25,15 @@ impl Keys {
         }
     }
 
+    pub(super) fn work_key(
+        &self,
+        machine: &MachineName,
+        session: &SessionId,
+        process_id: u32,
+    ) -> String {
+        format!("{}work:{machine}:{session}:{process_id}", self.prefix)
+    }
+
     pub(super) fn inbox_key(&self, agent: &AgentName) -> String {
         format!("{}inbox:{agent}", self.prefix)
     }
@@ -156,6 +165,7 @@ mod tests {
         let sid: SessionId = "sid-1".parse().unwrap();
         let machine: MachineName = "node-a".parse().unwrap();
         vec![
+            ("work_key", relay.work_key(&machine, &sid, 42)),
             ("inbox_key", relay.inbox_key(&agent)),
             ("agents_key", relay.agents_key()),
             ("aliases_key", relay.aliases_key()),
@@ -185,6 +195,7 @@ mod tests {
     #[test]
     fn the_keys_are_the_documented_ones() {
         let want = [
+            ("work_key", "p:work:node-a:sid-1:42"),
             ("inbox_key", "p:inbox:lead-a"),
             ("agents_key", "p:agents"),
             ("aliases_key", "p:aliases"),
@@ -239,6 +250,7 @@ mod tests {
         let sid: SessionId = "sid-1".parse().unwrap();
         let machine: MachineName = "node-a".parse().unwrap();
         let moved = [
+            other.work_key(&machine, &sid, 42),
             other.inbox_key(&agent),
             other.agents_key(),
             other.aliases_key(),

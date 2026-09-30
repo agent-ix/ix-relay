@@ -64,6 +64,7 @@ mod moves;
 #[cfg(test)]
 mod pop_budget_tests;
 mod scan;
+mod work;
 
 use keys::Keys;
 

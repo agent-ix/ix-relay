@@ -13,6 +13,7 @@ publish = false
 workspace = true
 
 [dependencies]
+ix-board.workspace = true
 relay-core.workspace = true
 herdr-cli.workspace = true
 jiff.workspace = true
