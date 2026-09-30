@@ -11,13 +11,18 @@ struct Runner {
     resume: &'static str,
     pid: u32,
     duplicate: bool,
+    profile: bool,
+    harness: &'static str,
 }
 impl ProcessRunner for Runner {
     fn run(&self, program: &str, args: &[&str], _: Duration) -> Result<Output, ProcessError> {
         assert_eq!(program, "herdr");
         let body = if args == ["api", "snapshot"] {
             let session = self.session.map_or("null".into(), |s| {
-                format!(r#"{{"kind":"id","value":"{s}"}}"#)
+                format!(
+                    r#"{{"agent":"{}","kind":"id","value":"{s}"}}"#,
+                    self.harness
+                )
             });
             let pane = format!(
                 r#"{{"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1","agent":"codex","agent_status":"working","agent_session":{session}}}"#
@@ -32,9 +37,14 @@ impl ProcessRunner for Runner {
             )
         } else {
             assert_eq!(args, ["pane", "process-info", "--pane", "w1:p1"]);
+            let argv = if self.profile {
+                r#"["codex","--profile","resume","exec","task"]"#.into()
+            } else {
+                format!(r#"["codex","resume","{}"]"#, self.resume)
+            };
             format!(
-                r#"{{"process_info":{{"foreground_processes":[{{"name":"codex","pid":{},"argv":["codex","resume","{}"]}}]}}}}"#,
-                self.pid, self.resume
+                r#"{{"process_info":{{"foreground_processes":[{{"name":"codex","pid":{},"argv":{}}}]}}}}"#,
+                self.pid, argv
             )
         };
         Ok(Output {
@@ -55,12 +65,37 @@ fn binding_uses_measured_resume_identity_and_refuses_ambiguity_conflict_and_repl
         resume: "session-a",
         pid: 42,
         duplicate: false,
+        profile: false,
+        harness: "codex",
     };
     let got = resolve_work_target(&runner, Some("luna:SWM:code"), &machine).unwrap();
     assert_eq!(got.binding.session.as_str(), "session-a");
     assert_eq!(got.binding.process_id, 42);
     assert_eq!(got.binding.pane.as_str(), "w1:p1");
     assert_eq!(got.status, "working");
+    assert!(matches!(
+        resolve_work_target(
+            &Runner {
+                profile: true,
+                ..runner
+            },
+            Some("luna:SWM:code"),
+            &machine
+        ),
+        Err(OpsError::WorkSessionUnavailable)
+    ));
+    assert!(matches!(
+        resolve_work_target(
+            &Runner {
+                session: Some("session-a"),
+                harness: "claude",
+                ..runner
+            },
+            Some("luna:SWM:code"),
+            &machine
+        ),
+        Err(OpsError::WorkIdentityConflict)
+    ));
     assert!(matches!(
         resolve_work_target(
             &Runner {

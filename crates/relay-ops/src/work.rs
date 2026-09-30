@@ -44,6 +44,7 @@ struct Pane {
 }
 #[derive(Debug, Deserialize)]
 struct NativeSession {
+    agent: String,
     kind: String,
     value: String,
 }
@@ -123,18 +124,26 @@ fn process_identity(
     let [process] = processes.as_slice() else {
         return Err(OpsError::WorkProcessAmbiguous);
     };
+    if process.pid == 0 {
+        return Err(OpsError::WorkProcessAmbiguous);
+    }
+    if pane.agent_session.as_ref().is_some_and(|s| s.agent != kind) {
+        return Err(OpsError::WorkIdentityConflict);
+    }
     let observed = pane
         .agent_session
         .as_ref()
         .filter(|s| s.kind == "id")
         .map(|s| s.value.parse())
         .transpose()?;
-    let resumed = if kind == "codex" {
+    // Only this measured direct invocation exposes an explicit native ID.
+    // Flag values, profiles, prompts and --last are not identity evidence.
+    let resumed = if kind == "codex" && process.argv.get(1).is_some_and(|a| a == "resume") {
         process
             .argv
-            .windows(2)
-            .find(|args| args[0] == "resume" && !args[1].starts_with('-'))
-            .map(|args| args[1].parse())
+            .get(2)
+            .filter(|id| !id.starts_with('-'))
+            .map(|id| id.parse())
             .transpose()?
     } else {
         None
@@ -186,7 +195,7 @@ fn observe_pane(
                 session: p
                     .agent_session
                     .as_ref()
-                    .filter(|s| s.kind == "id")
+                    .filter(|s| s.kind == "id" && p.agent.as_deref() == Some(s.agent.as_str()))
                     .and_then(|s| s.value.parse().ok()),
                 status: p.agent_status.clone(),
             })
