@@ -15,10 +15,10 @@ use std::{
 use crate::monitor_tracker::TrackerState;
 use ix_board::{LinearGraphQlSource, ReadService};
 
-/// Linear tracker snapshots refresh every 30 seconds.
-pub const TRACKER_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+/// Automatic Linear tracker reads run every 30 minutes.
+pub const TRACKER_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
 /// Limit retries after Linear or its cached workspace read returns an error.
-const TRACKER_MAX_RETRY_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const TRACKER_MAX_RETRY_INTERVAL: Duration = TRACKER_REFRESH_INTERVAL;
 
 /// Independent Linear snapshot refresh worker.
 pub struct TrackerWorker {
@@ -75,23 +75,14 @@ impl TrackerWorker {
                         refresh_interval,
                         max_retry_interval,
                     );
-                    let cooldown = match &result {
-                        Err(ix_board::Error::LinearRateLimited { retry_after }) => {
-                            Some(*retry_after)
-                        }
-                        _ => None,
-                    };
+                    let mut wait =
+                        RefreshWait::after_read(&result, refresh_interval, retry_interval);
                     if event_tx.send(result).is_err() {
                         break;
                     }
                     if worker_stop_requested.load(Ordering::Acquire) {
                         break;
                     }
-                    let mut wait = RefreshWait {
-                        delay: cooldown.unwrap_or(retry_interval).max(retry_interval),
-                        protected: cooldown.is_some(),
-                        force: false,
-                    };
                     let started = Instant::now();
                     loop {
                         if worker_stop_requested.load(Ordering::Acquire) {
@@ -139,7 +130,7 @@ impl TrackerWorker {
     }
 }
 
-/// Pending manual refreshes are coalesced until Linear's minimum cooldown ends.
+/// Manual refreshes during rate limiting coalesce until the next scheduled read.
 struct RefreshWait {
     delay: Duration,
     protected: bool,
@@ -153,6 +144,21 @@ enum WaitOutcome {
 }
 
 impl RefreshWait {
+    fn after_read(
+        result: &Result<TrackerState, ix_board::Error>,
+        refresh: Duration,
+        retry: Duration,
+    ) -> Self {
+        // Linear refills quota continuously; its full-window reset is not a
+        // mandatory pause. Reattempt on the explicit dashboard polling cadence.
+        let protected = matches!(result, Err(ix_board::Error::LinearRateLimited { .. }));
+        Self {
+            delay: if protected { refresh } else { retry },
+            protected,
+            force: false,
+        }
+    }
+
     fn receive(&mut self, command: Result<TrackerCommand, mpsc::RecvTimeoutError>) -> WaitOutcome {
         match command {
             Ok(TrackerCommand::Refresh) => {
@@ -234,6 +240,38 @@ mod tests {
         assert_eq!(retry, cap);
         assert_eq!(next_interval(false, retry, refresh, cap), cap);
         assert_eq!(next_interval(true, retry, refresh, cap), refresh);
+    }
+
+    /// Trace: FR-048-AC-5
+    #[test]
+    fn automatic_reads_and_rate_limited_retries_use_thirty_minutes() {
+        assert_eq!(TRACKER_REFRESH_INTERVAL, Duration::from_secs(1800));
+        let rate_limit = Err(ix_board::Error::LinearRateLimited {
+            retry_after: Duration::from_secs(3600),
+        });
+        let wait = RefreshWait::after_read(
+            &rate_limit,
+            TRACKER_REFRESH_INTERVAL,
+            TRACKER_MAX_RETRY_INTERVAL,
+        );
+        assert_eq!(wait.delay, Duration::from_secs(1800));
+        assert!(wait.protected);
+        assert_eq!(
+            next_interval(
+                false,
+                TRACKER_REFRESH_INTERVAL,
+                TRACKER_REFRESH_INTERVAL,
+                TRACKER_MAX_RETRY_INTERVAL
+            ),
+            Duration::from_secs(1800)
+        );
+        let wait = RefreshWait::after_read(
+            &Err(ix_board::Error::MissingApiKey),
+            TRACKER_REFRESH_INTERVAL,
+            TRACKER_MAX_RETRY_INTERVAL,
+        );
+        assert_eq!(wait.delay, Duration::from_secs(1800));
+        assert!(!wait.protected);
     }
 
     /// Trace: FR-048-AC-5

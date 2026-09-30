@@ -25,7 +25,7 @@ prove that an agent is working on them.
 | FR-048-AC-4 | A compact scrollable view shows scope, done/total, focus, live tickets and assignments. The table shows the next ready ticket in tracker order. The scope line shows project done/total counts. Details show title, project, priority, blockers and initiative progress restricted to the reported scope. Internal agents are labeled reported; pane activity is observed only for the matching native session. | Terminal rendering tests |
 | FR-048-AC-5 | Sources refresh independently. Failures preserve labeled last snapshots; source ages remain visible. Manual Linear refresh forces a fetch rather than renewing a cache timestamp. | Unit tests |
 
-Linear rate-limit errors SHALL remain visible with their cooldown. Manual refreshes during that cooldown SHALL coalesce until it expires; quit SHALL remain responsive. This behavior extends FR-048-AC-5.
+Automatic Linear reads SHALL run on a 30-minute timer. Rate-limited reads SHALL retry on that timer, with a live countdown to the next attempt. Manual refreshes during rate limiting SHALL coalesce until that attempt; quit SHALL remain responsive. Snapshot age SHALL be labeled stale at the 30-minute polling interval or when a refresh fails. Herdr activity and Redis report reads SHALL run independently once per minute. Herdr observations SHALL remain usable between scheduled reads, with activity becoming unknown after two minutes without a successful observation. This behavior extends FR-048-AC-5.
 
 ## Dependencies
 

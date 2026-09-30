@@ -16,6 +16,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Herdr observations and explicit Redis reports refresh once a minute.
+pub const RUNTIME_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+
 /// One source result with its actual read completion time.
 pub enum RuntimeRefresh {
     /// Measured Herdr activity or a typed observation failure.
@@ -48,7 +51,7 @@ fn spawn_reader(
             if events.send(read()).is_err() {
                 break;
             }
-            match stopped.recv_timeout(Duration::from_secs(2)) {
+            match stopped.recv_timeout(RUNTIME_REFRESH_INTERVAL) {
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }

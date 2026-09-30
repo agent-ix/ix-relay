@@ -25,6 +25,7 @@ const ERROR: Color = Color::Rgb(240, 163, 163);
 
 /// Renders one bound session, retaining visibly labeled snapshots on source failure.
 pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
+    let now_epoch = SystemClock.now_epoch_seconds();
     let report = app.report.value.as_ref().and_then(Option::as_ref);
     let computed = app
         .tracker
@@ -55,7 +56,11 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
         Constraint::Length(2),
     ])
     .areas(frame.area());
-    let runtime_fresh = fresh(&app.runtime, now, 10);
+    let runtime_fresh = fresh(
+        &app.runtime,
+        now,
+        crate::monitor_runtime::RUNTIME_REFRESH_INTERVAL.saturating_mul(2),
+    );
     let status = if app.session_ended {
         "session ended/replaced · restart to rebind"
     } else if !runtime_fresh {
@@ -83,10 +88,11 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
     let snapshot_old = app.tracker.error.is_some()
         || app.report.error.is_some()
         || app.session_ended
-        || app.tracker.value.as_ref().is_some_and(|s| {
-            SystemClock.now_epoch_seconds().saturating_sub(s.fetched_at)
-                >= ix_board::CACHE_TTL_SECONDS
-        });
+        || app
+            .tracker
+            .value
+            .as_ref()
+            .is_some_and(|s| snapshot_is_stale(s.fetched_at, now_epoch));
     let summary = view.as_ref().map_or_else(
         || {
             scope_error.clone().unwrap_or_else(|| {
@@ -179,7 +185,7 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
                 .max(0);
             format!(
                 "Linear: {}{} ago",
-                if seconds >= ix_board::CACHE_TTL_SECONDS {
+                if snapshot_is_stale(s.fetched_at, now_epoch) {
                     "stale "
                 } else {
                     "updated "
@@ -193,9 +199,22 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
         source_age(&app.runtime, now),
         source_age(&app.report, now)
     );
+    let tracker_error = app.tracker.error.as_ref().map(|error| {
+        app.tracker_retry_at.map_or_else(
+            || error.clone(),
+            |deadline| {
+                let seconds = deadline.saturating_duration_since(now).as_secs();
+                format!(
+                    "{error} · next attempt in {}m {:02}s",
+                    seconds / 60,
+                    seconds % 60
+                )
+            },
+        )
+    });
     let errors = [
         scope_error.as_deref(),
-        app.tracker.error.as_deref(),
+        tracker_error.as_deref(),
         app.runtime.error.as_deref(),
         app.report.error.as_deref(),
     ]
@@ -221,11 +240,16 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
     );
 }
 
-fn fresh<T>(source: &Source<T>, now: Instant, max_seconds: u64) -> bool {
+fn snapshot_is_stale(fetched_at: i64, now_epoch: i64) -> bool {
+    let age = now_epoch.saturating_sub(fetched_at);
+    u64::try_from(age).unwrap_or(0) >= crate::monitor_ops::TRACKER_REFRESH_INTERVAL.as_secs()
+}
+
+fn fresh<T>(source: &Source<T>, now: Instant, max_age: std::time::Duration) -> bool {
     source.error.is_none()
         && source
             .last_success
-            .is_some_and(|last| now.saturating_duration_since(last).as_secs() < max_seconds)
+            .is_some_and(|last| now.saturating_duration_since(last) < max_age)
 }
 
 fn source_age<T>(source: &Source<T>, now: Instant) -> String {
@@ -576,6 +600,70 @@ mod tests {
         );
         app
     }
+    /// Trace: FR-048-AC-5
+    #[test]
+    fn runtime_observations_remain_fresh_between_minute_polls() {
+        let now = Instant::now();
+        let mut source = Source::default();
+        source.success("observed", now);
+        let interval = crate::monitor_runtime::RUNTIME_REFRESH_INTERVAL;
+        assert_eq!(interval, std::time::Duration::from_secs(60));
+        assert!(fresh(
+            &source,
+            now + std::time::Duration::from_secs(45),
+            interval.saturating_mul(2)
+        ));
+        assert!(!fresh(
+            &source,
+            now + std::time::Duration::from_secs(120),
+            interval.saturating_mul(2)
+        ));
+        source.failure("unavailable");
+        assert!(!fresh(&source, now, interval.saturating_mul(2)));
+    }
+
+    /// Trace: FR-048-AC-5
+    #[test]
+    fn rate_limit_countdown_advances_and_cached_progress_remains_visible() {
+        let mut app = app();
+        let now = Instant::now();
+        app.apply_tracker_refresh(
+            Err(ix_board::Error::LinearRateLimited {
+                retry_after: std::time::Duration::from_secs(3600),
+            }),
+            now,
+        );
+        assert_eq!(
+            app.tracker_retry_at,
+            now.checked_add(std::time::Duration::from_secs(1800))
+        );
+        let mut terminal = Terminal::new(TestBackend::new(90, 15)).unwrap();
+        for (elapsed, expected) in [(0, "30m 00s"), (65, "28m 55s"), (1800, "0m 00s")] {
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        &mut app,
+                        now + std::time::Duration::from_secs(elapsed),
+                    )
+                })
+                .unwrap();
+            let line = (0..90)
+                .map(|x| terminal.backend().buffer()[(x, 14)].symbol())
+                .collect::<String>();
+            assert!(line.contains("Linear rate limited"), "{line}");
+            assert!(line.contains(expected), "{line}");
+            assert!(!line.contains("3599"));
+        }
+        assert!(screen(&mut app, 90, 15).contains("Tasks: 1/2 done"));
+        let snapshot = app.tracker.value.as_ref().unwrap().clone();
+        app.apply_tracker_refresh(Ok(snapshot), now);
+        assert!(app.tracker_retry_at.is_none());
+        assert!(app.tracker.error.is_none());
+        assert!(!snapshot_is_stale(9_400, 10_000));
+        assert!(snapshot_is_stale(8_199, 10_000));
+    }
+
     /// Trace: FR-048-AC-3, FR-048-AC-4
     #[test]
     fn initiative_progress_counts_only_scoped_leaves_once_across_projects() {
