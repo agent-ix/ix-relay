@@ -436,7 +436,7 @@ fn ticket_details(view: &DashboardView, ticket: &TicketSummary) -> String {
             .parse::<ix_board::ProjectPriority>()
             .map_or_else(
                 |_| ticket.priority.to_string(),
-                |priority| priority.to_string()
+                |priority| priority.label().to_owned()
             ),
         blockers,
         display_text(&projects, 512)
