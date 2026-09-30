@@ -2,11 +2,9 @@
 // Copyright (C) 2026 Agent-IX
 //! Read-only team-leader dashboard state for SWM (SWM-21).
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
-
-pub(crate) const TRACKER_STALE_AFTER: Duration = Duration::from_secs(90);
 
 /// One independently refreshed source, retaining its last good snapshot
 /// while reporting an error or stale age.
@@ -47,7 +45,21 @@ impl<T> Source<T> {
 /// Complete dashboard state.
 #[derive(Debug, Default)]
 pub struct App {
-    /// Selected ix-board and ix-projects tracker state from Linear.
+    /// Native session incarnation this monitor follows.
+    pub binding: Option<relay_core::work::WorkBinding>,
+    /// Latest independently refreshed Herdr activity.
+    pub runtime: Source<relay_ops::work::WorkObservation>,
+    /// Latest independently refreshed explicit assignment report.
+    pub report: Source<Option<relay_core::work::WorkReport>>,
+    /// Once observed, replacement requires an explicit monitor restart.
+    pub session_ended: bool,
+    /// Stateful table selection and scroll position.
+    pub table: ratatui::widgets::TableState,
+    /// Current rendered assignment row count.
+    pub row_count: usize,
+    /// Whether the detail panel is expanded.
+    pub details: bool,
+    /// Complete authoritative tracker snapshot from Linear.
     pub tracker: Source<crate::monitor_tracker::TrackerState>,
     /// Human-readable identity of the current team lead.
     pub lead_name: String,
@@ -61,22 +73,14 @@ impl App {
     /// Applies an independently refreshed Linear tracker result.
     pub fn apply_tracker_refresh(
         &mut self,
-        tracker: Result<crate::monitor_tracker::TrackerState, String>,
+        tracker: Result<crate::monitor_tracker::TrackerState, ix_board::Error>,
         now: Instant,
     ) {
         match tracker {
             Ok(data) => self.tracker.success(data, now),
-            Err(error) => self.tracker.failure(error),
+            Err(error) => self.tracker.failure(error.to_string()),
         }
     }
-}
-
-/// Whether tracker state is stale or has never loaded.
-#[must_use]
-pub fn tracker_is_stale(source: &Source<impl Sized>, now: Instant) -> bool {
-    source
-        .last_success
-        .is_none_or(|last| now.saturating_duration_since(last) > TRACKER_STALE_AFTER)
 }
 
 /// Handles the dashboard's read-only keyboard controls.
@@ -84,6 +88,27 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Char('r') => app.refresh_now = true,
+        KeyCode::Char('d') | KeyCode::Enter => app.details = !app.details,
+        KeyCode::Down | KeyCode::Char('j') => app.table.select(Some(
+            app.table
+                .selected()
+                .unwrap_or(0)
+                .saturating_add(1)
+                .min(app.row_count.saturating_sub(1)),
+        )),
+        KeyCode::Up | KeyCode::Char('k') => app
+            .table
+            .select(Some(app.table.selected().unwrap_or(0).saturating_sub(1))),
+        KeyCode::PageDown => app.table.select(Some(
+            app.table
+                .selected()
+                .unwrap_or(0)
+                .saturating_add(5)
+                .min(app.row_count.saturating_sub(1)),
+        )),
+        KeyCode::PageUp => app
+            .table
+            .select(Some(app.table.selected().unwrap_or(0).saturating_sub(5))),
         _ => {}
     }
 }

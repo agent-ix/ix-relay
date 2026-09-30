@@ -11,6 +11,9 @@ use crate::{
 /// Everything that can go wrong talking to the bus.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Work reporting validation failed.
+    #[error(transparent)]
+    Work(#[from] crate::work::WorkError),
     /// A name did not match herdr's agent-name rule, or used the reserved word `all`.
     #[error(
         "invalid agent name {name:?}: must match [a-z][a-z0-9_-]{{0,31}} and must not be \"all\""
@@ -285,7 +288,8 @@ impl Error {
     pub fn is_connection(&self) -> bool {
         match self {
             Self::Redis(e) => e.is_io_error() || e.is_unrecoverable_error(),
-            Self::InvalidName { .. }
+            Self::Work(_)
+            | Self::InvalidName { .. }
             | Self::UnknownAgent(_)
             | Self::InvalidAddress { .. }
             | Self::AmbiguousTarget { .. }

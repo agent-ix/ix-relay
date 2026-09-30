@@ -9,6 +9,7 @@ dependencies = [
  "clap",
  "claude-wire",
  "herdr-cli",
+ "ix-board",
  "proptest",
  "redis",
  "relay-core",
@@ -1111,7 +1112,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 [[package]]
 name = "ix-board"
 version = "0.1.0"
-source = "git+https://github.com/agent-ix/ix-board?rev=29a12f5951f1634dabd654495ed44102eee312f5#29a12f5951f1634dabd654495ed44102eee312f5"
+source = "git+https://github.com/agent-ix/ix-board?rev=484042311fbf705defb547f572f5c2a3ea3c310a#484042311fbf705defb547f572f5c2a3ea3c310a"
 dependencies = [
  "clap",
  "ix-cli-kit",
@@ -2025,6 +2026,7 @@ name = "relay-ops"
 version = "0.2.0"
 dependencies = [
  "herdr-cli",
+ "ix-board",
  "jiff",
  "redis",
  "relay-core",

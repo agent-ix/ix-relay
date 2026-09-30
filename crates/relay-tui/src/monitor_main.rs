@@ -4,8 +4,25 @@
 
 mod monitor;
 mod monitor_ops;
+mod monitor_runtime;
 mod monitor_tracker;
 mod monitor_ui;
+
+use clap::Parser;
+
+#[derive(Parser)]
+#[command(
+    name = "team-leader-dashboard",
+    about = "Monitor one explicitly assigned lead session"
+)]
+struct Args {
+    /// Lead Herdr address, e.g. luna:SWM:code.
+    #[arg(long)]
+    lead: String,
+    /// Native session expected at that address.
+    #[arg(long)]
+    session: Option<relay_core::SessionId>,
+}
 
 use std::{
     io,
@@ -42,6 +59,26 @@ fn main() -> ExitCode {
 }
 
 fn run() -> io::Result<()> {
+    let args = Args::parse();
+    let settings = relay_core::config::load_core(Default::default()).map_err(io::Error::other)?;
+    let observed = relay_ops::work::resolve_work_target(
+        &herdr_cli::RealProcessRunner,
+        Some(&args.lead),
+        &settings.machine.value,
+    )
+    .map_err(io::Error::other)?;
+    if args
+        .session
+        .is_some_and(|id| id != observed.binding.session)
+    {
+        return Err(io::Error::other(
+            "target session changed; explicitly rebind",
+        ));
+    }
+    let mut runtime_worker = Some(monitor_runtime::RuntimeWorker::spawn(
+        observed.binding.clone(),
+        settings,
+    )?);
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
     install_panic_hook();
@@ -52,14 +89,42 @@ fn run() -> io::Result<()> {
 
     let mut tracker_worker = Some(monitor_ops::TrackerWorker::spawn()?);
     let mut app = App {
-        lead_name: std::env::var("AGENT_MSG_NAME").unwrap_or_else(|_| "SWM team lead".to_owned()),
+        lead_name: args.lead,
+        binding: Some(observed.binding.clone()),
         ..App::default()
     };
+    app.runtime.success(observed, Instant::now());
     loop {
-        terminal.draw(|frame| monitor_ui::render(frame, &app, Instant::now()))?;
+        terminal.draw(|frame| monitor_ui::render(frame, &mut app, Instant::now()))?;
         if let Some(active_worker) = &tracker_worker {
             while let Ok(refresh) = active_worker.events.try_recv() {
                 app.apply_tracker_refresh(refresh, Instant::now());
+            }
+        }
+        if let Some(worker) = &runtime_worker {
+            while let Ok(refresh) = worker.events.try_recv() {
+                match refresh {
+                    monitor_runtime::RuntimeRefresh::Observation(result, read_at) => match result {
+                        Ok(observation) if !app.session_ended => {
+                            app.runtime.success(observation, read_at)
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            if matches!(
+                                error,
+                                relay_ops::OpsError::WorkSessionReplaced
+                                    | relay_ops::OpsError::WorkAgentAbsent
+                            ) {
+                                app.session_ended = true;
+                            }
+                            app.runtime.failure(error.to_string());
+                        }
+                    },
+                    monitor_runtime::RuntimeRefresh::Report(result, read_at) => match result {
+                        Ok(report) => app.report.success(report, read_at),
+                        Err(error) => app.report.failure(error.to_string()),
+                    },
+                }
             }
         }
         if event::poll(TICK)?
@@ -78,6 +143,9 @@ fn run() -> io::Result<()> {
             app.should_quit = true;
         }
         if app.should_quit {
+            if let Some(worker) = runtime_worker.take() {
+                worker.stop();
+            }
             if let Some(active_worker) = tracker_worker.take() {
                 active_worker.stop();
             }

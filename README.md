@@ -763,3 +763,30 @@ make ci           # every gate, incl. check-matrix (python3)
 ## License
 
 AGPL-3.0-or-later
+
+## Session work dashboard
+
+Monitor a verified lead session with `team-leader-dashboard --lead luna:SWM:code`.
+Add `--session <native-session-id>` to refuse an unexpected occupant at startup.
+The monitor keeps the original native session and process binding; restart it to
+bind a replacement. It reads independently from Herdr, Linear (using
+`LINEAR_API_KEY`) and explicit Redis work reports. It never consumes inboxes or
+changes tracker state.
+
+The lead reports assigned scope and actual work:
+
+```bash
+agent-msg work --lead luna:SWM:code scope --project ix-board --project ix-projects
+agent-msg work --lead luna:SWM:code focus "Reviewing credentials" --ticket SWM-12
+agent-msg work --lead luna:SWM:code agent reviewer-1 --ticket SWM-12 --role reviewer --status running
+```
+
+Use `agent-msg work --help` for initiative and ticket-subtree selection, worker
+pane verification, updates and removal. Scope is explicit, overlapping selectors
+count once, and progress counts non-canceled/non-duplicate leaf tasks. Internal
+agents have reported status; separate pane activity is observed only when its
+native session matches. Ticket workflow stages stay separate from agent status.
+
+Use arrows or j/k to scroll, `d` or Enter for details, `r` for a forced Linear
+refresh and `q` to quit. On short panes, details replace the table. Last good
+snapshots survive refresh errors with visible source ages and error labels.

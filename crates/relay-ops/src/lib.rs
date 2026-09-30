@@ -17,6 +17,7 @@ pub mod herdr_check;
 pub mod lenient;
 pub mod linear;
 pub mod naming;
+pub mod work;
 
 pub use errors::{OpsError, Result};
 pub use escalate::{RESOLUTION_COMMENT_MARKER_PREFIX, resolution_comment_marker};

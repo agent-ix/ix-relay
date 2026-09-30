@@ -11,6 +11,36 @@ use crate::{herdr::ProcessError, linear::LinearError};
 /// Everything a `relay-ops` command function can fail with.
 #[derive(Debug, thiserror::Error)]
 pub enum OpsError {
+    /// Pane workers must be on the lead's machine for this observer.
+    #[error("worker pane is on another machine; report it as an internal assignment")]
+    WorkWorkerMachine,
+    /// The authoritative tracker refused a scope or failed a read.
+    #[error(transparent)]
+    Board(#[from] ix_board::Error),
+    /// Target address or calling pane is unavailable.
+    #[error("work target is unavailable")]
+    WorkTargetUnavailable,
+    /// An address did not select exactly one live agent.
+    #[error("work target selects {matches} live agents; specify a unique pane")]
+    WorkTargetCardinality {
+        /// Number of live matches.
+        matches: usize,
+    },
+    /// The selected pane has no agent.
+    #[error("the work target pane has no live agent")]
+    WorkAgentAbsent,
+    /// Multiple or no native agent processes were observed.
+    #[error("could not identify one native agent process in the target pane")]
+    WorkProcessAmbiguous,
+    /// No measured native session identity was available.
+    #[error("native session ID unavailable; have the agent report its session to Herdr")]
+    WorkSessionUnavailable,
+    /// Independent measured session identities disagreed.
+    #[error("Herdr session and native process session disagree")]
+    WorkIdentityConflict,
+    /// The original agent session ended or was replaced.
+    #[error("session ended/replaced; explicitly restart the monitor to rebind")]
+    WorkSessionReplaced,
     /// The bus itself refused the operation: an unknown agent, a
     /// not-found or already-resolved escalation, a malformed ticket or
     /// session id, unsafe escalation text, or a Redis-level failure.

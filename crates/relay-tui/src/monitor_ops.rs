@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use crate::monitor_tracker::{TrackerState, summarize};
+use crate::monitor_tracker::TrackerState;
 use ix_board::{LinearGraphQlSource, ReadService};
 
 /// Linear tracker snapshots refresh every 30 seconds.
@@ -23,7 +23,7 @@ const TRACKER_MAX_RETRY_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// Independent Linear snapshot refresh worker.
 pub struct TrackerWorker {
     /// Latest available Linear refresh results.
-    pub events: Receiver<Result<TrackerState, String>>,
+    pub events: Receiver<Result<TrackerState, ix_board::Error>>,
     commands: SyncSender<TrackerCommand>,
     stop_requested: Arc<AtomicBool>,
     handle: JoinHandle<()>,
@@ -41,7 +41,7 @@ impl TrackerWorker {
     }
 
     fn spawn_with_read(
-        read: impl FnMut() -> Result<TrackerState, String> + Send + 'static,
+        read: impl FnMut(bool) -> Result<TrackerState, ix_board::Error> + Send + 'static,
     ) -> std::io::Result<Self> {
         Self::spawn_with_read_and_intervals(
             read,
@@ -51,7 +51,7 @@ impl TrackerWorker {
     }
 
     fn spawn_with_read_and_intervals(
-        mut read: impl FnMut() -> Result<TrackerState, String> + Send + 'static,
+        mut read: impl FnMut(bool) -> Result<TrackerState, ix_board::Error> + Send + 'static,
         refresh_interval: Duration,
         max_retry_interval: Duration,
     ) -> std::io::Result<Self> {
@@ -63,24 +63,30 @@ impl TrackerWorker {
             .name("team-leader-dashboard-linear-refresh".to_owned())
             .spawn(move || {
                 let mut retry_interval = refresh_interval;
+                let mut force = false;
                 loop {
                     if worker_stop_requested.load(Ordering::Acquire) {
                         break;
                     }
-                    let result = read();
-                    retry_interval = if result.is_ok() {
-                        refresh_interval
-                    } else {
-                        retry_interval
-                            .saturating_mul(2)
-                            .min(max_retry_interval.max(refresh_interval))
-                    };
-                    let _ = event_tx.try_send(result);
+                    let result = read(force);
+                    retry_interval = next_interval(
+                        result.is_ok(),
+                        retry_interval,
+                        refresh_interval,
+                        max_retry_interval,
+                    );
+                    if event_tx.send(result).is_err() {
+                        break;
+                    }
                     if worker_stop_requested.load(Ordering::Acquire) {
                         break;
                     }
                     match command_rx.recv_timeout(retry_interval) {
-                        Ok(TrackerCommand::Refresh) | Err(mpsc::RecvTimeoutError::Timeout) => {
+                        Ok(TrackerCommand::Refresh) => {
+                            force = true;
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            force = false;
                             if worker_stop_requested.load(Ordering::Acquire) {
                                 break;
                             }
@@ -116,14 +122,22 @@ impl TrackerWorker {
     }
 }
 
-fn read_tracker() -> Result<TrackerState, String> {
-    let source = LinearGraphQlSource::from_env().map_err(|error| error.to_string())?;
-    let mut service = ReadService::open_default(source).map_err(|error| error.to_string())?;
-    let snapshot = service
-        .workspace_snapshot()
-        .map_err(|error| error.to_string())?;
-    let queue = service.next("SWM").map_err(|error| error.to_string())?;
-    Ok(summarize(&snapshot, &queue))
+fn next_interval(success: bool, previous: Duration, refresh: Duration, cap: Duration) -> Duration {
+    if success {
+        refresh
+    } else {
+        previous.saturating_mul(2).min(cap.max(refresh))
+    }
+}
+
+fn read_tracker(force: bool) -> Result<TrackerState, ix_board::Error> {
+    let source = LinearGraphQlSource::from_env()?;
+    let mut service = ReadService::open_default(source)?;
+    if force {
+        service.force_refresh_workspace()
+    } else {
+        service.workspace_snapshot()
+    }
 }
 
 #[cfg(test)]
@@ -137,11 +151,11 @@ mod tests {
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let (read_finished_tx, read_finished_rx) = mpsc::channel();
-        let worker = TrackerWorker::spawn_with_read(move || {
+        let worker = TrackerWorker::spawn_with_read(move |_| {
             entered_tx.send(()).unwrap();
             let _ = release_rx.recv();
             read_finished_tx.send(()).unwrap();
-            Err("read canceled by test".to_owned())
+            Err(ix_board::Error::MissingApiKey)
         })
         .unwrap();
         entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -163,47 +177,37 @@ mod tests {
 
     #[test]
     fn failed_linear_refreshes_back_off_and_obey_the_configured_cap() {
-        let (calls_tx, calls_rx) = mpsc::channel();
-        let mut call_number = 0;
-        let worker = TrackerWorker::spawn_with_read_and_intervals(
-            move || {
-                call_number += 1;
-                calls_tx.send(call_number).unwrap();
-                Err("Linear rate limited".to_owned())
-            },
-            Duration::from_millis(100),
-            Duration::from_millis(200),
-        )
-        .unwrap();
-
-        assert_eq!(calls_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
-        assert!(calls_rx.recv_timeout(Duration::from_millis(120)).is_err());
-        assert_eq!(
-            calls_rx.recv_timeout(Duration::from_millis(200)).unwrap(),
-            2
-        );
-        assert!(calls_rx.recv_timeout(Duration::from_millis(120)).is_err());
-        assert_eq!(
-            calls_rx.recv_timeout(Duration::from_millis(200)).unwrap(),
-            3
-        );
-        worker.stop();
+        let refresh = Duration::from_millis(100);
+        let cap = Duration::from_millis(400);
+        let retry = next_interval(false, refresh, refresh, cap);
+        assert_eq!(retry, Duration::from_millis(200));
+        let retry = next_interval(false, retry, refresh, cap);
+        assert_eq!(retry, cap);
+        assert_eq!(next_interval(false, retry, refresh, cap), cap);
+        assert_eq!(next_interval(true, retry, refresh, cap), refresh);
     }
 
+    /// Trace: FR-048-AC-5
     #[test]
     fn manual_refresh_runs_again_after_current_read() {
         let (calls_tx, calls_rx) = mpsc::channel();
         let mut call_number = 0;
-        let worker = TrackerWorker::spawn_with_read(move || {
+        let worker = TrackerWorker::spawn_with_read(move |force| {
             call_number += 1;
-            calls_tx.send(call_number).unwrap();
-            Err("offline".to_owned())
+            calls_tx.send((call_number, force)).unwrap();
+            Err(ix_board::Error::MissingApiKey)
         })
         .unwrap();
 
-        assert_eq!(calls_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 1);
+        assert_eq!(
+            calls_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (1, false)
+        );
         worker.refresh_now();
-        assert_eq!(calls_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 2);
+        assert_eq!(
+            calls_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (2, true)
+        );
         worker.stop();
     }
 }
