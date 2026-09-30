@@ -3,42 +3,34 @@
 
 # Team Leader Dashboard
 
-Run the read-only team leader dashboard from an ix-relay checkout. The current
-deployment is configured for team SWM and its ix-board and ix-projects projects.
-Set `LINEAR_API_KEY` for tracker data:
+Monitor one measured native lead session:
 
 ```sh
-cargo run -p relay-tui --bin team-leader-dashboard
+cargo run -p relay-tui --bin team-leader-dashboard -- --lead luna:SWM:code --session <native-session-id>
 ```
 
-The view focuses on the current lead label, assigned projects and ticket work.
-For ix-board and ix-projects it shows project status and active/completed issue
-counts, current open SWM tickets, their direct blockers, and the next actionable
-ticket in ix-board's deterministic ready queue. `r` refreshes tracker data; `q`
-or Escape exits. `AGENT_MSG_NAME` supplies the lead label when set; otherwise the
-view uses `SWM team lead`.
+Scope, focus and agent assignments are explicit lead reports written with
+`agent-msg work`. Open tickets alone do not prove agent activity. The view shows
+scoped leaf-task progress, project counts, ready work and agent assignments.
+Initiative counts are restricted to the same scope. Internal agent activity is
+reported; pane activity is observed only when the native session matches.
 
-The dashboard reads Linear through ix-board's structured Rust API pinned at
-`29a12f5951f1634dabd654495ed44102eee312f5`. It uses ix-board's cached workspace
-snapshot and reuses its cache path; ix-board refreshes that snapshot after its
-five-minute cache expires. After a failed tracker read, retries back off from
-30 seconds up to 15 minutes; `r` requests an immediate read. Project status,
-ticket state, priority, and `blocked_by` relationships come from the structured
-snapshot. The dashboard is read-only and does not parse ticket prose or call a
-Linear mutation API.
+## Refresh intervals
 
-The lane signal is derived only from the assigned projects' structured ticket
-and direct blocker state. It reports ready work when ix-board supplies an
-actionable next ticket, reports blocked when displayed open work has unresolved
-direct blockers, and reports unknown when the tracker is stale, unavailable, or
-missing either assigned project. Staleness is reported after 90 seconds without
-a successful dashboard read; the underlying ix-board snapshot can be up to five
-minutes old because of its cache. Tracker errors and missing or stale state are
-shown explicitly rather than presented as progress.
+- Linear: immediately at startup, then every **30 minutes** through ix-board's
+  structured cache API. Rate-limited reads retry on that cadence with a live
+  countdown. The full rolling-quota reset does not suspend reads for an hour.
+- Herdr activity: immediately at startup, then every **minute**.
+- Redis reports: immediately at startup, then every **minute**, independently
+  of Herdr. These reads check scope, focus and agent assignments, not Linear.
 
-The dashboard does not poll or display Herdr sessions, agent activity, relay
-registrations, or bus messages. Its palette follows the Agent-IX Cloud Command
-tokens (blue primary, orange accent, green ready, yellow blocked) and uses a
-compact diamond glyph in place of a graphical icon. Filament IDE's icon and
-toolbar examples are visual references only; no assets are copied into this
-repository.
+`r` requests an immediate Linear fetch unless rate limited, in which case it
+coalesces with the next scheduled attempt. `d` or Enter toggles details;
+arrows, j/k and Page Up/Down select assignments. `q` or Escape quits.
+
+Tracker failures preserve visibly labeled last successful snapshots and their
+original source age. A snapshot is labeled stale at the 30-minute polling
+interval or after a read failure. Herdr activity becomes unknown after two
+minutes without a successful observation. A replaced native session requires
+an explicit restart to bind its successor. The monitor does not change Linear
+or register agents on the message bus.

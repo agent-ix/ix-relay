@@ -61,6 +61,8 @@ pub struct App {
     pub details: bool,
     /// Complete authoritative tracker snapshot from Linear.
     pub tracker: Source<crate::monitor_tracker::TrackerState>,
+    /// Next scheduled retry after a rate-limited Linear read.
+    pub tracker_retry_at: Option<Instant>,
     /// Human-readable identity of the current team lead.
     pub lead_name: String,
     /// Set by `q` or Escape.
@@ -77,8 +79,19 @@ impl App {
         now: Instant,
     ) {
         match tracker {
-            Ok(data) => self.tracker.success(data, now),
-            Err(error) => self.tracker.failure(error.to_string()),
+            Ok(data) => {
+                self.tracker_retry_at = None;
+                self.tracker.success(data, now);
+            }
+            Err(ix_board::Error::LinearRateLimited { .. }) => {
+                self.tracker_retry_at =
+                    now.checked_add(crate::monitor_ops::TRACKER_REFRESH_INTERVAL);
+                self.tracker.failure("Linear rate limited");
+            }
+            Err(error) => {
+                self.tracker_retry_at = None;
+                self.tracker.failure(error.to_string());
+            }
         }
     }
 }
