@@ -11,7 +11,8 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 const WORK_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
-const UPDATE: &str = r#"
+const IDENTITY_CHECK: &str = r#"
+if redis.call('HSTRLEN', KEYS[1], 'binding') > 65536 then return -3 end
 local binding = redis.call('HGET', KEYS[1], 'binding')
 if binding then
   local old = cjson.decode(binding)
@@ -19,12 +20,19 @@ if binding then
   if old.machine ~= new.machine or old.pane ~= new.pane or old.session ~= new.session
     or old.process_id ~= new.process_id or old.kind ~= new.kind then return -1 end
 end
+"#;
+const UPDATE: &str = r#"
 local agents = redis.call('HLEN', KEYS[1]) - redis.call('HEXISTS', KEYS[1], 'binding')
   - redis.call('HEXISTS', KEYS[1], 'scope') - redis.call('HEXISTS', KEYS[1], 'focus')
 if string.sub(ARGV[2], 1, 6) == 'agent:' and redis.call('HEXISTS', KEYS[1], ARGV[2]) == 0
   and agents >= 128 then return -2 end
 redis.call('HSET', KEYS[1], 'binding', ARGV[1], ARGV[2], ARGV[3])
 redis.call('EXPIRE', KEYS[1], ARGV[4])
+return 1
+"#;
+
+const REMOVE: &str = r#"
+redis.call('HDEL', KEYS[1], ARGV[2])
 return 1
 "#;
 
@@ -44,23 +52,27 @@ impl Relay {
         &mut self,
         binding: &WorkBinding,
         field: &str,
-        value: &T,
+        value: Option<&T>,
     ) -> Result<()> {
         binding.validate()?;
         let key = self
             .keys
             .work_key(&binding.machine, &binding.session, binding.process_id);
-        let reply: i64 = redis::Script::new(UPDATE)
-            .key(&key)
-            .arg(encode(binding))
-            .arg(field)
-            .arg(encode(value))
-            .arg(WORK_TTL_SECONDS)
-            .invoke(&mut self.conn)?;
+        let reply: i64 = redis::Script::new(&format!(
+            "{IDENTITY_CHECK}{}",
+            if value.is_some() { UPDATE } else { REMOVE }
+        ))
+        .key(&key)
+        .arg(encode(binding))
+        .arg(field)
+        .arg(encode(&value))
+        .arg(WORK_TTL_SECONDS)
+        .invoke(&mut self.conn)?;
         match reply {
             1 => Ok(()),
             -1 => Err(WorkError::IdentityMismatch.into()),
             -2 => Err(WorkError::AgentLimit.into()),
+            -3 => Err(WorkError::ReportLimit.into()),
             _ => Err(crate::Error::UnexpectedScriptReply {
                 script: "work-update",
                 reply: reply.to_string(),
@@ -71,33 +83,25 @@ impl Relay {
     /// Replaces only this session's explicit scope, preserving agent and focus reports.
     pub fn report_work_scope(&mut self, binding: &WorkBinding, scope: &WorkScope) -> Result<()> {
         scope.validate()?;
-        self.update_work(binding, "scope", scope)
+        self.update_work(binding, "scope", Some(scope))
     }
 
     /// Replaces only this session's focus; it does not change tracker state.
     pub fn report_work_focus(&mut self, binding: &WorkBinding, focus: &WorkFocus) -> Result<()> {
         focus.validate()?;
-        self.update_work(binding, "focus", focus)
+        self.update_work(binding, "focus", Some(focus))
     }
 
     /// Upserts one agent assignment atomically, without overwriting other agents.
     pub fn report_work_agent(&mut self, binding: &WorkBinding, agent: &AgentWork) -> Result<()> {
         agent.validate()?;
-        self.update_work(binding, &format!("agent:{}", agent.agent_id), agent)
+        self.update_work(binding, &format!("agent:{}", agent.agent_id), Some(agent))
     }
 
     /// Removes a finished assignment when the lead no longer needs it displayed.
     pub fn remove_work_agent(&mut self, binding: &WorkBinding, agent_id: &str) -> Result<()> {
         validate_text(agent_id, "agent_id", 128)?;
-        binding.validate()?;
-        let key = self
-            .keys
-            .work_key(&binding.machine, &binding.session, binding.process_id);
-        redis::cmd("HDEL")
-            .arg(key)
-            .arg(format!("agent:{agent_id}"))
-            .query::<()>(&mut self.conn)?;
-        Ok(())
+        self.update_work::<()>(binding, &format!("agent:{agent_id}"), None)
     }
 
     /// Reads a bounded snapshot without registering anyone or consuming messages.

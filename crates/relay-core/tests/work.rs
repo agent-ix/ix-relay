@@ -120,6 +120,14 @@ fn scope_focus_and_concurrent_agents_survive_independent_updates_and_are_session
         bus.relay.report_work_agent(&wrong_pane, &agent("bad")),
         Err(Error::Work(WorkError::IdentityMismatch))
     ));
+    assert!(matches!(
+        bus.relay.remove_work_agent(&wrong_pane, "coder"),
+        Err(Error::Work(WorkError::IdentityMismatch))
+    ));
+    assert_eq!(
+        bus.relay.work_report(&owner).unwrap().unwrap().agents.len(),
+        2
+    );
     bus.relay.remove_work_agent(&owner, "coder").unwrap();
     assert_eq!(
         bus.relay.work_report(&owner).unwrap().unwrap().agents[0].agent_id,
