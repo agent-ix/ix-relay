@@ -25,10 +25,32 @@ const ERROR: Color = Color::Rgb(240, 163, 163);
 
 /// Renders one bound session, retaining visibly labeled snapshots on source failure.
 pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
+    let report = app.report.value.as_ref().and_then(Option::as_ref);
+    let computed = app
+        .tracker
+        .value
+        .as_ref()
+        .zip(report)
+        .map(|(snapshot, report)| summarize(snapshot, report))
+        .transpose();
+    let (view, scope_error) = match computed {
+        Ok(view) => (view.flatten(), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
     let [identity, scope, focus, work, footer] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(2),
-        Constraint::Length(2),
+        Constraint::Length(
+            if view.as_ref().is_some_and(|v| !v.initiatives.is_empty()) {
+                3
+            } else {
+                2
+            },
+        ),
+        Constraint::Length(if report.and_then(|r| r.focus.as_ref()).is_some() {
+            2
+        } else {
+            1
+        }),
         Constraint::Min(3),
         Constraint::Length(2),
     ])
@@ -58,18 +80,6 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
         .style(Style::default().fg(FOREGROUND)),
         identity,
     );
-    let report = app.report.value.as_ref().and_then(Option::as_ref);
-    let computed = app
-        .tracker
-        .value
-        .as_ref()
-        .zip(report)
-        .map(|(snapshot, report)| summarize(snapshot, report))
-        .transpose();
-    let (view, scope_error) = match computed {
-        Ok(view) => (view.flatten(), None),
-        Err(error) => (None, Some(error.to_string())),
-    };
     let snapshot_old = app.tracker.error.is_some()
         || app.report.error.is_some()
         || app.session_ended
@@ -96,17 +106,39 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
                 .collect::<Vec<_>>()
                 .join(" · ");
             format!(
-                "Scope: {}{}\nTasks: {}/{} done{}{}",
-                v.labels
+                "Scope: {}{}\nTasks: {}/{} done{}{}{}",
+                v.projects
                     .iter()
-                    .map(|label| display_text(label, 128))
+                    .map(|p| format!("{} {}/{}", display_text(&p.name, 64), p.done, p.total))
+                    .chain(
+                        v.ticket_roots
+                            .iter()
+                            .map(|id| format!("ticket {}", display_text(id, 32)))
+                    )
                     .collect::<Vec<_>>()
-                    .join(", "),
+                    .join(" · "),
                 if snapshot_old { " [last snapshot]" } else { "" },
                 v.scope.done,
                 v.scope.leaf_ids.len(),
                 if stage.is_empty() { "" } else { " · " },
-                stage
+                stage,
+                if v.initiatives.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "\nInitiatives (scoped): {}",
+                        v.initiatives
+                            .iter()
+                            .map(|p| format!(
+                                "{} {}/{}",
+                                display_text(&p.name, 64),
+                                p.done,
+                                p.total
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(" · ")
+                    )
+                }
             )
         },
     );
@@ -429,8 +461,14 @@ fn ticket_details(view: &DashboardView, ticket: &TicketSummary) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
+    let initiatives = view
+        .initiatives
+        .iter()
+        .map(|p| format!("{} {}/{}", display_text(&p.name, 64), p.done, p.total))
+        .collect::<Vec<_>>()
+        .join(" · ");
     format!(
-        "{}: {}\nProject: {} · Stage: {} · Priority: {}\nBlockers: {}\n{}",
+        "{}: {}\nProject: {} · Stage: {} · Priority: {}\nBlockers: {}\n{}{}",
         display_text(&ticket.identifier, 32),
         display_text(&ticket.title, 512),
         display_text(&ticket.project, 128),
@@ -444,7 +482,12 @@ fn ticket_details(view: &DashboardView, ticket: &TicketSummary) -> String {
                 |priority| priority.label().to_owned()
             ),
         blockers,
-        display_text(&projects, 512)
+        display_text(&projects, 512),
+        if initiatives.is_empty() {
+            String::new()
+        } else {
+            format!("\nInitiatives (scoped): {initiatives}")
+        }
     )
 }
 
@@ -533,6 +576,58 @@ mod tests {
         );
         app
     }
+    /// Trace: FR-048-AC-3, FR-048-AC-4
+    #[test]
+    fn initiative_progress_counts_only_scoped_leaves_once_across_projects() {
+        let mut app = app();
+        let snapshot = app.tracker.value.as_mut().unwrap();
+        let initiative = ix_board::Initiative {
+            id: "initiative".into(),
+            name: "Program".into(),
+        };
+        snapshot.projects[0].initiatives.push(initiative.clone());
+        let mut other = snapshot.projects[0].clone();
+        other.id = ProjectId("other".into());
+        other.name = "Other".into();
+        snapshot.projects.push(other);
+        let mut extra = snapshot.issues[2].clone();
+        extra.id = IssueId("extra".into());
+        extra.identifier = "SWM-99".into();
+        extra.project_id = Some(ProjectId("other".into()));
+        snapshot.issues.push(extra);
+        let report = app.report.value.as_ref().unwrap().as_ref().unwrap();
+        let view = summarize(snapshot, report).unwrap().unwrap();
+        assert_eq!(view.initiatives.len(), 1);
+        assert_eq!(
+            (view.initiatives[0].done, view.initiatives[0].total),
+            (1, 2)
+        );
+        app.report
+            .value
+            .as_mut()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .scope
+            .as_mut()
+            .unwrap()
+            .projects
+            .push("other".into());
+        let view = summarize(
+            app.tracker.value.as_ref().unwrap(),
+            app.report.value.as_ref().unwrap().as_ref().unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (view.initiatives[0].done, view.initiatives[0].total),
+            (1, 3)
+        );
+        assert_eq!(view.projects.len(), 2);
+        app.details = true;
+        assert!(screen(&mut app, 90, 25).contains("Initiatives (scoped): Program 1/3"));
+    }
+
     fn screen(app: &mut App, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
@@ -554,6 +649,7 @@ mod tests {
     fn compact_monitor_counts_leaves_and_details_fit_the_actual_short_pane() {
         let mut app = app();
         let compact = screen(&mut app, 69, 15);
+        assert!(compact.contains("Scope: Product 1/2"));
         assert!(compact.contains("Tasks: 1/2 done"));
         assert!(compact.contains("SWM-12"));
         assert!(compact.contains("unknown"));

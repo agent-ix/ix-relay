@@ -1112,7 +1112,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 [[package]]
 name = "ix-board"
 version = "0.1.0"
-source = "git+https://github.com/agent-ix/ix-board?rev=484042311fbf705defb547f572f5c2a3ea3c310a#484042311fbf705defb547f572f5c2a3ea3c310a"
+source = "git+https://github.com/agent-ix/ix-board?rev=3db8ae232b7d328e8f2e4ad97643bd40fcda357a#3db8ae232b7d328e8f2e4ad97643bd40fcda357a"
 dependencies = [
  "clap",
  "ix-cli-kit",
