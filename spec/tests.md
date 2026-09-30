@@ -778,7 +778,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | Benchmark | 8 | 5 | 0 | 0 | 0 | 0 | 62% |
 | Fuzz | 5 | 0 | 5 | 0 | 0 | 0 | 0% |
 | Inspection | 3 | 0 | 0 | 0 | 0 | 0 | 0% |
-| Integration | 145 | 110 | 0 | 10 | 0 | 0 | 76% |
+| Integration | 145 | 111 | 0 | 10 | 0 | 0 | 77% |
 | Property | 52 | 40 | 0 | 6 | 0 | 0 | 77% |
 | Static | 2 | 0 | 2 | 0 | 0 | 0 | 0% |
 | Unit | 145 | 112 | 0 | 3 | 0 | 0 | 77% |
