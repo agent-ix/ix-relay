@@ -20,8 +20,8 @@ use relay_core::{AgentName, MachineName, Registration, Relay};
 use super::{
     registry::{Attrs, HistogramData, Registry, label_value},
     series::{
-        DEADLETTER_ENTRIES, HOOK_FAILURES, INBOX_DEPTH, INBOX_OLDEST_AGE, INFLIGHT_ENTRIES,
-        MESSAGES, REGISTRATIONS, TICK_BOUNDS, TICK_DURATION,
+        DEADLETTER_ENTRIES, HEALTH_SNAPSHOT_READ_FAILURES, HOOK_FAILURES, INBOX_DEPTH,
+        INBOX_OLDEST_AGE, INFLIGHT_ENTRIES, MESSAGES, REGISTRATIONS, TICK_BOUNDS, TICK_DURATION,
     },
 };
 
@@ -114,6 +114,30 @@ pub struct Health {
     registrations: u64,
 }
 
+/// Failed reads of each source used to build one health snapshot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ReadFailures {
+    /// Failed per-lead or whole-source queue overview reads.
+    pub(super) lead_overviews: u64,
+    /// Failed whole-source newest hook-health reads.
+    pub(super) hook_health_newest: u64,
+}
+
+impl ReadFailures {
+    pub(super) fn fill(&self, registry: &mut Registry) {
+        for (snapshot, count) in [
+            ("lead_overviews", self.lead_overviews),
+            ("hook_health_newest", self.hook_health_newest),
+        ] {
+            registry.sum(
+                &HEALTH_SNAPSHOT_READ_FAILURES,
+                Attrs::new().with("snapshot", snapshot),
+                count,
+            );
+        }
+    }
+}
+
 /// A hook health record's `at_ms`, `stage` and `error_kind`, as far as they read.
 /// The record is written by another process: nothing else of it is used, and its
 /// strings are made safe before they become attributes.
@@ -132,13 +156,13 @@ fn hook_failure(record: &str) -> Option<(i64, String, String)> {
 /// failures, so at most `PUSH_REQUESTS` requests. A read that fails leaves
 /// its series out; the first error is returned beside what was read, and the caller
 /// decides what to do with it (the tick only logs it).
-pub fn read(
+pub(super) fn read(
     relay: &mut Relay,
     machine: &MachineName,
     regs: &[Registration],
     started_ms: i64,
     now_ms: i64,
-) -> (Health, Option<relay_core::Error>) {
+) -> (Health, ReadFailures, Option<relay_core::Error>) {
     let local: Vec<&AgentName> = regs
         .iter()
         .filter(|r| r.pane_on(machine).is_some())
@@ -149,10 +173,14 @@ pub fn read(
         ..Health::default()
     };
     let mut failed = None;
+    let mut read_failures = ReadFailures::default();
     match relay.lead_overviews(&local) {
         Ok(overviews) => {
             for (name, overview) in local.iter().zip(overviews) {
-                let Ok(overview) = overview else { continue };
+                let Ok(overview) = overview else {
+                    read_failures.lead_overviews = read_failures.lead_overviews.saturating_add(1);
+                    continue;
+                };
                 // A lead has a row only from a read that succeeded: a failed read
                 // leaves its series out, never a zero that reads as a drained inbox.
                 health.leads.insert(
@@ -168,7 +196,10 @@ pub fn read(
                 );
             }
         }
-        Err(e) => failed = Some(e),
+        Err(e) => {
+            read_failures.lead_overviews = 1;
+            failed = Some(e);
+        }
     }
     match relay.hook_health_newest(HOOK_ENTRIES) {
         Ok(stream) => {
@@ -191,9 +222,12 @@ pub fn read(
                 *health.hook_failures.entry(key).or_default() += 1;
             }
         }
-        Err(e) => failed = failed.or(Some(e)),
+        Err(e) => {
+            read_failures.hook_health_newest = 1;
+            failed = failed.or(Some(e));
+        }
     }
-    (health, failed)
+    (health, read_failures, failed)
 }
 
 impl Health {
@@ -388,7 +422,7 @@ mod tests {
         assert!(held > 1_000, "the stream was trimmed to {held} entries");
         let mut lead = reg_for("a-lead", "hub", "w1:p1");
         lead.last_seen_ms = now_ms;
-        let (health, failed) = read(&mut relay, &hub, &[lead], 0, now_ms);
+        let (health, _, failed) = read(&mut relay, &hub, &[lead], 0, now_ms);
         assert!(failed.is_none(), "{failed:?}");
         assert_eq!(
             health
@@ -435,7 +469,7 @@ mod tests {
             };
             relay.send(&msg).unwrap();
         }
-        let (health, failed) = read(&mut relay, &hub(), std::slice::from_ref(&lead), 0, 61_000);
+        let (health, _, failed) = read(&mut relay, &hub(), std::slice::from_ref(&lead), 0, 61_000);
         assert!(failed.is_none(), "{failed:?}");
         let row = &health.leads["a-lead"];
         assert_eq!(
@@ -451,7 +485,7 @@ mod tests {
                 relay_core::Claim::new(relay_core::Popper::Hook),
             )
             .unwrap();
-        let (health, _) = read(&mut relay, &hub(), &[lead], 0, 61_000);
+        let (health, _, _) = read(&mut relay, &hub(), &[lead], 0, 61_000);
         let row = &health.leads["a-lead"];
         assert_eq!((row.depth, row.in_flight, row.dead), (1, 2, 0));
     }
