@@ -293,7 +293,7 @@ fn render_work(
                 display_text(&ticket.title, 160)
             );
             let agent_cell = agent.map_or_else(
-                || "unassigned\nnot reported".into(),
+                || "unknown\nnot reported".into(),
                 |a| {
                     format!(
                         "{}\n{}",
@@ -357,8 +357,13 @@ fn render_work(
     let title = format!(
         "Tickets / agents · {} rows · {} ready",
         rows.len(),
-        view.ready_count
+        view.ready_queue.len()
     );
+    let title = if let Some(next) = view.ready_queue.first() {
+        format!("{title} · next {}", display_text(next, 20))
+    } else {
+        title
+    };
     let table = Table::new(
         rows,
         [
@@ -551,7 +556,8 @@ mod tests {
         let compact = screen(&mut app, 69, 15);
         assert!(compact.contains("Tasks: 1/2 done"));
         assert!(compact.contains("SWM-12"));
-        assert!(compact.contains("unassigned"));
+        assert!(compact.contains("unknown"));
+        assert!(!compact.contains("unassigned"));
         assert!(compact.contains("Focus: not reported"));
         app.details = true;
         let details = screen(&mut app, 69, 15);
@@ -565,6 +571,30 @@ mod tests {
         assert!(stale.contains("Tasks: 1/2 done"));
         app.report.value = None;
         assert!(screen(&mut app, 69, 15).contains("Scope: not reported"));
+    }
+
+    /// Trace: FR-048-AC-3, FR-048-AC-4
+    #[test]
+    fn next_ready_ticket_keeps_tracker_order_rather_than_identifier_order() {
+        let mut app = app();
+        let snapshot = app.tracker.value.as_mut().unwrap();
+        let ticket = snapshot.issues.last_mut().unwrap();
+        ticket.state = "Specced".into();
+        ticket.state_type = WorkflowStateType::Unstarted;
+        ticket.priority = 1.0;
+        let mut other = ticket.clone();
+        other.id = IssueId("id-10".into());
+        other.identifier = "SWM-10".into();
+        other.priority = 2.0;
+        snapshot.issues.push(other);
+        let report = app.report.value.as_ref().unwrap().as_ref().unwrap();
+        let view = summarize(snapshot, report).unwrap().unwrap();
+        assert_eq!(view.ready_queue, ["SWM-12", "SWM-10"]);
+        let rendered = screen(&mut app, 69, 15);
+        assert!(rendered.contains("2 ready · next SWM-12"));
+        assert!(rendered.contains("ready in queue"));
+        assert!(rendered.contains("unknown"));
+        assert!(!rendered.contains("unassigned"));
     }
 
     /// Trace: FR-048-AC-4
