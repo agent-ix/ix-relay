@@ -54,8 +54,8 @@ pub struct DashboardView {
     pub projects: Vec<ProjectProgress>,
     /// Open tickets and explicitly reported assignments, in deterministic order.
     pub tickets: Vec<TicketSummary>,
-    /// Number of ready tickets in scope.
-    pub ready_count: usize,
+    /// Ready identifiers in deterministic team order, preserving each team's tracker queue.
+    pub ready_queue: Vec<String>,
 }
 
 /// Uses the same selection representation as the authoritative board library.
@@ -212,6 +212,6 @@ pub fn summarize(
         labels: labels.into_iter().collect(),
         projects,
         tickets,
-        ready_count: ready_ids.len(),
+        ready_queue: ready.into_iter().map(|item| item.identifier).collect(),
     }))
 }
