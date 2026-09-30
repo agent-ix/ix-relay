@@ -9,7 +9,7 @@ use std::{
         mpsc::{self, Receiver, SyncSender},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::monitor_tracker::TrackerState;
@@ -75,24 +75,41 @@ impl TrackerWorker {
                         refresh_interval,
                         max_retry_interval,
                     );
+                    let cooldown = match &result {
+                        Err(ix_board::Error::LinearRateLimited { retry_after }) => {
+                            Some(*retry_after)
+                        }
+                        _ => None,
+                    };
                     if event_tx.send(result).is_err() {
                         break;
                     }
                     if worker_stop_requested.load(Ordering::Acquire) {
                         break;
                     }
-                    match command_rx.recv_timeout(retry_interval) {
-                        Ok(TrackerCommand::Refresh) => {
-                            force = true;
+                    let mut wait = RefreshWait {
+                        delay: cooldown.unwrap_or(retry_interval).max(retry_interval),
+                        protected: cooldown.is_some(),
+                        force: false,
+                    };
+                    let started = Instant::now();
+                    loop {
+                        if worker_stop_requested.load(Ordering::Acquire) {
+                            return;
                         }
-                        Err(mpsc::RecvTimeoutError::Timeout) => {
-                            force = false;
-                            if worker_stop_requested.load(Ordering::Acquire) {
+                        if started.elapsed() >= wait.delay {
+                            force = wait.force;
+                            break;
+                        }
+                        let command =
+                            command_rx.recv_timeout(wait.delay.saturating_sub(started.elapsed()));
+                        match wait.receive(command) {
+                            WaitOutcome::Continue => continue,
+                            WaitOutcome::Read { force: requested } => {
+                                force = requested;
                                 break;
                             }
-                        }
-                        Ok(TrackerCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            break;
+                            WaitOutcome::Stop => return,
                         }
                     }
                 }
@@ -119,6 +136,38 @@ impl TrackerWorker {
         // during shutdown; it observes the stop flag and exits after the
         // current read returns, while the dashboard can quit immediately.
         drop(self.handle);
+    }
+}
+
+/// Pending manual refreshes are coalesced until Linear's minimum cooldown ends.
+struct RefreshWait {
+    delay: Duration,
+    protected: bool,
+    force: bool,
+}
+
+enum WaitOutcome {
+    Continue,
+    Read { force: bool },
+    Stop,
+}
+
+impl RefreshWait {
+    fn receive(&mut self, command: Result<TrackerCommand, mpsc::RecvTimeoutError>) -> WaitOutcome {
+        match command {
+            Ok(TrackerCommand::Refresh) => {
+                self.force = true;
+                if self.protected {
+                    WaitOutcome::Continue
+                } else {
+                    WaitOutcome::Read { force: true }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => WaitOutcome::Read { force: self.force },
+            Ok(TrackerCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                WaitOutcome::Stop
+            }
+        }
     }
 }
 
@@ -185,6 +234,43 @@ mod tests {
         assert_eq!(retry, cap);
         assert_eq!(next_interval(false, retry, refresh, cap), cap);
         assert_eq!(next_interval(true, retry, refresh, cap), refresh);
+    }
+
+    /// Trace: FR-048-AC-5
+    #[test]
+    fn rate_limit_cooldown_coalesces_manual_refreshes_until_timeout_and_allows_stop() {
+        let mut wait = RefreshWait {
+            delay: Duration::from_secs(300),
+            protected: true,
+            force: false,
+        };
+        for _ in 0..3 {
+            assert!(matches!(
+                wait.receive(Ok(TrackerCommand::Refresh)),
+                WaitOutcome::Continue
+            ));
+        }
+        assert!(matches!(
+            wait.receive(Err(mpsc::RecvTimeoutError::Timeout)),
+            WaitOutcome::Read { force: true }
+        ));
+        assert!(matches!(
+            wait.receive(Ok(TrackerCommand::Stop)),
+            WaitOutcome::Stop
+        ));
+        let mut wait = RefreshWait {
+            delay: Duration::from_secs(300),
+            protected: true,
+            force: false,
+        };
+        assert!(matches!(
+            wait.receive(Err(mpsc::RecvTimeoutError::Timeout)),
+            WaitOutcome::Read { force: false }
+        ));
+        assert!(matches!(
+            wait.receive(Err(mpsc::RecvTimeoutError::Disconnected)),
+            WaitOutcome::Stop
+        ));
     }
 
     /// Trace: FR-048-AC-5

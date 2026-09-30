@@ -9,10 +9,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Tracker source snapshot; its timestamp belongs to the source fetch.
 pub type TrackerState = WorkspaceSnapshot;
 
-/// Progress within one explicitly selected project.
+/// Progress within one scope-associated project or initiative.
 #[derive(Clone, Debug)]
-pub struct ProjectProgress {
-    /// Project display name.
+pub struct ScopeProgress {
+    /// Project or initiative display name.
     pub name: String,
     /// Completed leaf tasks.
     pub done: usize,
@@ -48,10 +48,12 @@ pub struct TicketSummary {
 pub struct DashboardView {
     /// Resolved leaf-task membership and progress.
     pub scope: ScopeSummary,
-    /// Initiative and project labels describing the assigned scope.
-    pub labels: Vec<String>,
+    /// Explicit ticket subtree roots, resolved to native identifiers.
+    pub ticket_roots: Vec<String>,
+    /// Initiative progress restricted to this reported scope.
+    pub initiatives: Vec<ScopeProgress>,
     /// Project totals for the detail view.
-    pub projects: Vec<ProjectProgress>,
+    pub projects: Vec<ScopeProgress>,
     /// Open tickets and explicitly reported assignments, in deterministic order.
     pub tickets: Vec<TicketSummary>,
     /// Ready identifiers in deterministic team order, preserving each team's tracker queue.
@@ -76,7 +78,8 @@ pub fn summarize(
         return Ok(None);
     };
     let scope = ix_board::select_scope(snapshot, &selection(assignment))?;
-    let mut labels = BTreeSet::new();
+    let mut ticket_roots = BTreeSet::new();
+    let mut initiative_projects: BTreeMap<_, (String, BTreeSet<_>)> = BTreeMap::new();
     let mut projects = Vec::new();
     for project in snapshot.projects.iter().filter(|p| {
         scope.project_ids.contains(&p.id)
@@ -85,9 +88,12 @@ pub fn summarize(
                 .iter()
                 .any(|i| scope.issue_ids.contains(&i.id) && i.project_id.as_ref() == Some(&p.id))
     }) {
-        labels.insert(project.name.clone());
         for initiative in &project.initiatives {
-            labels.insert(initiative.name.clone());
+            initiative_projects
+                .entry(&initiative.id)
+                .or_insert_with(|| (initiative.name.clone(), BTreeSet::new()))
+                .1
+                .insert(&project.id);
         }
         let leaves: Vec<_> = snapshot
             .issues
@@ -96,7 +102,7 @@ pub fn summarize(
                 scope.leaf_ids.contains(&i.id) && i.project_id.as_ref() == Some(&project.id)
             })
             .collect();
-        projects.push(ProjectProgress {
+        projects.push(ScopeProgress {
             name: project.name.clone(),
             done: leaves
                 .iter()
@@ -107,9 +113,34 @@ pub fn summarize(
     }
     for id in &assignment.tickets {
         if let Some(issue) = snapshot.issues.iter().find(|i| i.id.0 == *id) {
-            labels.insert(issue.identifier.clone());
+            ticket_roots.insert(issue.identifier.clone());
         }
     }
+    let mut initiatives: Vec<_> = initiative_projects
+        .into_values()
+        .map(|(name, project_ids)| {
+            let leaves: Vec<_> = snapshot
+                .issues
+                .iter()
+                .filter(|issue| {
+                    scope.leaf_ids.contains(&issue.id)
+                        && issue
+                            .project_id
+                            .as_ref()
+                            .is_some_and(|id| project_ids.contains(id))
+                })
+                .collect();
+            ScopeProgress {
+                name,
+                total: leaves.len(),
+                done: leaves
+                    .iter()
+                    .filter(|issue| issue.state_type == WorkflowStateType::Completed)
+                    .count(),
+            }
+        })
+        .collect();
+    initiatives.sort_by(|a, b| a.name.cmp(&b.name));
     projects.sort_by(|a, b| a.name.cmp(&b.name));
     let teams: BTreeSet<_> = snapshot
         .issues
@@ -209,7 +240,8 @@ pub fn summarize(
     });
     Ok(Some(DashboardView {
         scope,
-        labels: labels.into_iter().collect(),
+        ticket_roots: ticket_roots.into_iter().collect(),
+        initiatives,
         projects,
         tickets,
         ready_queue: ready.into_iter().map(|item| item.identifier).collect(),
