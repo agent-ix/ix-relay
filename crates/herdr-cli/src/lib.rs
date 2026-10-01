@@ -282,21 +282,22 @@ fn kill_group(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-/// herdr's `{"error": {...}}` / `{"result": {...}}` envelope. Untagged:
-/// exactly one of the two branches is present in real output.
+/// Selected fields of herdr's externally owned envelope. Metadata such as
+/// request IDs is ignored. Keep the result as raw JSON so decoding T retains
+/// field/type diagnostics and rejects duplicate fields in the command payload.
 #[derive(Deserialize)]
-#[serde(untagged)]
-enum Envelope<T> {
-    /// herdr reported a failure instead of a result.
-    Error {
-        /// The `error` object.
-        error: ErrorBody,
-    },
-    /// herdr's call succeeded.
-    Ok {
-        /// The `result` object, whose shape depends on the command.
-        result: T,
-    },
+struct Envelope {
+    #[serde(default, deserialize_with = "present_result")]
+    result: Option<Box<serde_json::value::RawValue>>,
+    error: Option<ErrorBody>,
+}
+
+// An explicitly present null is a legitimate payload for T = Option<_> or ().
+// The outer Option tracks absence, not the payload's nullability.
+fn present_result<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Box<serde_json::value::RawValue>>, D::Error> {
+    Box::<serde_json::value::RawValue>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -322,22 +323,35 @@ pub fn decode<T: serde::de::DeserializeOwned>(
     success: bool,
 ) -> Result<T, ProcessError> {
     let bytes = if success { stdout } else { stderr };
-    match serde_json::from_slice::<Envelope<T>>(bytes) {
-        Ok(Envelope::Ok { result }) => Ok(result),
-        Ok(Envelope::Error { error }) => Err(ProcessError::Reported {
+    let bad_output = |reason: String| {
+        if success {
+            ProcessError::BadOutput {
+                program: program.to_owned(),
+                reason,
+            }
+        } else {
+            ProcessError::UnexpectedExit {
+                program: program.to_owned(),
+                status: -1,
+                stderr: String::from_utf8_lossy(stderr).into_owned(),
+            }
+        }
+    };
+    // Select the envelope before decoding the command's payload. If T is inside
+    // an untagged enum, serde discards its actual error (e.g. a missing field)
+    // and reports only that no envelope variant matched.
+    let envelope: Envelope =
+        serde_json::from_slice(bytes).map_err(|error| bad_output(error.to_string()))?;
+    if let Some(error) = envelope.error {
+        return Err(ProcessError::Reported {
             code: error.code,
             message: error.message,
-        }),
-        Err(e) if success => Err(ProcessError::BadOutput {
-            program: program.to_owned(),
-            reason: e.to_string(),
-        }),
-        Err(_) => Err(ProcessError::UnexpectedExit {
-            program: program.to_owned(),
-            status: -1,
-            stderr: String::from_utf8_lossy(stderr).into_owned(),
-        }),
+        });
     }
+    let result = envelope
+        .result
+        .ok_or_else(|| bad_output("missing result or error".into()))?;
+    serde_json::from_str(result.get()).map_err(|error| bad_output(error.to_string()))
 }
 
 /// Runs `program <args>` through `runner` and decodes its documented JSON
@@ -439,6 +453,107 @@ mod tests {
         }
         let r: R = decode("herdr", br#"{"result":{"x":7}}"#, b"", true).unwrap();
         assert_eq!(r, R { x: 7 });
+    }
+
+    /// Trace: FR-048-AC-8
+    #[test]
+    fn payload_failure_names_the_missing_field_or_invalid_type() {
+        #[derive(Debug, Deserialize)]
+        struct Payload {
+            status: String,
+        }
+        for (bytes, expected) in [
+            (
+                br#"{"id":"request","result":{}}"#.as_slice(),
+                "missing field `status`",
+            ),
+            (
+                br#"{"result":{"status":42}}"#.as_slice(),
+                "expected a string",
+            ),
+        ] {
+            let error = decode::<Payload>("herdr", bytes, b"", true).unwrap_err();
+            let ProcessError::BadOutput { program, reason } = error else {
+                panic!("expected a payload decode error");
+            };
+            assert_eq!(program, "herdr");
+            assert!(reason.contains(expected), "{reason}");
+            assert!(!reason.contains("untagged"));
+        }
+        let value =
+            decode::<Payload>("herdr", br#"{"result":{"status":"working"}}"#, b"", true).unwrap();
+        assert_eq!(value.status, "working");
+    }
+
+    /// Trace: FR-048-AC-8
+    #[test]
+    fn raw_payload_preserves_duplicate_rejection_and_null_distinction() {
+        #[derive(Debug, Deserialize)]
+        struct Payload {
+            status: String,
+        }
+        let error = decode::<Payload>(
+            "herdr",
+            br#"{"result":{"status":"idle","status":"working"}}"#,
+            b"",
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, ProcessError::BadOutput { reason, .. } if reason.contains("duplicate field `status`"))
+        );
+        let value = decode::<Payload>(
+            "herdr",
+            br#"{"id":"request","result":{"status":"working"}}"#,
+            b"",
+            true,
+        )
+        .unwrap();
+        assert_eq!(value.status, "working");
+        assert_eq!(
+            decode::<Option<Payload>>("herdr", br#"{"result":null}"#, b"", true)
+                .unwrap()
+                .map(|v| v.status),
+            None
+        );
+        let error =
+            decode::<Option<Payload>>("herdr", br#"{"id":"request"}"#, b"", true).unwrap_err();
+        assert!(
+            matches!(error, ProcessError::BadOutput { reason, .. } if reason == "missing result or error")
+        );
+    }
+
+    /// Trace: FR-048-AC-8
+    #[test]
+    fn payload_decode_failure_on_nonzero_exit_keeps_exit_semantics() {
+        #[derive(Debug, Deserialize)]
+        struct Payload {
+            _status: String,
+        }
+        let stderr = br#"{"result":{}}"#;
+        assert_eq!(
+            decode::<Payload>("herdr", b"", stderr, false).unwrap_err(),
+            ProcessError::UnexpectedExit {
+                program: "herdr".into(),
+                status: -1,
+                stderr: String::from_utf8_lossy(stderr).into_owned(),
+            }
+        );
+        // An error envelope does not need to contain any command payload fields.
+        let error = decode::<Payload>(
+            "herdr",
+            br#"{"error":{"code":"busy","message":"later"}}"#,
+            b"",
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            ProcessError::Reported {
+                code: "busy".into(),
+                message: "later".into()
+            }
+        );
     }
 
     #[test]

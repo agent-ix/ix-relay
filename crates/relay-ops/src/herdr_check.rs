@@ -383,23 +383,14 @@ fn decode<T: serde::de::DeserializeOwned>(
     args: &[&str],
     timeout: Duration,
 ) -> Result<T, HerdrCheck> {
-    // The envelope is decoded untyped first: a failure to decode `T` from inside
-    // it then names the member, where the envelope's own untagged decode would
-    // only say that nothing matched.
-    let result = herdr_cli::call::<serde_json::Value>(runner, "herdr", args, timeout).map_err(
-        |e| match e {
-            ProcessError::BadOutput { reason, .. } => HerdrCheck::ShapeMismatch {
-                command,
-                detail: bounded(&reason),
-            },
-            other => HerdrCheck::Failed {
-                reason: bounded(&format!("{command}: {other}")),
-            },
+    herdr_cli::call::<T>(runner, "herdr", args, timeout).map_err(|error| match error {
+        ProcessError::BadOutput { reason, .. } => HerdrCheck::ShapeMismatch {
+            command,
+            detail: bounded(&reason),
         },
-    )?;
-    serde_json::from_value(result).map_err(|e| HerdrCheck::ShapeMismatch {
-        command,
-        detail: bounded(&e.to_string()),
+        other => HerdrCheck::Failed {
+            reason: bounded(&format!("{command}: {other}")),
+        },
     })
 }
 
