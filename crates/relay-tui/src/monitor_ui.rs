@@ -3,7 +3,7 @@
 //! Compact, scrollable session monitor. Ticket stage and activity stay separate.
 
 use crate::{
-    monitor::{App, Source, display_text},
+    monitor::{App, Source, View, display_text},
     monitor_tracker::{DashboardView, TicketSummary, summarize},
 };
 use ix_board::{Clock, SystemClock};
@@ -17,10 +17,11 @@ use ratatui::{
 use relay_core::work::{AgentWork, WorkStatus};
 use std::time::Instant;
 
-const PRIMARY: Color = Color::Rgb(79, 141, 247);
-const FOREGROUND: Color = Color::Rgb(230, 230, 230);
-const MUTED: Color = Color::Rgb(139, 146, 156);
-const WARNING: Color = Color::Rgb(224, 161, 92);
+pub(crate) const PRIMARY: Color = Color::Rgb(79, 141, 247);
+pub(crate) const FOREGROUND: Color = Color::Rgb(230, 230, 230);
+pub(crate) const MUTED: Color = Color::Rgb(139, 146, 156);
+pub(crate) const WARNING: Color = Color::Rgb(224, 161, 92);
+pub(crate) const SELECTION: Color = Color::Rgb(31, 41, 55);
 const ERROR: Color = Color::Rgb(240, 163, 163);
 
 /// Renders one bound session, retaining visibly labeled snapshots on source failure.
@@ -38,10 +39,12 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
         Ok(view) => (view.flatten(), None),
         Err(error) => (None, Some(error.to_string())),
     };
-    let [identity, scope, focus, work, footer] = Layout::vertical([
+    let [identity, tabs, scope, focus, work, footer] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(
-            if view.as_ref().is_some_and(|v| !v.initiatives.is_empty()) {
+            if app.view == View::Tickets && view.as_ref().is_some_and(|v| !v.initiatives.is_empty())
+            {
                 3
             } else {
                 2
@@ -85,6 +88,25 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
         .style(Style::default().fg(FOREGROUND)),
         identity,
     );
+    let mut tab_spans = Vec::new();
+    for (key, label, view) in [
+        ("t", "Tickets", View::Tickets),
+        ("a", "Agents", View::Agents),
+        ("p", "Scope", View::Scope),
+    ] {
+        tab_spans.push(Span::styled(key, Style::default().fg(PRIMARY)));
+        tab_spans.push(Span::styled(
+            format!(" {label}  "),
+            Style::default()
+                .fg(if app.view == view { FOREGROUND } else { MUTED })
+                .add_modifier(if app.view == view {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(tab_spans)), tabs);
     let snapshot_old = app.tracker.error.is_some()
         || app.report.error.is_some()
         || app.session_ended
@@ -111,6 +133,18 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
                 .map(|(stage, count)| format!("{count} {}", display_text(stage, 32)))
                 .collect::<Vec<_>>()
                 .join(" · ");
+            if app.view != View::Tickets {
+                return format!(
+                    "Scope: {} initiatives · {} projects{}\nTasks: {}/{} done{}{}",
+                    v.initiatives.len(),
+                    v.projects.len(),
+                    if snapshot_old { " [last snapshot]" } else { "" },
+                    v.scope.done,
+                    v.scope.leaf_ids.len(),
+                    if stage.is_empty() { "" } else { " · " },
+                    stage
+                );
+            }
             format!(
                 "Scope: {}{}\nTasks: {}/{} done{}{}{}",
                 v.projects
@@ -158,9 +192,20 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
         || "Focus: not reported".into(),
         |f| {
             format!(
-                "Focus: {} · reported {} ago",
+                "Focus: {}{}",
                 display_text(&f.summary, 512),
-                age_ms(f.reported_at_ms)
+                if f.tickets.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "\nTickets: {}",
+                        f.tickets
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
             )
         },
     );
@@ -170,11 +215,17 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
             .wrap(Wrap { trim: true }),
         focus,
     );
-    if let Some(view) = &view {
-        render_work(frame, app, view, work, runtime_fresh);
-    } else {
-        app.row_count = 0;
-        frame.render_widget(Paragraph::new("Ticket/agent assignments unavailable until scope and Linear load.\nNo assignment or focus is inferred from open tickets.").style(Style::default().fg(MUTED)).wrap(Wrap { trim: true }), work);
+    match app.view {
+        View::Agents => crate::monitor_views::render_agents(frame, app, work, runtime_fresh, now),
+        View::Scope => crate::monitor_views::render_scope(frame, app, view.as_ref(), work),
+        View::Tickets => {
+            if let Some(view) = &view {
+                render_work(frame, app, view, work, runtime_fresh);
+            } else {
+                app.row_count = 0;
+                frame.render_widget(Paragraph::new("Tickets unavailable until scope and Linear load. Agents are available with a.\nNo assignment or focus is inferred from open tickets.").style(Style::default().fg(MUTED)).wrap(Wrap { trim: true }), work);
+            }
+        }
     }
     let linear = app.tracker.value.as_ref().map_or_else(
         || "Linear: no data".into(),
@@ -289,7 +340,7 @@ fn duration(seconds: i64) -> String {
     }
 }
 
-fn age_ms(timestamp: i64) -> String {
+pub(crate) fn age_ms(timestamp: i64) -> String {
     duration(
         SystemClock
             .now_epoch_seconds()
@@ -307,7 +358,7 @@ fn activity(status: &str) -> &str {
     }
 }
 
-fn reported_status(status: WorkStatus) -> &'static str {
+pub(crate) fn reported_status(status: WorkStatus) -> &'static str {
     match status {
         WorkStatus::Running => "running",
         WorkStatus::Waiting => "waiting",
@@ -317,7 +368,7 @@ fn reported_status(status: WorkStatus) -> &'static str {
     }
 }
 
-fn agent_activity(app: &App, agent: &AgentWork, runtime_fresh: bool) -> String {
+pub(crate) fn agent_activity(app: &App, agent: &AgentWork, runtime_fresh: bool) -> String {
     if app.session_ended {
         return "last report".into();
     }
@@ -406,25 +457,8 @@ fn render_work(
             tickets.push(ticket);
         }
     }
-    app.row_count = rows.len();
-    let selected = app
-        .table
-        .selected()
-        .unwrap_or(0)
-        .min(rows.len().saturating_sub(1));
-    app.table.select((!rows.is_empty()).then_some(selected));
-    let compact_details = app.details && area.height < 12;
-    let [table_area, detail_area] = Layout::vertical([
-        Constraint::Min(if compact_details { 0 } else { 3 }),
-        Constraint::Length(if compact_details {
-            area.height
-        } else if app.details {
-            area.height.saturating_sub(5).min(9)
-        } else {
-            0
-        }),
-    ])
-    .areas(area);
+    let selected = crate::monitor_views::select_row(app, rows.len());
+    let [table_area, detail_area] = crate::monitor_views::content_areas(area, app.details);
     let title = format!(
         "Tickets / agents · {} rows · {} ready",
         rows.len(),
@@ -452,7 +486,7 @@ fn render_work(
         title,
         Style::default().fg(PRIMARY),
     ))))
-    .row_highlight_style(Style::default().bg(Color::Rgb(31, 41, 55)))
+    .row_highlight_style(Style::default().bg(SELECTION))
     .highlight_symbol("› ");
     frame.render_stateful_widget(table, table_area, &mut app.table);
     if rows_empty(view) {
@@ -467,15 +501,7 @@ fn render_work(
             || "No ticket selected".into(),
             |ticket| ticket_details(view, ticket),
         );
-        frame.render_widget(
-            Paragraph::new(text)
-                .style(Style::default().fg(FOREGROUND))
-                .wrap(Wrap { trim: true })
-                .block(
-                    Block::default().title(Span::styled("Details", Style::default().fg(PRIMARY))),
-                ),
-            detail_area,
-        );
+        crate::monitor_views::render_details(frame, text, detail_area);
     }
 }
 
@@ -793,6 +819,151 @@ mod tests {
         assert_eq!(view.projects.len(), 2);
         app.details = true;
         assert!(screen(&mut app, 90, 25).contains("Initiatives (scoped): Program 1/3"));
+    }
+
+    /// Trace: FR-048-AC-6
+    #[test]
+    fn agents_are_visible_without_scope_or_linear_and_details_follow_selection() {
+        let mut app = app();
+        let report = app.report.value.as_mut().unwrap().as_mut().unwrap();
+        report.scope = None;
+        report.focus = Some(relay_core::work::WorkFocus {
+            summary: "Review credentials".into(),
+            tickets: vec!["SWM-12".parse().unwrap()],
+            reported_at_ms: 100,
+        });
+        report.agents = (0..12)
+            .map(|n| AgentWork {
+                agent_id: format!("native-{n}"),
+                name: format!("worker-{n:02}"),
+                ticket: "SWM-12".parse().unwrap(),
+                role: "coder".into(),
+                status: if n == 0 {
+                    WorkStatus::Done
+                } else {
+                    WorkStatus::Running
+                },
+                pane: None,
+                session: None,
+                reported_at_ms: 100,
+            })
+            .collect();
+        app.tracker.value = None;
+        crate::monitor::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        );
+        let first = screen(&mut app, 69, 15);
+        assert!(first.contains("worker-00"), "{first}");
+        assert!(first.contains("SWM-12"));
+        assert!(first.contains("stage done"));
+        assert!(first.contains("11 active"));
+        assert!(first.contains("Focus: Review credentials"));
+        assert!(first.contains("Tickets: SWM-12"));
+        assert_eq!(app.row_count, 12);
+        for _ in 0..11 {
+            crate::monitor::handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert!(screen(&mut app, 69, 15).contains("worker-11"));
+        app.details = true;
+        let detail = screen(&mut app, 69, 15);
+        assert!(detail.contains("native-11"), "{detail}");
+        assert!(detail.contains("Linear data unavailable"));
+        app.details = false;
+        app.report.failure("Redis unavailable");
+        let stale = screen(&mut app, 69, 15);
+        assert!(stale.contains("last snapshot"));
+        assert!(stale.contains("Redis unavailable"));
+        crate::monitor::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.table.selected(), None);
+        assert_eq!(app.table.offset(), 0);
+    }
+
+    /// Trace: FR-048-AC-7
+    #[test]
+    fn scope_view_shows_group_counts_and_remaining_stage_details() {
+        let mut app = app();
+        let snapshot = app.tracker.value.as_mut().unwrap();
+        snapshot.projects[0].initiatives.push(ix_board::Initiative {
+            id: "program".into(),
+            name: "Program".into(),
+        });
+        snapshot.issues[2]
+            .blocked_by
+            .push(IssueId("missing".into()));
+        let mut ready = snapshot.issues[2].clone();
+        ready.id = IssueId("ready".into());
+        ready.identifier = "SWM-20".into();
+        ready.state = "Specced".into();
+        ready.state_type = WorkflowStateType::Unstarted;
+        ready.blocked_by.clear();
+        snapshot.issues.push(ready);
+        let report = app.report.value.as_ref().unwrap().as_ref().unwrap();
+        let view = summarize(snapshot, report).unwrap().unwrap();
+        for progress in [&view.projects[0], &view.initiatives[0]] {
+            assert_eq!(
+                (
+                    progress.done,
+                    progress.total,
+                    progress.ready,
+                    progress.blocked
+                ),
+                (1, 3, 1, 1)
+            );
+            assert_eq!(progress.remaining_by_stage.get("Review"), Some(&1));
+            assert_eq!(progress.remaining_by_stage.get("Specced"), Some(&1));
+        }
+        crate::monitor::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+        );
+        let scope = screen(&mut app, 69, 15);
+        assert!(scope.contains("Program"), "{scope}");
+        assert!(scope.contains("Product"));
+        assert!(scope.contains("Blocked"));
+        assert_eq!(app.row_count, 2);
+        crate::monitor::handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.details = true;
+        let detail = screen(&mut app, 69, 15);
+        assert!(detail.contains("Project: Product"), "{detail}");
+        assert!(detail.contains("Project status: Started"));
+        assert!(detail.contains("Ready: 1 · Blocked: 1"));
+        assert!(detail.contains("1 Review · 1 Specced"));
+        app.details = false;
+        let snapshot = app.tracker.value.as_mut().unwrap();
+        let template = snapshot.projects[0].clone();
+        let scope = app
+            .report
+            .value
+            .as_mut()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .scope
+            .as_mut()
+            .unwrap();
+        for n in 0..20 {
+            let mut project = template.clone();
+            project.id = ProjectId(format!("project-{n}"));
+            project.name = format!("Project-{n:02}");
+            project.initiatives.clear();
+            scope.projects.push(project.id.0.clone());
+            snapshot.projects.push(project);
+        }
+        screen(&mut app, 69, 15);
+        for _ in 0..21 {
+            crate::monitor::handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert!(screen(&mut app, 69, 15).contains("Project-19"));
+        crate::monitor::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.view, View::Tickets);
+        assert_eq!(app.table.selected(), None);
     }
 
     fn screen(app: &mut App, width: u16, height: u16) -> String {
