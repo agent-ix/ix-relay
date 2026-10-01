@@ -42,6 +42,18 @@ impl<T> Source<T> {
     }
 }
 
+/// Main content selected independently of the source status toggle.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    /// Open scope tickets and their assignments.
+    #[default]
+    Tickets,
+    /// All explicit agents, even without a scope or tracker snapshot.
+    Agents,
+    /// Initiative and project progress within the reported scope.
+    Scope,
+}
+
 /// Complete dashboard state.
 #[derive(Debug, Default)]
 pub struct App {
@@ -57,6 +69,8 @@ pub struct App {
     pub table: ratatui::widgets::TableState,
     /// Current rendered assignment row count.
     pub row_count: usize,
+    /// Selected content view.
+    pub view: View,
     /// Whether the detail panel is expanded.
     pub details: bool,
     /// Whether source timestamps are visible in the optional status line.
@@ -105,6 +119,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('r') => app.refresh_now = true,
         KeyCode::Char('d') | KeyCode::Enter => app.details = !app.details,
         KeyCode::Char('s') => app.show_status = !app.show_status,
+        KeyCode::Char('t') => select_view(app, View::Tickets),
+        KeyCode::Char('a') => select_view(app, View::Agents),
+        KeyCode::Char('p') => select_view(app, View::Scope),
         KeyCode::Down | KeyCode::Char('j') => app.table.select(Some(
             app.table
                 .selected()
@@ -126,6 +143,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             .table
             .select(Some(app.table.selected().unwrap_or(0).saturating_sub(5))),
         _ => {}
+    }
+}
+
+fn select_view(app: &mut App, view: View) {
+    if app.view != view {
+        app.view = view;
+        app.table = Default::default();
+        app.row_count = 0;
     }
 }
 

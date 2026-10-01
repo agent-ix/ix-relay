@@ -787,6 +787,17 @@ count once, and progress counts non-canceled/non-duplicate leaf tasks. Internal
 agents have reported status; separate pane activity is observed only when its
 native session matches. Ticket workflow stages stay separate from agent status.
 
+Use `t` for Tickets, `a` for Agents, and `p` for Scope. Agents remain visible
+without reported scope or Linear data; they show every explicit assignment,
+including finished stages and tickets outside scope. Native internal subagents
+must be reported by the lead; they are not automatically discovered.
+Scope gives each initiative and project a scrollable row with done/total,
+remaining, ready and blocked leaf-task counts. Details show remaining workflow
+stages and the project's Linear status. All group counts are restricted to the
+reported scope; overlapping initiative and project counts must not be added.
+
 Use arrows or j/k to scroll, `d` or Enter for details, `r` for a forced Linear
-refresh and `q` to quit. On short panes, details replace the table. Last good
-snapshots survive refresh errors with visible source ages and error labels.
+refresh and `q` to quit. On short panes, details replace the table. The `s` key
+shows source timestamps, hidden by default. Last good snapshots survive refresh
+errors; error labels remain visible with status hidden. Linear refreshes every
+30 minutes, while Herdr and reports refresh every minute.

@@ -7,6 +7,7 @@ mod monitor_ops;
 mod monitor_runtime;
 mod monitor_tracker;
 mod monitor_ui;
+mod monitor_views;
 
 use clap::Parser;
 

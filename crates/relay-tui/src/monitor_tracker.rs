@@ -14,6 +14,16 @@ pub type TrackerState = WorkspaceSnapshot;
 pub struct ScopeProgress {
     /// Project or initiative display name.
     pub name: String,
+    /// Associated initiative names for a project row.
+    pub initiatives: Vec<String>,
+    /// Tracker project status; initiatives have no project workflow status.
+    pub status: Option<String>,
+    /// Remaining scoped leaves by tracker workflow stage.
+    pub remaining_by_stage: BTreeMap<String, usize>,
+    /// Scoped leaves in the authoritative ready queue.
+    pub ready: usize,
+    /// Unfinished scoped leaves with unfinished or unknown prerequisites.
+    pub blocked: usize,
     /// Completed leaf tasks.
     pub done: usize,
     /// Total non-canceled, non-duplicate leaves.
@@ -78,6 +88,27 @@ pub fn summarize(
         return Ok(None);
     };
     let scope = ix_board::select_scope(snapshot, &selection(assignment))?;
+    let teams: BTreeSet<_> = snapshot
+        .issues
+        .iter()
+        .filter(|i| scope.issue_ids.contains(&i.id))
+        .map(|i| &i.team_key.0)
+        .collect();
+    let mut ready = Vec::new();
+    for team in teams {
+        ready.extend(
+            ix_board::ready_from_snapshot(snapshot, team)?
+                .into_iter()
+                .filter(|q| {
+                    snapshot
+                        .issues
+                        .iter()
+                        .any(|i| i.identifier == q.identifier && scope.issue_ids.contains(&i.id))
+                }),
+        );
+    }
+    let ready_ids: BTreeSet<_> = ready.iter().map(|q| q.identifier.as_str()).collect();
+    let by_id: BTreeMap<_, _> = snapshot.issues.iter().map(|i| (&i.id, i)).collect();
     let mut ticket_roots = BTreeSet::new();
     let mut initiative_projects: BTreeMap<_, (String, BTreeSet<_>)> = BTreeMap::new();
     let mut projects = Vec::new();
@@ -102,14 +133,15 @@ pub fn summarize(
                 scope.leaf_ids.contains(&i.id) && i.project_id.as_ref() == Some(&project.id)
             })
             .collect();
-        projects.push(ScopeProgress {
-            name: project.name.clone(),
-            done: leaves
-                .iter()
-                .filter(|i| i.state_type == WorkflowStateType::Completed)
-                .count(),
-            total: leaves.len(),
-        });
+        let mut project_progress = progress(
+            &by_id,
+            &leaves,
+            &ready_ids,
+            &project.name,
+            Some(&project.status),
+        );
+        project_progress.initiatives = project.initiatives.iter().map(|i| i.name.clone()).collect();
+        projects.push(project_progress);
     }
     for id in &assignment.tickets {
         if let Some(issue) = snapshot.issues.iter().find(|i| i.id.0 == *id) {
@@ -130,39 +162,11 @@ pub fn summarize(
                             .is_some_and(|id| project_ids.contains(id))
                 })
                 .collect();
-            ScopeProgress {
-                name,
-                total: leaves.len(),
-                done: leaves
-                    .iter()
-                    .filter(|issue| issue.state_type == WorkflowStateType::Completed)
-                    .count(),
-            }
+            progress(&by_id, &leaves, &ready_ids, &name, None)
         })
         .collect();
     initiatives.sort_by(|a, b| a.name.cmp(&b.name));
     projects.sort_by(|a, b| a.name.cmp(&b.name));
-    let teams: BTreeSet<_> = snapshot
-        .issues
-        .iter()
-        .filter(|i| scope.issue_ids.contains(&i.id))
-        .map(|i| &i.team_key.0)
-        .collect();
-    let mut ready = Vec::new();
-    for team in teams {
-        ready.extend(
-            ix_board::ready_from_snapshot(snapshot, team)?
-                .into_iter()
-                .filter(|q| {
-                    snapshot
-                        .issues
-                        .iter()
-                        .any(|i| i.identifier == q.identifier && scope.issue_ids.contains(&i.id))
-                }),
-        );
-    }
-    let ready_ids: BTreeSet<_> = ready.iter().map(|q| q.identifier.as_str()).collect();
-    let by_id: BTreeMap<_, _> = snapshot.issues.iter().map(|i| (&i.id, i)).collect();
     let mut tickets = Vec::new();
     for issue in &snapshot.issues {
         let agents: Vec<_> = report
@@ -246,4 +250,40 @@ pub fn summarize(
         tickets,
         ready_queue: ready.into_iter().map(|item| item.identifier).collect(),
     }))
+}
+
+fn progress(
+    by_id: &BTreeMap<&ix_board::IssueId, &ix_board::Issue>,
+    leaves: &[&ix_board::Issue],
+    ready_ids: &BTreeSet<&str>,
+    name: &str,
+    status: Option<&str>,
+) -> ScopeProgress {
+    let mut remaining_by_stage = BTreeMap::new();
+    let mut done = 0;
+    let mut blocked = 0;
+    let mut ready = 0;
+    for issue in leaves {
+        if issue.state_type == WorkflowStateType::Completed {
+            done += 1;
+            continue;
+        }
+        *remaining_by_stage.entry(issue.state.clone()).or_default() += 1;
+        ready += usize::from(ready_ids.contains(issue.identifier.as_str()));
+        blocked += usize::from(issue.blocked_by.iter().any(|id| {
+            by_id
+                .get(id)
+                .is_none_or(|prerequisite| prerequisite.state_type != WorkflowStateType::Completed)
+        }));
+    }
+    ScopeProgress {
+        name: name.into(),
+        initiatives: Vec::new(),
+        status: status.map(str::to_owned),
+        remaining_by_stage,
+        done,
+        total: leaves.len(),
+        ready,
+        blocked,
+    }
 }
