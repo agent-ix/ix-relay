@@ -25,7 +25,8 @@ reported; pane activity is observed only when the native session matches.
   of Herdr. These reads check scope, focus and agent assignments, not Linear.
 
 `r` requests an immediate Linear fetch unless rate limited, in which case it
-coalesces with the next scheduled attempt. `d` or Enter toggles details;
+coalesces with the next scheduled attempt. `s` toggles source timestamps (hidden by default). Errors are always visible.
+`d` or Enter toggles details;
 arrows, j/k and Page Up/Down select assignments. `q` or Escape quits.
 
 Tracker failures preserve visibly labeled last successful snapshots and their
