@@ -141,6 +141,10 @@ struct ProcessDetails<R> {
     omit_processes: bool,
 }
 impl<R: ProcessRunner> ProcessRunner for ProcessDetails<R> {
+    #[expect(
+        clippy::expect_used,
+        reason = "test fixture assertions fail if the fixed JSON shape changes"
+    )]
     fn run(&self, program: &str, args: &[&str], timeout: Duration) -> Result<Output, ProcessError> {
         let mut output = self.inner.run(program, args, timeout)?;
         if args.first() == Some(&"pane") {
