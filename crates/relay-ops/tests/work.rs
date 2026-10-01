@@ -134,3 +134,92 @@ fn binding_uses_measured_resume_identity_and_refuses_ambiguity_conflict_and_repl
         Err(OpsError::WorkSessionReplaced)
     ));
 }
+
+struct ProcessDetails<R> {
+    inner: R,
+    argv: Option<serde_json::Value>,
+    omit_processes: bool,
+}
+impl<R: ProcessRunner> ProcessRunner for ProcessDetails<R> {
+    fn run(&self, program: &str, args: &[&str], timeout: Duration) -> Result<Output, ProcessError> {
+        let mut output = self.inner.run(program, args, timeout)?;
+        if args.first() == Some(&"pane") {
+            let mut response: serde_json::Value =
+                serde_json::from_slice(&output.stdout).expect("fixture runner emits JSON");
+            let info = response["result"]["process_info"]
+                .as_object_mut()
+                .expect("fixture includes process info");
+            if self.omit_processes {
+                info.remove("foreground_processes");
+            } else {
+                let process = info["foreground_processes"][0]
+                    .as_object_mut()
+                    .expect("fixture includes one process");
+                process.remove("argv");
+                if let Some(argv) = &self.argv {
+                    process.insert("argv".into(), argv.clone());
+                }
+            }
+            output.stdout = serde_json::to_vec(&response).expect("JSON fixture serializes");
+        }
+        Ok(output)
+    }
+}
+
+/// Trace: FR-048-AC-1, FR-048-AC-10
+#[test]
+fn optional_process_details_preserve_native_binding_and_refuse_missing_evidence() {
+    let machine = "luna".parse().unwrap();
+    for argv in [None, Some(serde_json::Value::Null)] {
+        let runner = ProcessDetails {
+            inner: Runner {
+                session: Some("session-a"),
+                resume: "session-a",
+                pid: 42,
+                duplicate: false,
+                profile: false,
+                harness: "codex",
+            },
+            argv,
+            omit_processes: false,
+        };
+        let observed = resolve_work_target(&runner, Some("luna:SWM:code"), &machine).unwrap();
+        assert_eq!(observed.binding.session.as_str(), "session-a");
+        assert_eq!(observed.binding.process_id, 42);
+        let unreported = ProcessDetails {
+            inner: Runner {
+                session: None,
+                ..runner.inner
+            },
+            ..runner
+        };
+        assert!(matches!(
+            resolve_work_target(&unreported, Some("luna:SWM:code"), &machine),
+            Err(OpsError::WorkSessionUnavailable)
+        ));
+        let empty = ProcessDetails {
+            omit_processes: true,
+            ..unreported
+        };
+        assert!(matches!(
+            resolve_work_target(&empty, Some("luna:SWM:code"), &machine),
+            Err(OpsError::WorkProcessAmbiguous)
+        ));
+    }
+    let invalid = ProcessDetails {
+        inner: Runner {
+            session: Some("session-a"),
+            resume: "session-a",
+            pid: 42,
+            duplicate: false,
+            profile: false,
+            harness: "codex",
+        },
+        argv: Some(serde_json::json!("invalid")),
+        omit_processes: false,
+    };
+    assert!(matches!(
+        resolve_work_target(&invalid, Some("luna:SWM:code"), &machine),
+        Err(OpsError::Herdr(ProcessError::BadOutput { .. }))
+    ));
+}

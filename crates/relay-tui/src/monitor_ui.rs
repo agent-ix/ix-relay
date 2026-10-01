@@ -127,13 +127,9 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
             .is_some_and(|s| snapshot_is_stale(s.fetched_at, now_epoch));
     let summary = view.as_ref().map_or_else(
         || {
-            scope_error.clone().unwrap_or_else(|| {
-                if report.and_then(|r| r.scope.as_ref()).is_none() {
-                    "Scope: not reported".into()
-                } else {
-                    "Scope: waiting for Linear".into()
-                }
-            })
+            scope_error
+                .clone()
+                .unwrap_or_else(|| format!("Scope: {team_label} · waiting for Linear"))
         },
         |v| {
             let stage = v
@@ -150,12 +146,14 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
                         frame.area().width.saturating_sub(20).into(),
                     )
                 } else {
-                    format!(
-                        "{} projects · {} initiatives · {} ticket roots",
-                        v.projects.len(),
-                        v.initiatives.len(),
-                        v.ticket_roots.len()
-                    )
+                    let mut groups = vec![format!("{} projects", v.projects.len())];
+                    if !v.initiatives.is_empty() {
+                        groups.push(format!("{} initiatives", v.initiatives.len()));
+                    }
+                    if !v.ticket_roots.is_empty() {
+                        groups.push(format!("{} ticket roots", v.ticket_roots.len()));
+                    }
+                    groups.join(" · ")
                 };
             format!(
                 "Scope: {} · {}{}\nTasks: {}/{} done{}{}",
@@ -210,7 +208,7 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
                 render_work(frame, app, view, work, runtime_fresh);
             } else {
                 app.row_count = 0;
-                frame.render_widget(Paragraph::new("Tickets unavailable until scope and Linear load. Agents are available with a.\nNo assignment or focus is inferred from open tickets.").style(Style::default().fg(MUTED)).wrap(Wrap { trim: true }), work);
+                frame.render_widget(Paragraph::new("Tickets unavailable until Linear loads. Agents are available with a.\nNo assignment or focus is inferred from open tickets.").style(Style::default().fg(MUTED)).wrap(Wrap { trim: true }), work);
             }
         }
     }
@@ -1165,5 +1163,10 @@ mod tests {
         let failed = screen(&mut app, 90, 15);
         assert!(failed.contains("UNKNOWN"), "{failed}");
         assert!(!failed.contains("Tasks:"));
+        app.team = None;
+        app.tracker.value = None;
+        let waiting = screen(&mut app, 90, 15);
+        assert!(waiting.contains("Scope: SWM team · waiting for Linear"));
+        assert!(!waiting.contains("Scope: not reported"));
     }
 }

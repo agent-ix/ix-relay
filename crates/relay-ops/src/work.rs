@@ -54,13 +54,16 @@ struct ProcessResult {
 }
 #[derive(Debug, Deserialize)]
 struct ProcessInfo {
+    // Protocol 22 permits omission; no process evidence cannot establish a binding.
+    #[serde(default)]
     foreground_processes: Vec<ForegroundProcess>,
 }
 #[derive(Debug, Deserialize)]
 struct ForegroundProcess {
     name: String,
     pid: u32,
-    argv: Vec<String>,
+    // Protocol 22 makes argument details optional and nullable.
+    argv: Option<Vec<String>>,
 }
 
 /// One observation of the bound lead and other pane agents on its machine.
@@ -138,10 +141,12 @@ fn process_identity(
         .transpose()?;
     // Only this measured direct invocation exposes an explicit native ID.
     // Flag values, profiles, prompts and --last are not identity evidence.
-    let resumed = if kind == "codex" && process.argv.get(1).is_some_and(|a| a == "resume") {
+    let resumed = if kind == "codex" {
         process
             .argv
-            .get(2)
+            .as_deref()
+            .filter(|argv| argv.get(1).is_some_and(|a| a == "resume"))
+            .and_then(|argv| argv.get(2))
             .filter(|id| !id.starts_with('-'))
             .map(|id| id.parse())
             .transpose()?
