@@ -28,28 +28,38 @@ const ERROR: Color = Color::Rgb(240, 163, 163);
 pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
     let now_epoch = SystemClock.now_epoch_seconds();
     let report = app.report.value.as_ref().and_then(Option::as_ref);
+    let team = app.team.clone().or_else(|| {
+        app.binding.as_ref().and_then(|binding| {
+            binding
+                .address
+                .parse::<relay_core::Address>()
+                .ok()
+                .map(|address| address.workspace().to_ascii_uppercase())
+        })
+    });
+    let whole_team = report.and_then(|r| r.scope.as_ref()).is_none_or(|scope| {
+        scope.initiatives.is_empty() && scope.projects.is_empty() && scope.tickets.is_empty()
+    });
+    let team_label = format!(
+        "{}{}",
+        team.as_deref().unwrap_or("unknown team"),
+        if whole_team { " team" } else { "" }
+    );
     let computed = app
         .tracker
         .value
         .as_ref()
-        .zip(report)
-        .map(|(snapshot, report)| summarize(snapshot, report))
+        .zip(team.as_deref())
+        .map(|(snapshot, team)| summarize(snapshot, report, team))
         .transpose();
     let (view, scope_error) = match computed {
-        Ok(view) => (view.flatten(), None),
+        Ok(view) => (view, None),
         Err(error) => (None, Some(error.to_string())),
     };
     let [identity, tabs, scope, focus, work, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
-        Constraint::Length(
-            if app.view == View::Tickets && view.as_ref().is_some_and(|v| !v.initiatives.is_empty())
-            {
-                3
-            } else {
-                2
-            },
-        ),
+        Constraint::Length(2),
         Constraint::Length(if report.and_then(|r| r.focus.as_ref()).is_some() {
             2
         } else {
@@ -117,13 +127,9 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
             .is_some_and(|s| snapshot_is_stale(s.fetched_at, now_epoch));
     let summary = view.as_ref().map_or_else(
         || {
-            scope_error.clone().unwrap_or_else(|| {
-                if report.and_then(|r| r.scope.as_ref()).is_none() {
-                    "Scope: not reported".into()
-                } else {
-                    "Scope: waiting for Linear".into()
-                }
-            })
+            scope_error
+                .clone()
+                .unwrap_or_else(|| format!("Scope: {team_label} · waiting for Linear"))
         },
         |v| {
             let stage = v
@@ -133,52 +139,31 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
                 .map(|(stage, count)| format!("{count} {}", display_text(stage, 32)))
                 .collect::<Vec<_>>()
                 .join(" · ");
-            if app.view != View::Tickets {
-                return format!(
-                    "Scope: {} initiatives · {} projects{}\nTasks: {}/{} done{}{}",
-                    v.initiatives.len(),
-                    v.projects.len(),
-                    if snapshot_old { " [last snapshot]" } else { "" },
-                    v.scope.done,
-                    v.scope.leaf_ids.len(),
-                    if stage.is_empty() { "" } else { " · " },
-                    stage
-                );
-            }
-            format!(
-                "Scope: {}{}\nTasks: {}/{} done{}{}{}",
-                v.projects
-                    .iter()
-                    .map(|p| format!("{} {}/{}", display_text(&p.name, 64), p.done, p.total))
-                    .chain(
-                        v.ticket_roots
-                            .iter()
-                            .map(|id| format!("ticket {}", display_text(id, 32)))
+            let names =
+                if v.projects.len() == 1 && v.ticket_roots.is_empty() && v.initiatives.is_empty() {
+                    display_text(
+                        &v.projects[0].name,
+                        frame.area().width.saturating_sub(20).into(),
                     )
-                    .collect::<Vec<_>>()
-                    .join(" · "),
+                } else {
+                    let mut groups = vec![format!("{} projects", v.projects.len())];
+                    if !v.initiatives.is_empty() {
+                        groups.push(format!("{} initiatives", v.initiatives.len()));
+                    }
+                    if !v.ticket_roots.is_empty() {
+                        groups.push(format!("{} ticket roots", v.ticket_roots.len()));
+                    }
+                    groups.join(" · ")
+                };
+            format!(
+                "Scope: {} · {}{}\nTasks: {}/{} done{}{}",
+                team_label,
+                names,
                 if snapshot_old { " [last snapshot]" } else { "" },
                 v.scope.done,
                 v.scope.leaf_ids.len(),
                 if stage.is_empty() { "" } else { " · " },
-                stage,
-                if v.initiatives.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "\nInitiatives (scoped): {}",
-                        v.initiatives
-                            .iter()
-                            .map(|p| format!(
-                                "{} {}/{}",
-                                display_text(&p.name, 64),
-                                p.done,
-                                p.total
-                            ))
-                            .collect::<Vec<_>>()
-                            .join(" · ")
-                    )
-                }
+                stage
             )
         },
     );
@@ -223,7 +208,7 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
                 render_work(frame, app, view, work, runtime_fresh);
             } else {
                 app.row_count = 0;
-                frame.render_widget(Paragraph::new("Tickets unavailable until scope and Linear load. Agents are available with a.\nNo assignment or focus is inferred from open tickets.").style(Style::default().fg(MUTED)).wrap(Wrap { trim: true }), work);
+                frame.render_widget(Paragraph::new("Tickets unavailable until Linear loads. Agents are available with a.\nNo assignment or focus is inferred from open tickets.").style(Style::default().fg(MUTED)).wrap(Wrap { trim: true }), work);
             }
         }
     }
@@ -410,7 +395,7 @@ fn render_work(
                 if ticket.in_scope {
                     ""
                 } else {
-                    "OUT OF SCOPE · "
+                    "Outside focus · "
                 },
                 display_text(&ticket.title, 160)
             );
@@ -788,12 +773,18 @@ mod tests {
         extra.identifier = "SWM-99".into();
         extra.project_id = Some(ProjectId("other".into()));
         snapshot.issues.push(extra);
-        let report = app.report.value.as_ref().unwrap().as_ref().unwrap();
-        let view = summarize(snapshot, report).unwrap().unwrap();
+        let report = app.report.value.as_mut().unwrap().as_mut().unwrap();
+        report
+            .scope
+            .as_mut()
+            .unwrap()
+            .initiatives
+            .push("initiative".into());
+        let view = summarize(snapshot, Some(report), "SWM").unwrap();
         assert_eq!(view.initiatives.len(), 1);
         assert_eq!(
             (view.initiatives[0].done, view.initiatives[0].total),
-            (1, 2)
+            (1, 3)
         );
         app.report
             .value
@@ -808,9 +799,9 @@ mod tests {
             .push("other".into());
         let view = summarize(
             app.tracker.value.as_ref().unwrap(),
-            app.report.value.as_ref().unwrap().as_ref().unwrap(),
+            app.report.value.as_ref().unwrap().as_ref(),
+            "SWM",
         )
-        .unwrap()
         .unwrap();
         assert_eq!(
             (view.initiatives[0].done, view.initiatives[0].total),
@@ -901,8 +892,14 @@ mod tests {
         ready.state_type = WorkflowStateType::Unstarted;
         ready.blocked_by.clear();
         snapshot.issues.push(ready);
-        let report = app.report.value.as_ref().unwrap().as_ref().unwrap();
-        let view = summarize(snapshot, report).unwrap().unwrap();
+        let report = app.report.value.as_mut().unwrap().as_mut().unwrap();
+        report
+            .scope
+            .as_mut()
+            .unwrap()
+            .initiatives
+            .push("program".into());
+        let view = summarize(snapshot, Some(report), "SWM").unwrap();
         for progress in [&view.projects[0], &view.initiatives[0]] {
             assert_eq!(
                 (
@@ -987,7 +984,7 @@ mod tests {
     fn compact_monitor_counts_leaves_and_details_fit_the_actual_short_pane() {
         let mut app = app();
         let compact = screen(&mut app, 69, 15);
-        assert!(compact.contains("Scope: Product 1/2"));
+        assert!(compact.contains("Scope: SWM · Product"));
         assert!(compact.contains("Tasks: 1/2 done"));
         assert!(compact.contains("SWM-12"));
         assert!(compact.contains("unknown"));
@@ -1004,7 +1001,7 @@ mod tests {
         assert!(stale.contains("last snapshot"));
         assert!(stale.contains("Tasks: 1/2 done"));
         app.report.value = None;
-        assert!(screen(&mut app, 69, 15).contains("Scope: not reported"));
+        assert!(screen(&mut app, 69, 15).contains("Scope: SWM team · Product"));
     }
 
     /// Trace: FR-048-AC-3, FR-048-AC-4
@@ -1022,7 +1019,7 @@ mod tests {
         other.priority = 2.0;
         snapshot.issues.push(other);
         let report = app.report.value.as_ref().unwrap().as_ref().unwrap();
-        let view = summarize(snapshot, report).unwrap().unwrap();
+        let view = summarize(snapshot, Some(report), "SWM").unwrap();
         assert_eq!(view.ready_queue, ["SWM-12", "SWM-10"]);
         let rendered = screen(&mut app, 69, 15);
         assert!(rendered.contains("2 ready · next SWM-12"));
@@ -1106,5 +1103,70 @@ mod tests {
         assert!(!last.contains("worker-00"));
         app.session_ended = true;
         assert!(screen(&mut app, 77, 15).contains("last report"));
+    }
+    /// Trace: FR-048-AC-9
+    #[test]
+    fn team_scope_defaults_and_project_focus_exclude_foreign_work() {
+        let mut app = app();
+        let snapshot = app.tracker.value.as_mut().unwrap();
+        snapshot.projects[0].initiatives.push(ix_board::Initiative {
+            id: "parent".into(),
+            name: "Parent initiative".into(),
+        });
+        let mut foreign = snapshot.issues[2].clone();
+        foreign.id = IssueId("foreign".into());
+        foreign.identifier = "AGE-1".into();
+        foreign.team_key = TeamKey("AGE".into());
+        let mut loose = snapshot.issues[2].clone();
+        loose.id = IssueId("loose".into());
+        loose.identifier = "SWM-99".into();
+        loose.project_id = None;
+        snapshot.issues.extend([foreign, loose]);
+        let report = app.report.value.as_mut().unwrap().as_mut().unwrap();
+        let focused = summarize(snapshot, Some(report), "SWM").unwrap();
+        assert_eq!(focused.scope.leaf_ids.len(), 2);
+        assert!(focused.initiatives.is_empty());
+        assert!(
+            !focused
+                .tickets
+                .iter()
+                .any(|t| t.identifier == "AGE-1" || t.identifier == "SWM-99")
+        );
+        report.scope = Some(WorkScope {
+            tickets: vec!["foreign".into()],
+            ..Default::default()
+        });
+        let foreign_focus = summarize(snapshot, Some(report), "SWM").unwrap();
+        assert!(foreign_focus.scope.issue_ids.is_empty());
+        assert!(foreign_focus.ticket_roots.is_empty());
+        report.scope = None;
+        let whole = summarize(snapshot, Some(report), "SWM").unwrap();
+        assert_eq!(whole.scope.leaf_ids.len(), 3);
+        assert!(
+            whole
+                .tickets
+                .iter()
+                .any(|t| t.identifier == "SWM-99" && t.in_scope)
+        );
+        assert!(!whole.tickets.iter().any(|t| t.identifier == "AGE-1"));
+        app.report.value = Some(None);
+        let rendered = screen(&mut app, 69, 15);
+        assert!(rendered.contains("Scope: SWM"), "{rendered}");
+        assert!(rendered.contains("Tasks: 1/3"));
+        assert!(rendered.contains("Focus: not reported"));
+        app.team = Some("AGE".into());
+        let overridden = screen(&mut app, 90, 15);
+        assert!(overridden.contains("Scope: AGE team"));
+        assert!(overridden.contains("Tasks: 0/1"));
+        assert!(!overridden.contains("SWM-99"));
+        app.team = Some("UNKNOWN".into());
+        let failed = screen(&mut app, 90, 15);
+        assert!(failed.contains("UNKNOWN"), "{failed}");
+        assert!(!failed.contains("Tasks:"));
+        app.team = None;
+        app.tracker.value = None;
+        let waiting = screen(&mut app, 90, 15);
+        assert!(waiting.contains("Scope: SWM team · waiting for Linear"));
+        assert!(!waiting.contains("Scope: not reported"));
     }
 }

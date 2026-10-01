@@ -196,3 +196,43 @@ fn report_validation_and_read_bounds_refuse_unsafe_or_oversized_data() {
         Err(Error::Work(WorkError::ReportLimit))
     ));
 }
+
+/// Trace: FR-048-AC-9
+#[test]
+fn whole_team_report_clears_narrow_selectors_without_erasing_agents() {
+    let Some(mut bus) = Bus::connect("work-whole-team") else {
+        return;
+    };
+    let owner = binding();
+    bus.relay
+        .report_work_scope(
+            &owner,
+            &WorkScope {
+                projects: vec!["project".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    bus.relay
+        .report_work_agent(&owner, &agent("coder"))
+        .unwrap();
+    bus.relay
+        .report_work_scope(
+            &owner,
+            &WorkScope {
+                reported_at_ms: 123,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let report = bus.relay.work_report(&owner).unwrap().unwrap();
+    assert_eq!(
+        report.scope,
+        Some(WorkScope {
+            reported_at_ms: 123,
+            ..Default::default()
+        })
+    );
+    assert_eq!(report.agents.len(), 1);
+    assert_eq!(report.agents[0].agent_id, "coder");
+}

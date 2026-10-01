@@ -57,6 +57,8 @@ pub enum View {
 /// Complete dashboard state.
 #[derive(Debug, Default)]
 pub struct App {
+    /// Explicit Linear team override; otherwise the bound workspace is the team key.
+    pub team: Option<String>,
     /// Native session incarnation this monitor follows.
     pub binding: Option<relay_core::work::WorkBinding>,
     /// Latest independently refreshed Herdr activity.
