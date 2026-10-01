@@ -24,6 +24,7 @@ pub struct WorkBinding {
 }
 
 /// Explicit assignment selectors, resolved to UUIDs by the reporting command.
+/// Empty selectors explicitly select the monitor-bound whole team.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkScope {
@@ -136,7 +137,7 @@ impl WorkScope {
             .chain(&self.projects)
             .chain(&self.tickets)
             .collect();
-        if values.is_empty() || values.len() > 100 {
+        if values.len() > 100 {
             return Err(WorkError::InvalidField { field: "scope" });
         }
         for value in values {

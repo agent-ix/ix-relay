@@ -7,7 +7,7 @@ use clap::{Args, Subcommand};
 use ix_board::{LinearGraphQlSource, ReadService, ScopeSelection};
 use relay_core::{
     Relay, SessionId, TicketId,
-    work::{AgentWork, WorkFocus, WorkStatus},
+    work::{AgentWork, WorkFocus, WorkScope, WorkStatus},
 };
 use relay_ops::work::{resolve_work_scope, resolve_work_target};
 use std::io::Write;
@@ -26,8 +26,11 @@ pub(crate) struct WorkArgs {
 
 #[derive(Subcommand)]
 enum WorkCommand {
-    /// Set the assigned scope, resolving selectors against Linear.
+    /// Set whole-team scope or resolve narrower selectors against Linear.
     Scope {
+        /// Clear narrower selectors and monitor the lead's whole team.
+        #[arg(long, conflicts_with_all = ["initiatives", "projects", "tickets"], required_unless_present_any = ["initiatives", "projects", "tickets"])]
+        all_team: bool,
         /// Initiative UUID or exact name; repeatable.
         #[arg(long = "initiative")]
         initiatives: Vec<String>,
@@ -114,19 +117,28 @@ pub(crate) fn run(
     let now = crate::now_ms();
     match args.command {
         WorkCommand::Scope {
+            all_team,
             initiatives,
             projects,
             tickets,
         } => {
-            let scope = resolve_work_scope(
-                &source_snapshot()?,
-                &ScopeSelection {
-                    initiatives,
-                    projects,
-                    tickets,
-                },
-                now,
-            )?;
+            let scope = if all_team {
+                WorkScope {
+                    reported_at_ms: now,
+                    ..Default::default()
+                }
+            } else {
+                resolve_work_scope(
+                    &source_snapshot()?,
+                    &ScopeSelection {
+                        initiatives,
+                        projects,
+                        tickets,
+                        ..Default::default()
+                    },
+                    now,
+                )?
+            };
             relay.report_work_scope(&binding, &scope)?;
         }
         WorkCommand::Focus { summary, tickets } => {
@@ -184,4 +196,35 @@ pub(crate) fn run(
         binding.address, binding.session
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    /// Trace: FR-048-AC-9
+    #[test]
+    fn whole_team_scope_requires_an_explicit_exclusive_choice() {
+        assert!(crate::Cli::try_parse_from(["agent-msg", "work", "scope"]).is_err());
+        assert!(
+            crate::Cli::try_parse_from([
+                "agent-msg",
+                "work",
+                "scope",
+                "--all-team",
+                "--project",
+                "p"
+            ])
+            .is_err()
+        );
+        let parsed =
+            crate::Cli::try_parse_from(["agent-msg", "work", "scope", "--all-team"]).unwrap();
+        assert!(matches!(
+            parsed.cmd,
+            crate::Cmd::Work(super::WorkArgs {
+                command: super::WorkCommand::Scope { all_team: true, .. },
+                ..
+            })
+        ));
+    }
 }

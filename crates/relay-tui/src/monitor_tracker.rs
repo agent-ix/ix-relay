@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Agent-IX
 //! Pure dashboard view built from independent tracker and explicit assignment data.
 
-use ix_board::{ScopeSelection, ScopeSummary, WorkflowStateType, WorkspaceSnapshot};
+use ix_board::{ScopeSelection, ScopeSummary, TeamKey, WorkflowStateType, WorkspaceSnapshot};
 use relay_core::work::{AgentWork, WorkReport, WorkScope};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -76,18 +76,25 @@ pub fn selection(scope: &WorkScope) -> ScopeSelection {
         initiatives: scope.initiatives.clone(),
         projects: scope.projects.clone(),
         tickets: scope.tickets.clone(),
+        ..Default::default()
     }
 }
 
 /// Counts scoped leaves and attaches explicit agent reports without inferring activity.
 pub fn summarize(
     snapshot: &TrackerState,
-    report: &WorkReport,
-) -> Result<Option<DashboardView>, ix_board::Error> {
-    let Some(assignment) = report.scope.as_ref() else {
-        return Ok(None);
-    };
-    let scope = ix_board::select_scope(snapshot, &selection(assignment))?;
+    report: Option<&WorkReport>,
+    team: &str,
+) -> Result<DashboardView, ix_board::Error> {
+    let whole_team = WorkScope::default();
+    let assignment = report.and_then(|r| r.scope.as_ref()).unwrap_or(&whole_team);
+    let agents = report.map_or(&[][..], |r| r.agents.as_slice());
+    let mut selectors = selection(assignment);
+    selectors.team = Some(TeamKey(team.to_owned()));
+    let narrowed = !assignment.initiatives.is_empty()
+        || !assignment.projects.is_empty()
+        || !assignment.tickets.is_empty();
+    let scope = ix_board::select_scope(snapshot, &selectors)?;
     let teams: BTreeSet<_> = snapshot
         .issues
         .iter()
@@ -119,7 +126,11 @@ pub fn summarize(
                 .iter()
                 .any(|i| scope.issue_ids.contains(&i.id) && i.project_id.as_ref() == Some(&p.id))
     }) {
-        for initiative in &project.initiatives {
+        for initiative in project
+            .initiatives
+            .iter()
+            .filter(|i| !narrowed || assignment.initiatives.contains(&i.id))
+        {
             initiative_projects
                 .entry(&initiative.id)
                 .or_insert_with(|| (initiative.name.clone(), BTreeSet::new()))
@@ -144,7 +155,11 @@ pub fn summarize(
         projects.push(project_progress);
     }
     for id in &assignment.tickets {
-        if let Some(issue) = snapshot.issues.iter().find(|i| i.id.0 == *id) {
+        if let Some(issue) = snapshot
+            .issues
+            .iter()
+            .find(|i| i.id.0 == *id && scope.issue_ids.contains(&i.id))
+        {
             ticket_roots.insert(issue.identifier.clone());
         }
     }
@@ -169,8 +184,7 @@ pub fn summarize(
     projects.sort_by(|a, b| a.name.cmp(&b.name));
     let mut tickets = Vec::new();
     for issue in &snapshot.issues {
-        let agents: Vec<_> = report
-            .agents
+        let agents: Vec<_> = agents
             .iter()
             .filter(|a| a.ticket.as_str() == issue.identifier)
             .cloned()
@@ -210,7 +224,7 @@ pub fn summarize(
         }
     }
     // A reported assignment absent from Linear remains visible as unknown.
-    for agent in &report.agents {
+    for agent in agents {
         if !snapshot
             .issues
             .iter()
@@ -242,14 +256,14 @@ pub fn summarize(
             .cmp(&b.agents.is_empty())
             .then_with(|| a.identifier.cmp(&b.identifier))
     });
-    Ok(Some(DashboardView {
+    Ok(DashboardView {
         scope,
         ticket_roots: ticket_roots.into_iter().collect(),
         initiatives,
         projects,
         tickets,
         ready_queue: ready.into_iter().map(|item| item.identifier).collect(),
-    }))
+    })
 }
 
 fn progress(

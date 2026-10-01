@@ -20,6 +20,9 @@ struct Args {
     /// Lead Herdr address, e.g. luna:SWM:code.
     #[arg(long)]
     lead: String,
+    /// Linear team key; defaults to the bound lead workspace label.
+    #[arg(long)]
+    team: Option<String>,
     /// Native session expected at that address.
     #[arg(long)]
     session: Option<relay_core::SessionId>,
@@ -90,6 +93,7 @@ fn run() -> io::Result<()> {
 
     let mut tracker_worker = Some(monitor_ops::TrackerWorker::spawn()?);
     let mut app = App {
+        team: args.team.map(|team| team.to_ascii_uppercase()),
         lead_name: args.lead,
         binding: Some(observed.binding.clone()),
         ..App::default()
