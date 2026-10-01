@@ -59,6 +59,8 @@ pub struct App {
     pub row_count: usize,
     /// Whether the detail panel is expanded.
     pub details: bool,
+    /// Whether source timestamps are visible in the optional status line.
+    pub show_status: bool,
     /// Complete authoritative tracker snapshot from Linear.
     pub tracker: Source<crate::monitor_tracker::TrackerState>,
     /// Next scheduled retry after a rate-limited Linear read.
@@ -102,6 +104,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Char('r') => app.refresh_now = true,
         KeyCode::Char('d') | KeyCode::Enter => app.details = !app.details,
+        KeyCode::Char('s') => app.show_status = !app.show_status,
         KeyCode::Down | KeyCode::Char('j') => app.table.select(Some(
             app.table
                 .selected()

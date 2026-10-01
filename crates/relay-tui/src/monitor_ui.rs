@@ -53,7 +53,7 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
             1
         }),
         Constraint::Min(3),
-        Constraint::Length(2),
+        Constraint::Length(if app.show_status { 2 } else { 1 }),
     ])
     .areas(frame.area());
     let runtime_fresh = fresh(
@@ -223,19 +223,34 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
     .collect::<Vec<_>>()
     .join(" · ");
     let controls = if errors.is_empty() {
-        "↑↓ select · d details · r refresh · q quit".to_owned()
-    } else {
-        display_text(&errors, usize::from(footer.width))
-    };
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(display_text(&footer_line, usize::from(footer.width))),
-            Line::from(Span::styled(
-                controls,
-                Style::default().fg(if errors.is_empty() { PRIMARY } else { ERROR }),
-            )),
+        Line::from(vec![
+            Span::styled("↑↓", Style::default().fg(PRIMARY)),
+            Span::raw(" select · "),
+            Span::styled("d", Style::default().fg(PRIMARY)),
+            Span::raw(" details · "),
+            Span::styled("r", Style::default().fg(PRIMARY)),
+            Span::raw(" refresh · "),
+            Span::styled("q", Style::default().fg(PRIMARY)),
+            Span::raw(" quit · "),
+            Span::styled("s", Style::default().fg(PRIMARY)),
+            Span::raw(" status"),
         ])
-        .style(Style::default().fg(MUTED)),
+    } else {
+        Line::from(Span::styled(
+            display_text(&errors, usize::from(footer.width)),
+            Style::default().fg(ERROR),
+        ))
+    };
+    let mut footer_lines = Vec::with_capacity(2);
+    if app.show_status {
+        footer_lines.push(Line::from(display_text(
+            &footer_line,
+            usize::from(footer.width),
+        )));
+    }
+    footer_lines.push(controls);
+    frame.render_widget(
+        Paragraph::new(footer_lines).style(Style::default().fg(MUTED)),
         footer,
     );
 }
@@ -600,6 +615,70 @@ mod tests {
         );
         app
     }
+    /// Trace: FR-048-AC-4, FR-048-AC-5
+    #[test]
+    fn source_status_is_opt_in_and_errors_remain_visible_when_hidden() {
+        let mut app = app();
+        assert!(!app.show_status);
+        let hidden = screen(&mut app, 90, 15);
+        assert!(!hidden.contains("Linear: updated"));
+        assert!(!hidden.contains("Herdr:"));
+        assert!(hidden.contains("s status"));
+        crate::monitor::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        );
+        let shown = screen(&mut app, 90, 15);
+        assert!(shown.contains("Linear: updated"));
+        assert!(shown.contains("Herdr:"));
+        assert!(shown.contains("Reports:"));
+        crate::monitor::handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        );
+        app.tracker.failure("Linear unavailable");
+        let hidden = screen(&mut app, 90, 15);
+        assert!(hidden.contains("Linear unavailable"));
+        assert!(!hidden.contains("Herdr:"));
+    }
+
+    /// Trace: FR-048-AC-4
+    #[test]
+    fn footer_highlights_only_hotkeys_and_preserves_error_color() {
+        let mut app = app();
+        let mut terminal = Terminal::new(TestBackend::new(69, 15)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &mut app, Instant::now()))
+            .unwrap();
+        let mut x = 0;
+        for (text, color) in [
+            ("↑↓", PRIMARY),
+            (" select · ", MUTED),
+            ("d", PRIMARY),
+            (" details · ", MUTED),
+            ("r", PRIMARY),
+            (" refresh · ", MUTED),
+            ("q", PRIMARY),
+            (" quit · ", MUTED),
+            ("s", PRIMARY),
+            (" status", MUTED),
+        ] {
+            for character in text.chars() {
+                let cell = &terminal.backend().buffer()[(x, 14)];
+                assert_eq!(cell.symbol(), character.to_string());
+                assert_eq!(cell.fg, color, "footer column {x}");
+                x += 1;
+            }
+        }
+        app.tracker.failure("offline");
+        terminal
+            .draw(|frame| render(frame, &mut app, Instant::now()))
+            .unwrap();
+        for x in 0..7 {
+            assert_eq!(terminal.backend().buffer()[(x, 14)].fg, ERROR);
+        }
+    }
+
     /// Trace: FR-048-AC-5
     #[test]
     fn runtime_observations_remain_fresh_between_minute_polls() {
