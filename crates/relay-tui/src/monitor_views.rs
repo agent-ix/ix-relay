@@ -197,6 +197,7 @@ pub(crate) fn render_scope(
     view: Option<&DashboardView>,
     area: Rect,
 ) {
+    let [_, area] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
     let Some(view) = view else {
         select_row(app, 0);
         frame.render_widget(
@@ -207,25 +208,21 @@ pub(crate) fn render_scope(
         );
         return;
     };
-    let entries: Vec<(&str, &ScopeProgress)> = view
+    let entries: Vec<(&str, &str, &ScopeProgress)> = view
         .initiatives
         .iter()
-        .map(|p| ("Initiative", p))
-        .chain(view.projects.iter().map(|p| ("Project", p)))
+        .map(|p| ("Initiative", "🎯", p))
+        .chain(view.projects.iter().map(|p| ("Project", "📁", p)))
         .collect();
     let selected = select_row(app, entries.len());
-    let rows = entries.iter().map(|(kind, progress)| {
+    let rows = entries.iter().map(|(_, icon, progress)| {
         Row::new([
-            format!("{}\n{kind}", display_text(&progress.name, 128)),
-            format!("{}/{}\ndone", progress.done, progress.total),
-            format!(
-                "{}\nremaining",
-                progress.total.saturating_sub(progress.done)
-            ),
+            format!("{icon} {}", display_text(&progress.name, 128)),
+            format!("{}/{}", progress.done, progress.total),
+            progress.total.saturating_sub(progress.done).to_string(),
             progress.ready.to_string(),
             progress.blocked.to_string(),
         ])
-        .height(2)
     });
     let [table_area, detail_area] = content_areas(area, app.details);
     frame.render_stateful_widget(
@@ -240,13 +237,15 @@ pub(crate) fn render_scope(
             ],
         )
         .header(
-            Row::new(["Scope", "Progress", "Remaining", "Ready", "Blocked"])
-                .style(Style::default().fg(PRIMARY)),
+            Row::new([
+                "Initiative/project",
+                "Progress",
+                "Remaining",
+                "Ready",
+                "Blocked",
+            ])
+            .style(Style::default().fg(PRIMARY)),
         )
-        .block(Block::default().title(Span::styled(
-            "Initiatives / projects · counts within reported scope",
-            Style::default().fg(PRIMARY),
-        )))
         .row_highlight_style(Style::default().bg(SELECTION))
         .highlight_symbol("› "),
         table_area,
@@ -260,7 +259,7 @@ pub(crate) fn render_scope(
         );
     }
     if app.details {
-        let text = entries.get(selected).map_or_else(|| "No initiative or project selected".into(), |(kind, progress)| {
+        let text = entries.get(selected).map_or_else(|| "No initiative or project selected".into(), |(kind, _, progress)| {
             let stages = progress.remaining_by_stage.iter().map(|(stage, count)| format!("{count} {}", display_text(stage, 64))).collect::<Vec<_>>().join(" · ");
             format!("{kind}: {}\n{}{}{}\nTasks: {}/{} done · {} remaining\nReady: {} · Blocked: {}\nRemaining stages: {}\nCounts include only scoped leaf tasks; groups may overlap.",
                 display_text(&progress.name, 128), if progress.status.is_some() { "Project status: " } else { "" }, progress.status.as_deref().map_or_else(String::new, |s| display_text(s, 64)), if progress.status.is_some() { " (Linear)" } else { "Progress across scoped projects" },

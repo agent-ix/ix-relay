@@ -919,7 +919,35 @@ mod tests {
         );
         let scope = screen(&mut app, 69, 15);
         assert!(scope.contains("Program"), "{scope}");
-        assert!(scope.contains("Product"));
+        assert!(scope.contains("📁"), "{scope}");
+        let lines: Vec<_> = scope.lines().collect();
+        let focus_row = lines
+            .iter()
+            .position(|line| line.contains("Focus: not reported"))
+            .unwrap();
+        let header_row = lines
+            .iter()
+            .position(|line| line.contains("Initiative/project"))
+            .unwrap();
+        assert_eq!(header_row, focus_row + 2, "{scope}");
+        assert!(lines[focus_row + 1].trim().is_empty());
+        assert!(!scope.contains("counts within reported scope"));
+        let initiative_row = lines
+            .iter()
+            .position(|line| line.contains("🎯") && line.contains("Program"))
+            .unwrap();
+        assert!(
+            lines[initiative_row + 1].contains("📁")
+                && lines[initiative_row + 1].contains("Product"),
+            "{scope}"
+        );
+        assert!(lines[initiative_row].contains("1/3"));
+        assert!(lines[initiative_row + 1].contains("1/3"));
+        assert!(
+            !lines
+                .iter()
+                .any(|line| matches!(line.trim(), "Project" | "Initiative" | "done" | "remaining"))
+        );
         assert!(scope.contains("Blocked"));
         assert_eq!(app.row_count, 2);
         crate::monitor::handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
