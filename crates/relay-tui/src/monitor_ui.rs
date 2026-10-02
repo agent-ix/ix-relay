@@ -90,10 +90,10 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
                 display_text(&app.lead_name, 40),
                 Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!(
-                " · {} · {status}",
-                app.binding.as_ref().map_or("unknown", |b| b.kind.as_str())
-            )),
+            muted(" · "),
+            Span::raw(app.binding.as_ref().map_or("unknown", |b| b.kind.as_str())),
+            muted(" · "),
+            Span::raw(activity_marker(status)),
         ]))
         .style(Style::default().fg(FOREGROUND)),
         identity,
@@ -104,17 +104,23 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
         ("a", "Agents", View::Agents),
         ("p", "Scope", View::Scope),
     ] {
-        tab_spans.push(Span::styled(key, Style::default().fg(PRIMARY)));
+        let selected = app.view == view;
+        let decoration = if selected {
+            Modifier::BOLD | Modifier::UNDERLINED
+        } else {
+            Modifier::empty()
+        };
         tab_spans.push(Span::styled(
-            format!(" {label}  "),
+            key,
+            Style::default().fg(PRIMARY).add_modifier(decoration),
+        ));
+        tab_spans.push(Span::styled(
+            format!(" {label}"),
             Style::default()
                 .fg(if app.view == view { FOREGROUND } else { MUTED })
-                .add_modifier(if app.view == view {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
+                .add_modifier(decoration),
         ));
+        tab_spans.push(muted("  "));
     }
     frame.render_widget(Paragraph::new(Line::from(tab_spans)), tabs);
     let snapshot_old = app.tracker.error.is_some()
@@ -125,78 +131,87 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
             .value
             .as_ref()
             .is_some_and(|s| snapshot_is_stale(s.fetched_at, now_epoch));
-    let summary = view.as_ref().map_or_else(
-        || {
-            scope_error
-                .clone()
-                .unwrap_or_else(|| format!("Scope: {team_label} · waiting for Linear"))
-        },
-        |v| {
-            let stage = v
-                .scope
-                .remaining_by_stage
-                .iter()
-                .map(|(stage, count)| format!("{count} {}", display_text(stage, 32)))
-                .collect::<Vec<_>>()
-                .join(" · ");
-            let names =
-                if v.projects.len() == 1 && v.ticket_roots.is_empty() && v.initiatives.is_empty() {
-                    display_text(
-                        &v.projects[0].name,
-                        frame.area().width.saturating_sub(20).into(),
-                    )
-                } else {
-                    let mut groups = vec![format!("{} projects", v.projects.len())];
-                    if !v.initiatives.is_empty() {
-                        groups.push(format!("{} initiatives", v.initiatives.len()));
-                    }
-                    if !v.ticket_roots.is_empty() {
-                        groups.push(format!("{} ticket roots", v.ticket_roots.len()));
-                    }
-                    groups.join(" · ")
-                };
-            format!(
-                "Scope: {} · {}{}\nTasks: {}/{} done{}{}",
-                team_label,
-                names,
-                if snapshot_old { " [last snapshot]" } else { "" },
-                v.scope.done,
-                v.scope.leaf_ids.len(),
-                if stage.is_empty() { "" } else { " · " },
-                stage
-            )
-        },
-    );
+    let summary = if let Some(v) = &view {
+        let mut scope_spans = vec![muted("Scope: "), Span::raw(team_label), muted(" · ")];
+        if v.projects.len() == 1 && v.ticket_roots.is_empty() && v.initiatives.is_empty() {
+            scope_spans.push(Span::raw(display_text(
+                &v.projects[0].name,
+                frame.area().width.saturating_sub(20).into(),
+            )));
+        } else {
+            scope_spans.push(Span::raw(v.projects.len().to_string()));
+            scope_spans.push(muted(" projects"));
+            for (count, label) in [
+                (v.initiatives.len(), " initiatives"),
+                (v.ticket_roots.len(), " ticket roots"),
+            ] {
+                if count > 0 {
+                    scope_spans.push(muted(" · "));
+                    scope_spans.push(Span::raw(count.to_string()));
+                    scope_spans.push(muted(label));
+                }
+            }
+        }
+        if snapshot_old {
+            scope_spans.push(Span::styled(
+                " [last snapshot]",
+                Style::default().fg(WARNING),
+            ));
+        }
+        let mut task_spans = vec![
+            muted("Tasks: "),
+            Span::raw(format!("{}/{}", v.scope.done, v.scope.leaf_ids.len())),
+            muted(" done"),
+        ];
+        for (stage, count) in &v.scope.remaining_by_stage {
+            task_spans.push(muted(" · "));
+            task_spans.push(Span::raw(count.to_string()));
+            task_spans.push(muted(format!(" {}", display_text(stage, 32))));
+        }
+        vec![Line::from(scope_spans), Line::from(task_spans)]
+    } else if let Some(error) = &scope_error {
+        vec![Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(ERROR),
+        ))]
+    } else {
+        vec![Line::from(vec![
+            muted("Scope: "),
+            Span::raw(team_label),
+            muted(" · waiting for Linear"),
+        ])]
+    };
     frame.render_widget(
         Paragraph::new(summary)
             .style(Style::default().fg(FOREGROUND))
             .wrap(Wrap { trim: true }),
         scope,
     );
-    let focus_line = report.and_then(|r| r.focus.as_ref()).map_or_else(
-        || "Focus: not reported".into(),
+    let focus_lines = report.and_then(|r| r.focus.as_ref()).map_or_else(
+        || vec![Line::from(vec![muted("Focus: "), muted("not reported")])],
         |f| {
-            format!(
-                "Focus: {}{}",
-                display_text(&f.summary, 512),
-                if f.tickets.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "\nTickets: {}",
+            let mut lines = vec![Line::from(vec![
+                muted("Focus: "),
+                Span::raw(display_text(&f.summary, 512)),
+            ])];
+            if !f.tickets.is_empty() {
+                lines.push(Line::from(vec![
+                    muted("Tickets: "),
+                    Span::raw(
                         f.tickets
                             .iter()
                             .map(ToString::to_string)
                             .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                }
-            )
+                            .join(", "),
+                    ),
+                ]));
+            }
+            lines
         },
     );
     frame.render_widget(
-        Paragraph::new(focus_line)
-            .style(Style::default().fg(MUTED))
+        Paragraph::new(focus_lines)
+            .style(Style::default().fg(FOREGROUND))
             .wrap(Wrap { trim: true }),
         focus,
     );
@@ -231,7 +246,7 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
         },
     );
     let footer_line = format!(
-        "{linear} · Herdr: {} · Reports: {}",
+        "Activity: {status} · {linear} · Herdr: {} · Reports: {}",
         source_age(&app.runtime, now),
         source_age(&app.report, now)
     );
@@ -334,7 +349,19 @@ pub(crate) fn age_ms(timestamp: i64) -> String {
     )
 }
 
-fn activity(status: &str) -> &str {
+fn muted<'a>(text: impl Into<std::borrow::Cow<'a, str>>) -> Span<'a> {
+    Span::styled(text, Style::default().fg(MUTED))
+}
+
+fn activity_marker(status: &str) -> &str {
+    match status {
+        "ready for input" => "○",
+        "waiting for input" => "◇",
+        _ => status,
+    }
+}
+
+fn activity(status: &str) -> &'static str {
     match status {
         "working" => "working",
         "blocked" => "waiting for input",
@@ -687,6 +714,115 @@ mod tests {
             .unwrap();
         for x in 0..7 {
             assert_eq!(terminal.backend().buffer()[(x, 14)].fg, ERROR);
+        }
+    }
+
+    /// Trace: FR-048-AC-4
+    #[test]
+    fn header_distinguishes_labels_values_tabs_and_input_activity() {
+        let mut app = app();
+        app.report.value.as_mut().unwrap().as_mut().unwrap().focus =
+            Some(relay_core::work::WorkFocus {
+                summary: "Review credentials".into(),
+                tickets: vec!["SWM-12".parse().unwrap()],
+                reported_at_ms: 100,
+            });
+        app.runtime.success(
+            relay_ops::work::WorkObservation {
+                binding: app.binding.clone().unwrap(),
+                status: "idle".into(),
+                panes: vec![],
+            },
+            Instant::now(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 18)).unwrap();
+        for (view, key, tab) in [
+            (View::Tickets, "t", "Tickets"),
+            (View::Agents, "a", "Agents"),
+            (View::Scope, "p", "Scope"),
+        ] {
+            app.view = view;
+            terminal
+                .draw(|frame| render(frame, &mut app, Instant::now()))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            for (y, pieces) in [
+                (
+                    0,
+                    vec![
+                        ("luna:SWM:code", PRIMARY),
+                        (" · ", MUTED),
+                        ("codex", FOREGROUND),
+                        (" · ", MUTED),
+                        ("○", FOREGROUND),
+                    ],
+                ),
+                (
+                    2,
+                    vec![
+                        ("Scope: ", MUTED),
+                        ("SWM", FOREGROUND),
+                        (" · ", MUTED),
+                        ("Product", FOREGROUND),
+                    ],
+                ),
+                (
+                    3,
+                    vec![
+                        ("Tasks: ", MUTED),
+                        ("1/2", FOREGROUND),
+                        (" done · ", MUTED),
+                        ("1", FOREGROUND),
+                        (" Review", MUTED),
+                    ],
+                ),
+                (
+                    4,
+                    vec![("Focus: ", MUTED), ("Review credentials", FOREGROUND)],
+                ),
+                (5, vec![("Tickets: ", MUTED), ("SWM-12", FOREGROUND)]),
+            ] {
+                let mut x = 0;
+                for (text, color) in pieces {
+                    for character in text.chars() {
+                        let cell = &buffer[(x, y)];
+                        assert_eq!(cell.symbol(), character.to_string(), "header {x},{y}");
+                        assert_eq!(cell.fg, color, "header {x},{y}");
+                        x += 1;
+                    }
+                }
+            }
+            let mut x = 0;
+            for (tab_key, label) in [("t", "Tickets"), ("a", "Agents"), ("p", "Scope")] {
+                let selected = tab_key == key && label == tab;
+                for (text, color) in [
+                    (tab_key.to_owned(), PRIMARY),
+                    (
+                        format!(" {label}"),
+                        if selected { FOREGROUND } else { MUTED },
+                    ),
+                ] {
+                    for _ in text.chars() {
+                        let cell = &buffer[(x, 1)];
+                        assert_eq!(cell.fg, color);
+                        assert_eq!(cell.modifier.contains(Modifier::UNDERLINED), selected);
+                        x += 1;
+                    }
+                }
+                assert!(!buffer[(x, 1)].modifier.contains(Modifier::UNDERLINED));
+                x += 2;
+            }
+        }
+        for (state, marker, description) in [
+            ("idle", "○", "ready for input"),
+            ("done", "○", "ready for input"),
+            ("blocked", "◇", "waiting for input"),
+        ] {
+            app.runtime.value.as_mut().unwrap().status = state.into();
+            app.show_status = true;
+            let visible = screen(&mut app, 120, 18);
+            assert!(visible.lines().next().unwrap().contains(marker));
+            assert!(visible.contains(&format!("Activity: {description}")));
         }
     }
 
