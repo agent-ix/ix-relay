@@ -43,6 +43,18 @@ pub fn resolve_target(
     registrations: &[Registration],
     aliases: &[(AgentName, AgentName)],
 ) -> Result<Target> {
+    resolve_target_scoped(input, sender_machine, None, registrations, aliases)
+}
+
+/// Resolves a target with the sender's verified Herdr placement available for
+/// relative `:tab` and `:workspace:tab` addresses.
+pub fn resolve_target_scoped(
+    input: &str,
+    sender_machine: &MachineName,
+    sender_place: Option<&Address>,
+    registrations: &[Registration],
+    aliases: &[(AgentName, AgentName)],
+) -> Result<Target> {
     if let Ok(target @ Target::All) = input.parse::<Target>() {
         return Ok(target);
     }
@@ -72,7 +84,31 @@ pub fn resolve_target(
         return one_or_ambiguous(input, by_pane);
     }
 
-    if !input.contains(':') {
+    let expanded;
+    let query_input = if let Some(relative) = input.strip_prefix(':') {
+        let Some(place) = sender_place else {
+            return Err(Error::InvalidAddress {
+                input: input.to_owned(),
+            });
+        };
+        let parts: Vec<_> = relative.split(':').collect();
+        expanded = match parts.as_slice() {
+            [tab] if !tab.is_empty() => format!("{}:{}:{}", place.server(), place.workspace(), tab),
+            [workspace, tab] if !workspace.is_empty() && !tab.is_empty() => {
+                format!("{}:{}:{}", place.server(), workspace, tab)
+            }
+            _ => {
+                return Err(Error::InvalidAddress {
+                    input: input.to_owned(),
+                });
+            }
+        };
+        expanded.as_str()
+    } else {
+        input
+    };
+
+    if !query_input.contains(':') {
         return Err(unknown(
             input,
             UnknownCause::NotRegistered,
@@ -80,7 +116,7 @@ pub fn resolve_target(
             aliases,
         ));
     }
-    let query: Address = input.parse()?;
+    let query: Address = query_input.parse()?;
     let matched: Vec<&Registration> = registrations
         .iter()
         .filter(|r| {

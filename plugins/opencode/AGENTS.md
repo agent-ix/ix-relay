@@ -74,7 +74,13 @@ workspace label and tab label you see in herdr:
 ```
 agent-msg send hub:EA:1 "<text>"       # workspace EA, tab 1, on hub
 agent-msg send node-a:research "<text>"  # tab left out: one lead in that workspace
+agent-msg send :review "<text>"          # tab in your current workspace
+agent-msg send :EA:review "<text>"       # workspace/tab on your current server
 ```
+
+Relative addresses use your verified Herdr location: `:tab` searches that
+workspace on your server, and `:workspace:tab` searches that workspace on your
+server. They still refuse ambiguous matches.
 
 `send` resolves the address itself, so send cold: **do not run `agent-msg find`
 first.** Case doesn't matter. Leave the tab out only when the workspace has

@@ -34,7 +34,7 @@ pub use escalation::{
 pub use ids::{MAX_ID_BYTES, MachineName, PaneId, PaneRef, SessionId, TabId, WorkspaceId};
 pub use message::{Message, Registration};
 pub use name::{AgentName, Target};
-pub use resolve::resolve_target;
+pub use resolve::{resolve_target, resolve_target_scoped};
 pub use store::{
     AgentList, AgentSlot, BACKLOG_SCAN_BOUND, Backlog, BatchId, BudgetPopResult, Claim,
     CommitOutcome, DEAD_LETTER_CAP, DEFAULT_PREFIX, Demotion, HERDR_FAILED_TTL_SECS, HOOK_LEASE,

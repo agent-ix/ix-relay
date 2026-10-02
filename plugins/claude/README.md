@@ -111,6 +111,10 @@ isn't a lead.
   the bus: the WireGuard hub, a Linux or macOS machine joining it, the
   `agent-msg`/`relay-watcher` install, re-keying, and what each
   `redis_unreachable` cause means.
+- **Skill** (`skills/join/SKILL.md`, invoked as `/join`): checks whether this
+  machine is connected and whether this lead session has the intended bus
+  name, then routes machine enrollment to `/setup` or explains how to update
+  the session's identity.
 
 ## Optional: delivery through Claude Code's inbox socket
 
