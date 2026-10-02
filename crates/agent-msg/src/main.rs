@@ -948,7 +948,14 @@ fn resolve_send_target(
     let registrations = relay
         .agents()?
         .into_registrations_reporting(|skipped| eprintln!("agent-msg send: {skipped}"));
-    let target = relay_core::resolve_target(input, machine, &registrations, &relay.all_aliases()?)?;
+    let sender_place = pane_place(relay, machine)?.map(|place| place.address(machine));
+    let target = relay_core::resolve_target_scoped(
+        input,
+        machine,
+        sender_place.as_ref(),
+        &registrations,
+        &relay.all_aliases()?,
+    )?;
     Ok(SendTarget {
         target,
         registry: Some(registrations),
