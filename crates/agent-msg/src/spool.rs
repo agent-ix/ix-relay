@@ -197,6 +197,7 @@ impl ErrorKind {
             E::Work(_) => Self::Rejected,
             E::UnknownAgent(_)
             | E::InvalidAddress { .. }
+            | E::RelativeAddressNeedsLocation { .. }
             | E::AmbiguousTarget { .. }
             | E::UnknownTarget { .. }
             | E::MessageTooLarge { .. }

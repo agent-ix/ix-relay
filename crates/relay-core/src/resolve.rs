@@ -86,12 +86,17 @@ pub fn resolve_target_scoped(
 
     let expanded;
     let query_input = if let Some(relative) = input.strip_prefix(':') {
-        let Some(place) = sender_place else {
+        let parts: Vec<_> = relative.split(':').collect();
+        if !(1..=2).contains(&parts.len()) || parts.iter().any(|part| part.is_empty()) {
             return Err(Error::InvalidAddress {
                 input: input.to_owned(),
             });
+        }
+        let Some(place) = sender_place else {
+            return Err(Error::RelativeAddressNeedsLocation {
+                input: input.to_owned(),
+            });
         };
-        let parts: Vec<_> = relative.split(':').collect();
         expanded = match parts.as_slice() {
             [tab] if !tab.is_empty() => format!("{}:{}:{}", place.server(), place.workspace(), tab),
             [workspace, tab] if !workspace.is_empty() && !tab.is_empty() => {
@@ -323,6 +328,49 @@ mod tests {
 
     fn agent(n: &str) -> Target {
         Target::Agent(name(n))
+    }
+
+    #[test]
+    fn shorthand_uses_the_senders_machine_and_workspace() {
+        let place: Address = "hub:EA:code".parse().unwrap();
+        let regs = fleet();
+        for (input, expected) in [(":plan", "ea-plan"), (":EA:plan", "ea-plan")] {
+            assert_eq!(
+                resolve_target_scoped(input, &"hub".parse().unwrap(), Some(&place), &regs, &[])
+                    .unwrap(),
+                agent(expected)
+            );
+        }
+        let other: Address = "node-a:research:1".parse().unwrap();
+        assert!(matches!(
+            resolve_target_scoped(
+                ":EA:plan",
+                &"node-a".parse().unwrap(),
+                Some(&other),
+                &regs,
+                &[]
+            ),
+            Err(Error::UnknownTarget { .. })
+        ));
+    }
+
+    #[test]
+    fn shorthand_without_location_is_a_context_error() {
+        assert!(matches!(
+            target(":plan"),
+            Err(Error::RelativeAddressNeedsLocation { .. })
+        ));
+    }
+
+    #[test]
+    fn shorthand_does_not_guess_an_ambiguous_target() {
+        let place: Address = "hub:EA:code".parse().unwrap();
+        let mut regs = fleet();
+        regs.push(reg("another-plan", "hub", "wB:p3", Some(("EA", "plan", 2))));
+        assert!(matches!(
+            resolve_target_scoped(":plan", &"hub".parse().unwrap(), Some(&place), &regs, &[]),
+            Err(Error::AmbiguousTarget { .. })
+        ));
     }
 
     #[test]

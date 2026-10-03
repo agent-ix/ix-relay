@@ -166,6 +166,7 @@ enum Outcome {
     UnknownWorkspace(BTreeSet<String>),
     UnknownTab(BTreeSet<String>),
     Invalid,
+    NeedsLocation,
 }
 
 fn observed(result: &Result<Target, Error>) -> Outcome {
@@ -188,6 +189,7 @@ fn observed(result: &Result<Target, Error>) -> Outcome {
             }
         },
         Err(Error::InvalidAddress { .. }) => Outcome::Invalid,
+        Err(Error::RelativeAddressNeedsLocation { .. }) => Outcome::NeedsLocation,
         Err(other) => panic!("resolution returned an error outside its contract: {other}"),
     }
 }
@@ -282,6 +284,14 @@ fn model(input: &str, sender: &str, fleet: &Fleet) -> Outcome {
             names.sort();
             return Outcome::Ambiguous(names);
         }
+    }
+    if let Some(relative) = input.strip_prefix(':') {
+        let parts: Vec<_> = relative.split(':').collect();
+        return if (1..=2).contains(&parts.len()) && parts.iter().all(|part| !part.is_empty()) {
+            Outcome::NeedsLocation
+        } else {
+            Outcome::Invalid
+        };
     }
     if !input.contains(':') {
         return Outcome::NotRegistered;

@@ -33,6 +33,14 @@ pub enum Error {
         /// The rejected input.
         input: String,
     },
+    /// Relative addressing needs the sender's verified Herdr location.
+    #[error(
+        "relative address {input:?} needs a verified Herdr location for this session; use a full server:workspace:tab address or enable the session hooks"
+    )]
+    RelativeAddressNeedsLocation {
+        /// The relative target.
+        input: String,
+    },
     /// A target matched more than one lead. Never resolved by guessing: the
     /// sender picks one, by a more specific address (add tab/pane detail) or a bus name.
     #[error("{input:?} matches {} leads, so nothing was sent: {}", .candidates.len(), list_candidates(.candidates))]
@@ -292,6 +300,7 @@ impl Error {
             | Self::InvalidName { .. }
             | Self::UnknownAgent(_)
             | Self::InvalidAddress { .. }
+            | Self::RelativeAddressNeedsLocation { .. }
             | Self::AmbiguousTarget { .. }
             | Self::UnknownTarget { .. }
             | Self::MessageTooLarge { .. }

@@ -473,3 +473,88 @@ fn a_pane_id_shared_with_another_machine_never_leaks_its_place_or_its_messages()
         node_a_inbox.stdout
     );
 }
+
+#[test]
+fn relative_addresses_work_through_the_cli_and_require_verified_sender_location() {
+    let Some(url) = test_url() else { return };
+    let prefix = format!("test:{}:address:relative:", std::process::id());
+    let dir = scratch("relative");
+    let herdr = fake_herdr_dir(
+        EA_WORKSPACES,
+        EA_TABS,
+        EA_PANES,
+        &agent_session_case("wB:p1", "sender-session"),
+        &dir.join("herdr.log"),
+        false,
+    );
+    let sender = Pane {
+        machine: "hub",
+        herdr_dir: &herdr,
+        pane: "wB:p1",
+        tab: "wB:t1",
+        workspace: "wB",
+        session: "sender-session",
+    };
+    let receiver = Pane {
+        machine: "hub",
+        herdr_dir: &herdr,
+        pane: "wB:p2",
+        tab: "wB:t2",
+        workspace: "wB",
+        session: "receiver-session",
+    };
+    seed_verified_registration(&url, &prefix, "sender", &sender, "EA", "code");
+    seed_verified_registration(&url, &prefix, "receiver", &receiver, "EA", "plan");
+    for target in [":plan", ":EA:plan"] {
+        let mut cmd = base_cmd(
+            &["send", target, "relative regression test"],
+            Some("sender"),
+        );
+        cmd.env("IX_RELAY_URL", &url)
+            .env("IX_RELAY_PREFIX", &prefix)
+            .env("IX_RELAY_MACHINE", "hub")
+            .env("HERDR_PANE_ID", "wB:p1");
+        let sent = run(cmd, "");
+        assert_eq!(sent.status, 0, "{}", sent.stderr);
+        assert!(
+            sent.stdout.contains("queued for hub:EA:plan (receiver)"),
+            "{}",
+            sent.stdout
+        );
+    }
+    let sent = as_lead_on(
+        "hub",
+        &url,
+        &prefix,
+        "sender",
+        &["send", ":plan", "no context"],
+    );
+    assert_ne!(sent.status, 0);
+    assert!(
+        sent.stderr.contains("needs a verified Herdr location"),
+        "{}",
+        sent.stderr
+    );
+    let mut relay = Relay::connect(&url, Duration::from_secs(2))
+        .unwrap()
+        .with_prefix(prefix.clone());
+    let mut claimed = relay.agent_slot(&"sender".parse().unwrap()).unwrap();
+    if let relay_core::AgentSlot::Registered(ref mut reg) = claimed {
+        reg.place.as_mut().unwrap().herdr_ids = None;
+        relay.register(reg).unwrap();
+    } else {
+        panic!("sender must be registered");
+    }
+    let mut cmd = base_cmd(&["send", ":plan", "unverified context"], Some("sender"));
+    cmd.env("IX_RELAY_URL", &url)
+        .env("IX_RELAY_PREFIX", &prefix)
+        .env("IX_RELAY_MACHINE", "hub")
+        .env("HERDR_PANE_ID", "wB:p1");
+    let sent = run(cmd, "");
+    assert_ne!(sent.status, 0);
+    assert!(
+        sent.stderr.contains("needs a verified Herdr location"),
+        "{}",
+        sent.stderr
+    );
+}

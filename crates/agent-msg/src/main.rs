@@ -985,7 +985,7 @@ fn pane_place(relay: &mut Relay, machine: &MachineName) -> relay_core::Result<Op
     Ok(relay
         .registrations_for_pane(&PaneRef::new(machine.clone(), pane))?
         .into_iter()
-        .find_map(|r| r.place))
+        .find_map(|r| r.verified_place().cloned()))
 }
 
 /// Addresses for printing, or why the registry could not be read.
