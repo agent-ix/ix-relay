@@ -19,7 +19,7 @@ fn registration(name: &str, machine: &str) -> Registration {
         name: name.parse().unwrap(),
         machine: machine.parse().unwrap(),
         kind: "claude".into(),
-        session_id: None,
+        session_id: Some(name.parse().unwrap()),
         cwd: None,
         herdr_pane: Some("w1:p1".parse().unwrap()),
         place: None,
@@ -29,6 +29,17 @@ fn registration(name: &str, machine: &str) -> Registration {
 
 /// `agent-msg inbox --json` as the lead sitting in pane `w1:p1` on `machine`.
 fn inbox_texts(url: &str, prefix: &str, machine: &str) -> Vec<String> {
+    let scratch = support::Scratch::new("ix-relay-pane-machine-");
+    let session = if machine == "hub" {
+        "hub-lead"
+    } else {
+        "node-a-lead"
+    };
+    let agent_case = format!(
+        r#""w1:p1") echo '{{"result":{{"agent":{{"agent_session":{{"kind":"id","value":"{session}"}}}}}}}}' ;;"#
+    );
+    let herdr =
+        support::fake_herdr_dir("[]", "[]", "[]", &agent_case, &scratch.join("calls"), false);
     let mut cmd = support::base_cmd(&["inbox", "--json"], None);
     cmd.env("IX_RELAY_URL", url)
         .env("IX_RELAY_PREFIX", prefix)
@@ -36,6 +47,10 @@ fn inbox_texts(url: &str, prefix: &str, machine: &str) -> Vec<String> {
         .env("HERDR_PANE_ID", "w1:p1")
         .env("HERDR_TAB_ID", "w1:t1")
         .env("HERDR_WORKSPACE_ID", "w1");
+    cmd.env(
+        "PATH",
+        format!("{}:{}", herdr.display(), std::env::var("PATH").unwrap()),
+    );
     let run = support::run(cmd, "");
     assert_eq!(run.status, 0, "inbox failed: {}", run.stderr);
     let parsed: serde_json::Value = serde_json::from_str(run.stdout.trim()).expect("json stdout");

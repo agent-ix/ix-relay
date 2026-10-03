@@ -134,6 +134,7 @@ pub fn base_cmd(args: &[&str], name: Option<&str>) -> Command {
     cmd.env_remove("IX_RELAY_WATCHER_INTERVAL_SECS");
     cmd.env("IX_RELAY_CONFIG", nonexistent_config_path());
     cmd.env_remove("HERDR_PANE_ID");
+    cmd.env_remove("CODEX_THREAD_ID");
     cmd
 }
 

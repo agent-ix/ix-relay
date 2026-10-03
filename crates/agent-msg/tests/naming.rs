@@ -881,14 +881,10 @@ fn a_fork_session_never_joins_the_bus() {
 
 // ---- interactive commands resolve by pane from the registry (finding 4) --
 
-/// `agent-msg whoami`/`send` run directly in the agent's own shell (not
-/// through a hook) must see a `/rename` the hook already published — and
-/// must make no herdr call to do it (proven here by giving them a herdr
-/// that always fails: if the interactive path fell back to re-deriving
-/// through herdr, this would surface as an error or "not a lead", not the
-/// renamed name).
+/// Interactive commands preserve the hook's published rename while checking
+/// that the pane still hosts the registered session.
 #[test]
-fn interactive_commands_resolve_a_rename_from_the_registry_with_no_herdr_call() {
+fn interactive_commands_preserve_a_rename_after_live_session_verification() {
     let Some(url) = test_url() else { return };
     let prefix = format!("test:{}:naming-interactive-registry:", std::process::id());
     let scratch = std::env::temp_dir().join(format!(
@@ -936,18 +932,20 @@ fn interactive_commands_resolve_a_rename_from_the_registry_with_no_herdr_call() 
     );
     assert_eq!(r.status, 0, "stderr: {}", r.stderr);
 
-    // Now `whoami`, run directly (no AGENT_MSG_NAME, no hook JSON), with a
-    // herdr that always fails: must still report "interactive-renamed",
-    // resolved from the registry by HERDR_PANE_ID, not "qsl" (which is all
-    // a fresh herdr re-derive could ever produce, and would anyway fail
-    // outright against this herdr).
-    let failing_herdr_dir =
-        fake_herdr_dir(WORKSPACES_JSON, TABS_JSON, PANES_JSON, "", &call_log, true);
+    // Herdr confirms the same session; the registry's /rename must still win.
+    let verified_herdr_dir = fake_herdr_dir(
+        WORKSPACES_JSON,
+        TABS_JSON,
+        PANES_JSON,
+        r#""wQ:p1") echo '{"result":{"agent":{"agent_session":{"kind":"id","value":"naming-interactive-s1"}}}}' ;;"#,
+        &call_log,
+        false,
+    );
     let whoami = agent_msg_with_herdr(
         &["whoami"],
         Some(&url),
         Some(&prefix),
-        &failing_herdr_dir,
+        &verified_herdr_dir,
         "wQ:p1",
         "wQ:t1",
         "wQ",
@@ -970,7 +968,7 @@ fn interactive_commands_resolve_a_rename_from_the_registry_with_no_herdr_call() 
         &["send", "interactive-renamed", "hi"],
         Some(&url),
         Some(&prefix),
-        &failing_herdr_dir,
+        &verified_herdr_dir,
         "wQ:p1",
         "wQ:t1",
         "wQ",
@@ -981,7 +979,7 @@ fn interactive_commands_resolve_a_rename_from_the_registry_with_no_herdr_call() 
 
     std::fs::remove_dir_all(&scratch).ok();
     std::fs::remove_dir_all(&herdr_dir).ok();
-    std::fs::remove_dir_all(&failing_herdr_dir).ok();
+    std::fs::remove_dir_all(&verified_herdr_dir).ok();
 }
 
 // ---- a second rename keeps every earlier name reachable (finding 5) ------

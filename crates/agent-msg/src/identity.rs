@@ -674,21 +674,16 @@ fn demotion(
 /// AGE-2018 PR review, finding 4: a command run directly in the agent's own
 /// shell has no session transcript to check for a `/rename` the way a hook
 /// does, so re-running the precedence chain here would silently ignore one.
-/// Instead, when this process is running inside a herdr-managed pane, this
-/// first looks up what the hook last registered *that pane* as (the
-/// most-recently-seen registration, if more than one somehow matches) and
-/// trusts it — [`Source::Registry`]. That registration is exactly what
-/// `SessionStart`/`UserPromptSubmit` computed, transcript and all, so it
-/// reflects a `/rename` correctly.
+/// Instead, this reads the pane's registration to preserve the hook's rename,
+/// but accepts it only after a live Herdr snapshot confirms its session. A
+/// Codex caller's `CODEX_THREAD_ID`, when present, must identify that same
+/// session: inherited pane variables alone do not prove who the caller is.
+/// Missing, replaced, or unreachable pane identities fail closed rather than
+/// refresh or send as an old lead. The registry is not a verification source.
 ///
-/// Only when no registration exists yet for this pane (nothing has ever
-/// registered it — e.g. a command run before any hook fired) does this fall
-/// back to re-running tiers 3 and 4 of the chain directly (no transcript is
-/// available outside a hook call either way). Either way, this makes **no
-/// Redis writes**: no registration, no alias — `send`'s own send is the only
-/// side effect an interactive command has (finding 4). `None` when nothing
-/// resolves at all — "not a lead," the same state an unset `AGENT_MSG_NAME`
-/// has always meant.
+/// With no registration yet, tiers 3 and 4 can still derive a name. A Codex
+/// caller must first match the pane's live session before that fallback too.
+/// Both paths make no Redis writes and return `None` when no lead resolves.
 ///
 /// # Errors
 ///
@@ -703,13 +698,44 @@ pub fn derive(
     machine: &MachineName,
 ) -> Result<Option<Identity>, CollisionError> {
     if let Some(env) = HerdrEnv::from_process_env() {
-        let mut regs = relay.registrations_for_pane(&PaneRef::new(machine.clone(), env.pane_id))?;
-        if let Some(reg) = regs.drain(..).next() {
-            return Ok(Some(Identity {
-                name: reg.name,
-                source: Source::Registry,
-                location_alias: None,
-            }));
+        let regs =
+            relay.registrations_for_pane(&PaneRef::new(machine.clone(), env.pane_id.clone()))?;
+        let caller_session = std::env::var("CODEX_THREAD_ID").ok();
+        if !regs.is_empty() || caller_session.is_some() {
+            let herdr = real_herdr(INTERACTIVE_HERDR_BUDGET, None);
+            let live_session = herdr
+                .agent(&env.pane_id)
+                .ok()
+                .flatten()
+                .and_then(|agent| agent.session_id);
+            if let Some(reg) = regs.iter().find(|reg| {
+                interactive_session_matches(
+                    reg.session_id.as_ref(),
+                    live_session.as_ref(),
+                    caller_session.as_deref(),
+                )
+            }) {
+                return Ok(Some(Identity {
+                    name: reg.name.clone(),
+                    source: Source::Registry,
+                    location_alias: None,
+                }));
+            }
+            if !regs.is_empty()
+                || !interactive_session_matches(
+                    live_session.as_ref(),
+                    live_session.as_ref(),
+                    caller_session.as_deref(),
+                )
+            {
+                crate::report::line(format_args!(
+                    "agent-msg: inherited Herdr pane {} has no verified identity for this \
+                     session; refresh the genuine Herdr/Codex session hooks and caller context \
+                     before registering (manual registration cannot repair it)",
+                    env.pane_id
+                ));
+                return Ok(None);
+            }
         }
     }
     let ChainOutcome::Winner(chain) = resolve_chain(None, INTERACTIVE_HERDR_BUDGET, None) else {
@@ -724,6 +750,16 @@ pub fn derive(
         source: chain.source,
         location_alias: chain.location_alias,
     }))
+}
+
+/// Two absent session IDs are never proof of the same agent.
+fn interactive_session_matches(
+    registered: Option<&SessionId>,
+    live: Option<&SessionId>,
+    caller: Option<&str>,
+) -> bool {
+    let Some(live) = live else { return false };
+    registered == Some(live) && caller.is_none_or(|caller| caller == live.as_str())
 }
 
 /// Where this pane sits in herdr, read now: what an interactive
