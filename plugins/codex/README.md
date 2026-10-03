@@ -144,6 +144,14 @@ CLI does.
 
 ## Diagnose stale caller context
 
+Install `plugins/codex/skills/doctor/` as `$CODEX_HOME/skills/doctor/` to expose
+`/doctor`. It diagnoses registration and delivery and includes an authorized
+temporary-helper-tab recovery scenario for existing shared-daemon sessions,
+including restarts from shells that still select the underlying npm/NVM Codex.
+The helper waits for idle, resumes the original pane with explicit
+`--no-daemon`, verifies genuine registration and hook receipt, and closes its
+own tab. A diagnostic-only invocation leaves agents running.
+
 `agent-msg whoami --json` checks a registry identity against the pane's live
 Herdr session. If the inherited pane is missing or the session does not match,
 it refuses the stale identity and explains that manual registration cannot
