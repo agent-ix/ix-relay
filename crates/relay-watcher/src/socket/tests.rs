@@ -4012,6 +4012,16 @@ fn tc_044_15_an_untrusted_status_directory_is_alerted_once_and_delivery_goes_on(
         );
         assert_eq!(got, Ok(()), "delivery goes on");
     }
+    // A successful socket write can precede the receiver thread parsing it.
+    // Observe all three arrivals rather than racing an immediate snapshot.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while claude.received().len() < 3 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "receiver did not observe all three posts"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
     assert_eq!(claude.received().len(), 3);
     let alerts = d.alerts();
     assert_eq!(alerts.len(), 1, "once per episode: {alerts:?}");

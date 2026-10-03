@@ -429,16 +429,28 @@ fn tc_029_07_a_missing_herdr_fails_and_an_unaskable_service_manager_does_not() {
     assert!(codes(&report, "unknown").contains(&"service_unknown".to_owned()));
     assert_eq!(report["ok"], false);
 
-    // Restore herdr: only the service state remains unknown, and the exit is 0.
+    // Restore Herdr and verify the unavailable service-manager classification.
     stub(world.bin.path(), "herdr", HERDR_OK);
     let run = world.run(&["--json"]);
     assert_eq!(run.status, 0, "{}", run.stdout);
-    assert_eq!(
-        codes(&json(&run), "unknown"),
-        ["service_unknown"],
-        "{}",
-        run.stdout
+    let report = json(&run);
+    let service = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["check"] == "service")
+        .unwrap();
+    assert_eq!(service["code"], "service_unknown", "{report}");
+    assert_eq!(service["status"], "unknown", "{report}");
+    assert!(
+        service["message"]
+            .as_str()
+            .unwrap()
+            .contains("neither systemctl nor launchctl")
     );
+    assert_eq!(report["ok"], true, "{report}");
+    // Other process probes may correctly be unknown under their independent
+    // deadline. Their classification is verified by dedicated Herdr cases.
 }
 
 /// Tracing: TC-029-09
