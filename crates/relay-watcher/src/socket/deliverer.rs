@@ -237,7 +237,7 @@ impl SocketConfig {
     }
 
     /// The locations for this user: `$IX_RELAY_CLAUDE_DIR` (else `~/.claude`)
-    /// and `/tmp/cc-socks` on macOS or `$XDG_RUNTIME_DIR/cc-socks` on Linux,
+    /// and `$XDG_RUNTIME_DIR/cc-socks` (default `/tmp/cc-socks` on macOS),
     /// with the default timings.
     ///
     /// # Errors
@@ -252,7 +252,9 @@ impl SocketConfig {
             .join(".claude"),
         };
         #[cfg(target_os = "macos")]
-        let socket_dir = PathBuf::from("/tmp/cc-socks");
+        let socket_dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(|runtime| PathBuf::from(runtime).join("cc-socks"))
+            .unwrap_or_else(|| PathBuf::from("/tmp/cc-socks"));
         #[cfg(not(target_os = "macos"))]
         let socket_dir =
             PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").ok_or("XDG_RUNTIME_DIR is not set")?)
@@ -687,6 +689,8 @@ impl SocketDeliverer {
     /// The directories a session's socket may be in.
     fn socket_dirs(&self) -> Vec<PathBuf> {
         let mut dirs = vec![self.config.socket_dir.clone()];
+        #[cfg(target_os = "macos")]
+        dirs.push(PathBuf::from("/tmp/cc-socks"));
         if let Some(uid) = self.procs.uid() {
             dirs.push(PathBuf::from(format!("/tmp/cc-socks-{uid}")));
         }

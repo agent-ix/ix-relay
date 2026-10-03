@@ -393,7 +393,8 @@ How it behaves:
   is alive, has the recorded start time and pid namespace, and reports `peerProtocol`
   1 and version 2.1.224 or later. The socket is Claude Code's own; the watcher only
   binds its reply socket at `$XDG_RUNTIME_DIR/cc-socks/<pid>.sock` on Linux, or
-  `/tmp/cc-socks/<pid>.sock` on macOS. On macOS process identity matches Claude
+  `/tmp/cc-socks/<pid>.sock` on macOS (an explicit `XDG_RUNTIME_DIR` overrides
+  the reply directory). On macOS process identity matches Claude
   Code’s UTC `ps -o lstart=` timestamp and `darwin` pid domain; Linux uses `/proc`.
 - herdr stays the fallback: no session id, no live record, a refused connection, a reply
   socket that is not bound yet (it is bound later, with backoff), or a receipt saying the
