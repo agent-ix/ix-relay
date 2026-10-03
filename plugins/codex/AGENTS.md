@@ -93,6 +93,30 @@ but report and use addresses — `who`, `find`, `whoami`, `log` and the
 `[ix-relay] from <address>:` line all show them, so what you tell the operator is what
 they see in herdr.
 
+## Recover a failed send
+
+Relative targets (`:tab`, `:workspace:tab`) need this session's verified Herdr
+location. A missing location is an integration problem, not unsupported syntax.
+Use a full address from live state or a confirmed bus name while repairing it.
+
+If a send is rejected or the intended lead is not on relay, read
+`$CODEX_HOME/ix-relay/delivery-recovery.md` (default
+`~/.codex/ix-relay/delivery-recovery.md`). It covers confirmed Herdr fallback,
+remote machine selection, and inviting the lead to join. If the installed copy
+is unavailable, read `plugins/claude/skills/msg/references/delivery-recovery.md`
+in the ix-relay checkout.
+
+A `queued for` result is a successful enqueue: do not send the same message
+through Herdr. For a timeout or lost connection, check the log or get an
+acknowledgement before retrying. After a definite rejection, find the uniquely
+identified live recipient and use `herdr agent prompt` within the installed
+Herdr skill's caller-context rules; never use raw keys to bypass a blocked
+agent. Invite unregistered leads to use `/ix-relay:join` or `/join` when
+available. For Codex, enable the relay and Herdr session hooks and refresh from
+the real session; preserve `AGENT_MSG_NAME` and never invent a session ID.
+Manual registration alone does not prove a verified location. Report queued,
+submitted, and acknowledged outcomes separately.
+
 ## Commands
 
 ```

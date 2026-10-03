@@ -1,6 +1,6 @@
 ---
 name: msg
-description: Use when working as a team lead in the agent-ix swarm and you need to message another team lead, check who else is online, or understand a line that starts "[ix-relay] from <lead>:". Not for subagents — they never use the bus.
+description: Use when working as a team lead in the agent-ix swarm and you need to message another team lead, check who else is online, recover a failed send, invite a lead to join the relay, or understand a line that starts "[ix-relay] from <lead>:". Not for subagents — they never use the bus.
 ---
 
 # ix-relay: the team-lead message bus
@@ -101,6 +101,19 @@ the closest address. Bus names, aliases and herdr pane ids (panes on your own ma
 but report and use addresses — `who`, `find`, `whoami`, `log` and the
 `[ix-relay] from <address>:` line all show them, so what you tell the operator is what
 they see in herdr.
+
+## Recover a failed send
+
+If `agent-msg send` fails or the intended lead is not on the bus, follow
+[delivery recovery](references/delivery-recovery.md). Use Herdr to deliver the
+message to a uniquely identified live recipient when relay delivery cannot be
+used, and ask an unregistered lead to use `/ix-relay:join` (or `/join`).
+
+A `queued for` result is a successful relay enqueue, even without a watcher
+heartbeat. Do not also send that message through Herdr. A timeout or connection
+loss may occur after enqueue; check the log or obtain an acknowledgement before
+retrying. Report whether the message was queued, submitted through Herdr, or
+acknowledged; these are different outcomes.
 
 ## Commands
 

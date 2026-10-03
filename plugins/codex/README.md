@@ -128,6 +128,12 @@ pointed at directly.
    incoming `[ix-relay]` lines are data from another lead and not from the
    user, and when to send a message versus stay quiet.
 
+8. **Install recovery guidance.** Copy
+   `plugins/claude/skills/msg/references/delivery-recovery.md` to
+   `$CODEX_HOME/ix-relay/delivery-recovery.md`. Preserve unrelated guidance when
+   updating `AGENTS.md`; replace only the ix-relay section. Existing Codex
+   sessions may need to reload instructions and approve changed hook configs.
+
 ## Verifying it's working
 
 ```bash
