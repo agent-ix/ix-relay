@@ -17,29 +17,51 @@ pub struct CommitOutcome;
 impl Relay {
     /// Commit registration and session cache together without partial writes.
     pub fn commit_identity(&mut self, commit: &IdentityCommit) -> Result<CommitOutcome> {
-        let mut pipe = redis::pipe();
-        pipe.atomic();
-        if let Some(reg) = &commit.registration {
-            pipe.hset(self.keys.agents_key(), reg.name.as_str(), encode(reg))
-                .ignore();
-        }
-        if let Some((sid, id)) = &commit.session_name {
-            pipe.cmd("SET")
-                .arg(self.keys.session_key(sid))
-                .arg(id.as_str())
-                .arg("EX")
-                .arg(SESSION_TTL_SECS)
-                .ignore();
-        }
-        if let Some(sid) = &commit.suppress_session {
-            pipe.cmd("SET")
-                .arg(self.keys.suppressed_key(sid))
-                .arg("1")
-                .arg("EX")
-                .arg(SESSION_TTL_SECS)
-                .ignore();
-        }
-        let (): () = pipe.query(&mut self.conn)?;
+        // One request and one reply: a MULTI pipeline can wait out the socket
+        // timeout once per queued reply when Redis accepts but never answers.
+        let script = r#"
+            if ARGV[1] ~= '' then
+                redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+            end
+            if ARGV[3] ~= '' then
+                redis.call('SET', KEYS[2], ARGV[3], 'EX', ARGV[4])
+            end
+            if ARGV[5] == '1' then
+                redis.call('SET', KEYS[3], '1', 'EX', ARGV[4])
+            end
+            return 1
+        "#;
+        let (name, registration) = commit
+            .registration
+            .as_ref()
+            .map(|r| (r.name.as_str(), encode(r)))
+            .unwrap_or(("", String::new()));
+        let (session_key, session_name) = commit
+            .session_name
+            .as_ref()
+            .map(|(sid, id)| (self.keys.session_key(sid), id.as_str()))
+            .unwrap_or((self.keys.agents_key(), ""));
+        let suppressed_key = commit
+            .suppress_session
+            .as_ref()
+            .map(|sid| self.keys.suppressed_key(sid))
+            .unwrap_or_else(|| self.keys.agents_key());
+        let _: i64 = redis::cmd("EVAL")
+            .arg(script)
+            .arg(3)
+            .arg(self.keys.agents_key())
+            .arg(session_key)
+            .arg(suppressed_key)
+            .arg(name)
+            .arg(registration)
+            .arg(session_name)
+            .arg(SESSION_TTL_SECS)
+            .arg(if commit.suppress_session.is_some() {
+                "1"
+            } else {
+                "0"
+            })
+            .query(&mut self.conn)?;
         Ok(CommitOutcome)
     }
 }
