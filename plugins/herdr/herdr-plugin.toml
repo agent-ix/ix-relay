@@ -1,0 +1,12 @@
+id = "agent-ix.ix-relay"
+name = "ix-relay"
+version = "0.1.0"
+min_herdr_version = "0.9.1"
+description = "Show ix-relay status in Herdr for any coding agent"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "status"
+title = "Show ix-relay status"
+contexts = ["pane"]
+command = ["agent-msg", "status"]
