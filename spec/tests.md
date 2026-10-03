@@ -115,7 +115,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-018 | FR-018-AC-3 | TC-018-03 | 🚧 pending |
 | FR-018 | FR-018-AC-4 | TC-018-04 | ✅ written, pop and render only (`tc_018_04_*` in `relay-core/src/store/pop_budget_tests.rs`: the popped batch printed with the real renderer, joined by newlines, is within the budget; the pending-count line and `hook::respond` itself are not asserted) |
 | FR-018 | FR-018-AC-5 | TC-018-05 | ✅ written (`tc_018_05_connecting_sends_no_client_setinfo`; Redis lane) |
-| FR-018 | FR-018-AC-6 | TC-018-06 | ✅ written (`tc_018_06_a_derived_name_user_prompt_submit_reaches_the_pop_in_three_requests` and `tc_018_06_an_explicit_name_user_prompt_submit_reaches_the_pop_in_two_requests`, request counts through a counting proxy; `probe_session_reads_the_mark_the_name_and_the_unresolved_flag_together`; Redis lane) |
+| FR-018 | FR-018-AC-6 | TC-018-06 | ✅ written (`tc_018_06_a_derived_name_user_prompt_submit_reaches_the_pop_in_three_requests` and `tc_018_06_an_explicit_name_user_prompt_submit_reaches_the_pop_in_two_requests`, request counts through a counting proxy; `probe_session_reads_the_suppression_and_queue_together`; Redis lane) |
 | FR-018 | FR-018-AC-7 | TC-018-07 | ✅ written (`tc_018_07_post_tool_use_costs_one_read_then_the_pop`; Redis lane) |
 | FR-019 | FR-019-AC-1 | TC-019-01 | 🚧 pending |
 | FR-019 | FR-019-AC-2 | TC-019-02 | 🚧 pending |
@@ -702,3 +702,27 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | Unit | 111 | 83 | 0 | 3 | 0 | 0 | 75% |
 
 "Written, named method" counts rows whose status names a written test that uses the method the row names. It records that the test exists, not a run: the last recorded run is the `make ci` output in the PR comment for the head commit, and Redis-backed tests skip without `IX_RELAY_TEST_URL`. Fuzz and Static rows are counted separately: the Fuzz rows are property-based fuzz lanes (see `fuzz/README.md`), not recorded `cargo-fuzz` campaigns, and the Static rows are exhaustive checks over a bound, not Kani proofs. Rows marked red (`#[ignore]` with a ticket) are not counted.
+
+## Additional startup and transport regression evidence
+
+`herdr-cli::tests::completed_child_does_not_wait_for_a_descendants_inherited_pipes`
+checks that completed commands do not wait for inherited output descriptors.
+The adjacent capture-cap and closed-output tests preserve bounded capture and
+hung-child termination. `relay_ops::find` tests verify exact saved SSH target
+and session selection, shell quoting, profile caching, and refusal of missing,
+disabled, ambiguous, or option-like targets.
+
+Live 0.3 acceptance used an isolated Herdr session and throwaway Redis. Both a
+fresh Codex session and a resumed one registered through installed SessionStart
+hooks before a `whoami` or manual registration call. Captured session IDs matched
+Herdr and Redis. A preserved stale `AGENT_MSG_NAME` did not affect identity. The
+resumed model reported markers sent with full, workspace-relative, and tab-relative
+addresses. Real remote reads enrolled genuine Luna and Terra recipients in the
+throwaway namespace; no test messages entered production Redis.
+
+The session-cache probe now renews TTLs and reads suppression/queue state with
+one atomic Lua reply. The dedicated blackhole benchmark exercises genuine lead
+hooks in both metadata variants and retains its 400 ms / 1,000 ms thresholds.
+Executable validation is warmed for the benchmark; cold startup is checked by
+the independent real SessionStart acceptance. Topology gathering shares one
+deadline across its three calls and starts no further calls after it expires.

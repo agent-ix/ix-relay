@@ -687,7 +687,7 @@ fn try_run<B: Bus>(
     let identity = {
         arm(&mut bus, &budget, "reading the session", HookError::Derive)?;
         // One request for every independent read about the session (suppressed,
-        // cached name, unresolved mark). It is also the round trip the pop window
+        // cached queue). It is also the round trip the pop window
         // is sized from (see [`pop_window`]).
         let step_started = clock.elapsed();
         let probe = match input.session_id.as_ref() {

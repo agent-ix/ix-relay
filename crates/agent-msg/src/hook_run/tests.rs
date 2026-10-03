@@ -77,11 +77,9 @@ struct World {
     commits: Vec<IdentityCommit>,
     /// What `derive` answers.
     identity: Option<Derived>,
-    /// When set, `derive` finds no free variant of this name, every call.
     /// When set, herdr could not name the session and `derive` says so; the flag
     /// is whether the budget was spent (rather than herdr itself failing).
     herdr_failed: Option<bool>,
-    /// Sessions marked unresolved, as `SET NX` would.
     /// Sessions whose herdr failure was recorded, as `SET NX` would.
     herdr_marked: BTreeSet<String>,
     /// The place `registered_place` answers.

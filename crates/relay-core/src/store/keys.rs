@@ -74,10 +74,6 @@ impl Keys {
         format!("{}suppressed:{session_id}", self.prefix)
     }
 
-    pub(super) fn unresolved_key(&self, session_id: &SessionId) -> String {
-        format!("{}unresolved:{session_id}", self.prefix)
-    }
-
     /// The once-per-window mark of a session whose herdr failure was recorded.
     pub(super) fn herdr_failed_key(&self, session_id: &SessionId) -> String {
         format!("{}herdr-failed:{session_id}", self.prefix)
@@ -172,7 +168,6 @@ mod tests {
             ("esc_index_key", relay.esc_index_key()),
             ("session_key", relay.session_key(&sid)),
             ("suppressed_key", relay.suppressed_key(&sid)),
-            ("unresolved_key", relay.unresolved_key(&sid)),
             ("herdr_failed_key", relay.herdr_failed_key(&sid)),
             ("inflight_key", relay.inflight_key(&agent)),
             ("inflight_stem", relay.inflight_stem()),
@@ -201,7 +196,6 @@ mod tests {
             ("esc_index_key", "p:esc:index"),
             ("session_key", "p:session:sid-1"),
             ("suppressed_key", "p:suppressed:sid-1"),
-            ("unresolved_key", "p:unresolved:sid-1"),
             ("herdr_failed_key", "p:herdr-failed:sid-1"),
             ("inflight_key", "p:inflight:lead-a"),
             ("inflight_stem", "p:inflight:"),
@@ -255,7 +249,6 @@ mod tests {
             other.esc_index_key(),
             other.session_key(&sid),
             other.suppressed_key(&sid),
-            other.unresolved_key(&sid),
             other.herdr_failed_key(&sid),
             other.inflight_key(&agent),
             other.inflight_stem(),

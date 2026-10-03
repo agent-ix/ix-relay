@@ -45,13 +45,8 @@ const HEALTH_HOOKS_CAP: usize = 1_000;
 /// so entries would otherwise accumulate forever with nothing to clean them up.
 const SESSION_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 
-/// How long a session with no free bus name is left alone before the hook
-/// derives again: 5 minutes, in seconds.
-pub const UNRESOLVED_TTL_SECS: u64 = 300;
-
-/// How long a session's herdr failure, once recorded, is not recorded again:
-/// 5 minutes, in seconds. Unlike [`UNRESOLVED_TTL_SECS`] it never stops the
-/// derivation, only the record.
+/// How long a recorded Herdr failure is deduplicated: five minutes.
+/// This never stops session verification or enrollment.
 pub const HERDR_FAILED_TTL_SECS: u64 = 300;
 
 mod commit;
@@ -85,16 +80,6 @@ pub use scan::ScanCut;
 /// [`Relay::pop_inbox_budget`]) can always deliver at least one message
 /// whole, never split mid-text.
 pub const MAX_MESSAGE_BYTES: usize = 4 * 1024;
-
-/// The replies to [`Relay::probe_session`]'s one pipelined request: the three
-/// reads, then the two expiry renewals (ignored).
-type ProbeReplies = (
-    redis::RedisResult<bool>,
-    redis::RedisResult<Option<String>>,
-    redis::RedisResult<bool>,
-    redis::RedisResult<bool>,
-    redis::RedisResult<bool>,
-);
 
 /// A connection to the bus.
 pub struct Relay {
@@ -285,12 +270,8 @@ impl Relay {
         }))
     }
 
-    /// Everything a hook reads about a session before it decides who it is, as
-    /// one pipelined request (AGE-2028): whether it is suppressed (an escalation
-    /// fork, marked by [`Relay::commit_identity`]), the name remembered for it
-    /// (`None` when never recorded, expired, or not a bus name), and whether it
-    /// is marked unresolved ([`Relay::mark_session_unresolved`]). The three reads
-    /// are independent, so they share one round trip instead of costing three.
+    /// Read suppression and the session queue in one atomic request/reply.
+    /// A cache miss never adopts a registry record or generates a name.
     ///
     /// Reading a session also renews the expiry of its remembered name and its
     /// suppression mark (30 days from now, in the same round trip): what is in
@@ -300,55 +281,34 @@ impl Relay {
     /// so one corrupt key cannot make every hook of a session fail; only the
     /// connection failing fails the call.
     pub fn probe_session(&mut self, session_id: &SessionId) -> Result<SessionProbe> {
-        let (suppressed, name, unresolved, _, _): ProbeReplies = redis::pipe()
-            .ignore_errors()
-            .cmd("EXISTS")
+        // One Redis reply is essential: a pipeline with five ignored errors
+        // can consume five read timeouts when the peer accepts but never answers.
+        const SCRIPT: &str = r#"
+local cached = redis.pcall('GET', KEYS[2])
+if type(cached) == 'table' and cached.err then cached = false end
+local suppressed = redis.call('EXISTS', KEYS[1])
+redis.call('EXPIRE', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[2], ARGV[1])
+return {suppressed, cached}
+"#;
+        let (suppressed, name): (bool, Option<String>) = redis::cmd("EVAL")
+            .arg(SCRIPT)
+            .arg(2)
             .arg(self.keys.suppressed_key(session_id))
-            .cmd("GET")
-            .arg(self.keys.session_key(session_id))
-            .cmd("EXISTS")
-            .arg(self.keys.unresolved_key(session_id))
-            // A session that is still in use keeps its cache: the expiry counts
-            // from the last use, so a session older than the TTL is not
-            // forgotten mid-way. (`EXPIRE` on an absent key does nothing.)
-            .cmd("EXPIRE")
-            .arg(self.keys.suppressed_key(session_id))
-            .arg(SESSION_TTL_SECS)
-            .cmd("EXPIRE")
             .arg(self.keys.session_key(session_id))
             .arg(SESSION_TTL_SECS)
             .query(&mut self.conn)?;
         Ok(SessionProbe {
-            suppressed: suppressed.unwrap_or(false),
-            name: name.ok().flatten().and_then(|s| s.parse().ok()),
-            unresolved: unresolved.unwrap_or(false),
+            suppressed,
+            name: name.and_then(|s| s.parse().ok()),
         })
-    }
-
-    /// Marks `session_id` as having no free bus name for
-    /// [`UNRESOLVED_TTL_SECS`], unless it is already marked. Returns whether
-    /// this call set the mark: `true` for the first failure, `false` while an
-    /// earlier one is still remembered. The mark lets the hook skip the name
-    /// derivation that would fail the same way, and record the failure once
-    /// instead of on every tool call.
-    pub fn mark_session_unresolved(&mut self, session_id: &SessionId) -> Result<bool> {
-        let key = self.keys.unresolved_key(session_id);
-        let set: Option<String> = redis::cmd("SET")
-            .arg(&key)
-            .arg("1")
-            .arg("NX")
-            .arg("EX")
-            .arg(UNRESOLVED_TTL_SECS)
-            .query(&mut self.conn)?;
-        Ok(set.is_some())
     }
 
     /// Marks `session_id` as having had its herdr failure recorded for
     /// [`HERDR_FAILED_TTL_SECS`], unless it already is. Returns whether this
     /// call set the mark (record the failure) or an earlier one is still
-    /// remembered (do not). A separate key from [`Relay::mark_session_unresolved`]:
-    /// that mark also stops the derivation, and a herdr outage must not leave a
-    /// lead unregistered after herdr is back.
+    /// remembered (do not). Verification continues on every uncached hook, so a
+    /// Herdr outage never prevents enrollment after it recovers.
     pub fn mark_session_herdr_failed(&mut self, session_id: &SessionId) -> Result<bool> {
         let key = self.keys.herdr_failed_key(session_id);
         let set: Option<String> = redis::cmd("SET")
@@ -1136,8 +1096,6 @@ pub struct SessionProbe {
     pub suppressed: bool,
     /// The bus name remembered for the session, if any.
     pub name: Option<AgentName>,
-    /// Whether the session is marked as having no free name.
-    pub unresolved: bool,
 }
 
 /// The usable entries of a hook health stream reply, in reply order, and how many

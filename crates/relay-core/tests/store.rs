@@ -1013,10 +1013,9 @@ fn commit_identity_writes_registration_cache_and_suppression_together() {
 /// ACs: FR-018-AC-6
 ///
 /// `probe_session` answers the suppressed mark, the cached name and the
-/// unresolved mark of a session together, and a session nothing is known
-/// about answers the default.
+/// durable queue of a session together; an unknown session answers the default.
 #[test]
-fn probe_session_reads_the_mark_the_name_and_the_unresolved_flag_together() {
+fn probe_session_reads_the_suppression_and_queue_together() {
     let Some(mut r) = relay("probe-session") else {
         return;
     };
@@ -1030,18 +1029,12 @@ fn probe_session_reads_the_mark_the_name_and_the_unresolved_flag_together() {
         registration: None,
     })
     .unwrap();
-    assert!(
-        r.mark_session_unresolved(&"sid-stuck".parse().unwrap())
-            .unwrap()
-    );
 
     let named = r.probe_session(&"sid-1".parse().unwrap()).unwrap();
     assert_eq!(named.name, Some(name("qsl")));
-    assert!(!named.suppressed && !named.unresolved);
+    assert!(!named.suppressed);
     let fork = r.probe_session(&"sid-fork".parse().unwrap()).unwrap();
-    assert!(fork.suppressed && fork.name.is_none() && !fork.unresolved);
-    let stuck = r.probe_session(&"sid-stuck".parse().unwrap()).unwrap();
-    assert!(stuck.unresolved && stuck.name.is_none() && !stuck.suppressed);
+    assert!(fork.suppressed && fork.name.is_none());
 
     // A key of the wrong type reads as absent instead of failing the probe.
     let url = std::env::var("IX_RELAY_TEST_URL").unwrap();

@@ -41,5 +41,5 @@ pub use store::{
     LeadOverview, LeaseState, MAX_HEARTBEAT_KEYS, MAX_INFLIGHT_BATCHES, MAX_INFLIGHT_BYTES,
     MAX_LEASE, MAX_MESSAGE_BYTES, MAX_REDELIVERIES, Moves, Now, PanesReplaced, PlaceRefresh,
     PopResult, Popper, Reaped, RecipientProbe, Relay, Salvage, Salvaged, ScanCut, SessionProbe,
-    SkippedRegistration, Sweep, UNRESOLVED_TTL_SECS, WATCHER_LEASE,
+    SkippedRegistration, Sweep, WATCHER_LEASE,
 };

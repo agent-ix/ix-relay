@@ -288,14 +288,8 @@ fn main() -> ExitCode {
     };
 
     if let Cmd::Hook { kind: _ } = cli.cmd {
-        // No explicit name and not running inside a herdr-managed pane
-        // either: stay silent, exactly as before AGE-2018 — checked *before*
-        // the config file is ever read, so a malformed
-        // `~/.ix/relay/config.toml` never prints anything for a session
-        // that's clearly not a lead (no name to derive at all). A session
-        // with no explicit name but *inside* herdr still needs the config
-        // loaded next, to reach the registry for the derived-name collision
-        // check.
+        // Hooks outside Herdr are not lead hooks. Identity is established from
+        // the genuine session association after the machine config is loaded.
         if std::env::var("HERDR_ENV").as_deref() != Ok("1") {
             return ExitCode::SUCCESS;
         }
