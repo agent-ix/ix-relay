@@ -151,12 +151,15 @@ pub fn recipient(
         }
         Some(selected.label)
     };
-    let view = find::gather_machine_view(
-        &herdr,
-        selector.as_deref(),
-        &machine,
-        Duration::from_secs(3),
-    )?;
+    // A saved remote profile may need its first SSH connection established.
+    // This is a human send, not a latency-limited hook: retain a bounded cold
+    // connection budget without requiring a prior find to warm the transport.
+    let timeout = if selector.is_some() {
+        Duration::from_secs(30)
+    } else {
+        Duration::from_secs(3)
+    };
+    let view = find::gather_machine_view(&herdr, selector.as_deref(), &machine, timeout)?;
     let live = registrations(&view)?;
     let candidates: Vec<_> = live
         .iter()

@@ -15,6 +15,8 @@ impl Fixture {
 import json, os, sys
 state=json.load(open(os.environ['TEST_HERDR_STATE']))
 args=sys.argv[1:]
+if '--session' in args:
+ i=args.index('--session'); del args[i:i+2]
 machine=os.environ.get('TEST_LOCAL_MACHINE','draco')
 if '--machine' in args:
  i=args.index('--machine'); machine=args[i+1]; del args[i:i+2]
@@ -24,6 +26,13 @@ print(json.dumps(data if key=='machines' else {'result':{key:data}}))
 "#;
         fs::write(dir.join("herdr"), script).unwrap();
         fs::set_permissions(dir.join("herdr"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(dir.join("ssh"), r#"#!/usr/bin/env python3
+import os,sys,shlex,subprocess
+args=shlex.split(sys.argv[-1]);i=args.index('herdr');args=args[i+1:]
+env=dict(os.environ,TEST_LOCAL_MACHINE='terra')
+raise SystemExit(subprocess.run([os.path.join(os.path.dirname(__file__),'herdr'),*args],env=env).returncode)
+"#).unwrap();
+        fs::set_permissions(dir.join("ssh"), fs::Permissions::from_mode(0o755)).unwrap();
         let fixture = Self {
             dir,
             url,
@@ -43,7 +52,7 @@ print(json.dumps(data if key=='machines' else {'result':{key:data}}))
         }
         let local = serde_json::json!({"agents":agents,"workspaces":[{"workspace_id":"w1","label":"misc"}],"tabs":[{"tab_id":"w1:t1","label":"agent-skills"},{"tab_id":"w1:t2","label":"code"}]});
         let remote = serde_json::json!({"agents":[agent("terra-session","w1:p1","w1:t1")],"workspaces":[{"workspace_id":"w1","label":"laya"}],"tabs":[{"tab_id":"w1:t1","label":"code"}]});
-        fs::write(self.dir.join("state.json"),serde_json::to_vec(&serde_json::json!({"draco":local,"terra":remote,"profiles":[{"label":"terra","enabled":true}]})).unwrap()).unwrap();
+        fs::write(self.dir.join("state.json"),serde_json::to_vec(&serde_json::json!({"draco":local,"terra":remote,"profiles":[{"label":"terra","enabled":true,"target":"fixture-terra","session":"default"}]})).unwrap()).unwrap();
     }
     pub fn cmd(&self, args: &[&str]) -> Command {
         let mut cmd = base_cmd(args, Some("filament-code-old-15"));

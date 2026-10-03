@@ -26,7 +26,6 @@ use std::{
     io::Read,
     os::unix::process::CommandExt,
     process::{Command, Stdio},
-    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -142,33 +141,30 @@ pub trait ProcessRunner {
 /// without bound.
 const MAX_CAPTURE_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Which of a child's output streams a drain thread read.
-#[derive(Debug, Clone, Copy)]
-enum Stream {
-    Stdout,
-    Stderr,
+/// Read currently available bytes without waiting for descendants to close a
+/// pipe. Bound work per visit so a continuously chatty child cannot prevent
+/// deadline checks or starve its other output stream.
+fn capture_available(reader: &mut impl Read, kept: &mut Vec<u8>) -> std::io::Result<()> {
+    let mut buffer = [0u8; 65536];
+    for _ in 0..32 {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                let available = (MAX_CAPTURE_BYTES as usize).saturating_sub(kept.len());
+                kept.extend_from_slice(&buffer[..count.min(available)]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
-/// Reads `reader` to the end on its own thread — so the child can never
-/// block on a full pipe while the caller waits for it — and sends what it
-/// kept (see [`MAX_CAPTURE_BYTES`]) on `tx`.
-fn drain(
-    stream: Stream,
-    reader: impl std::io::Read + Send + 'static,
-    tx: mpsc::Sender<(Stream, Vec<u8>)>,
-) -> std::io::Result<()> {
-    thread::Builder::new()
-        .name(format!("herdr-cli-drain-{stream:?}"))
-        .spawn(move || {
-            let mut kept = Vec::new();
-            let mut reader = reader;
-            // A read error just ends the capture; what arrived is still returned.
-            let _ = (&mut reader).take(MAX_CAPTURE_BYTES).read_to_end(&mut kept);
-            let _ = std::io::copy(&mut reader, &mut std::io::sink());
-            // The receiver is gone only when the caller already gave up (timeout).
-            let _ = tx.send((stream, kept));
-        })
-        .map(drop)
+fn nonblocking(pipe: &impl std::os::fd::AsFd) -> std::io::Result<()> {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    fcntl_setfl(pipe, fcntl_getfl(pipe)? | OFlags::NONBLOCK)?;
+    Ok(())
 }
 
 /// Spawns a real child process on `PATH`.
@@ -176,17 +172,9 @@ fn drain(
 pub struct RealProcessRunner;
 
 impl ProcessRunner for RealProcessRunner {
-    /// Both output streams are drained on their own threads while the child
-    /// runs, so output larger than the OS pipe buffer cannot stall it. The
-    /// deadline is enforced on the channel those threads report to
-    /// (`recv_timeout`, no polling): on expiry the child is killed and
-    /// reaped. Once both streams have closed, the exit status is collected
-    /// by a helper thread under the same deadline.
-    ///
-    /// A child that closes stdout and stderr yet keeps running past the
-    /// deadline is reported as [`ProcessError::Timeout`] but cannot be killed at
-    /// that point (its handle belongs to the reaping thread, which collects it
-    /// whenever it does exit); herdr never does this.
+    /// Drain both nonblocking pipes while checking the child and one deadline.
+    /// Completion follows the command's exit, not inherited pipe EOF: SSH
+    /// control processes may retain a descriptor after Herdr has finished.
     fn run(&self, program: &str, args: &[&str], timeout: Duration) -> Result<Output, ProcessError> {
         let spawn_error = |reason: String| ProcessError::Spawn {
             program: program.to_owned(),
@@ -197,6 +185,7 @@ impl ProcessRunner for RealProcessRunner {
         let mut child = Command::new(program)
             .args(args)
             .process_group(0)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -207,58 +196,53 @@ impl ProcessRunner for RealProcessRunner {
             secs: timeout.as_secs(),
         };
 
-        let (tx, rx) = mpsc::channel();
-        let drains = [
-            child
-                .stdout
-                .take()
-                .map(|s| drain(Stream::Stdout, s, tx.clone())),
-            child
-                .stderr
-                .take()
-                .map(|s| drain(Stream::Stderr, s, tx.clone())),
-        ];
-        drop(tx);
-        if let Some(e) = drains.into_iter().flatten().find_map(Result::err) {
+        let Some(mut stdout_pipe) = child.stdout.take() else {
             kill_group(&mut child);
-            return Err(spawn_error(e.to_string()));
+            return Err(spawn_error("stdout pipe unavailable".into()));
+        };
+        let Some(mut stderr_pipe) = child.stderr.take() else {
+            kill_group(&mut child);
+            return Err(spawn_error("stderr pipe unavailable".into()));
+        };
+        if let Err(error) = nonblocking(&stdout_pipe).and_then(|()| nonblocking(&stderr_pipe)) {
+            kill_group(&mut child);
+            return Err(spawn_error(error.to_string()));
         }
-
-        let (mut stdout, mut stderr) = (None, None);
-        while stdout.is_none() || stderr.is_none() {
-            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok((Stream::Stdout, bytes)) => stdout = Some(bytes),
-                Ok((Stream::Stderr, bytes)) => stderr = Some(bytes),
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // The drain threads end on their own once the kill closes
-                    // the pipes.
-                    kill_group(&mut child);
-                    return Err(timed_out());
-                }
-                // A drain thread died without reporting: nothing more will come.
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        loop {
+            if let Err(error) = capture_available(&mut stdout_pipe, &mut stdout)
+                .and_then(|()| capture_available(&mut stderr_pipe, &mut stderr))
+            {
+                kill_group(&mut child);
+                return Err(spawn_error(error.to_string()));
             }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    // The child may have written between the preceding read
+                    // and its exit. Read the buffered tail, without waiting for
+                    // a detached descendant's inherited pipe to close.
+                    let _ = capture_available(&mut stdout_pipe, &mut stdout);
+                    let _ = capture_available(&mut stderr_pipe, &mut stderr);
+                    return Ok(Output {
+                        status_code: status.code().unwrap_or(-1),
+                        success: status.success(),
+                        stdout,
+                        stderr,
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    kill_group(&mut child);
+                    return Err(spawn_error(error.to_string()));
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                kill_group(&mut child);
+                return Err(timed_out());
+            }
+            thread::sleep(remaining.min(Duration::from_millis(5)));
         }
-
-        let (status_tx, status_rx) = mpsc::channel();
-        thread::Builder::new()
-            .name("herdr-cli-reap".to_owned())
-            .spawn(move || {
-                let _ = status_tx.send(child.wait());
-            })
-            .map_err(|e| spawn_error(e.to_string()))?;
-        let status =
-            match status_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok(Ok(status)) => status,
-                Ok(Err(e)) => return Err(spawn_error(e.to_string())),
-                Err(_) => return Err(timed_out()),
-            };
-        Ok(Output {
-            status_code: status.code().unwrap_or(-1),
-            success: status.success(),
-            stdout: stdout.unwrap_or_default(),
-            stderr: stderr.unwrap_or_default(),
-        })
     }
 }
 
@@ -400,6 +384,50 @@ mod tests {
 
     fn sh(script: &str, timeout: Duration) -> Result<Output, ProcessError> {
         RealProcessRunner.run("sh", &["-c", script], timeout)
+    }
+
+    #[test]
+    fn completed_child_does_not_wait_for_a_descendants_inherited_pipes() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("descendant.pid");
+        let script = format!(
+            "sleep 30 & echo $! > '{}'; printf 'complete'; printf 'note' >&2; exit 7",
+            pidfile.display()
+        );
+        let result = sh(&script, Duration::from_secs(2));
+        // Clean up only the descendant this test created, even on failure.
+        if let Ok(pid) = std::fs::read_to_string(&pidfile) {
+            let _ = Command::new("/bin/kill")
+                .args(["-KILL", pid.trim()])
+                .status();
+        }
+        let output = result.unwrap();
+        assert_eq!(output.status_code, 7);
+        assert!(!output.success);
+        assert_eq!(output.stdout, b"complete");
+        assert_eq!(output.stderr, b"note");
+    }
+
+    #[test]
+    fn output_capture_is_capped_while_excess_bytes_are_drained() {
+        let output = sh(
+            "head -c 9000000 /dev/zero; head -c 9000000 /dev/zero >&2",
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        assert!(output.success);
+        assert_eq!(output.stdout.len(), MAX_CAPTURE_BYTES as usize);
+        assert_eq!(output.stderr.len(), MAX_CAPTURE_BYTES as usize);
+    }
+
+    #[test]
+    fn closed_output_pipes_do_not_hide_a_still_running_child() {
+        let error = sh(
+            "exec >/dev/null 2>&1; exec sleep 30",
+            Duration::from_millis(300),
+        )
+        .unwrap_err();
+        assert!(matches!(error, ProcessError::Timeout { .. }));
     }
 
     /// AGE-2026: output past the OS pipe buffer (64 KiB on Linux) used to

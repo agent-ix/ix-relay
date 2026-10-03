@@ -468,11 +468,13 @@ fn write_transport_herdr(directory: &Path) {
     let script = r#"#!/usr/bin/env python3
 import sys,json
 args=sys.argv[1:]
+if '--session' in args:
+ i=args.index('--session'); del args[i:i+2]
 if '--machine' in args:
  i=args.index('--machine'); del args[i:i+2]
 key=args[0]
 if key=='machine':
- print(json.dumps([{'label':s,'enabled':True} for s in ['hub','node-a','terra']]))
+ print(json.dumps([{'label':s,'enabled':True,'target':'fixture-'+s,'session':'default'} for s in ['hub','node-a','terra']]))
 else:
  data={
  'agent': {'agents':[
@@ -483,8 +485,22 @@ else:
  }
  print(json.dumps({'result':data[key]}))
 "#;
+    std::fs::write(
+        directory.join("ssh"),
+        r#"#!/usr/bin/env python3
+import os,sys,shlex,subprocess
+args=shlex.split(sys.argv[-1]);i=args.index('herdr');args=args[i+1:]
+raise SystemExit(subprocess.run([os.path.join(os.path.dirname(__file__),'herdr'),*args]).returncode)
+"#,
+    )
+    .unwrap();
     std::fs::write(directory.join("herdr"), script).unwrap();
     use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(
+        directory.join("ssh"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
     std::fs::set_permissions(
         directory.join("herdr"),
         std::fs::Permissions::from_mode(0o755),

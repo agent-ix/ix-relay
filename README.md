@@ -172,6 +172,11 @@ hostname-shaped (letters, digits, `.`, `-`, `_`, at most 32) is never printed.
 
 ### Location identities and automatic enrollment
 
+Remote reads use the exact SSH target and session recorded by `herdr machine
+list --json`, invoking the installed Herdr CLI in that session. No local pane
+context is forwarded. Missing, disabled, or ambiguous profiles are refused;
+a cold send does not require a preceding `find`.
+
 Every lead is identified by `server:workspace:tab`. The tab is always included.
 Send a full address, `:workspace:tab` on your verified server, or `:tab` in your
 verified workspace. The relay checks live Herdr session associations and
