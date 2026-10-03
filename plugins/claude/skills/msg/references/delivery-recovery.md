@@ -25,6 +25,31 @@ Herdr, a registry fallback name does not establish relative-address context.
 Use `/ix-relay:join` to repair the sender's session registration. Do not claim
 that shorthand is unsupported merely because sender location is missing.
 
+## Stale caller context is not a join failure
+
+A live workspace/tab is not proof that this session occupies it. If shorthand
+fails and `whoami --json` reports a registry name with `address: null`, stop
+running `register`: it cannot correct inherited pane variables or establish a
+session association. Compare the caller's `HERDR_PANE_ID`, `HERDR_TAB_ID`, and
+`HERDR_WORKSPACE_ID` with `herdr pane current --current`, then check the claimed
+pane with `herdr agent get <pane-id>`. `--current` uses inherited caller context;
+it is not an independent way to discover which pane hosts this session.
+
+A missing pane, missing `agent_session`, or mismatching session ID means the
+caller is unverified. A VS Code/API session can inherit stale Herdr variables
+from its launcher or shell snapshot without occupying any terminal pane. Do
+not bind it to a nearby/focused pane, copy another session's ID, edit snapshots
+as a repair, or send a fallback claiming a guessed sender address. Reply to the
+operator in the current conversation when no sender location is verified.
+
+For an actual terminal lead, enable and approve the installed Herdr and relay
+hooks, then observe a genuine SessionStart from that terminal at its next
+operator-approved restart/resume. Confirm `herdr agent get` reports the exact
+session ID from that event before using shorthand. Do not restart active work
+just to diagnose it. The checkout's Codex README describes an optional capture
+hook that records only event, session ID, transcript path, and caller context.
+Missing evidence is not proof that the hook ran or that its payload was wrong.
+
 ## Locate the recipient after a rejection
 
 Send cold first. After rejection, `agent-msg find <intended address or label>`

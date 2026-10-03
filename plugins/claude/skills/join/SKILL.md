@@ -70,6 +70,16 @@ session restart; do not restart active work without authorization. Manual
 `agent-msg register` may establish a bus name without session identity and
 must not be presented as fixing shorthand. Preserve `AGENT_MSG_NAME`.
 
+If inherited context names a missing pane, do not repeat `register`. A
+VS Code/API session may have inherited terminal variables without occupying
+that terminal; `herdr pane current --current` cannot discover an independent
+location. Never bind such a session to a nearby pane. Report the sender as
+unverified and reply to the operator in the current conversation. For an
+actual terminal session, observe its genuine SessionStart and matching Herdr
+`agent_session`; the checkout's Codex README includes optional limited capture
+instructions. An operator-approved restart/resume may be needed to obtain that
+event, but do not restart active work as an automatic repair.
+
 If Redis answers but location remains unverified, report both facts separately
 and use a confirmed bus name for delivery while repairing the integration. If
 the lead is unreachable on relay, the sender can use the

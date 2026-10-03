@@ -144,3 +144,30 @@ agent-msg log       # recent bus history
 If `agent-msg who` only shows leads you expect and `agent-msg log` shows
 sends you've made land, the plugin's hooks are reaching the same Redis your
 CLI does.
+
+## Diagnose stale caller context
+
+`agent-msg whoami --json` checks a registry identity against the pane's live
+Herdr session. If the inherited pane is missing or the session does not match,
+it refuses the stale identity and explains that manual registration cannot
+repair it. Preserve `AGENT_MSG_NAME` if set. A VS Code/API session is not
+necessarily a terminal lead, even when it inherits `HERDR_*` variables.
+
+To capture the next genuine terminal SessionStart, copy
+`scripts/capture-codex-session-start.py` to
+`$CODEX_HOME/ix-relay/capture-codex-session-start.py` (default `~/.codex`). Add a
+separate SessionStart command hook before the Herdr and relay entries:
+
+```json
+{"type":"command","command":"python3 /absolute/path/to/capture-codex-session-start.py","timeout":2}
+```
+
+Approve the changed hook configuration through the real session's normal trust
+flow. At its next operator-approved restart/resume, the helper appends to
+`$CODEX_HOME/ix-relay/session-start.jsonl` with mode 0600. It records only
+`hook_event_name`, `session_id`, `transcript_path`, and the inherited Herdr
+context plus `CODEX_THREAD_ID`; it does not record prompts, transcript contents,
+credentials, or fabricated events. Compare that event's session ID with
+`herdr agent get <the actual terminal pane>`. Remove the diagnostic hook after
+capturing the event. Never synthesize a SessionStart or substitute another
+session's ID to make verification pass.
