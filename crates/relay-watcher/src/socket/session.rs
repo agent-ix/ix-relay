@@ -35,23 +35,56 @@ pub trait Procs {
     fn uid(&self) -> Option<u32>;
 }
 
-/// [`Procs`] over `/proc` (Linux).
+/// Operating-system process identity, matching Claude Code's session records.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ProcFs;
 
 impl Procs for ProcFs {
     fn start_time(&self, pid: u32) -> Option<String> {
+        #[cfg(target_os = "macos")]
+        {
+            use herdr_cli::ProcessRunner;
+            // Match Claude Code's `procStart` exactly, independently of the
+            // watcher's locale/time zone, with a bounded process invocation.
+            let output = herdr_cli::RealProcessRunner
+                .run(
+                    "/usr/bin/env",
+                    &[
+                        "LC_ALL=C",
+                        "TZ=UTC",
+                        "/bin/ps",
+                        "-o",
+                        "lstart=",
+                        "-p",
+                        &pid.to_string(),
+                    ],
+                    std::time::Duration::from_secs(1),
+                )
+                .ok()?;
+            if !output.success {
+                return None;
+            }
+            let start = String::from_utf8(output.stdout).ok()?;
+            let start = start.trim();
+            (!start.is_empty()).then(|| start.to_owned())
+        }
+        #[cfg(not(target_os = "macos"))]
         relay_core::socket_status::proc_start_time(pid)
     }
 
     fn domain(&self) -> Option<String> {
-        let machine = fs::read_to_string("/etc/machine-id").ok()?;
-        let ns = fs::read_link("/proc/self/ns/pid").ok()?;
-        Some(format!("linux:{}:{}", machine.trim(), ns.to_str()?))
+        #[cfg(target_os = "macos")]
+        return Some("darwin".to_owned());
+        #[cfg(not(target_os = "macos"))]
+        {
+            let machine = fs::read_to_string("/etc/machine-id").ok()?;
+            let ns = fs::read_link("/proc/self/ns/pid").ok()?;
+            Some(format!("linux:{}:{}", machine.trim(), ns.to_str()?))
+        }
     }
 
     fn uid(&self) -> Option<u32> {
-        fs::metadata("/proc/self").ok().map(|m| m.uid())
+        Some(nix::unistd::Uid::current().as_raw())
     }
 }
 
@@ -250,4 +283,21 @@ pub fn resolve(
         socket,
         version: record.version.unwrap_or_default(),
     })
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::{ProcFs, Procs};
+
+    #[test]
+    fn native_identity_matches_claude_record_format() {
+        let procs = ProcFs;
+        assert_eq!(procs.domain().as_deref(), Some("darwin"));
+        assert!(procs.uid().is_some());
+        let Some(start) = procs.start_time(std::process::id()) else {
+            panic!("current process must have a start time");
+        };
+        assert_eq!(start.split_whitespace().count(), 5);
+        assert_eq!(procs.start_time(u32::MAX), None);
+    }
 }

@@ -182,6 +182,8 @@ impl FakeClaude {
                     thread::sleep(Duration::from_micros(100));
                     continue;
                 };
+                // macOS inherits the listener's nonblocking flag on accept.
+                conn.set_nonblocking(false).unwrap();
                 let mut line = String::new();
                 if BufReader::new(conn).read_line(&mut line).is_err() || line.is_empty() {
                     continue;
@@ -289,7 +291,7 @@ impl Rig {
 }
 
 /// `session::resolve` over `home`'s directories.
-fn resolve(home: &Home, session: &str, procs: &FakeProcs) -> Result<session::Resolved, Unresolved> {
+fn resolve(home: &Home, session: &str, procs: &dyn Procs) -> Result<session::Resolved, Unresolved> {
     session::resolve(
         &home.sessions(),
         session,
@@ -4279,4 +4281,29 @@ fn tc_046_15_the_rest_of_a_skipped_over_long_line_is_not_scanned() {
         "{seen:?}"
     );
     assert_eq!(seen.last(), Some(&TranscriptMatch::Acked), "{seen:?}");
+}
+
+/// Tracing: TC-044-02
+/// ACs: FR-044-AC-2
+/// A native macOS process resolves only with its exact Claude process identity.
+#[cfg(target_os = "macos")]
+#[test]
+fn tc_044_02_macos_native_process_identity_rejects_a_reused_pid() {
+    let home = Home::new();
+    let pid = std::process::id();
+    let _listener = listen(home.socket(pid)).unwrap();
+    let start = session::ProcFs.start_time(pid).unwrap();
+    home.record(pid, SESSION, |r| {
+        r["procStart"] = json!(start);
+        r["pidDomain"] = json!("darwin");
+    });
+    assert_eq!(resolve(&home, SESSION, &session::ProcFs).unwrap().pid, pid);
+    home.record(pid, SESSION, |r| {
+        r["procStart"] = json!("Fri Oct  2 00:00:00 2026");
+        r["pidDomain"] = json!("darwin");
+    });
+    assert_eq!(
+        resolve(&home, SESSION, &session::ProcFs),
+        Err(Unresolved::Stale(1))
+    );
 }
