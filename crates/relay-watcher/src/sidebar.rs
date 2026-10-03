@@ -29,7 +29,7 @@ pub fn value(state: &str, pending: Option<usize>) -> String {
 /// Publishes metadata only after Herdr confirms this exact registered session
 /// still occupies the registered pane. Does not modify semantic agent state.
 pub fn report_if_verified(
-    herdr: &impl Herdr,
+    herdr: &dyn Herdr,
     registration: &Registration,
     pane: &PaneId,
     display: &str,
@@ -110,6 +110,7 @@ mod tests {
     }
 
     #[test]
+    /// Trace: FR-052-AC-3
     fn token_values_keep_unknown_separate_from_zero() {
         assert_eq!(value("connected", Some(0)), "connected · 0 pending");
         assert_eq!(value("unavailable", None), "unavailable · pending unknown");
@@ -117,6 +118,7 @@ mod tests {
     }
 
     #[test]
+    /// Trace: FR-052-AC-1, FR-052-AC-3
     fn metadata_is_reported_only_for_the_exact_registered_session() {
         let matching = FakeHerdr {
             current: Some("session-a".parse().unwrap()),

@@ -173,7 +173,8 @@ fn report_sidebar_if_due<H: Herdr>(
     }
     last_reported.insert(registration.name.clone(), now);
     let display = sidebar::value(state, pending);
-    sidebar::report_if_verified(herdr, registration, pane, &display, ttl);
+    let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
+    herdr.report_relay_sidebar_for_registration(registration, pane, &display, ttl_ms);
 }
 
 /// State carried across ticks, so "once per episode" (blocked notifications,
@@ -813,7 +814,13 @@ impl<H: Herdr + Deliverer> RedisBus<H> {
         let ttl = sidebar::ttl(self.state.sweep_every);
         for registration in &self.sidebar_regs {
             if let Some(pane) = registration.pane_on(&self.machine) {
-                sidebar::report_if_verified(&self.herdr, registration, pane, &display, ttl);
+                let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
+                self.herdr.report_relay_sidebar_for_registration(
+                    registration,
+                    pane,
+                    &display,
+                    ttl_ms,
+                );
             }
         }
     }

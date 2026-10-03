@@ -203,6 +203,7 @@ mod tests {
         );
     }
 
+    /// Trace: FR-051-AC-1
     #[test]
     fn peek_and_history_reports_pin_fields_and_do_not_invent_redelivery_state() {
         let message = msg("qsl-lead", "all", "first line\nsecond\u{1b}[31m");

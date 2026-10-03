@@ -30,6 +30,8 @@ snapshot for other integrations. Herdr removes terminal control sequences
 from command output, so the indicator uses text and symbols rather than ANSI
 color codes.
 
+For the optional `$ix_relay` sidebar row, see [the repository README](../../README.md#optional-herdr-sidebar-badge).
+
 The snapshot distinguishes Redis reachability, the local watcher heartbeat,
 and whether the focused pane's live Herdr session matches a relay registration.
 It reads no inbox and does not register a lead. Run `agent-msg doctor` for the

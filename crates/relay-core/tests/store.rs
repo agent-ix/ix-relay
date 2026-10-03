@@ -328,6 +328,7 @@ fn inbox_len_counts_without_popping() {
     assert_eq!(r.inbox_len(&name("tl-lead")).unwrap(), 0);
 }
 
+/// Trace: FR-051-AC-2, FR-052-AC-2
 #[test]
 fn inbox_peek_is_bounded_read_only_and_reports_redelivery_state() {
     let Some(mut r) = relay("peek") else { return };

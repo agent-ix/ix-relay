@@ -778,7 +778,7 @@ mod tests {
         command: Vec<String>,
     }
 
-    /// Trace: FR-050-AC-6
+    /// Trace: FR-049-AC-4, FR-050-AC-6, FR-051-AC-5
     #[test]
     fn herdr_manifest_registers_cross_agent_popup_action_and_entrypoint() {
         let manifest: PluginManifest =
