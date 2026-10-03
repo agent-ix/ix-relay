@@ -31,6 +31,9 @@ use crate::deliver::{DeliverError, Deliverer};
 /// reporting [`herdr_cli::ProcessError::Timeout`]. A hung herdr call would
 /// otherwise block every other lead this process watches, forever.
 const HERDR_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+/// Metadata is display-only and best-effort; never let it hold delivery for a
+/// full agent-operation timeout.
+const SIDEBAR_REPORT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// A lead's state as herdr's `agent_status` reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +128,11 @@ pub trait Herdr {
     fn get(&self, pane: &PaneId) -> Result<Option<AgentGet>, ProcessError>;
     /// Shows a desktop notification so the operator notices something needs them.
     fn notify(&self, title: &str, body: &str) -> Result<(), ProcessError>;
+    /// Publishes a short-lived, display-only ix-relay token for a pane. It
+    /// never changes Herdr's semantic agent state or lifecycle authority.
+    fn report_relay_sidebar(&self, _pane: &PaneId, _value: &str, _ttl_ms: u64) {
+        // Implementations without a Herdr metadata API can safely omit the badge.
+    }
     /// Where every live agent on this machine sits and which session it hosts,
     /// keyed by pane id, so the watcher can keep registered
     /// `server:workspace[:tab[:pane]]` addresses true and follow a session to the pane
@@ -275,6 +283,27 @@ impl Herdr for RealHerdr {
             HERDR_CALL_TIMEOUT,
         )
         .map(|_| ())
+    }
+
+    fn report_relay_sidebar(&self, pane: &PaneId, value: &str, ttl_ms: u64) {
+        let token = format!("{}={value}", crate::sidebar::TOKEN);
+        let ttl = ttl_ms.to_string();
+        let _ = herdr_cli::call::<serde_json::Value>(
+            &herdr_cli::RealProcessRunner,
+            "herdr",
+            &[
+                "pane",
+                "report-metadata",
+                pane.as_str(),
+                "--source",
+                "agent-ix:ix-relay",
+                "--token",
+                &token,
+                "--ttl-ms",
+                &ttl,
+            ],
+            SIDEBAR_REPORT_TIMEOUT,
+        );
     }
 }
 
