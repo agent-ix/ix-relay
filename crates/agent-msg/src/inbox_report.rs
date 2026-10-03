@@ -4,7 +4,7 @@
 //! trust the one field it actually needs (`rendered`) instead of re-deriving
 //! the sender-line format itself.
 
-use relay_core::{AddressBook, Error, Message, PopResult};
+use relay_core::{AddressBook, Error, Message, PeekResult, PopResult};
 use serde::Serialize;
 
 /// One message as the CLI reports it.
@@ -58,6 +58,77 @@ impl InboxReport {
                 .map(|m| InboxMessage::new(m, book))
                 .collect(),
             rejected: popped.rejected.iter().map(Error::to_string).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct PeekMessage {
+    pub from: String,
+    pub to: String,
+    pub text: String,
+    pub sent_at_ms: i64,
+    pub redelivered: bool,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct PeekReport {
+    pub pending: usize,
+    pub truncated: bool,
+    pub messages: Vec<PeekMessage>,
+    pub rejected: Vec<String>,
+}
+
+impl PeekReport {
+    pub fn new(peek: &PeekResult) -> Self {
+        Self {
+            pending: peek.pending,
+            truncated: peek.truncated,
+            messages: peek
+                .messages
+                .iter()
+                .map(|row| PeekMessage {
+                    from: row.message.from.to_string(),
+                    to: row.message.to.to_string(),
+                    text: row.message.text.clone(),
+                    sent_at_ms: row.message.sent_at_ms,
+                    redelivered: row.redelivered,
+                })
+                .collect(),
+            rejected: peek.rejected.iter().map(ToString::to_string).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct HistoryMessage {
+    pub from: String,
+    pub to: String,
+    pub text: String,
+    pub sent_at_ms: i64,
+    pub redelivery_state: &'static str,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct HistoryReport {
+    pub truncated: bool,
+    pub messages: Vec<HistoryMessage>,
+}
+
+impl HistoryReport {
+    pub fn new(messages: &[Message], truncated: bool) -> Self {
+        Self {
+            truncated,
+            messages: messages
+                .iter()
+                .map(|m| HistoryMessage {
+                    from: m.from.to_string(),
+                    to: m.to.to_string(),
+                    text: m.text.clone(),
+                    sent_at_ms: m.sent_at_ms,
+                    redelivery_state: "not_recorded",
+                })
+                .collect(),
         }
     }
 }
@@ -130,5 +201,31 @@ mod tests {
             "rejected[0]: {}",
             report.rejected[0]
         );
+    }
+
+    /// Trace: FR-051-AC-1
+    #[test]
+    fn peek_and_history_reports_pin_fields_and_do_not_invent_redelivery_state() {
+        let message = msg("qsl-lead", "all", "first line\nsecond\u{1b}[31m");
+        let peek = PeekReport::new(&PeekResult {
+            messages: vec![relay_core::PeekedMessage {
+                message: message.clone(),
+                redelivered: true,
+            }],
+            rejected: vec![],
+            pending: 7,
+            truncated: true,
+        });
+        assert_eq!(
+            serde_json::to_value(peek).unwrap(),
+            json!({"pending":7,"truncated":true,"messages":[{
+                "from":"qsl-lead","to":"all","text":"first line\nsecond\u{1b}[31m",
+                "sent_at_ms":42,"redelivered":true
+            }],"rejected":[]})
+        );
+        let history = HistoryReport::new(&[message], true);
+        assert!(history.truncated);
+        assert_eq!(history.messages[0].redelivery_state, "not_recorded");
+        assert_eq!(history.messages[0].to, "all");
     }
 }

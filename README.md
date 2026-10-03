@@ -146,9 +146,12 @@ config file is shared by all of them. It's also optional (AGE-2018): see
 ```
 agent-msg send <lead|all> "<text>"   # signed as you (see "Automatic bus names"); prints who it queued for and the recipient's state
 agent-msg inbox                      # print and remove your pending messages
+agent-msg inbox --peek               # bounded JSON preview without removing messages
 agent-msg who                        # registered leads
 agent-msg find [<query>]             # look up a lead by name, alias, label, session or pane
-agent-msg log [--since 1h]           # history
+agent-msg log [--since 1h] [--json]  # history; JSON has separate message fields
+agent-msg status [--json]            # Herdr relay/watcher/lead status
+agent-msg badge                      # print compact relay status for integrations
 agent-msg doctor [--json] [--strict] # is the relay healthy? read-only; exits 1 on a failure (--strict: on a warning too)
 agent-msg register [--kind manual]   # register by hand; hooks do this on session start
 agent-msg whoami [--json]            # print this session's bus name, its source, and its alias
@@ -168,6 +171,23 @@ tick 3s ago), 1 waiting)`, or `(no watcher heartbeat from hub, 1 waiting)` when 
 live for that machine (a watcher older than the heartbeat has none). The state is one extra request with one reply, bounded at a quarter of a second
 in all; when Redis is slow you get the plain `queued for <name>`. A machine name that is not
 hostname-shaped (letters, digits, `.`, `-`, `_`, at most 32) is never printed.
+
+### Optional Herdr sidebar badge
+
+The local `relay-watcher` publishes short-lived, display-only pane metadata for
+verified relay leads. To show it in Herdr's expanded agent sidebar, add the
+`$ix_relay` token to a custom row and keep the native agent row for Herdr's
+activity state:
+
+```toml
+[ui.sidebar.agents]
+rows = [["state_icon", "machine", "workspace", "tab"], ["agent"], ["$ix_relay"]]
+```
+
+The token reports relay availability and the pending count. It expires if the
+watcher stops refreshing it. It does not change Herdr's idle, working, or
+blocked state. The sidebar row is optional; the tab bar and popup continue to
+work without it.
 
 ### Automatic bus names
 
@@ -754,7 +774,7 @@ state can be read with Redis down; a `last_ok_tick_ms` more than about 20 second
 | `plugins/codex` | Codex plugin: hooks a lead session into the bus |
 | `plugins/herdr` | Herdr plugin and tab bar status indicator for any coding agent |
 
-Planned: `relay-tui` (escalation inbox), `plugins/opencode`.
+Also available: `relay-tui` (escalation inbox and searchable Herdr lead directory), `plugins/opencode`.
 Tracked in Linear AGE-2007.
 
 ## Build

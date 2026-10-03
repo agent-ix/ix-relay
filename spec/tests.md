@@ -24,9 +24,9 @@ to fail until the named ticket lands; the ticket is given on each such row.
 
 | Stakeholder Req | Trace to US/FR | Test/Validation | Status |
 |-----------------|----------------|-----------------|--------|
-| StR-001 | US-001, US-002, US-003, FR-001..FR-022, FR-040, FR-044, FR-046..FR-047 | Demonstration (StR-001-VC-1..3) | 🚧 pending |
+| StR-001 | US-001, US-002, US-003, US-008, FR-001..FR-022, FR-040, FR-044, FR-046..FR-047, FR-049..FR-052 | Demonstration (StR-001-VC-1..3) | 🚧 pending |
 | StR-002 | US-004, US-005, FR-023..FR-027 | Demonstration (StR-002-VC-1..2) | 🚧 pending |
-| StR-003 | US-006, US-007, FR-028..FR-037, FR-043, FR-045 | Demonstration (StR-003-VC-1..3) | 🚧 pending (red on main, AGE-2033) |
+| StR-003 | US-006, US-007, US-008, FR-028..FR-037, FR-043, FR-045, FR-049..FR-051 | Demonstration (StR-003-VC-1..3) | 🚧 pending (red on main, AGE-2033) |
 
 ### Functional Requirement Coverage
 
@@ -368,6 +368,26 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-047 | FR-047-AC-3 | TC-047-03 | ✅ written (`address_location_requires_a_matching_herdr_session_id`, mismatch and absent-session cases) |
 | FR-047 | FR-047-AC-4 | TC-047-04 | ✅ written (`registration_and_place_with_unknown_fields_still_decode`; legacy Redis registration fixtures decode with no verified Herdr IDs) |
 | FR-047 | FR-047-AC-5 | TC-047-05 | ✅ written (`invalidate_place_clears_only_the_registration_snapshot_that_lost_proof`, Redis lane; compare-and-set prevents a stale refresh from invalidating a new session) |
+| FR-049 | FR-049-AC-1 | TC-049-01 | ✅ written (`only_the_live_herdr_session_matching_the_pane_registration_is_verified`, `duplicate_live_session_registrations_are_unknown_not_guessed`, `non_lead_panes_never_render_as_connected_leads`) |
+| FR-049 | FR-049-AC-2 | TC-049-02 | ✅ written (`watcher_states_distinguish_missing_stale_unreadable_and_fresh`, `unreachable_bus_is_visible_even_when_lead_identity_is_unverified`, `bus_availability_distinguishes_healthy_degraded_and_unavailable`) |
+| FR-049 | FR-049-AC-3 | TC-049-03 | ◐ partial (`status_json_keeps_bus_watcher_and_lead_claims_separate`; command budget and read-only call graph verified by inspection) |
+| FR-049 | FR-049-AC-4 | TC-049-04 | ✅ written (`herdr_manifest_registers_cross_agent_popup_action_and_entrypoint`) |
+| FR-050 | FR-050-AC-1 | TC-050-01 | ✅ written (`a_live_agent_registered_on_the_bus_joins_its_name_and_labels`, `a_live_session_does_not_join_the_first_stale_registration_on_its_pane`, `a_sessionless_herdr_agent_does_not_verify_a_pane_claim`, `a_live_agent_with_no_registration_is_still_listed_as_not_on_bus`) |
+| FR-050 | FR-050-AC-2 | TC-050-02 | ✅ written (`report_distinguishes_fresh_stale_and_unreachable_machines`, `report_keeps_unreadable_degraded_missing_and_unread_scans_distinct`) |
+| FR-050 | FR-050-AC-3 | TC-050-03 | ✅ written (`found_json_pins_the_field_list`, `report_json_has_stable_top_level_fields_and_marks_incomplete_machines`); 500-row cap asserted by source-level check |
+| FR-050 | FR-050-AC-4 | TC-050-04 | ✅ written (`searches_aliases_and_every_human_location_field`; the worker keeps terminal input on the UI thread) |
+| FR-050 | FR-050-AC-5 | TC-050-05 | ✅ written (`only_a_fresh_watcher_and_verified_registration_are_deliverable`, `copy_encoding_is_valid_base64_for_terminal_clipboard_sequences`, `labels_are_neutralised_before_terminal_rendering`) |
+| FR-050 | FR-050-AC-6 | TC-050-06 | ✅ written (`herdr_manifest_registers_cross_agent_popup_action_and_entrypoint`) |
+| FR-051 | FR-051-AC-1 | TC-051-01 | ✅ written (`peek_and_history_reports_pin_fields_and_do_not_invent_redelivery_state`) |
+| FR-051 | FR-051-AC-2 | TC-051-02 | ✅ written (`inbox_peek_is_bounded_read_only_and_reports_redelivery_state`) |
+| FR-051 | FR-051-AC-3 | TC-051-03 | ✅ written (`message_bodies_remain_data_and_are_bounded_before_display`) |
+| FR-051 | FR-051-AC-4 | TC-051-04, TC-051-06 | ◐ partial (canonical address check is tested; no full command integration test yet) |
+| FR-051 | FR-051-AC-5 | TC-051-05 | ✅ written (`herdr_manifest_registers_cross_agent_popup_action_and_entrypoint`) |
+| FR-052 | FR-052-AC-1 | TC-052-01 | ✅ written (`metadata_is_reported_only_for_the_exact_registered_session`) |
+| FR-052 | FR-052-AC-2 | TC-052-02 | ✅ written (`inbox_peek_is_bounded_read_only_and_reports_redelivery_state`) |
+| FR-052 | FR-052-AC-3 | TC-052-03 | ◐ partial (`token_values_keep_unknown_separate_from_zero`; Herdr expiry behavior is not exercised against Herdr) |
+| FR-052 | FR-052-AC-4 | TC-052-04 | ✅ written (`sidebar_reporting_reserves_at_most_four_background_slots`) |
+| FR-052 | FR-052-AC-5 | TC-052-05 | ✅ written (optional `$ix_relay` layout documented in `README.md`) |
 
 ### Non-Functional Requirement Coverage
 
@@ -469,6 +489,27 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-047-03 | Herdr session and pane mismatches or absent session proof make a placement unverifiable. | Unit | FR-047-AC-3 | ✅ written (`address_location_requires_a_matching_herdr_session_id`) |
 | TC-047-04 | Existing serialized registrations with unknown or absent proof fields decode without inventing verified identity. | Unit | FR-047-AC-4 | ✅ written (`registration_and_place_with_unknown_fields_still_decode`) |
 | TC-047-05 | Invalidating a stale placement clears only the exact registration snapshot that lost proof. | Integration | FR-047-AC-5 | ✅ written (`invalidate_place_clears_only_the_registration_snapshot_that_lost_proof`; Redis lane) |
+| TC-049-01 | The focused pane is a registered lead only when its live Herdr session exactly matches one registration; missing and ambiguous proofs stay unknown. | Unit | FR-049-AC-1 | ✅ written (`only_the_live_herdr_session_matching_the_pane_registration_is_verified`, `duplicate_live_session_registrations_are_unknown_not_guessed`, `non_lead_panes_never_render_as_connected_leads`) |
+| TC-049-02 | Compact status separates healthy, degraded, unavailable, unregistered and unknown states, including Redis failure priority. | Unit | FR-049-AC-2 | ✅ written (`watcher_states_distinguish_missing_stale_unreadable_and_fresh`, `unreachable_bus_is_visible_even_when_lead_identity_is_unverified`, `bus_availability_distinguishes_healthy_degraded_and_unavailable`) |
+| TC-049-03 | JSON status claims remain separate and bounded status reads never consume inbox or register a lead. | Unit | FR-049-AC-3 | ◐ partial (`status_json_keeps_bus_watcher_and_lead_claims_separate`; bounded read-only implementation verified by inspection) |
+| TC-049-04 | The same Herdr action starts from its manifest for any coding agent supported by Herdr. | Unit | FR-049-AC-4 | ✅ written (`herdr_manifest_registers_cross_agent_popup_action_and_entrypoint`) |
+| TC-050-01 | A live Herdr pane joins only an exact session registration; unregistered and sessionless panes have no sendable address. | Unit | FR-050-AC-1 | ✅ written (four verified and mismatch cases in `relay_ops::find` join tests) |
+| TC-050-02 | Machine reports distinguish fresh, degraded, stale, missing, unreadable, unavailable, and unknown health evidence. | Unit | FR-050-AC-2 | ✅ written (`report_distinguishes_fresh_stale_and_unreachable_machines`, `report_keeps_unreadable_degraded_missing_and_unread_scans_distinct`) |
+| TC-050-03 | Directory JSON pins its fields, completeness and row bound without touching inbox or registration data. | Unit | FR-050-AC-3 | ✅ written (`found_json_pins_the_field_list`, `report_json_has_stable_top_level_fields_and_marks_incomplete_machines`; row cap verified by source inspection) |
+| TC-050-04 | Search matches canonical name, alias, machine, workspace, tab, pane, session and address while refresh work stays off the input loop. | Unit | FR-050-AC-4 | ✅ written (`searches_aliases_and_every_human_location_field`) |
+| TC-050-05 | Only a verified registration address can be copied and terminal-bound labels are neutralised. | Unit | FR-050-AC-5 | ✅ written (`only_a_fresh_watcher_and_verified_registration_are_deliverable`, `copy_encoding_is_valid_base64_for_terminal_clipboard_sequences`, `labels_are_neutralised_before_terminal_rendering`) |
+| TC-050-06 | The Herdr action starts the searchable directory popup from a pane. | Unit | FR-050-AC-6 | ✅ written (`herdr_manifest_registers_cross_agent_popup_action_and_entrypoint`) |
+| TC-051-01 | History and pending preview preserve typed message fields, broadcast target and honest redelivery information. | Unit | FR-051-AC-1 | ✅ written (`peek_and_history_reports_pin_fields_and_do_not_invent_redelivery_state`) |
+| TC-051-02 | Pending preview is bounded, preserves inbox and in-flight lengths, and exposes requeued redelivery. | Redis integration | FR-051-AC-2 | ✅ written (`inbox_peek_is_bounded_read_only_and_reports_redelivery_state`) |
+| TC-051-03 | Popup renders message bodies as neutralised, bounded data, distinct from metadata. | Unit | FR-051-AC-3 | ✅ written (`message_bodies_remain_data_and_are_bounded_before_display`) |
+| TC-051-04 | Reply revalidates the focused lead and requires a unique live canonical sender address. | Integration | FR-051-AC-4 | ◐ partial (no full command integration test yet) |
+| TC-051-06 | Sender resolution rejects ambiguity, offline registrations, and non-canonical addresses. | Unit | FR-051-AC-4 | ✅ written (`reply_requires_one_live_sender_with_a_full_canonical_address`) |
+| TC-051-05 | One Herdr manifest exposes the feature independent of coding agent. | Unit | FR-051-AC-5 | ✅ written (`herdr_manifest_registers_cross_agent_popup_action_and_entrypoint`) |
+| TC-052-01 | Metadata is emitted only when the live session exactly matches the registration. | Unit | FR-052-AC-1 | ✅ written (`metadata_is_reported_only_for_the_exact_registered_session`) |
+| TC-052-02 | Pending count is a read-only inbox length observation. | Redis integration | FR-052-AC-2 | ✅ written (`inbox_peek_is_bounded_read_only_and_reports_redelivery_state`) |
+| TC-052-03 | Unknown pending count stays distinct from zero; Herdr clears expired tokens when refresh stops. | Unit | FR-052-AC-3 | ◐ partial (`token_values_keep_unknown_separate_from_zero`; expiry semantics require a live Herdr check) |
+| TC-052-04 | Slow report work is bounded and cannot grow beyond four concurrent panes. | Unit | FR-052-AC-4 | ✅ written (`sidebar_reporting_reserves_at_most_four_background_slots`) |
+| TC-052-05 | Optional `$ix_relay` sidebar configuration preserves Herdr's native agent row. | Inspection | FR-052-AC-5 | ◐ partial (documented in `README.md`; not demonstrated in a live Herdr sidebar) |
 | TC-010-01 | Every send from any registered sender to any registered lead X increases X's inbox length by exactly one … | Property | FR-010-AC-1 | ✅ written |
 | TC-010-02 | Given alias `old` pointing at registered `new`, sending to `old` queues the message in `new`'s inbox and … | Unit | FR-010-AC-2 | ✅ written |
 | TC-010-03 | Given an unregistered target name, the send returns an unknown-agent error and no inbox or log entry is added. | Unit | FR-010-AC-3 | ✅ written |
@@ -767,7 +808,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 
 | Gap ID | Description | Risk Level | Mitigation |
 |--------|-------------|------------|------------|
-| GAP-001 | 276 of 360 rows have a written test (7 of them by a substitute method: proptest fuzz lanes and exhaustive checks) and 19 more are partial; 65 rows have no test: the unbuilt rows (GAP-002), the hook and watcher process behaviour of FR-006/007/009/018/019/027, the fault-injection and benchmark rows, and FR-010-AC-5 and FR-013-AC-4/5. | High | Remaining evidence work under AGE-2029. |
+| GAP-001 | 294 of 381 rows have a written test (7 of them by a substitute method: proptest fuzz lanes and exhaustive checks) and 22 more are partial; 65 rows have no test: the unbuilt rows (GAP-002), the hook and watcher process behaviour of FR-006/007/009/018/019/027, the fault-injection and benchmark rows, and FR-010-AC-5 and FR-013-AC-4/5. | High | Remaining evidence work under AGE-2029. |
 | GAP-002 | 15 rows still say `red on main`: obligations of requirements `main` does not yet meet, red when written (FR-031, FR-033-AC-2, FR-034-AC-4, FR-035, FR-037). The rest of FR-032..FR-034 are written or partial since the relink work (FR-043). | High | AGE-2033 (AGE-2032 landed; the NFR-001 stdin row landed under AGE-2033). |
 | GAP-003 | No `herdr` stub or blackholed-Redis harness exists yet for the fault-injection and benchmark rows. | Medium | Build with the NFR-001..003 suites. |
 
@@ -777,10 +818,11 @@ to fail until the named ticket lands; the ticket is given on each such row.
 |----------|-------|-----------------------|----------------------------|---------|--------|---------|--------------------------|
 | Benchmark | 8 | 5 | 0 | 0 | 0 | 0 | 62% |
 | Fuzz | 5 | 0 | 5 | 0 | 0 | 0 | 0% |
-| Inspection | 3 | 0 | 0 | 0 | 0 | 0 | 0% |
-| Integration | 145 | 111 | 0 | 10 | 0 | 0 | 77% |
+| Inspection | 4 | 0 | 0 | 1 | 0 | 0 | 0% |
+| Integration | 146 | 111 | 0 | 11 | 0 | 0 | 76% |
 | Property | 52 | 40 | 0 | 6 | 0 | 0 | 77% |
+| Redis integration | 2 | 2 | 0 | 0 | 0 | 0 | 100% |
 | Static | 2 | 0 | 2 | 0 | 0 | 0 | 0% |
-| Unit | 145 | 112 | 0 | 3 | 0 | 0 | 77% |
+| Unit | 162 | 128 | 0 | 4 | 0 | 0 | 79% |
 
 "Written, named method" counts rows whose status names a written test that uses the method the row names. It records that the test exists, not a run: the last recorded run is the `make ci` output in the PR comment for the head commit, and Redis-backed tests skip without `IX_RELAY_TEST_URL`. Fuzz and Static rows are counted separately: the Fuzz rows are property-based fuzz lanes (see `fuzz/README.md`), not recorded `cargo-fuzz` campaigns, and the Static rows are exhaustive checks over a bound, not Kani proofs. Rows marked red (`#[ignore]` with a ticket) are not counted.

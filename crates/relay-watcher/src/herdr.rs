@@ -14,14 +14,15 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    thread,
     time::Duration,
 };
 
 pub use herdr_cli::ProcessError;
-use relay_core::{MachineName, PaneId, Place, SessionId};
+use relay_core::{MachineName, PaneId, Place, Registration, SessionId};
 use relay_ops::{find::MachineView, herdr_check::HerdrCheck};
 use serde::Deserialize;
 
@@ -31,6 +32,11 @@ use crate::deliver::{DeliverError, Deliverer};
 /// reporting [`herdr_cli::ProcessError::Timeout`]. A hung herdr call would
 /// otherwise block every other lead this process watches, forever.
 const HERDR_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+/// Metadata is display-only and best-effort; never let it hold delivery for a
+/// full agent-operation timeout.
+const SIDEBAR_REPORT_TIMEOUT: Duration = Duration::from_millis(500);
+/// Keep best-effort sidebar work from accumulating without bound when Herdr is slow.
+const MAX_SIDEBAR_REPORTS_IN_FLIGHT: usize = 4;
 
 /// A lead's state as herdr's `agent_status` reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +131,30 @@ pub trait Herdr {
     fn get(&self, pane: &PaneId) -> Result<Option<AgentGet>, ProcessError>;
     /// Shows a desktop notification so the operator notices something needs them.
     fn notify(&self, title: &str, body: &str) -> Result<(), ProcessError>;
+    /// Publishes a short-lived, display-only ix-relay token for a pane. It
+    /// never changes Herdr's semantic agent state or lifecycle authority.
+    fn report_relay_sidebar(&self, _pane: &PaneId, _value: &str, _ttl_ms: u64) {
+        // Implementations without a Herdr metadata API can safely omit the badge.
+    }
+    /// Verifies the registration and publishes its metadata. Real implementations
+    /// should schedule this outside the watcher delivery loop.
+    fn report_relay_sidebar_for_registration(
+        &self,
+        registration: &relay_core::Registration,
+        pane: &PaneId,
+        value: &str,
+        ttl_ms: u64,
+    ) where
+        Self: Sized,
+    {
+        crate::sidebar::report_if_verified(
+            self,
+            registration,
+            pane,
+            value,
+            Duration::from_millis(ttl_ms),
+        );
+    }
     /// Where every live agent on this machine sits and which session it hosts,
     /// keyed by pane id, so the watcher can keep registered
     /// `server:workspace[:tab[:pane]]` addresses true and follow a session to the pane
@@ -180,6 +210,21 @@ pub struct RealHerdr {
     decode_failed: Arc<AtomicBool>,
     /// The entries the last layout listing dropped; read by [`Herdr::dropped_entries`].
     dropped: Arc<AtomicUsize>,
+    /// Bounds background metadata work independently of watcher ticks.
+    sidebar_reports_in_flight: Arc<Mutex<std::collections::HashSet<PaneId>>>,
+}
+
+fn reserve_sidebar_report(
+    in_flight: &Mutex<std::collections::HashSet<PaneId>>,
+    pane: &PaneId,
+) -> bool {
+    let mut in_flight = in_flight
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if in_flight.len() >= MAX_SIDEBAR_REPORTS_IN_FLIGHT || !in_flight.insert(pane.clone()) {
+        return false;
+    }
+    true
 }
 
 impl RealHerdr {
@@ -276,6 +321,72 @@ impl Herdr for RealHerdr {
         )
         .map(|_| ())
     }
+
+    fn report_relay_sidebar(&self, pane: &PaneId, value: &str, ttl_ms: u64) {
+        let token = format!("{}={value}", crate::sidebar::TOKEN);
+        let ttl = ttl_ms.to_string();
+        let _ = herdr_cli::call::<serde_json::Value>(
+            &herdr_cli::RealProcessRunner,
+            "herdr",
+            &[
+                "pane",
+                "report-metadata",
+                pane.as_str(),
+                "--source",
+                "agent-ix:ix-relay",
+                "--token",
+                &token,
+                "--ttl-ms",
+                &ttl,
+            ],
+            SIDEBAR_REPORT_TIMEOUT,
+        );
+    }
+
+    fn report_relay_sidebar_for_registration(
+        &self,
+        registration: &Registration,
+        pane: &PaneId,
+        value: &str,
+        ttl_ms: u64,
+    ) {
+        if !reserve_sidebar_report(&self.sidebar_reports_in_flight, pane) {
+            return;
+        }
+        let herdr = self.clone();
+        let registration = registration.clone();
+        let report_pane = pane.clone();
+        let value = value.to_owned();
+        let in_flight = Arc::clone(&self.sidebar_reports_in_flight);
+        let tracked_pane = pane.clone();
+        let started = thread::Builder::new()
+            .name("relay-sidebar-metadata".into())
+            .spawn(move || {
+                struct Release(Arc<Mutex<std::collections::HashSet<PaneId>>>, PaneId);
+                impl Drop for Release {
+                    fn drop(&mut self) {
+                        self.0
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&self.1);
+                    }
+                }
+                let _release = Release(in_flight, tracked_pane);
+                crate::sidebar::report_if_verified(
+                    &herdr,
+                    &registration,
+                    &report_pane,
+                    &value,
+                    Duration::from_millis(ttl_ms),
+                );
+            });
+        if started.is_err() {
+            self.sidebar_reports_in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(pane);
+        }
+    }
 }
 
 /// The one transport today: `herdr agent prompt`.
@@ -295,6 +406,22 @@ impl Deliverer for RealHerdr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Trace: FR-052-AC-4
+    #[test]
+    fn sidebar_reporting_reserves_at_most_four_background_slots() {
+        let in_flight = Mutex::new(std::collections::HashSet::new());
+        let pane: PaneId = "w1:p1".parse().unwrap();
+        for _ in 0..MAX_SIDEBAR_REPORTS_IN_FLIGHT {
+            let pane: PaneId = format!("w1:p{}", in_flight.lock().unwrap().len() + 1)
+                .parse()
+                .unwrap();
+            assert!(reserve_sidebar_report(&in_flight, &pane));
+        }
+        assert!(!reserve_sidebar_report(&in_flight, &pane));
+        in_flight.lock().unwrap().remove(&"w1:p1".parse().unwrap());
+        assert!(reserve_sidebar_report(&in_flight, &pane));
+    }
 
     #[test]
     fn parses_all_known_statuses_and_falls_back_on_unknown() {

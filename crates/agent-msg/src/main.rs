@@ -56,6 +56,7 @@ use crate::{
 
 /// Connect/read/write timeout for commands an agent runs.
 const CLI_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_HISTORY_REPORT: usize = 500;
 
 #[derive(Parser)]
 #[command(
@@ -113,13 +114,16 @@ enum Cmd {
         /// Print `{"messages": [...], "rejected": [...]}` instead of plain
         /// text, for callers that parse the output (e.g. the opencode
         /// plugin). Still pops: use `--count` for a non-destructive peek.
-        #[arg(long, conflicts_with = "count")]
+        #[arg(long, conflicts_with_all = ["count", "peek", "dead", "in_flight"])]
         json: bool,
         /// Print the number of pending messages without removing anything,
         /// so a caller can decide whether it's worth starting a turn to read
         /// them (the opencode plugin's idle path does this).
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["json", "peek", "dead", "in_flight"])]
         count: bool,
+        /// Show a bounded JSON preview without removing messages.
+        #[arg(long, conflicts_with_all = ["json", "count", "dead", "in_flight"])]
+        peek: bool,
         /// Print your dead letters (messages whose redeliveries ran out, FR-040)
         /// instead of popping, oldest first, and leave them where they are.
         #[arg(long, conflicts_with_all = ["count", "json"])]
@@ -145,6 +149,9 @@ enum Cmd {
         /// Print one JSON object per matching row instead of plain text.
         #[arg(long)]
         json: bool,
+        /// Print one stable JSON document including machine reachability and watcher freshness.
+        #[arg(long, conflicts_with = "json")]
+        report_json: bool,
     },
     /// Check the relay's health: Redis, this machine's watcher, hook failures,
     /// herdr, registrations, queue depth and the watcher's unit. Read-only; works
@@ -164,6 +171,8 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Print a compact, read-only status and pending-count badge for Herdr.
+    Badge,
     /// Show recent message history.
     Log {
         /// How far back, e.g. 30m, 1h, 2d.
@@ -172,6 +181,9 @@ enum Cmd {
         /// Most messages to show.
         #[arg(long, default_value_t = 100)]
         max: usize,
+        /// Emit a stable JSON history report.
+        #[arg(long)]
+        json: bool,
     },
     /// Register yourself by hand. Hooks do this on session start.
     Register {
@@ -391,6 +403,9 @@ fn main() -> ExitCode {
     if let Cmd::Status { json } = cli.cmd {
         return status::run(core_flags(&cli), json);
     }
+    if let Cmd::Badge = cli.cmd {
+        return status::badge(core_flags(&cli));
+    }
 
     // ~/.ix/relay/config.toml (AGE-2017), resolved flag > env > file >
     // default. A malformed file is an error every non-hook command exits 1
@@ -534,11 +549,21 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
             writeln!(out, "{n}")?;
         }
         Cmd::Inbox {
+            peek: true, max, ..
+        } => {
+            let name = me(cli.name.as_deref(), &mut relay, &settings.machine.value)?;
+            let found = relay.peek_inbox(&name, max)?;
+            let report = inbox_report::PeekReport::new(&found);
+            serde_json::to_writer(&mut out, &report)?;
+            writeln!(out)?;
+        }
+        Cmd::Inbox {
             max,
             json,
             count: false,
             dead: false,
             in_flight: false,
+            peek: false,
         } => {
             let name = me(cli.name.as_deref(), &mut relay, &settings.machine.value)?;
             let popped = relay.pop_inbox(&name, max)?;
@@ -640,7 +665,11 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 writeln!(out)?;
             }
         }
-        Cmd::Find { query, json } => {
+        Cmd::Find {
+            query,
+            json,
+            report_json,
+        } => {
             let query = query.unwrap_or_default();
             let report = find::run(&mut relay, &redial, &settings.machine.value, &query)?;
             for skipped in &report.skipped {
@@ -649,7 +678,10 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                     skipped.machine, skipped.reason
                 );
             }
-            if json {
+            if report_json {
+                serde_json::to_writer(&mut out, &find::report_json(&report))?;
+                writeln!(out)?;
+            } else if json {
                 for row in &report.rows {
                     serde_json::to_writer(&mut out, &find::FoundJson::from(row))?;
                     writeln!(out)?;
@@ -667,20 +699,31 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 }
             }
         }
-        Cmd::Log { since, max } => {
+        Cmd::Log { since, max, json } => {
             let window = i64::try_from(since.0.as_millis()).unwrap_or(i64::MAX);
             let book = display_book(&mut relay, &redial);
             let since_ms = now_ms().saturating_sub(window);
-            let messages = retry::read(&mut relay, &redial, |r| Ok(r.log(since_ms, max)?))?;
-            for m in messages {
-                writeln!(
-                    out,
-                    "{} {} -> {}: {}",
-                    clock(m.sent_at_ms),
-                    book.label(&m.from),
-                    book.label_target(&m.to),
-                    relay_core::text::neutralise(&m.text)
-                )?;
+            let effective_max = max.min(MAX_HISTORY_REPORT);
+            let fetch_max = effective_max.saturating_add(1);
+            let mut messages =
+                retry::read(&mut relay, &redial, |r| Ok(r.log(since_ms, fetch_max)?))?;
+            let truncated = messages.len() > effective_max;
+            messages.truncate(effective_max);
+            if json {
+                let report = inbox_report::HistoryReport::new(&messages, truncated);
+                serde_json::to_writer(&mut out, &report)?;
+                writeln!(out)?;
+            } else {
+                for m in messages {
+                    writeln!(
+                        out,
+                        "{} {} -> {}: {}",
+                        clock(m.sent_at_ms),
+                        book.label(&m.from),
+                        book.label_target(&m.to),
+                        relay_core::text::neutralise(&m.text)
+                    )?;
+                }
             }
         }
         Cmd::Register { kind } => {
@@ -809,7 +852,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 None => writeln!(out, "not a lead")?,
             }
         }
-        Cmd::Hook { .. } | Cmd::Doctor { .. } | Cmd::Status { .. } => {
+        Cmd::Hook { .. } | Cmd::Doctor { .. } | Cmd::Status { .. } | Cmd::Badge => {
             unreachable!("handled in main")
         }
     }

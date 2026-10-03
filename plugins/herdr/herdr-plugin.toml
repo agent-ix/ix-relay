@@ -2,7 +2,7 @@ id = "agent-ix.ix-relay"
 name = "ix-relay"
 version = "0.1.0"
 min_herdr_version = "0.9.1"
-description = "Show ix-relay status in Herdr for any coding agent"
+description = "Show ix-relay status and browse online leads in Herdr for any coding agent"
 platforms = ["linux", "macos"]
 
 [[actions]]
@@ -10,3 +10,21 @@ id = "status"
 title = "Show ix-relay status"
 contexts = ["pane"]
 command = ["agent-msg", "status"]
+
+[[actions]]
+id = "open-directory"
+title = "Browse ix-relay leads"
+contexts = ["pane"]
+command = [
+  "herdr", "plugin", "pane", "open",
+  "--plugin", "agent-ix.ix-relay",
+  "--entrypoint", "directory",
+  "--placement", "popup",
+]
+
+[[panes]]
+id = "directory"
+title = "ix-relay online leads"
+description = "Search verified relay leads across enabled Herdr machines"
+placement = "popup"
+command = ["relay-directory"]

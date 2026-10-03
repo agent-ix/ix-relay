@@ -12,6 +12,9 @@ use relay_ops::find::{self, FindHerdr, FoundAgent, MachineView, ProcessError, Re
 
 use crate::{BoxError, retry::Redial};
 
+/// Maximum live rows included in the machine-readable directory snapshot.
+pub(crate) const MAX_DIRECTORY_ROWS: usize = 500;
+
 /// Timeout for each herdr call `find` makes, local or remote: bounded so
 /// one unreachable saved machine can't hang the whole command. 10s (not the
 /// original 3s): a remote machine's calls go over SSH, and `find` (per
@@ -38,6 +41,52 @@ pub struct FindReport {
     pub rows: Vec<FoundAgent>,
     /// Machines that errored or timed out and were skipped.
     pub skipped: Vec<SkippedMachine>,
+    /// Herdr and watcher state for each machine queried by this snapshot.
+    pub machines: Vec<MachineStatus>,
+}
+
+/// Reachability and watcher freshness for one configured Herdr machine.
+#[derive(Debug, serde::Serialize)]
+pub struct MachineStatus {
+    /// Herdr's machine label.
+    pub machine: String,
+    /// Whether Herdr returned a live view from this machine.
+    pub herdr: &'static str,
+    /// Whether its relay watcher heartbeat is current and healthy.
+    pub watcher: &'static str,
+    /// Most recent watcher tick, when one is known.
+    pub last_tick_ms: Option<i64>,
+    /// Why Herdr could not read this machine, when applicable.
+    pub detail: Option<String>,
+}
+
+/// Stable, bounded JSON envelope for directory integrations.
+#[derive(Debug, serde::Serialize)]
+pub struct FindReportJson<'a> {
+    /// Live Herdr agents, joined only to exact verified relay registrations.
+    pub rows: Vec<FoundJson<'a>>,
+    /// Reachability and freshness for all queried machines.
+    pub machines: &'a [MachineStatus],
+    /// Whether every configured machine answered Herdr.
+    pub complete: bool,
+    /// Whether more live rows matched than the snapshot includes.
+    pub truncated: bool,
+}
+
+/// Builds the bounded stable JSON payload used by the Herdr directory.
+#[must_use]
+pub fn report_json(report: &FindReport) -> FindReportJson<'_> {
+    FindReportJson {
+        rows: report
+            .rows
+            .iter()
+            .take(MAX_DIRECTORY_ROWS)
+            .map(FoundJson::from)
+            .collect(),
+        machines: &report.machines,
+        complete: report.skipped.is_empty(),
+        truncated: report.rows.len() > MAX_DIRECTORY_ROWS,
+    }
 }
 
 /// Gathers live herdr state from this machine and every enabled saved
@@ -73,6 +122,10 @@ pub fn run(
         Ok(list) => list.into_iter().filter(|m| m.enabled).collect::<Vec<_>>(),
         Err(e) => {
             eprintln!("agent-msg find: could not list saved herdr machines: {e}");
+            skipped.push(SkippedMachine {
+                machine: "<saved machine list>".to_owned(),
+                reason: e.to_string(),
+            });
             Vec::new()
         }
     };
@@ -126,8 +179,16 @@ pub fn run(
 
     // Only reads, so a timed-out one is retried on a fresh connection (after the
     // herdr gathering above, which is not repeated).
-    let (list, aliases) =
-        crate::retry::read(relay, redial, |r| Ok((r.agents()?, r.all_aliases()?)))?;
+    let (list, aliases, heartbeats) = crate::retry::read(relay, redial, |r| {
+        let known = views
+            .iter()
+            .map(|view| view.machine.clone())
+            .chain(skipped.iter().filter_map(|row| row.machine.parse().ok()))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        Ok((r.agents()?, r.all_aliases()?, r.heartbeats(&known)?))
+    })?;
     let registrations =
         list.into_registrations_reporting(|skipped| eprintln!("agent-msg find: {skipped}"));
     let rows = find::join(&views, &registrations, &aliases)
@@ -135,7 +196,85 @@ pub fn run(
         .filter(|row| find::matches_query(row, query))
         .collect();
 
-    Ok(FindReport { rows, skipped })
+    let machines = machine_statuses(&views, &skipped, &heartbeats);
+    Ok(FindReport {
+        rows,
+        skipped,
+        machines,
+    })
+}
+
+fn machine_statuses(
+    views: &[MachineView],
+    skipped: &[SkippedMachine],
+    heartbeats: &relay_core::Heartbeats,
+) -> Vec<MachineStatus> {
+    let mut labels = views
+        .iter()
+        .map(|view| view.machine.to_string())
+        .chain(skipped.iter().map(|row| row.machine.clone()))
+        .collect::<Vec<_>>();
+    labels.sort();
+    labels.dedup();
+
+    labels
+        .into_iter()
+        .map(|machine| {
+            let detail = skipped
+                .iter()
+                .find(|row| row.machine == machine)
+                .map(|row| bounded_reason(&row.reason));
+            let herdr = if detail.is_some() {
+                "unavailable"
+            } else {
+                "live"
+            };
+            let machine_name = machine.parse::<MachineName>().ok();
+            let heartbeat = machine_name
+                .as_ref()
+                .and_then(|name| heartbeats.found.iter().find(|row| &row.machine == name));
+            let marker = machine_name
+                .as_ref()
+                .and_then(|name| heartbeats.last_ticks.get(name).copied());
+            let (watcher, last_tick_ms) = match heartbeat.map(|row| &row.read) {
+                Some(relay_core::health::HeartbeatRead::Live(heartbeat)) => {
+                    let age = crate::now_ms().saturating_sub(heartbeat.last_tick_ms);
+                    let state = if !heartbeat.redis_ok
+                        || !heartbeat.herdr_ok
+                        || heartbeat.herdr_blocks_delivery
+                    {
+                        "degraded"
+                    } else if relay_core::health::tick_is_stale(age, heartbeat.sweep_secs) {
+                        "stale"
+                    } else {
+                        "fresh"
+                    };
+                    (state, Some(heartbeat.last_tick_ms))
+                }
+                Some(relay_core::health::HeartbeatRead::Undecodable) => ("unreadable", marker),
+                None if heartbeats.truncated == Some(relay_core::ScanCut::Deadline) => {
+                    ("unknown", marker)
+                }
+                None if marker.is_some() => ("stale", marker),
+                None if machine_name.is_some() => ("missing", None),
+                None => ("unknown", None),
+            };
+            MachineStatus {
+                machine,
+                herdr,
+                watcher,
+                last_tick_ms,
+                detail,
+            }
+        })
+        .collect()
+}
+
+fn bounded_reason(reason: &str) -> String {
+    relay_core::text::neutralise(reason)
+        .chars()
+        .take(240)
+        .collect()
 }
 
 /// One plain-text line for `row`: its `server:workspace[:tab[:pane]]` address first
@@ -195,6 +334,8 @@ pub struct FoundJson<'a> {
     herdr_status: &'a str,
     /// Whether the pane is registered on the bus.
     on_bus: bool,
+    /// The registration's last refresh time in Unix milliseconds.
+    last_seen_ms: Option<i64>,
 }
 
 impl<'a> From<&'a FoundAgent> for FoundJson<'a> {
@@ -214,6 +355,7 @@ impl<'a> From<&'a FoundAgent> for FoundJson<'a> {
             session_name: row.session_name.as_deref(),
             herdr_status: &row.herdr_status,
             on_bus: row.on_bus,
+            last_seen_ms: row.last_seen_ms,
         }
     }
 }
@@ -236,6 +378,8 @@ pub fn sendable_targets(rows: &[FoundAgent]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use serde_json::json;
 
     use super::*;
@@ -255,6 +399,7 @@ mod tests {
             session_name: Some("s".into()),
             herdr_status: "idle".into(),
             on_bus: true,
+            last_seen_ms: Some(1),
         }
     }
 
@@ -267,7 +412,7 @@ mod tests {
     fn found_json_is_byte_identical_to_main() {
         assert_eq!(
             serde_json::to_string(&FoundJson::from(&row())).unwrap(),
-            r#"{"address":"node-a:qsl:main","bus_name":"qsl-lead","aliases":["qsl"],"machine":"node-a","workspace_label":"qsl","tab_label":null,"pane_id":"p1","session_name":"s","herdr_status":"idle","on_bus":true}"#
+            r#"{"address":"node-a:qsl:main","bus_name":"qsl-lead","aliases":["qsl"],"machine":"node-a","workspace_label":"qsl","tab_label":null,"pane_id":"p1","session_name":"s","herdr_status":"idle","on_bus":true,"last_seen_ms":1}"#
         );
         let off_bus = FoundAgent {
             bus_name: None,
@@ -283,14 +428,16 @@ mod tests {
             session_name: None,
             herdr_status: "working".into(),
             on_bus: false,
+            last_seen_ms: None,
         };
         assert_eq!(
             serde_json::to_string(&FoundJson::from(&off_bus)).unwrap(),
-            r#"{"address":null,"bus_name":null,"aliases":[],"machine":"hub","workspace_label":null,"tab_label":"t","pane_id":"w1:p2","session_name":null,"herdr_status":"working","on_bus":false}"#
+            r#"{"address":null,"bus_name":null,"aliases":[],"machine":"hub","workspace_label":null,"tab_label":"t","pane_id":"w1:p2","session_name":null,"herdr_status":"working","on_bus":false,"last_seen_ms":null}"#
         );
     }
 
-    /// `find --json` emits exactly these ten fields, absent ones as `null`.
+    /// `find --json` emits exactly these eleven fields, absent ones as `null`.
+    /// Trace: FR-050-AC-3
     #[test]
     fn found_json_pins_the_field_list() {
         let row = row();
@@ -307,7 +454,158 @@ mod tests {
                 "session_name": "s",
                 "herdr_status": "idle",
                 "on_bus": true,
+                "last_seen_ms": 1,
             })
         );
+    }
+
+    fn heartbeat(machine: &str, last_tick_ms: i64) -> relay_core::health::MachineHeartbeat {
+        use relay_core::health::{HeartbeatRead, MachineHeartbeat, WatcherHeartbeat};
+
+        MachineHeartbeat {
+            machine: machine.parse().unwrap(),
+            read: HeartbeatRead::Live(Box::new(WatcherHeartbeat {
+                machine: machine.parse().unwrap(),
+                pid: 1,
+                version: "test".into(),
+                started_at_ms: last_tick_ms,
+                last_tick_ms,
+                last_sweep_ms: None,
+                sweep_secs: 15,
+                herdr_ok: true,
+                herdr_problem: None,
+                herdr_blocks_delivery: false,
+                redis_ok: true,
+                leads_watched: 1,
+                otlp: None,
+                last_error: None,
+            })),
+        }
+    }
+
+    /// Trace: FR-050-AC-2
+    #[test]
+    fn report_distinguishes_fresh_stale_and_unreachable_machines() {
+        let views = ["fresh", "stale"]
+            .into_iter()
+            .map(|machine| MachineView {
+                machine: machine.parse().unwrap(),
+                agents: vec![],
+                workspaces: vec![],
+                tabs: vec![],
+                dropped: 0,
+            })
+            .collect::<Vec<_>>();
+        let now = crate::now_ms();
+        let heartbeats = relay_core::Heartbeats {
+            found: vec![heartbeat("fresh", now), heartbeat("stale", 1)],
+            truncated: None,
+            last_ticks: BTreeMap::from([("unreachable".parse().unwrap(), 1)]),
+            unreadable: 0,
+        };
+        let skipped = [SkippedMachine {
+            machine: "unreachable".into(),
+            reason: "ssh failed\u{1b}[31m".into(),
+        }];
+
+        let report = machine_statuses(&views, &skipped, &heartbeats);
+        assert_eq!(report[0].machine, "fresh");
+        assert_eq!(report[0].watcher, "fresh");
+        assert_eq!(report[1].machine, "stale");
+        assert_eq!(report[1].watcher, "stale");
+        assert_eq!(report[2].machine, "unreachable");
+        assert_eq!(report[2].herdr, "unavailable");
+        assert_eq!(report[2].watcher, "stale");
+        assert!(!report[2].detail.as_ref().unwrap().contains('\u{1b}'));
+    }
+
+    /// Trace: FR-050-AC-2
+    #[test]
+    fn report_keeps_unreadable_degraded_missing_and_unread_scans_distinct() {
+        use relay_core::health::{HeartbeatRead, MachineHeartbeat};
+
+        let names = ["degraded", "missing", "unreadable"];
+        let views = names
+            .iter()
+            .map(|machine| MachineView {
+                machine: machine.parse().unwrap(),
+                agents: vec![],
+                workspaces: vec![],
+                tabs: vec![],
+                dropped: 0,
+            })
+            .collect::<Vec<_>>();
+        let mut degraded = heartbeat("degraded", crate::now_ms());
+        if let HeartbeatRead::Live(record) = &mut degraded.read {
+            record.redis_ok = false;
+        }
+        let heartbeats = relay_core::Heartbeats {
+            found: vec![
+                degraded,
+                MachineHeartbeat {
+                    machine: "unreadable".parse().unwrap(),
+                    read: HeartbeatRead::Undecodable,
+                },
+            ],
+            truncated: None,
+            last_ticks: BTreeMap::new(),
+            unreadable: 1,
+        };
+
+        let report = machine_statuses(&views, &[], &heartbeats);
+        let states = report
+            .iter()
+            .map(|machine| (machine.machine.as_str(), machine.watcher))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(states["degraded"], "degraded");
+        assert_eq!(states["missing"], "missing");
+        assert_eq!(states["unreadable"], "unreadable");
+
+        let deadline_health = relay_core::Heartbeats {
+            truncated: Some(relay_core::ScanCut::Deadline),
+            ..relay_core::Heartbeats::default()
+        };
+        let deadline_view = [MachineView {
+            machine: "deadline".parse().unwrap(),
+            agents: vec![],
+            workspaces: vec![],
+            tabs: vec![],
+            dropped: 0,
+        }];
+        let deadline = machine_statuses(&deadline_view, &[], &deadline_health);
+        assert_eq!(deadline[0].watcher, "unknown");
+    }
+
+    /// Trace: FR-050-AC-3
+    #[test]
+    fn report_json_has_stable_top_level_fields_and_marks_incomplete_machines() {
+        let report = FindReport {
+            rows: vec![row()],
+            skipped: vec![SkippedMachine {
+                machine: "hub".into(),
+                reason: "SSH unavailable".into(),
+            }],
+            machines: vec![MachineStatus {
+                machine: "hub".into(),
+                herdr: "unavailable",
+                watcher: "unknown",
+                last_tick_ms: None,
+                detail: Some("SSH unavailable".into()),
+            }],
+        };
+        let payload = serde_json::to_value(report_json(&report)).unwrap();
+        assert_eq!(
+            payload
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["complete", "machines", "rows", "truncated"]
+        );
+        assert_eq!(payload["complete"], false);
+        assert_eq!(payload["machines"][0]["herdr"], "unavailable");
+        assert_eq!(payload["rows"][0]["last_seen_ms"], 1);
+        assert_eq!(payload["truncated"], false);
     }
 }

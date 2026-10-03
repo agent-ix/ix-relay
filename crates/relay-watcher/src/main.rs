@@ -37,6 +37,7 @@ mod last_seen;
 mod liveness;
 mod otlp;
 mod relink;
+mod sidebar;
 mod socket;
 mod state_file;
 mod supervise;
@@ -152,6 +153,30 @@ fn per_lead(err: relay_core::Error, context: impl std::fmt::Display) -> relay_co
     Ok(())
 }
 
+fn report_sidebar_if_due<H: Herdr>(
+    herdr: &H,
+    last_reported: &mut HashMap<AgentName, Instant>,
+    registration: &relay_core::Registration,
+    pane: &PaneId,
+    state: &str,
+    pending: Option<usize>,
+    sweep: Duration,
+    now: Instant,
+) {
+    let ttl = sidebar::ttl(sweep);
+    let refresh_after = ttl / 2;
+    if last_reported
+        .get(&registration.name)
+        .is_some_and(|last| now.saturating_duration_since(*last) < refresh_after)
+    {
+        return;
+    }
+    last_reported.insert(registration.name.clone(), now);
+    let display = sidebar::value(state, pending);
+    let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
+    herdr.report_relay_sidebar_for_registration(registration, pane, &display, ttl_ms);
+}
+
 /// State carried across ticks, so "once per episode" (blocked notifications,
 /// stale-registration, no-agent and herdr-error log lines) means what it says
 /// instead of firing every tick. Nothing in it outlives the registry: each tick
@@ -213,6 +238,9 @@ struct WatcherState {
     /// Each local lead's inbox length as of the last tick that saw it: a wake
     /// looks at a lead only when it has grown (or has no timer).
     last_len: HashMap<AgentName, usize>,
+    /// Throttles the optional metadata write when unrelated sends wake this
+    /// watcher repeatedly.
+    sidebar_reported: HashMap<AgentName, Instant>,
     /// When each lead was last looked at with herdr, capping a wake's spawns.
     last_examined: HashMap<AgentName, Instant>,
     /// When each old registration was last checked for pruning, so a lead idle
@@ -251,6 +279,7 @@ impl WatcherState {
             refused: Vec::new(),
             registry_recheck_at: None,
             last_len: HashMap::new(),
+            sidebar_reported: HashMap::new(),
             last_examined: HashMap::new(),
             prune_checked: HashMap::new(),
             rotation: 0,
@@ -579,6 +608,7 @@ fn main() -> ExitCode {
         machine,
         herdr: herdr.clone(),
         state,
+        sidebar_regs: Vec::new(),
     };
     // SIGTERM (a service manager's stop) and SIGINT are noticed at the next turn of
     // the loop, so the reply socket is removed on the way out. `signal_hook::flag`
@@ -663,6 +693,8 @@ struct RedisBus<H: Herdr + Deliverer> {
     machine: MachineName,
     herdr: H,
     state: WatcherState,
+    /// Last verified local leads, retained for brief Redis outages.
+    sidebar_regs: Vec<relay_core::Registration>,
 }
 
 impl<H: Herdr + Deliverer> Bus for RedisBus<H> {
@@ -673,13 +705,22 @@ impl<H: Herdr + Deliverer> Bus for RedisBus<H> {
     /// [`Bus::wait`] hears rather than one lost. Timers of an earlier
     /// connection are dropped; the first poll is a sweep.
     fn connect(&mut self) -> relay_core::Result<Relay> {
-        let mut relay = Relay::connect(&self.url, REDIS_TIMEOUT)?.with_prefix(self.prefix.clone());
+        let mut relay = match Relay::connect(&self.url, REDIS_TIMEOUT) {
+            Ok(relay) => relay.with_prefix(self.prefix.clone()),
+            Err(error) => {
+                self.report_sidebar_unavailable();
+                return Err(error);
+            }
+        };
         match relay.log_tail_id() {
             Ok(id) => {
                 self.state.log_id = Some(id);
                 self.state.degraded_logged = false;
             }
-            Err(e) if e.is_connection() => return Err(e),
+            Err(e) if e.is_connection() => {
+                self.report_sidebar_unavailable();
+                return Err(e);
+            }
             Err(e) => {
                 // A log this watcher cannot follow costs it the wake-ups, not its
                 // deliveries: it falls back to its timers and says so once.
@@ -712,6 +753,17 @@ impl<H: Herdr + Deliverer> Bus for RedisBus<H> {
                 eprintln!("relay-watcher: {line}");
             },
         );
+        if let Err(error) = &ticked {
+            if error.is_connection() {
+                self.report_sidebar_unavailable();
+            }
+        } else if let Some((_, registrations)) = &self.state.registry {
+            self.sidebar_regs = registrations
+                .iter()
+                .filter(|reg| reg.pane_on(&self.machine).is_some())
+                .cloned()
+                .collect();
+        }
         self.state.live.finish_tick(conn, wake, ticked)
     }
 
@@ -729,11 +781,46 @@ impl<H: Herdr + Deliverer> Bus for RedisBus<H> {
                 std::thread::sleep(block);
                 continue;
             };
-            if conn.wait_for_log(&after, block)? {
+            let changed = match conn.wait_for_log(&after, block) {
+                Ok(changed) => changed,
+                Err(error) => {
+                    if error.is_connection() {
+                        self.report_sidebar_unavailable();
+                    }
+                    return Err(error);
+                }
+            };
+            if changed {
                 // Jump to the tail so the tick that follows covers everything
                 // sent so far and only a later send wakes the next wait.
-                self.state.log_id = Some(conn.log_tail_id()?);
+                self.state.log_id = match conn.log_tail_id() {
+                    Ok(id) => Some(id),
+                    Err(error) => {
+                        if error.is_connection() {
+                            self.report_sidebar_unavailable();
+                        }
+                        return Err(error);
+                    }
+                };
                 return Ok(Wake::Message);
+            }
+        }
+    }
+}
+
+impl<H: Herdr + Deliverer> RedisBus<H> {
+    fn report_sidebar_unavailable(&self) {
+        let display = sidebar::value("unavailable", None);
+        let ttl = sidebar::ttl(self.state.sweep_every);
+        for registration in &self.sidebar_regs {
+            if let Some(pane) = registration.pane_on(&self.machine) {
+                let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
+                self.herdr.report_relay_sidebar_for_registration(
+                    registration,
+                    pane,
+                    &display,
+                    ttl_ms,
+                );
             }
         }
     }
@@ -858,6 +945,34 @@ fn tick<H: Herdr + Deliverer>(
     for ((reg, pane), len) in local.into_iter().zip(lens) {
         let name = &reg.name;
         seen.insert(name.clone());
+        let (badge_state, badge_count) = match &len {
+            Ok(count) => (
+                if state.live.delivery_blocked() {
+                    "degraded"
+                } else {
+                    "connected"
+                },
+                Some(*count),
+            ),
+            Err(error) => (
+                if error.is_connection() {
+                    "unavailable"
+                } else {
+                    "degraded"
+                },
+                None,
+            ),
+        };
+        report_sidebar_if_due(
+            herdr,
+            &mut state.sidebar_reported,
+            reg,
+            pane,
+            badge_state,
+            badge_count,
+            state.sweep_every,
+            now,
+        );
         let len = match len {
             Ok(len) => len,
             Err(e) => {
@@ -954,6 +1069,7 @@ fn tick<H: Herdr + Deliverer>(
     }
     state.retry_at.retain(|name, _| seen.contains(name));
     state.last_len.retain(|name, _| seen.contains(name));
+    state.sidebar_reported.retain(|name, _| seen.contains(name));
     state.last_examined.retain(|name, _| seen.contains(name));
     state.otlp.tick_took(started.elapsed());
     state.registry = Some((read_at, regs));
@@ -3646,6 +3762,7 @@ mod tests {
             machine: "node-a".parse().unwrap(),
             herdr,
             state: WatcherState::new(retry_every, Duration::from_secs(DEFAULT_SWEEP_SECS)),
+            sidebar_regs: Vec::new(),
         }
     }
 

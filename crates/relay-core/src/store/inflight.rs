@@ -51,7 +51,9 @@ use std::{collections::BTreeMap, fmt, num::NonZeroUsize, sync::LazyLock, time::D
 
 use redis::Value;
 
-use super::{BudgetPopResult, LOG_CAP, PopResult, Relay, decode_entries};
+use super::{
+    BudgetPopResult, LOG_CAP, MAX_INBOX_PEEK, PEEK_SCRIPT, PopResult, Relay, decode_entries,
+};
 use crate::{
     error::{Error, Result},
     name::AgentName,
@@ -72,6 +74,28 @@ pub const HOOK_LEASE: Duration = Duration::from_secs(20);
 /// live delivery takes, and a watcher that crashed between the pop and the
 /// prompt returns its batch to the sweep (every 15 s) within about 75 s.
 pub const WATCHER_LEASE: Duration = Duration::from_secs(60);
+
+/// One pending message decoded by a read-only inbox preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeekedMessage {
+    /// The message body and routing fields.
+    pub message: crate::Message,
+    /// Whether this message had already been delivered and requeued at least once.
+    pub redelivered: bool,
+}
+
+/// A bounded, non-destructive inbox preview.
+#[derive(Debug)]
+pub struct PeekResult {
+    /// The oldest pending messages up to the caller's bound, oldest first.
+    pub messages: Vec<PeekedMessage>,
+    /// Entries that were present but could not be decoded; they remain in the inbox.
+    pub rejected: Vec<Error>,
+    /// Total pending entries at the time of the snapshot.
+    pub pending: usize,
+    /// Whether some pending entries were omitted by the bound.
+    pub truncated: bool,
+}
 
 /// The longest lease a [`Claim`] can hold: a longer one is clamped to it, so a
 /// huge value can neither overflow a deadline nor make a row that cannot be read.
@@ -301,6 +325,56 @@ pub struct Backlog {
 }
 
 impl Relay {
+    /// Reads up to `max` pending messages without removing or acknowledging them.
+    ///
+    /// Requests are capped at [`MAX_INBOX_PEEK`]. Redelivery state is taken from
+    /// the count encoded with each inbox row; a corrupt message is reported but
+    /// remains pending for an explicit consumer or operator repair.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Redis`] for a failed read, or [`Error::InflightUnreadable`] when
+    /// this lead's inbox key has the wrong Redis type.
+    pub fn peek_inbox(&mut self, agent: &AgentName, max: NonZeroUsize) -> Result<PeekResult> {
+        let requested = max.get().min(MAX_INBOX_PEEK);
+        let (status, pending, raw): (i64, usize, Vec<Vec<u8>>) = redis::cmd("EVAL")
+            .arg(PEEK_SCRIPT)
+            .arg(1)
+            .arg(self.keys.inbox_key(agent))
+            .arg(requested)
+            .query(&mut self.conn)?;
+        if status < 0 {
+            return Err(Error::InflightUnreadable {
+                lead: agent.clone(),
+            });
+        }
+        let key = self.keys.inbox_key(agent);
+        let mut messages = Vec::new();
+        let mut rejected = Vec::new();
+        for entry in raw {
+            let core_len = entry
+                .iter()
+                .rposition(|byte| *byte != b' ')
+                .map_or(0, |index| index + 1);
+            match serde_json::from_slice::<crate::Message>(&entry[..core_len]) {
+                Ok(message) => messages.push(PeekedMessage {
+                    message,
+                    redelivered: core_len < entry.len(),
+                }),
+                Err(source) => rejected.push(Error::Decode {
+                    key: key.clone(),
+                    source,
+                }),
+            }
+        }
+        Ok(PeekResult {
+            messages,
+            rejected,
+            pending,
+            truncated: pending > requested,
+        })
+    }
+
     /// Removes and returns pending messages for `agent`, oldest first, keeping
     /// the running total of their *rendered* size at or under `max_bytes` —
     /// except the first message, which is always taken even if it alone exceeds
