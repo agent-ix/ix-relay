@@ -40,6 +40,11 @@ const LOG_CAP: usize = 10_000;
 /// Roughly how many entries the hook health stream keeps (`XADD MAXLEN ~`).
 const HEALTH_HOOKS_CAP: usize = 1_000;
 
+/// Maximum pending messages returned by one non-destructive inbox preview.
+pub const MAX_INBOX_PEEK: usize = 100;
+
+pub(super) const PEEK_SCRIPT: &str = include_str!("store/lua/peek.lua");
+
 /// How long a session's remembered name or suppression lasts: 30 days, in
 /// seconds. A harness session id is one-shot (never reused across restarts),
 /// so entries would otherwise accumulate forever with nothing to clean them up.
@@ -75,7 +80,7 @@ pub use health::{
 pub use inflight::{
     BACKLOG_SCAN_BOUND, Backlog, BatchId, Claim, DEAD_LETTER_CAP, HOOK_LEASE,
     INFLIGHT_ROW_OVERHEAD, LeadBacklog, MAX_INFLIGHT_BATCHES, MAX_INFLIGHT_BYTES, MAX_LEASE,
-    MAX_REDELIVERIES, Now, Popper, Reaped, Sweep, WATCHER_LEASE,
+    MAX_REDELIVERIES, Now, PeekResult, PeekedMessage, Popper, Reaped, Sweep, WATCHER_LEASE,
 };
 pub use moves::{Moves, PanesReplaced, PlaceRefresh};
 pub use scan::ScanCut;

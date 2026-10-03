@@ -17,6 +17,10 @@ path = "src/main.rs"
 name = "team-leader-dashboard"
 path = "src/monitor_main.rs"
 
+[[bin]]
+name = "relay-directory"
+path = "src/directory_main.rs"
+
 [lints]
 workspace = true
 
@@ -28,6 +32,7 @@ clap.workspace = true
 ratatui.workspace = true
 serde_json.workspace = true
 serde.workspace = true
+toml.workspace = true
 signal-hook.workspace = true
 ix-board.workspace = true
 

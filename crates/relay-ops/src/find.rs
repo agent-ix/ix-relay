@@ -127,6 +127,8 @@ pub struct FoundAgent {
     pub herdr_status: String,
     /// Whether this pane is registered on the bus at all.
     pub on_bus: bool,
+    /// Last relay registration refresh time in Unix milliseconds, when registered.
+    pub last_seen_ms: Option<i64>,
 }
 
 /// Joins every machine's live herdr agents against the bus registry
@@ -224,6 +226,7 @@ pub fn join(
                 session_name: agent.session_name.clone(),
                 herdr_status: agent.status.clone(),
                 on_bus: reg.is_some(),
+                last_seen_ms: reg.map(|r| r.last_seen_ms),
             });
         }
     }
@@ -646,6 +649,7 @@ mod tests {
         }
     }
 
+    /// Trace: FR-050-AC-1
     #[test]
     fn a_live_agent_registered_on_the_bus_joins_its_name_and_labels() {
         let mut live = agent("wQ:p1", "wQ:t1", "wQ", "idle");
@@ -658,9 +662,11 @@ mod tests {
         assert_eq!(rows[0].workspace_label.as_deref(), Some("QSL"));
         assert_eq!(rows[0].tab_label.as_deref(), Some("review"));
         assert!(rows[0].on_bus);
+        assert_eq!(rows[0].last_seen_ms, Some(1));
         assert_eq!(rows[0].herdr_status, "idle");
     }
 
+    /// Trace: FR-050-AC-1
     #[test]
     fn a_live_session_does_not_join_the_first_stale_registration_on_its_pane() {
         let mut live = agent("wQ:p1", "wQ:t1", "wQ", "working");
@@ -673,6 +679,7 @@ mod tests {
         assert!(!rows[0].on_bus);
     }
 
+    /// Trace: FR-050-AC-1
     #[test]
     fn a_sessionless_herdr_agent_does_not_verify_a_pane_claim() {
         let machines = vec![machine_view(
@@ -711,6 +718,7 @@ mod tests {
         );
     }
 
+    /// Trace: FR-050-AC-1
     #[test]
     fn a_live_agent_with_no_registration_is_still_listed_as_not_on_bus() {
         let machines = vec![machine_view(
@@ -1026,6 +1034,7 @@ mod tests {
             session_name: Some("agent-d".into()),
             herdr_status: "idle".into(),
             on_bus: true,
+            last_seen_ms: Some(1),
         };
         for query in [
             "QSL-REVIEW",

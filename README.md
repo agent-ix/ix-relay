@@ -146,9 +146,12 @@ config file is shared by all of them. It's also optional (AGE-2018): see
 ```
 agent-msg send <lead|all> "<text>"   # signed as you (see "Automatic bus names"); prints who it queued for and the recipient's state
 agent-msg inbox                      # print and remove your pending messages
+agent-msg inbox --peek               # bounded JSON preview without removing messages
 agent-msg who                        # registered leads
 agent-msg find [<query>]             # look up a lead by name, alias, label, session or pane
-agent-msg log [--since 1h]           # history
+agent-msg log [--since 1h] [--json]  # history; JSON has separate message fields
+agent-msg status [--json]            # Herdr relay/watcher/lead status
+agent-msg badge                      # optional Herdr bar status + pending count
 agent-msg doctor [--json] [--strict] # is the relay healthy? read-only; exits 1 on a failure (--strict: on a warning too)
 agent-msg register [--kind manual]   # register by hand; hooks do this on session start
 agent-msg whoami [--json]            # print this session's bus name, its source, and its alias
@@ -754,7 +757,7 @@ state can be read with Redis down; a `last_ok_tick_ms` more than about 20 second
 | `plugins/codex` | Codex plugin: hooks a lead session into the bus |
 | `plugins/herdr` | Herdr plugin and tab bar status indicator for any coding agent |
 
-Planned: `relay-tui` (escalation inbox), `plugins/opencode`.
+Also available: `relay-tui` (escalation inbox and searchable Herdr lead directory), `plugins/opencode`.
 Tracked in Linear AGE-2007.
 
 ## Build

@@ -12,7 +12,7 @@ use std::{collections::HashSet, num::NonZeroUsize, thread, time::Duration};
 
 use relay_core::{
     AgentName, Claim, CommitOutcome, Demotion, Error, Escalation, EscalationFiling,
-    EscalationStatus, HookHealthEntry, IdentityCommit, Message, PaneRef, PlaceRefresh, Popper,
+    EscalationStatus, HookHealthEntry, IdentityCommit, Message, Now, PaneRef, PlaceRefresh, Popper,
     RefusedDemotion, Registration, Relay, Target,
 };
 
@@ -326,6 +326,52 @@ fn inbox_len_counts_without_popping() {
     let popped = r.pop_inbox(&name("tl-lead"), MAX).unwrap();
     assert_eq!(popped.messages.len(), 3);
     assert_eq!(r.inbox_len(&name("tl-lead")).unwrap(), 0);
+}
+
+#[test]
+fn inbox_peek_is_bounded_read_only_and_reports_redelivery_state() {
+    let Some(mut r) = relay("peek") else { return };
+    register(&mut r, "tl-lead");
+    for text in ["one", "two", "three"] {
+        r.send(&msg("qsl-lead", "tl-lead", text, 1)).unwrap();
+    }
+
+    let two = NonZeroUsize::new(2).unwrap();
+    let first = r.peek_inbox(&name("tl-lead"), two).unwrap();
+    assert_eq!(first.pending, 3);
+    assert!(first.truncated);
+    assert_eq!(first.messages.len(), 2);
+    assert!(first.messages.iter().all(|row| !row.redelivered));
+    assert_eq!(r.inbox_len(&name("tl-lead")).unwrap(), 3);
+    assert_eq!(r.inflight_len(&name("tl-lead")).unwrap(), 0);
+
+    let claim = Claim::new(Popper::Hook)
+        .with_lease(Duration::from_millis(1))
+        .at(Now::AtMs(1_000));
+    let popped = r
+        .pop_inbox_budget(
+            &name("tl-lead"),
+            NonZeroUsize::new(1).unwrap(),
+            1_000_000,
+            claim,
+        )
+        .unwrap();
+    assert_eq!(popped.pending, 2);
+    assert_eq!(r.inflight_len(&name("tl-lead")).unwrap(), 1);
+
+    let during_delivery = r.peek_inbox(&name("tl-lead"), MAX).unwrap();
+    assert_eq!(during_delivery.pending, 2);
+    assert_eq!(r.inbox_len(&name("tl-lead")).unwrap(), 2);
+    assert_eq!(r.inflight_len(&name("tl-lead")).unwrap(), 1);
+
+    r.reap_expired(&name("tl-lead"), Now::AtMs(1_002)).unwrap();
+    let returned = r.peek_inbox(&name("tl-lead"), MAX).unwrap();
+    assert_eq!(returned.pending, 3);
+    assert!(returned.messages[0].redelivered);
+    assert_eq!(returned.messages[0].message.text, "one");
+    assert!(returned.messages[1..].iter().all(|row| !row.redelivered));
+    assert_eq!(r.inbox_len(&name("tl-lead")).unwrap(), 3);
+    assert_eq!(r.inflight_len(&name("tl-lead")).unwrap(), 0);
 }
 
 #[test]

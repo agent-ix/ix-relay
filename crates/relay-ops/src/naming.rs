@@ -110,6 +110,17 @@ impl HerdrEnv {
         std::env::var("HERDR_PANE_ID").ok()?.parse().ok()
     }
 
+    /// The tiled pane a Herdr plugin popup was opened over, when available.
+    /// Popup panes have no own pane id; this reads the host-provided plugin
+    /// context and never treats the popup itself as a lead.
+    #[must_use]
+    pub fn focused_pane_id_from_process_env() -> Option<PaneId> {
+        Self::pane_id_from_process_env().or_else(|| {
+            let context = std::env::var("HERDR_PLUGIN_CONTEXT_JSON").ok()?;
+            focused_pane_from_plugin_context(&context)
+        })
+    }
+
     /// Reads the three env vars herdr sets. `None` if any is unset or empty:
     /// not running inside a herdr-managed pane (the common case for a
     /// one-off or non-herdr session), or — shouldn't happen — only
@@ -125,6 +136,17 @@ impl HerdrEnv {
             workspace_id: get("HERDR_WORKSPACE_ID")?,
         })
     }
+}
+
+#[derive(serde::Deserialize)]
+struct PluginContext {
+    focused_pane_id: Option<PaneId>,
+}
+
+fn focused_pane_from_plugin_context(context: &str) -> Option<PaneId> {
+    serde_json::from_str::<PluginContext>(context)
+        .ok()?
+        .focused_pane_id
 }
 
 /// Shells out to the real `herdr` binary on `PATH`, through `R`
@@ -578,6 +600,28 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+
+    /// Trace: FR-049-AC-1
+    #[test]
+    fn herdr_plugin_popup_context_identifies_only_its_underlying_tiled_pane() {
+        assert_eq!(
+            focused_pane_from_plugin_context(
+                r#"{"focused_pane_id":"w1:p2","invocation_source":"keybinding","future":true}"#
+            )
+            .as_ref()
+            .map(PaneId::as_str),
+            Some("w1:p2")
+        );
+        assert_eq!(
+            focused_pane_from_plugin_context(r#"{"focused_pane_id":"w1\n:p2"}"#),
+            None
+        );
+        assert_eq!(
+            focused_pane_from_plugin_context(r#"{"workspace_id":"w1"}"#),
+            None
+        );
+        assert_eq!(focused_pane_from_plugin_context("not json"), None);
+    }
 
     #[derive(Default)]
     struct FakeLocationHerdr {

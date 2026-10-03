@@ -148,7 +148,8 @@ fn report(flags: CoreFlags) -> StatusReport {
 
     let deadline = Instant::now() + STATUS_BUDGET;
     let herdr_env = HerdrEnv::from_process_env();
-    let pane = herdr_env.as_ref().map(|env| env.pane_id.clone());
+    let pane = HerdrEnv::focused_pane_id_from_process_env()
+        .or_else(|| herdr_env.as_ref().map(|env| env.pane_id.clone()));
     let pane_session = match pane.as_ref() {
         Some(pane_id) => {
             let timeout =
@@ -231,6 +232,37 @@ fn report(flags: CoreFlags) -> StatusReport {
         (_, PaneSession::Live(_), _) => LeadState::Unknown,
     };
     StatusReport::new(RedisState::Reachable, watcher, lead)
+}
+
+/// Renders an optional Herdr bar badge. The count is only read for a lead
+/// whose focused pane was verified by `report`; failures never become zero.
+pub(crate) fn badge(flags: CoreFlags) -> ExitCode {
+    let status = report(flags.clone());
+    let pending =
+        if let (LeadState::Verified(name), RedisState::Reachable) = (&status.lead, status.redis) {
+            config::load_core(flags).ok().and_then(|settings| {
+                Relay::connect(&settings.url.value, Duration::from_millis(500))
+                    .ok()
+                    .map(|relay| relay.with_prefix(settings.prefix.value))
+                    .and_then(|mut relay| relay.inbox_len(name).ok())
+            })
+        } else {
+            None
+        };
+    println!("{}", badge_line(status.status, pending));
+    ExitCode::SUCCESS
+}
+
+fn badge_line(status: OverallState, pending: Option<usize>) -> String {
+    let state = match status {
+        OverallState::Connected => "connected",
+        OverallState::Degraded => "degraded",
+        OverallState::Unavailable => "unavailable",
+    };
+    match pending {
+        Some(count) => format!("● relay {state} · {count} pending"),
+        None => format!("? relay {state} · pending unknown"),
+    }
 }
 
 fn lead_state(registrations: &[Registration], pane_session: &PaneSession) -> LeadState {
@@ -332,6 +364,7 @@ mod tests {
         }
     }
 
+    /// Trace: FR-049-AC-1, FR-049-AC-2
     #[test]
     fn watcher_states_distinguish_missing_stale_unreadable_and_fresh() {
         assert_eq!(watcher_state(None, 100_000), WatcherState::Missing);
@@ -349,6 +382,7 @@ mod tests {
         );
     }
 
+    /// Trace: FR-049-AC-1
     #[test]
     fn only_the_live_herdr_session_matching_the_pane_registration_is_verified() {
         let registered = registration("qsl-lead", "session-1");
@@ -383,6 +417,7 @@ mod tests {
         );
     }
 
+    /// Trace: FR-049-AC-1
     #[test]
     fn duplicate_live_session_registrations_are_unknown_not_guessed() {
         let registrations = [
@@ -396,6 +431,7 @@ mod tests {
         );
     }
 
+    /// Trace: FR-049-AC-1
     #[test]
     fn non_lead_panes_never_render_as_connected_leads() {
         let report = StatusReport::new(
@@ -407,6 +443,7 @@ mod tests {
         assert_eq!(report.status, OverallState::Connected);
     }
 
+    /// Trace: FR-049-AC-1, FR-049-AC-2
     #[test]
     fn unreachable_bus_is_visible_even_when_lead_identity_is_unverified() {
         let report = StatusReport::new(
@@ -417,6 +454,7 @@ mod tests {
         assert_eq!(report.compact(), "× relay unavailable");
     }
 
+    /// Trace: FR-049-AC-2
     #[test]
     fn bus_availability_distinguishes_healthy_degraded_and_unavailable() {
         let lead = LeadState::Verified("qsl-lead".parse().unwrap());
@@ -434,6 +472,7 @@ mod tests {
         );
     }
 
+    /// Trace: FR-049-AC-1, FR-049-AC-2
     #[test]
     fn status_json_keeps_bus_watcher_and_lead_claims_separate() {
         let report = StatusReport::new(
@@ -447,5 +486,18 @@ mod tests {
         assert_eq!(value["watcher"], "fresh");
         assert_eq!(value["lead"]["state"], "verified");
         assert_eq!(value["lead"]["name"], "qsl-lead");
+    }
+
+    /// Trace: FR-052-AC-1, FR-052-AC-3
+    #[test]
+    fn badge_never_turns_an_unavailable_count_into_zero() {
+        assert_eq!(
+            badge_line(OverallState::Connected, Some(0)),
+            "● relay connected · 0 pending"
+        );
+        assert_eq!(
+            badge_line(OverallState::Unavailable, None),
+            "? relay unavailable · pending unknown"
+        );
     }
 }
