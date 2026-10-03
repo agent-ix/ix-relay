@@ -11,9 +11,8 @@
 use std::{collections::HashSet, num::NonZeroUsize, thread, time::Duration};
 
 use relay_core::{
-    AgentName, Claim, CommitOutcome, Demotion, Error, Escalation, EscalationFiling,
-    EscalationStatus, HookHealthEntry, IdentityCommit, Message, PaneRef, PlaceRefresh, Popper,
-    RefusedDemotion, Registration, Relay, Target,
+    AgentName, Claim, Error, Escalation, EscalationFiling, EscalationStatus, HookHealthEntry,
+    IdentityCommit, Message, PaneRef, PlaceRefresh, Popper, Registration, Relay, Target,
 };
 
 fn relay(test: &str) -> Option<Relay> {
@@ -471,113 +470,6 @@ fn agent_looks_up_one_registration_by_name_or_none() {
 }
 
 // ---- aliases (AGE-2018) -----------------------------------------------
-
-#[test]
-fn send_resolves_an_alias_to_its_canonical_inbox() {
-    let Some(mut r) = relay("alias-send") else {
-        return;
-    };
-    register(&mut r, "my-cool-name");
-    r.set_alias(&name("qsl"), &name("my-cool-name")).unwrap();
-
-    let to = r.send(&msg("sender", "qsl", "hi", 1)).unwrap();
-    assert_eq!(
-        to,
-        vec![name("my-cool-name")],
-        "resolved to the canonical name"
-    );
-
-    let popped = r.pop_inbox(&name("my-cool-name"), MAX).unwrap();
-    assert_eq!(popped.messages.len(), 1);
-    assert_eq!(popped.messages[0].text, "hi");
-}
-
-#[test]
-fn sending_to_an_alias_whose_canonical_never_registered_is_still_refused() {
-    let Some(mut r) = relay("alias-dangling") else {
-        return;
-    };
-    r.set_alias(&name("qsl"), &name("nobody")).unwrap();
-    let err = r.send(&msg("sender", "qsl", "hi", 1)).unwrap_err();
-    assert!(matches!(&err, Error::UnknownAgent(n) if n == &name("qsl")));
-}
-
-#[test]
-fn resolve_alias_is_identity_for_a_name_with_no_alias() {
-    let Some(mut r) = relay("alias-identity") else {
-        return;
-    };
-    assert_eq!(r.resolve_alias(&name("qsl")).unwrap(), name("qsl"));
-}
-
-#[test]
-fn aliases_of_lists_every_alias_pointing_at_a_canonical_name() {
-    let Some(mut r) = relay("aliases-of") else {
-        return;
-    };
-    r.set_alias(&name("qsl"), &name("my-cool-name")).unwrap();
-    r.set_alias(&name("qsl-old"), &name("my-cool-name"))
-        .unwrap();
-    r.set_alias(&name("other"), &name("someone-else")).unwrap();
-    assert_eq!(
-        r.aliases_of(&name("my-cool-name")).unwrap(),
-        vec![name("qsl"), name("qsl-old")]
-    );
-    assert!(r.aliases_of(&name("someone-unaliased")).unwrap().is_empty());
-}
-
-#[test]
-fn registering_a_name_that_was_an_alias_reclaims_it_as_canonical() {
-    let Some(mut r) = relay("alias-reclaim") else {
-        return;
-    };
-    r.set_alias(&name("qsl"), &name("my-cool-name")).unwrap();
-    // Someone else now registers directly as "qsl": it must stop being an
-    // alias and become canonical again.
-    register(&mut r, "qsl");
-    assert_eq!(r.resolve_alias(&name("qsl")).unwrap(), name("qsl"));
-}
-
-#[test]
-fn setting_an_alias_drops_any_stale_canonical_registration_under_that_name() {
-    // Caught live on node-a: "qsl" (a location name) registers first as its
-    // own canonical entry, then later loses that status to a `/rename`
-    // title, which sets "qsl" as an alias of the new canonical name. Without
-    // this, "qsl" kept showing up in `who` as its own separate, stale
-    // registration alongside the real one.
-    let Some(mut r) = relay("alias-drops-stale-canonical") else {
-        return;
-    };
-    register(&mut r, "qsl");
-    assert!(r.agent(&name("qsl")).unwrap().is_some());
-    r.set_alias(&name("qsl"), &name("renamed-lead")).unwrap();
-    assert_eq!(
-        r.agent(&name("qsl")).unwrap(),
-        None,
-        "qsl must no longer be its own registration once it's an alias"
-    );
-    assert_eq!(r.resolve_alias(&name("qsl")).unwrap(), name("renamed-lead"));
-}
-
-#[test]
-fn set_alias_to_oneself_is_a_no_op() {
-    let Some(mut r) = relay("alias-self") else {
-        return;
-    };
-    r.set_alias(&name("qsl"), &name("qsl")).unwrap();
-    assert_eq!(r.resolve_alias(&name("qsl")).unwrap(), name("qsl"));
-    assert!(r.aliases_of(&name("qsl")).unwrap().is_empty());
-}
-
-// ---- session name cache (AGE-2018) ------------------------------------
-
-fn remember_session(r: &mut Relay, session_id: &str, n: &str) {
-    r.commit_identity(&IdentityCommit {
-        session_name: Some((session_id.parse().unwrap(), name(n))),
-        ..IdentityCommit::default()
-    })
-    .unwrap();
-}
 
 #[test]
 fn session_name_round_trips_through_commit_identity() {
@@ -1090,254 +982,6 @@ fn refresh_place_updates_only_the_place_and_reports_whether_it_changed() {
 /// Tracing: TC-047-05
 /// ACs: FR-047-AC-5
 #[test]
-fn invalidate_place_clears_only_the_registration_snapshot_that_lost_proof() {
-    let Some(mut r) = relay("invalidate-place") else {
-        return;
-    };
-    let mut seen = reg_at("lead", "sid-1", "w1:p1");
-    seen.place = Some(relay_core::Place {
-        workspace: "EA".into(),
-        tab: "code".into(),
-        herdr_ids: Some(relay_core::HerdrPlaceIds {
-            workspace: "w1".parse().unwrap(),
-            tab: "w1:t1".parse().unwrap(),
-            pane: "w1:p1".parse().unwrap(),
-            session_id: "sid-1".parse().unwrap(),
-            verified_at_ms: 10,
-        }),
-    });
-    r.register(&seen).unwrap();
-
-    let mut replacement = seen.clone();
-    replacement.session_id = Some("sid-2".parse().unwrap());
-    assert!(replacement.verified_place().is_none());
-    r.register(&replacement).unwrap();
-    assert!(
-        !r.invalidate_place(&seen).unwrap(),
-        "stale snapshot cannot clear a new session"
-    );
-
-    let current = r.agent(&name("lead")).unwrap().unwrap();
-    assert!(r.invalidate_place(&current).unwrap());
-    assert!(r.agent(&name("lead")).unwrap().unwrap().place.is_none());
-}
-
-// ---- commit_identity demotions (AGE-2018 PR review) ------------
-
-fn reg_at(name_str: &str, session_id: &str, pane: &str) -> Registration {
-    Registration {
-        name: name(name_str),
-        machine: "node-a".parse().unwrap(),
-        kind: "claude".into(),
-        session_id: Some(session_id.parse().unwrap()),
-        cwd: None,
-        herdr_pane: Some(pane.parse().unwrap()),
-        place: None,
-        last_seen_ms: 1,
-    }
-}
-
-/// Demotes `old` into `new` as the session `sid-1` in pane `w1:p1`.
-fn demote(r: &mut Relay, old: &str, new: &str) -> CommitOutcome {
-    r.commit_identity(&IdentityCommit {
-        demotions: vec![Demotion {
-            old: name(old),
-            new: name(new),
-            session_id: Some("sid-1".parse().unwrap()),
-            pane_id: Some("w1:p1".parse().unwrap()),
-            machine: "node-a".parse().unwrap(),
-        }],
-        ..IdentityCommit::default()
-    })
-    .unwrap()
-}
-
-#[test]
-fn a_demotion_sets_the_alias_when_the_name_was_never_registered() {
-    let Some(mut r) = relay("demote-unregistered") else {
-        return;
-    };
-    assert_eq!(demote(&mut r, "qsl", "renamed"), CommitOutcome::default());
-    assert_eq!(r.resolve_alias(&name("qsl")).unwrap(), name("renamed"));
-}
-
-#[test]
-fn a_demotion_sets_the_alias_when_the_caller_owns_the_existing_registration() {
-    let Some(mut r) = relay("demote-own") else {
-        return;
-    };
-    // The same session/pane that's about to claim "qsl" as an alias already
-    // registered directly under it (a restart in the same spot).
-    r.register(&reg_at("qsl", "sid-1", "w1:p1")).unwrap();
-    assert_eq!(demote(&mut r, "qsl", "renamed"), CommitOutcome::default());
-    assert_eq!(
-        r.agent(&name("qsl")).unwrap(),
-        None,
-        "reclaimed as an alias"
-    );
-}
-
-#[test]
-fn a_demotion_of_a_registration_owned_by_a_different_session_and_pane_is_refused() {
-    let Some(mut r) = relay("demote-refuse-different") else {
-        return;
-    };
-    r.register(&reg_at("qsl", "someone-elses-sid", "w9:p9"))
-        .unwrap();
-    let outcome = demote(&mut r, "qsl", "renamed");
-    assert_eq!(
-        outcome.refused,
-        vec![RefusedDemotion {
-            alias: name("qsl"),
-            session_id: Some("someone-elses-sid".parse().unwrap()),
-            herdr_pane: Some("w9:p9".parse().unwrap()),
-        }]
-    );
-    // Nothing was deleted or aliased.
-    assert!(r.agent(&name("qsl")).unwrap().is_some());
-    assert_eq!(r.resolve_alias(&name("qsl")).unwrap(), name("qsl"));
-}
-
-#[test]
-fn a_demotion_is_refused_when_only_the_pane_differs() {
-    let Some(mut r) = relay("demote-refuse-pane-only") else {
-        return;
-    };
-    // Same session id (e.g. a coincidence), but a different pane: still not
-    // "ours" — refuse rather than guess.
-    r.register(&reg_at("qsl", "sid-1", "w9:p9")).unwrap();
-    assert_eq!(demote(&mut r, "qsl", "renamed").refused.len(), 1);
-}
-
-/// A name demoted to itself is a no-op: it must not become its own alias or
-/// lose its registration.
-#[test]
-fn a_demotion_of_a_name_to_itself_changes_nothing() {
-    let Some(mut r) = relay("demote-self") else {
-        return;
-    };
-    r.register(&reg_at("qsl", "sid-1", "w1:p1")).unwrap();
-    assert_eq!(demote(&mut r, "qsl", "qsl"), CommitOutcome::default());
-    assert!(r.agent(&name("qsl")).unwrap().is_some());
-    assert!(r.all_aliases().unwrap().is_empty());
-}
-
-/// A commit that demotes one name repoints every alias that already pointed
-/// at it, so resolution never needs a second hop.
-#[test]
-fn commit_identity_repoints_every_alias_from_the_old_canonical_to_the_new_one() {
-    let Some(mut r) = relay("commit-retarget") else {
-        return;
-    };
-    r.set_alias(&name("qsl"), &name("b")).unwrap();
-    r.set_alias(&name("qsl-t2"), &name("b")).unwrap();
-    let outcome = r
-        .commit_identity(&IdentityCommit {
-            demotions: vec![Demotion {
-                old: name("b"),
-                new: name("c"),
-                session_id: Some("sid-1".parse().unwrap()),
-                pane_id: Some("w1:p1".parse().unwrap()),
-                machine: "node-a".parse().unwrap(),
-            }],
-            ..IdentityCommit::default()
-        })
-        .unwrap();
-    assert_eq!(outcome, CommitOutcome::default());
-    assert_eq!(r.resolve_alias(&name("qsl")).unwrap(), name("c"));
-    assert_eq!(r.resolve_alias(&name("qsl-t2")).unwrap(), name("c"));
-    assert_eq!(r.resolve_alias(&name("b")).unwrap(), name("c"));
-}
-
-/// A demotion of a name that belongs to a different live session is refused
-/// and reported, while the rest of the commit still applies.
-#[test]
-fn commit_identity_refuses_a_demotion_owned_elsewhere_but_applies_the_rest() {
-    let Some(mut r) = relay("commit-refuse") else {
-        return;
-    };
-    r.register(&reg_at("qsl", "someone-elses-sid", "w9:p9"))
-        .unwrap();
-    let outcome = r
-        .commit_identity(&IdentityCommit {
-            demotions: vec![Demotion {
-                old: name("qsl"),
-                new: name("renamed"),
-                session_id: Some("sid-1".parse().unwrap()),
-                pane_id: Some("w1:p1".parse().unwrap()),
-                machine: "node-a".parse().unwrap(),
-            }],
-            registration: Some(reg_at("renamed", "sid-1", "w1:p1")),
-            session_name: Some(("sid-1".parse().unwrap(), name("renamed"))),
-            suppress_session: None,
-        })
-        .unwrap();
-    assert_eq!(
-        outcome.refused,
-        vec![RefusedDemotion {
-            alias: name("qsl"),
-            session_id: Some("someone-elses-sid".parse().unwrap()),
-            herdr_pane: Some("w9:p9".parse().unwrap()),
-        }]
-    );
-    assert!(r.agent(&name("qsl")).unwrap().is_some(), "left alone");
-    assert!(r.agent(&name("renamed")).unwrap().is_some(), "registered");
-    assert_eq!(
-        r.probe_session(&"sid-1".parse().unwrap()).unwrap().name,
-        Some(name("renamed"))
-    );
-}
-
-/// A demotion over a record nobody can decode is refused too, and reported
-/// without inventing a session or pane.
-#[test]
-fn commit_identity_refuses_a_demotion_over_an_undecodable_registration() {
-    let Ok(url) = std::env::var("IX_RELAY_TEST_URL") else {
-        eprintln!("skipping commit_identity_refuses_undecodable: IX_RELAY_TEST_URL unset");
-        return;
-    };
-    let prefix = format!("test:{}:commit-corrupt:", std::process::id());
-    let mut r = Relay::connect(&url, Duration::from_secs(2))
-        .unwrap()
-        .with_prefix(prefix.clone());
-    let mut raw = redis::Client::open(url).unwrap().get_connection().unwrap();
-    let _: () = redis::cmd("HSET")
-        .arg(format!("{prefix}agents"))
-        .arg("old-name")
-        .arg("{not json")
-        .query(&mut raw)
-        .unwrap();
-    let outcome = r
-        .commit_identity(&IdentityCommit {
-            demotions: vec![Demotion {
-                old: name("old-name"),
-                new: name("new-name"),
-                session_id: Some("s".parse().unwrap()),
-                pane_id: Some("w1:p1".parse().unwrap()),
-                machine: "node-a".parse().unwrap(),
-            }],
-            ..IdentityCommit::default()
-        })
-        .unwrap();
-    assert_eq!(
-        outcome.refused,
-        vec![RefusedDemotion {
-            alias: name("old-name"),
-            session_id: None,
-            herdr_pane: None,
-        }]
-    );
-    let still: Option<String> = redis::cmd("HGET")
-        .arg(format!("{prefix}agents"))
-        .arg("old-name")
-        .query(&mut raw)
-        .unwrap();
-    assert_eq!(still.as_deref(), Some("{not json"), "left untouched");
-}
-
-/// The commit is all-or-nothing from a reader's side: registration, cache and
-/// suppression land together.
-#[test]
 fn commit_identity_writes_registration_cache_and_suppression_together() {
     let Some(mut r) = relay("commit-all") else {
         return;
@@ -1346,7 +990,6 @@ fn commit_identity_writes_registration_cache_and_suppression_together() {
         registration: Some(reg_at("qsl", "sid-1", "w1:p1")),
         session_name: Some(("sid-1".parse().unwrap(), name("qsl"))),
         suppress_session: Some("sid-fork".parse().unwrap()),
-        ..IdentityCommit::default()
     })
     .unwrap();
     assert!(r.agent(&name("qsl")).unwrap().is_some());
@@ -1384,7 +1027,7 @@ fn probe_session_reads_the_mark_the_name_and_the_unresolved_flag_together() {
     r.commit_identity(&IdentityCommit {
         session_name: Some(("sid-1".parse().unwrap(), name("qsl"))),
         suppress_session: Some("sid-fork".parse().unwrap()),
-        ..IdentityCommit::default()
+        registration: None,
     })
     .unwrap();
     assert!(
@@ -1417,21 +1060,6 @@ fn probe_session_reads_the_mark_the_name_and_the_unresolved_flag_together() {
 
 /// An empty commit writes nothing at all.
 #[test]
-fn an_empty_commit_writes_nothing() {
-    let Some(mut r) = relay("commit-empty") else {
-        return;
-    };
-    assert_eq!(
-        r.commit_identity(&IdentityCommit::default()).unwrap(),
-        CommitOutcome::default()
-    );
-    assert!(r.agents().unwrap().registrations.is_empty());
-    assert!(r.all_aliases().unwrap().is_empty());
-}
-
-/// The remembered session name and the suppression mark both expire after 30
-/// days: dropping the `EX` from either write leaves them forever.
-#[test]
 fn session_and_suppression_keys_expire_after_thirty_days() {
     let Ok(url) = std::env::var("IX_RELAY_TEST_URL") else {
         eprintln!("skipping session_and_suppression_keys_expire: IX_RELAY_TEST_URL unset");
@@ -1444,7 +1072,7 @@ fn session_and_suppression_keys_expire_after_thirty_days() {
     r.commit_identity(&IdentityCommit {
         session_name: Some(("sid-1".parse().unwrap(), name("qsl"))),
         suppress_session: Some("sid-fork".parse().unwrap()),
-        ..IdentityCommit::default()
+        registration: None,
     })
     .unwrap();
     let mut raw = redis::Client::open(url).unwrap().get_connection().unwrap();
@@ -1817,19 +1445,6 @@ fn refresh_place_keeps_registration_members_this_binary_does_not_know() {
 // ---- prune (AGE-2018 PR review, finding 7) -------------------------------
 
 #[test]
-fn prune_removes_the_registration_and_every_alias_pointing_at_it() {
-    let Some(mut r) = relay("prune") else {
-        return;
-    };
-    register(&mut r, "qsl");
-    r.set_alias(&name("qsl-old"), &name("qsl")).unwrap();
-    let removed = r.prune(&name("qsl"), 1).unwrap();
-    assert_eq!(removed, Some(vec![name("qsl-old")]));
-    assert!(r.agent(&name("qsl")).unwrap().is_none());
-    assert_eq!(r.resolve_alias(&name("qsl-old")).unwrap(), name("qsl-old"));
-}
-
-#[test]
 fn prune_of_an_unregistered_name_is_a_no_op() {
     let Some(mut r) = relay("prune-noop") else {
         return;
@@ -1839,35 +1454,6 @@ fn prune_of_an_unregistered_name_is_a_no_op() {
 
 /// AGE-2026 review: a lead that re-registers between the watcher's registry
 /// snapshot and its prune keeps its fresh registration.
-#[test]
-fn prune_does_nothing_when_the_registration_changed_since_the_snapshot() {
-    let Some(mut r) = relay("prune-changed") else {
-        return;
-    };
-    register(&mut r, "qsl"); // last_seen_ms = 1: what the snapshot saw
-    r.set_alias(&name("qsl-old"), &name("qsl")).unwrap();
-    let mut fresh = r.agent(&name("qsl")).unwrap().unwrap();
-    fresh.last_seen_ms = 2; // SessionStart re-registered
-    r.register(&fresh).unwrap();
-
-    assert_eq!(r.prune(&name("qsl"), 1).unwrap(), None);
-    assert!(
-        r.agent(&name("qsl")).unwrap().is_some(),
-        "fresh registration survives"
-    );
-    assert_eq!(
-        r.resolve_alias(&name("qsl-old")).unwrap(),
-        name("qsl"),
-        "its aliases survive too"
-    );
-    assert_eq!(
-        r.prune(&name("qsl"), 2).unwrap(),
-        Some(vec![name("qsl-old")])
-    );
-}
-
-// ---- suppressed sessions (AGE-2018 PR review, finding 1) -----------------
-
 #[test]
 fn a_session_starts_out_not_suppressed() {
     let Some(mut r) = relay("suppressed-default") else {
@@ -2028,87 +1614,23 @@ fn a_requeue_wakes_the_log_and_is_not_a_message() {
 
 // ---- the demotion compares the machine (AGE-2027 PR review, finding 4) ------
 
-/// Demotes `old` into `new` as session `sid-1`, pane `w1:p1`, on `machine`.
-fn demote_on(r: &mut Relay, old: &str, new: &str, machine: &str) -> CommitOutcome {
+fn reg_at(name_str: &str, session_id: &str, pane: &str) -> Registration {
+    Registration {
+        name: name(name_str),
+        machine: "node-a".parse().unwrap(),
+        kind: "claude".into(),
+        session_id: Some(session_id.parse().unwrap()),
+        cwd: None,
+        herdr_pane: Some(pane.parse().unwrap()),
+        place: None,
+        last_seen_ms: 1,
+    }
+}
+
+fn remember_session(r: &mut Relay, session_id: &str, n: &str) {
     r.commit_identity(&IdentityCommit {
-        demotions: vec![Demotion {
-            old: name(old),
-            new: name(new),
-            session_id: Some("sid-1".parse().unwrap()),
-            pane_id: Some("w1:p1".parse().unwrap()),
-            machine: machine.parse().unwrap(),
-        }],
+        session_name: Some((session_id.parse().unwrap(), name(n))),
         ..IdentityCommit::default()
     })
-    .unwrap()
-}
-
-/// The regression: the session cache knows no machines, so session `S` resumed on
-/// node-a beside hub, both in pane `w1:p1` (the first pane of the first workspace
-/// on every box), made node-a's demotion claim hub's lead: its registration was
-/// deleted and its name aliased to node-a's. Fails on `main` and on the PR before
-/// the machine was compared.
-#[test]
-fn a_demotion_from_another_machine_never_claims_a_lead_with_the_same_session_and_pane() {
-    let Some(mut r) = relay("demote-two-machines") else {
-        return;
-    };
-    let mut hub = reg_at("x", "sid-1", "w1:p1");
-    hub.machine = "hub".parse().unwrap();
-    r.register(&hub).unwrap();
-
-    let outcome = demote_on(&mut r, "x", "y", "node-a");
-    assert_eq!(outcome.refused.len(), 1, "node-a does not own hub's lead");
-    assert_eq!(r.agent(&name("x")).unwrap(), Some(hub), "still registered");
-    assert!(r.all_aliases().unwrap().is_empty(), "and not aliased away");
-}
-
-/// Shared test vectors for the machine rule: the Lua `normalise_machine` inside
-/// `claim_alias` and `MachineName::normalise` must agree, so a record stored
-/// with the machine as an older writer spelled it (`Hub`, `hub.local`) is still
-/// claimed by its own machine, and only by it.
-#[test]
-fn the_lua_and_rust_machine_rules_agree_on_every_vector() {
-    const VECTORS: [(&str, &str); 7] = [
-        ("hub", "hub"),
-        ("Hub", "hub"),
-        ("HUB", "hub"),
-        ("hub.local", "hub"),
-        ("Hub.Example.COM", "hub"),
-        ("node-a.internal.example.com", "node-a"),
-        ("\u{c9}cole", "\u{c9}cole"),
-    ];
-    let Some(mut bus) = relay_test_support::Bus::connect("machine-vectors") else {
-        return;
-    };
-    for (raw, normal) in VECTORS {
-        assert_eq!(
-            relay_core::MachineName::new(raw).unwrap().as_str(),
-            normal,
-            "Rust rule on {raw:?}"
-        );
-        // The record as an older writer stored it: the raw machine string.
-        let json = format!(
-            r#"{{"name":"held","machine":{},"kind":"claude","session_id":"sid-1","cwd":null,"herdr_pane":"w1:p1","place":null,"last_seen_ms":1}}"#,
-            serde_json::to_string(raw).unwrap()
-        );
-        for claimer in ["hub", "node-a", "\u{c9}cole"] {
-            bus.plant("held", json.as_bytes());
-            let outcome = demote_on(&mut bus.relay, "held", "new", claimer);
-            let claimed = outcome.refused.is_empty();
-            assert_eq!(
-                claimed,
-                claimer == normal,
-                "{raw:?} claimed by {claimer:?} (Lua rule disagrees with {normal:?})"
-            );
-            // Reset for the next pair.
-            let agents = bus.key("agents");
-            let aliases = bus.key("aliases");
-            let _: () = redis::cmd("DEL")
-                .arg(agents)
-                .arg(aliases)
-                .query(&mut bus.raw)
-                .unwrap();
-        }
-    }
+    .unwrap();
 }

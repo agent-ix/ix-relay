@@ -14,10 +14,8 @@ pub enum Error {
     /// Work reporting validation failed.
     #[error(transparent)]
     Work(#[from] crate::work::WorkError),
-    /// A name did not match herdr's agent-name rule, or used the reserved word `all`.
-    #[error(
-        "invalid agent name {name:?}: must match [a-z][a-z0-9_-]{{0,31}} and must not be \"all\""
-    )]
+    /// An opaque storage identity or actor value was malformed.
+    #[error("invalid storage identity {name:?}")]
     InvalidName {
         /// The rejected input.
         name: String,
@@ -25,13 +23,17 @@ pub enum Error {
     /// A message was addressed to a lead that has never registered.
     #[error("unknown agent {0}: it has not registered on the bus (see `agent-msg who`)")]
     UnknownAgent(AgentName),
-    /// Text was not a `server:workspace[:tab[:pane]]` address.
-    #[error(
-        "invalid address {input:?}: expected server:workspace[:tab[:pane]], e.g. hub:EA:1 or node-a:research"
-    )]
+    /// Text was not an exact public tab address.
+    #[error("invalid address {input:?}: expected server:workspace:tab, e.g. draco:ix-relay:code")]
     InvalidAddress {
         /// The rejected input.
         input: String,
+    },
+    /// Enrollment had no genuine session and verified placement.
+    #[error("unverified enrollment: {reason}")]
+    UnverifiedEnrollment {
+        /// Why the session proof was rejected.
+        reason: String,
     },
     /// Relative addressing needs the sender's verified Herdr location.
     #[error(
@@ -42,7 +44,7 @@ pub enum Error {
         input: String,
     },
     /// A target matched more than one lead. Never resolved by guessing: the
-    /// sender picks one, by a more specific address (add tab/pane detail) or a bus name.
+    /// operator places each lead in a separate tab.
     #[error("{input:?} matches {} leads, so nothing was sent: {}", .candidates.len(), list_candidates(.candidates))]
     AmbiguousTarget {
         /// What the sender typed.
@@ -57,7 +59,7 @@ pub enum Error {
         input: String,
         /// The most likely reason nothing matched.
         cause: UnknownCause,
-        /// Close matches (addresses, names, aliases), best first; may be empty.
+        /// Close canonical addresses, best first; may be empty.
         suggestions: Vec<String>,
     },
     /// A message's text was larger than [`crate::MAX_MESSAGE_BYTES`] allows.
@@ -298,6 +300,7 @@ impl Error {
             Self::Redis(e) => e.is_io_error() || e.is_unrecoverable_error(),
             Self::Work(_)
             | Self::InvalidName { .. }
+            | Self::UnverifiedEnrollment { .. }
             | Self::UnknownAgent(_)
             | Self::InvalidAddress { .. }
             | Self::RelativeAddressNeedsLocation { .. }
@@ -364,7 +367,7 @@ fn list_candidates(candidates: &[Candidate]) -> String {
 /// statement the registry supports, so the sender knows what to fix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnknownCause {
-    /// Not an address, and no lead has that name, alias or pane id.
+    /// No verified lead at the requested address.
     NotRegistered,
     /// An address whose server has no registered lead.
     UnknownServer {
@@ -391,9 +394,7 @@ pub enum UnknownCause {
 
 fn unknown_target_message(input: &str, cause: &UnknownCause, suggestions: &[String]) -> String {
     let why = match cause {
-        UnknownCause::NotRegistered => {
-            "no lead is registered under that name, alias, pane id or address".to_owned()
-        }
+        UnknownCause::NotRegistered => "no verified lead is registered at that address".to_owned(),
         UnknownCause::UnknownServer { server, known } => {
             format!(
                 "no lead is registered on server {server:?} (servers with leads: {})",

@@ -764,6 +764,38 @@ mod tests {
         }
     }
 
+    /// Missing startup enrollment is healed from genuine live topology only.
+    #[test]
+    fn watcher_enrolls_missing_unique_sessions_and_never_creates_tab_aliases() {
+        let Some(mut bus) = Bus::connect("watcher-auto-enrollment") else {
+            return;
+        };
+        let mut state = WatcherState::default();
+        let mut log = Vec::new();
+        refresh(&mut bus, &replayed("start"), &mut state, &mut log);
+        let initial = bus.relay.agents().unwrap().registrations;
+        // sess-A1 and sess-A3 share wsA:1 and must not be auto-enrolled.
+        assert_eq!(initial.len(), 2);
+        for session in ["sess-A2", "sess-B1"] {
+            let id = AgentName::for_session(&hub(), &session.parse().unwrap());
+            let reg = bus.relay.agent(&id).unwrap().unwrap();
+            assert!(reg.full_address().is_some());
+        }
+        refresh(&mut bus, &replayed("tab-renamed"), &mut state, &mut log);
+        assert_eq!(bus.relay.agents().unwrap().registrations.len(), 2);
+        let id = AgentName::for_session(&hub(), &"sess-A2".parse().unwrap());
+        assert_eq!(
+            bus.relay
+                .agent(&id)
+                .unwrap()
+                .unwrap()
+                .full_address()
+                .unwrap()
+                .to_string(),
+            "hub:wsA-renamed:tabB-renamed"
+        );
+    }
+
     /// The whole measured sequence, replayed through the watcher's refresh: a
     /// workspace rename, a tab rename, a pane move within its workspace (same id,
     /// new tab), a pane move to another workspace (new id), neighbours closing and
@@ -779,10 +811,10 @@ mod tests {
         };
         let start = layout_of("start");
         for (n, session, p) in [
-            ("lead-a", "sess-A1", "w1:p1"),
-            ("lead-b", "sess-A2", "w1:p2"),
-            ("lead-c", "sess-A3", "w1:p3"),
-            ("lead-d", "sess-B1", "w2:p1"),
+            ("session/687562/736573732d4131", "sess-A1", "w1:p1"),
+            ("session/687562/736573732d4132", "sess-A2", "w1:p2"),
+            ("session/687562/736573732d4133", "sess-A3", "w1:p3"),
+            ("session/687562/736573732d4231", "sess-B1", "w2:p1"),
         ] {
             let at = start.places.get(&pane(p)).cloned();
             register(&mut bus, n, "hub", Some(session), p, at);
@@ -800,25 +832,25 @@ mod tests {
             &mut log,
         );
         expect.extend([
-            row(rename, "lead-a", None, "w1:p1"),
-            row(rename, "lead-b", None, "w1:p2"),
-            row(rename, "lead-c", None, "w1:p3"),
+            row(rename, "session/687562/736573732d4131", None, "w1:p1"),
+            row(rename, "session/687562/736573732d4132", None, "w1:p2"),
+            row(rename, "session/687562/736573732d4133", None, "w1:p3"),
         ]);
         let mut seen = moves(&mut bus);
         seen.sort_by(|a, b| a.1.cmp(&b.1));
         assert_eq!(seen, expect);
         assert!(place_matches(
-            &get(&mut bus, "lead-c").place,
+            &get(&mut bus, "session/687562/736573732d4133").place,
             &place("wsA-renamed", "1", 2)
         ));
         assert!(place_matches(
-            &get(&mut bus, "lead-d").place,
+            &get(&mut bus, "session/687562/736573732d4231").place,
             &place("wsB", "1", 1)
         ));
 
         // Tab `tabB` renamed: only its lead.
         refresh(&mut bus, &replayed("tab-renamed"), &mut state, &mut log);
-        expect.push(row(rename, "lead-b", None, "w1:p2"));
+        expect.push(row(rename, "session/687562/736573732d4132", None, "w1:p2"));
         assert_eq!(moves(&mut bus).last(), expect.last());
         assert_eq!(moves(&mut bus).len(), expect.len());
 
@@ -836,11 +868,14 @@ mod tests {
             &mut state,
             &mut log,
         );
-        expect.push(row(rename, "lead-c", None, "w1:p3"));
+        expect.push(row(rename, "session/687562/736573732d4133", None, "w1:p3"));
         assert_eq!(moves(&mut bus).last(), expect.last());
-        assert_eq!(get(&mut bus, "lead-c").herdr_pane, Some(pane("w1:p3")));
+        assert_eq!(
+            get(&mut bus, "session/687562/736573732d4133").herdr_pane,
+            Some(pane("w1:p3"))
+        );
         assert!(place_matches(
-            &get(&mut bus, "lead-c").place,
+            &get(&mut bus, "session/687562/736573732d4133").place,
             &place("wsA-renamed", "tabB-renamed", 2)
         ));
 
@@ -852,21 +887,26 @@ mod tests {
             &mut state,
             &mut log,
         );
-        expect.push(row(relink, "lead-c", Some("w1:p3"), "w2:p2"));
+        expect.push(row(
+            relink,
+            "session/687562/736573732d4133",
+            Some("w1:p3"),
+            "w2:p2",
+        ));
         assert_eq!(moves(&mut bus).last(), expect.last());
-        let moved = get(&mut bus, "lead-c");
+        let moved = get(&mut bus, "session/687562/736573732d4133");
         assert_eq!(moved.herdr_pane, Some(pane("w2:p2")));
         assert!(place_matches(&moved.place, &place("wsB", "1", 1)));
         assert_eq!(moved.session_id, Some(sid("sess-A3")));
         assert!(
             log.iter()
-                .any(|l| l.contains("lead-c") && l.contains("relinked"))
+                .any(|l| l.contains("session/687562/736573732d4133") && l.contains("relinked"))
         );
 
         // Neighbours closed (lead-a's tab, and with it its pane and session): the
         // lead remains registered for the prune rule, but its location proof is
         // invalidated because Herdr can no longer verify that pane.
-        let before_a = get(&mut bus, "lead-a");
+        let before_a = get(&mut bus, "session/687562/736573732d4131");
         refresh(
             &mut bus,
             &replayed("neighbours-closed"),
@@ -876,10 +916,10 @@ mod tests {
         // Only the workspace's tab count changed for lead-b: its address is kept
         // true and no rename is recorded.
         assert!(place_matches(
-            &get(&mut bus, "lead-b").place,
+            &get(&mut bus, "session/687562/736573732d4132").place,
             &place("wsA-renamed", "tabB-renamed", 1)
         ));
-        let after_a = get(&mut bus, "lead-a");
+        let after_a = get(&mut bus, "session/687562/736573732d4131");
         assert_eq!(after_a.place, None);
         assert_eq!(after_a.herdr_pane, before_a.herdr_pane);
         assert_eq!(after_a.session_id, before_a.session_id);
@@ -888,18 +928,28 @@ mod tests {
         // The server restarted: every pane id survived but no harness has
         // reported a session yet, so old place proofs are invalidated. The leads
         // stay registered and no move is recorded.
-        let before: Vec<_> = ["lead-a", "lead-b", "lead-c", "lead-d"]
-            .map(|n| get(&mut bus, n))
-            .into();
+        let before: Vec<_> = [
+            "session/687562/736573732d4131",
+            "session/687562/736573732d4132",
+            "session/687562/736573732d4133",
+            "session/687562/736573732d4231",
+        ]
+        .map(|n| get(&mut bus, n))
+        .into();
         refresh(
             &mut bus,
             &replayed("server-restarted"),
             &mut state,
             &mut log,
         );
-        let after: Vec<_> = ["lead-a", "lead-b", "lead-c", "lead-d"]
-            .map(|n| get(&mut bus, n))
-            .into();
+        let after: Vec<_> = [
+            "session/687562/736573732d4131",
+            "session/687562/736573732d4132",
+            "session/687562/736573732d4133",
+            "session/687562/736573732d4231",
+        ]
+        .map(|n| get(&mut bus, n))
+        .into();
         for (before, after) in before.iter().zip(&after) {
             assert_eq!(before.name, after.name);
             assert_eq!(before.session_id, after.session_id);
@@ -908,7 +958,16 @@ mod tests {
         }
         assert_eq!(moves(&mut bus), expect);
         assert!(
-            markers_of(&mut bus, &["lead-a", "lead-b", "lead-c", "lead-d"]).is_empty(),
+            markers_of(
+                &mut bus,
+                &[
+                    "session/687562/736573732d4131",
+                    "session/687562/736573732d4132",
+                    "session/687562/736573732d4133",
+                    "session/687562/736573732d4231"
+                ]
+            )
+            .is_empty(),
             "no pane hosted another session at any point"
         );
     }

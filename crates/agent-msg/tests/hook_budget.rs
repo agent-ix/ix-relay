@@ -40,7 +40,7 @@ fn blackhole() -> String {
 /// How long one hook of `event` takes against the blackhole, as a lead named by
 /// `--as` (`explicit`) or derived from its session.
 fn hook_wall_time(event: &str, explicit: bool) -> Duration {
-    let mut cmd = base_cmd(&["hook", "claude"], explicit.then_some("receiver"));
+    let mut cmd = base_cmd(&["hook", "claude"], explicit.then_some("hub:EA:code"));
     cmd.env("IX_RELAY_URL", blackhole());
     let stdin = format!(r#"{{"hook_event_name":"{event}","session_id":"s1","cwd":"/work"}}"#);
     let started = Instant::now();

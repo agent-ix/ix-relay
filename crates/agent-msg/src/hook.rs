@@ -32,18 +32,11 @@ pub struct HookInput {
     /// The harness session id.
     #[serde(default, deserialize_with = "lenient_session_id")]
     pub session_id: Option<SessionId>,
-    /// The agent's working directory.
-    pub cwd: Option<String>,
     /// Which hook fired.
     pub hook_event_name: String,
     /// Set when the call comes from inside a subagent. Subagents never read the
     /// lead's inbox; only the lead does.
     pub agent_id: Option<String>,
-    /// Path to this session's transcript (Claude Code only; Codex omits
-    /// it). Used by AGE-2018's name-precedence chain to read the last
-    /// `/rename` title a lead's own session recorded — see
-    /// `identity::custom_title_from_transcript`.
-    pub transcript_path: Option<String>,
     /// `SessionStart`'s own `source` field: `"startup"`, `"resume"`,
     /// `"clear"`, or `"fork"` when Claude Code launched this session via
     /// `--fork-session` (verified live 2026-09-24). AGE-2018 PR review,
@@ -183,8 +176,8 @@ mod tests {
         ["first", "second"]
             .into_iter()
             .map(|text| Message {
-                from: "qsl-lead".parse().unwrap(),
-                to: "tl-lead".parse().unwrap(),
+                from: "draco:qsl:code".parse().unwrap(),
+                to: "terra:tl:code".parse().unwrap(),
                 text: text.into(),
                 sent_at_ms: 0,
             })
@@ -207,7 +200,7 @@ mod tests {
                 json!({"hookSpecificOutput": {
                     "hookEventName": name,
                     "additionalContext":
-                        "[ix-relay] from qsl-lead: first\n[ix-relay] from qsl-lead: second"
+                        "[ix-relay] from draco:qsl:code: first\n[ix-relay] from draco:qsl:code: second"
                 }})
             );
         }
@@ -231,14 +224,14 @@ mod tests {
         let out = serde_json::to_value(out).unwrap();
         assert_eq!(
             out["hookSpecificOutput"]["additionalContext"],
-            "[ix-relay] from qsl-lead (redelivered): first\n[ix-relay] from qsl-lead: second"
+            "[ix-relay] from draco:qsl:code (redelivered): first\n[ix-relay] from draco:qsl:code: second"
         );
     }
 
     #[test]
     fn the_sender_is_shown_by_address_when_the_book_knows_one() {
         let book = AddressBook::from_registrations(&[relay_core::Registration {
-            name: "qsl-lead".parse().unwrap(),
+            name: "draco:qsl:code".parse().unwrap(),
             machine: "hub".parse().unwrap(),
             kind: "claude".into(),
             session_id: Some("session-1".parse().unwrap()),
@@ -275,7 +268,7 @@ mod tests {
         assert_eq!(
             out,
             json!({"decision": "block",
-                   "reason": "[ix-relay] from qsl-lead: first\n[ix-relay] from qsl-lead: second"})
+                   "reason": "[ix-relay] from draco:qsl:code: first\n[ix-relay] from draco:qsl:code: second"})
         );
     }
 
@@ -296,7 +289,7 @@ mod tests {
             json!({"hookSpecificOutput": {
                 "hookEventName": "PostToolUse",
                 "additionalContext":
-                    "[ix-relay] from qsl-lead: first\n[ix-relay] from qsl-lead: second\n\
+                    "[ix-relay] from draco:qsl:code: first\n[ix-relay] from draco:qsl:code: second\n\
                      (3 more ix-relay messages pending)"
             }})
         );
@@ -308,7 +301,7 @@ mod tests {
         assert_eq!(
             blocked,
             json!({"decision": "block",
-                   "reason": "[ix-relay] from qsl-lead: first\n[ix-relay] from qsl-lead: second\n\
+                   "reason": "[ix-relay] from draco:qsl:code: first\n[ix-relay] from draco:qsl:code: second\n\
                               (1 more ix-relay messages pending)"})
         );
     }
@@ -340,7 +333,6 @@ mod tests {
             input.session_id.as_ref().map(|v| v.as_str()),
             Some("11111111-2222-4333-8444-555555555555")
         );
-        assert_eq!(input.cwd.as_deref(), Some("/work"));
         assert_eq!(Event::parse(&input.hook_event_name), Some(Event::Stop));
         assert!(input.agent_id.is_none());
     }
@@ -428,12 +420,6 @@ mod tests {
                 input.session_id.as_ref().map(|v| v.as_str()),
                 Some("01a0d6ac-ec6a-7ba0-9ae9-dd543ce5a184"),
                 "{:?}: session_id",
-                case.event
-            );
-            assert_eq!(
-                input.cwd.as_deref(),
-                Some("/tmp/codex-probe-ws"),
-                "{:?}: cwd",
                 case.event
             );
             assert_eq!(

@@ -48,25 +48,24 @@ fn url() -> Option<String> {
 /// (rc 0), and never fails with a corrupt-record error for a name that was
 /// accepted before.
 #[test]
-fn send_queues_to_a_lead_whose_record_this_binary_cannot_read() {
+fn unreadable_legacy_names_are_never_routing_targets() {
     let Some(url) = url() else { return };
     let prefix = format!("test:{}:unreadable:send:", std::process::id());
     plant(&url, &prefix);
     for (name, _, _) in planted() {
         let r = support::agent_msg(
             &["send", name, "hi"],
-            Some("sender"),
+            Some("hub:EA:sender"),
             Some(&url),
             Some(&prefix),
             "",
         );
-        assert_eq!(r.status, 0, "send {name}: {}", r.stderr);
-        assert!(
-            r.stdout.contains(&format!("queued for {name}")),
-            "{name}: {}",
-            r.stdout
-        );
-        assert!(!r.stderr.contains("corrupt record"), "{name}: {}", r.stderr);
+        assert_ne!(r.status, 0, "send {name}: {}", r.stderr);
+        assert!(r.stderr.contains("invalid lead address"), "{}", r.stderr);
+        let mut relay = relay_core::Relay::connect(&url, std::time::Duration::from_secs(2))
+            .unwrap()
+            .with_prefix(&prefix);
+        assert_eq!(relay.inbox_len(&name.parse().unwrap()).unwrap(), 0);
     }
 }
 

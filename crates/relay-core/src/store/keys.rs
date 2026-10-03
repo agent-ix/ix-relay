@@ -42,10 +42,6 @@ impl Keys {
         format!("{}agents", self.prefix)
     }
 
-    pub(super) fn aliases_key(&self) -> String {
-        format!("{}aliases", self.prefix)
-    }
-
     pub(super) fn log_key(&self) -> String {
         format!("{}log", self.prefix)
     }
@@ -168,7 +164,6 @@ mod tests {
             ("work_key", relay.work_key(&machine, &sid, 42)),
             ("inbox_key", relay.inbox_key(&agent)),
             ("agents_key", relay.agents_key()),
-            ("aliases_key", relay.aliases_key()),
             ("log_key", relay.log_key()),
             ("health_hooks_key", relay.health_hooks_key()),
             ("esc_key", relay.esc_key(&id)),
@@ -198,7 +193,6 @@ mod tests {
             ("work_key", "p:work:node-a:sid-1:42"),
             ("inbox_key", "p:inbox:lead-a"),
             ("agents_key", "p:agents"),
-            ("aliases_key", "p:aliases"),
             ("log_key", "p:log"),
             ("health_hooks_key", "p:health:hooks"),
             ("esc_key", "p:esc:e1"),
@@ -253,7 +247,6 @@ mod tests {
             other.work_key(&machine, &sid, 42),
             other.inbox_key(&agent),
             other.agents_key(),
-            other.aliases_key(),
             other.log_key(),
             other.health_hooks_key(),
             other.esc_key(&id),

@@ -51,12 +51,22 @@ impl Bus {
             .unwrap()
             .with_prefix(prefix.clone());
         for (name, machine, pane) in [
-            ("receiver", "hub", receiver_pane),
-            ("sender", "node-a", Some("w9:p9")),
+            ("hub:EA:code", "hub", receiver_pane),
+            ("hub:EA:sender", "node-a", Some("w9:p9")),
         ] {
             relay
                 .register(&Registration {
-                    name: name.parse().unwrap(),
+                    name: if name == "hub:EA:code" {
+                        relay_core::AgentName::for_session(
+                            &"hub".parse().unwrap(),
+                            &"s1".parse().unwrap(),
+                        )
+                    } else {
+                        relay_core::AgentName::for_session(
+                            &"node-a".parse().unwrap(),
+                            &"sender-session".parse().unwrap(),
+                        )
+                    },
                     machine: machine.parse().unwrap(),
                     kind: "claude".into(),
                     session_id: None,
@@ -98,7 +108,7 @@ impl Bus {
 
     /// `agent-msg send <to> hi` as `sender`, against `url` (this bus or a proxy to it).
     fn send(&self, url: &str, to: &str) -> support::Run {
-        let mut cmd = base_cmd(&["send", to, "hi"], Some("sender"));
+        let mut cmd = base_cmd(&["send", to, "hi"], Some("hub:EA:sender"));
         cmd.env("IX_RELAY_URL", url)
             .env("IX_RELAY_PREFIX", &self.prefix)
             .env("IX_RELAY_MACHINE", "node-a");
@@ -131,18 +141,18 @@ fn tc_041_01_send_prints_the_recipients_state_on_the_queued_line() {
     let Some(url) = test_url() else { return };
 
     let mut bus = Bus::new(&url, "states", Some("w1:p1"));
-    let down = bus.send(&url, "receiver");
+    let down = bus.send(&url, "hub:EA:code");
     assert_eq!(down.status, 0, "{}", down.stderr);
     assert_eq!(
         down.stdout.trim(),
-        "queued for receiver (no watcher heartbeat from hub, 1 waiting)"
+        "queued for hub:EA:code (no watcher heartbeat from hub, 1 waiting)"
     );
 
     bus.heartbeat("hub", true);
-    let up = bus.send(&url, "receiver");
+    let up = bus.send(&url, "hub:EA:code");
     assert!(
         up.stdout
-            .starts_with("queued for receiver (watcher heartbeat from hub (last tick "),
+            .starts_with("queued for hub:EA:code (watcher heartbeat from hub (last tick "),
         "{}",
         up.stdout
     );
@@ -153,7 +163,7 @@ fn tc_041_01_send_prints_the_recipients_state_on_the_queued_line() {
     );
 
     bus.heartbeat("hub", false);
-    let unhealthy = bus.send(&url, "receiver");
+    let unhealthy = bus.send(&url, "hub:EA:code");
     assert!(
         unhealthy
             .stdout
@@ -163,9 +173,9 @@ fn tc_041_01_send_prints_the_recipients_state_on_the_queued_line() {
     );
 
     let nopane = Bus::new(&url, "nopane", None);
-    let out = nopane.send(&url, "receiver");
+    let out = nopane.send(&url, "hub:EA:code");
     assert!(
-        out.stdout.contains("no herdr pane registered"),
+        out.stdout.contains("no watcher heartbeat from hub"),
         "{}",
         out.stdout
     );
@@ -181,14 +191,15 @@ fn tc_041_01_send_prints_the_recipients_state_on_the_queued_line() {
 fn tc_041_04_the_state_line_never_reaches_the_recipient_and_a_broadcast_has_none() {
     let Some(url) = test_url() else { return };
     let mut bus = Bus::new(&url, "terminal-only", Some("w1:p1"));
-    let sent = bus.send(&url, "receiver");
+    let sent = bus.send(&url, "hub:EA:code");
     assert!(
         sent.stdout.contains("no watcher heartbeat from hub"),
         "{}",
         sent.stdout
     );
 
-    let receiver = "receiver".parse().unwrap();
+    let receiver =
+        relay_core::AgentName::for_session(&"hub".parse().unwrap(), &"s1".parse().unwrap());
     let popped = bus
         .relay
         .pop_inbox(&receiver, std::num::NonZeroUsize::new(10).unwrap())
@@ -199,7 +210,7 @@ fn tc_041_04_the_state_line_never_reaches_the_recipient_and_a_broadcast_has_none
 
     let broadcast = bus.send(&url, "all");
     assert_eq!(broadcast.status, 0, "{}", broadcast.stderr);
-    assert_eq!(broadcast.stdout.trim(), "queued for receiver");
+    assert_eq!(broadcast.stdout.trim(), "queued for hub:EA:code");
 }
 
 /// A proxy that forwards everything until the client sends the recipient-state
@@ -264,7 +275,7 @@ fn tc_041_03_a_stalled_redis_degrades_to_the_plain_line_within_the_probe_bound()
         .unwrap();
     // The baseline: the same send, process start included, with nothing stalled.
     let started = Instant::now();
-    let healthy = bus.send(&url, "receiver");
+    let healthy = bus.send(&url, "hub:EA:code");
     let baseline = started.elapsed();
     assert!(
         healthy.stdout.contains("(no watcher heartbeat"),
@@ -273,10 +284,10 @@ fn tc_041_03_a_stalled_redis_degrades_to_the_plain_line_within_the_probe_bound()
     );
     let proxy = stall_on_llen(upstream);
     let started = Instant::now();
-    let out = bus.send(&proxy, "receiver");
+    let out = bus.send(&proxy, "hub:EA:code");
     let took = started.elapsed();
     assert_eq!(out.status, 0, "{}", out.stderr);
-    assert_eq!(out.stdout.trim(), "queued for receiver");
+    assert_eq!(out.stdout.trim(), "queued for hub:EA:code");
     let bound = baseline + Duration::from_millis(250 + 150);
     assert!(
         took < bound,
@@ -289,7 +300,15 @@ fn tc_041_03_a_stalled_redis_degrades_to_the_plain_line_within_the_probe_bound()
     let mut relay = Relay::connect(&url, Duration::from_secs(2))
         .unwrap()
         .with_prefix(bus.prefix.clone());
-    assert_eq!(relay.inbox_len(&"receiver".parse().unwrap()).unwrap(), 2);
+    assert_eq!(
+        relay
+            .inbox_len(&relay_core::AgentName::for_session(
+                &"hub".parse().unwrap(),
+                &"s1".parse().unwrap()
+            ))
+            .unwrap(),
+        2
+    );
 }
 
 /// Tracing: TC-041-05
@@ -316,7 +335,10 @@ fn tc_041_05_a_machine_name_that_is_not_hostname_shaped_is_never_printed() {
         };
         relay
             .register(&Registration {
-                name: "receiver".parse().unwrap(),
+                name: relay_core::AgentName::for_session(
+                    &"hub".parse().unwrap(),
+                    &"s1".parse().unwrap(),
+                ),
                 machine: parsed,
                 kind: "claude".into(),
                 session_id: None,
@@ -326,8 +348,14 @@ fn tc_041_05_a_machine_name_that_is_not_hostname_shaped_is_never_printed() {
                 last_seen_ms: now_ms(),
             })
             .unwrap();
-        let out = bus.send(&url, "receiver");
-        assert_eq!(out.stdout.trim(), "queued for receiver", "{machine:?}");
+        let out = bus.send(&url, "hub:EA:code");
+        assert!(
+            out.stdout
+                .contains("queued for hub:EA:code (no watcher heartbeat from hub,"),
+            "{machine:?}: {}",
+            out.stdout
+        );
+        assert!(!out.stdout.contains(machine));
         tried += 1;
     }
     assert!(tried > 0, "no odd machine name could be registered");

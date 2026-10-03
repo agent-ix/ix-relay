@@ -6,16 +6,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
 
-/// Longest name herdr accepts; the bus uses the same rule so one name works in both.
-pub(crate) const MAX_NAME_LEN: usize = 32;
+/// Maximum encoded storage identity size.
+pub(crate) const MAX_NAME_LEN: usize = 2048;
 
 /// Reserved for broadcast; no agent may take it.
 pub(crate) const ALL: &str = "all";
 
-/// A lead's name on the bus, e.g. `qsl-lead`.
+/// A storage identity or signed message actor.
 ///
-/// Follows herdr's rule `[a-z][a-z0-9_-]{0,31}`, so the same name can address the
-/// agent through `herdr agent prompt`. Unlike herdr names it is global across machines.
+/// Leads use [`AgentName::for_session`] for durable queues. Public sender actors
+/// use the verified three-part location. This type is not a routing resolver;
+/// the CLI validates public locations before selecting any queue.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct AgentName(String);
@@ -30,23 +31,34 @@ impl AgentName {
 impl AgentName {
     /// Whether `s` satisfies the name rule.
     fn is_valid(s: &str) -> bool {
+        if let Some(rest) = s.strip_prefix("session/") {
+            return !rest.is_empty()
+                && s.len() <= MAX_NAME_LEN
+                && !s.chars().any(|c| c.is_control() || c.is_whitespace());
+        }
+        if s.split(':').count() == 3 && s.parse::<crate::Address>().is_ok() {
+            return s.len() <= crate::MAX_LABEL_BYTES;
+        }
         let mut chars = s.chars();
-        s.len() <= MAX_NAME_LEN
+        s.len() <= 32
             && s != ALL
             && chars.next().is_some_and(|c| c.is_ascii_lowercase())
             && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
     }
 
-    /// Wraps a string the caller has just built to satisfy the name rule by
-    /// construction ([`crate::naming::slugify`], [`crate::naming::with_suffix`]),
-    /// so those never need a panicking `parse().expect(..)` on a hook path.
-    /// Their proptests are what check "by construction"; debug builds assert it.
-    pub(crate) fn from_constructed(s: String) -> Self {
-        debug_assert!(
-            Self::is_valid(&s),
-            "constructed an invalid agent name {s:?}"
-        );
-        Self(s)
+    /// Opaque durable queue identity, independent of mutable location labels.
+    pub fn for_session(machine: &crate::MachineName, session: &crate::SessionId) -> Self {
+        let encode = |s: &str| {
+            s.as_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        };
+        Self(format!(
+            "session/{}/{}",
+            encode(machine.as_str()),
+            encode(session.as_str())
+        ))
     }
 }
 
@@ -169,5 +181,26 @@ mod tests {
         let target: Target = serde_json::from_str("\"all\"").unwrap();
         assert_eq!(serde_json::to_string(&target).unwrap(), "\"all\"");
         assert!(serde_json::from_str::<AgentName>("\"Bad Name\"").is_err());
+    }
+}
+
+#[cfg(test)]
+mod queue_identity_properties {
+    #![allow(clippy::unwrap_used, reason = "property test fixtures")]
+    use super::*;
+    use proptest::prelude::*;
+    proptest! {
+        #[test]
+        fn encoded_queue_identity_round_trips_full_session_strings(
+            machine in "[a-z]{1,64}", session in "[a-zA-Z0-9 :/_-]{1,256}"
+        ) {
+            let machine: crate::MachineName = machine.parse().unwrap();
+            let session: crate::SessionId = session.parse().unwrap();
+            let id = AgentName::for_session(&machine, &session);
+            prop_assert_eq!(id.as_str().parse::<AgentName>().unwrap(), id.clone());
+            prop_assert_ne!(id.clone(), AgentName::for_session(&"another-server".parse().unwrap(), &session));
+            let other: crate::SessionId = if session.as_str() == "different-session" { "other-session" } else { "different-session" }.parse().unwrap();
+            prop_assert_ne!(id, AgentName::for_session(&machine, &other));
+        }
     }
 }

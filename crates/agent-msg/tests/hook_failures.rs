@@ -95,7 +95,7 @@ fn test_url() -> Option<String> {
 #[test]
 fn a_dead_redis_leaves_one_connect_record_and_exits_zero() {
     let env = Env::new();
-    let r = env.hook(Some("qsl-lead"), Some(DEAD_REDIS), STOP);
+    let r = env.hook(Some("hub:qsl:code"), Some(DEAD_REDIS), STOP);
     assert_eq!(r.status, 0);
     assert_eq!(r.stdout, "");
     assert_eq!(only_record(&env), ("connect".into(), "connection".into()));
@@ -110,7 +110,11 @@ fn a_dead_redis_leaves_one_connect_record_and_exits_zero() {
 fn tc_030_01_three_failed_post_tool_use_hooks_leave_three_records() {
     let env = Env::new();
     for _ in 0..3 {
-        let r = env.hook(Some("qsl-lead"), Some(DEAD_REDIS), &payload("PostToolUse"));
+        let r = env.hook(
+            Some("hub:qsl:code"),
+            Some(DEAD_REDIS),
+            &payload("PostToolUse"),
+        );
         assert_eq!(r.status, 0);
         assert_eq!(r.stdout, "");
     }
@@ -125,7 +129,7 @@ fn tc_030_01_three_failed_post_tool_use_hooks_leave_three_records() {
 fn tc_017_05_a_closed_port_exits_zero_with_empty_stdout_for_every_event() {
     for event in ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"] {
         let env = Env::new();
-        let r = env.hook(Some("qsl-lead"), Some(DEAD_REDIS), &payload(event));
+        let r = env.hook(Some("hub:qsl:code"), Some(DEAD_REDIS), &payload(event));
         assert_eq!(r.status, 0, "{event}");
         assert_eq!(r.stdout, "", "{event}");
     }
@@ -134,7 +138,7 @@ fn tc_017_05_a_closed_port_exits_zero_with_empty_stdout_for_every_event() {
 #[test]
 fn unparseable_hook_input_leaves_one_decode_record() {
     let env = Env::new();
-    let r = env.hook(Some("qsl-lead"), None, "this is not json");
+    let r = env.hook(Some("hub:qsl:code"), None, "this is not json");
     assert_eq!(r.status, 0);
     assert_eq!(only_record(&env), ("decode".into(), "malformed".into()));
 }
@@ -142,20 +146,20 @@ fn unparseable_hook_input_leaves_one_decode_record() {
 /// Tracing: TC-017-03
 /// ACs: FR-017-AC-3
 #[test]
-fn tc_017_03_an_invalid_name_exits_zero_silently_and_leaves_one_derive_record() {
+fn legacy_name_metadata_outside_herdr_does_not_register_or_fail() {
     let env = Env::new();
     let r = env.hook(Some("Bad Name"), Some(DEAD_REDIS), STOP);
     assert_eq!(r.status, 0);
     assert_eq!(r.stdout, "");
-    assert!(r.stderr.contains("invalid agent name"), "{}", r.stderr);
-    assert_eq!(only_record(&env), ("derive".into(), "invalid_name".into()));
+    assert_eq!(r.stderr, "");
+    assert!(env.records().is_empty());
 }
 
 #[test]
 fn a_malformed_config_leaves_one_config_record() {
     let env = Env::new();
     std::fs::write(env.config(), "this = [is not toml").unwrap();
-    let r = env.hook(Some("qsl-lead"), None, STOP);
+    let r = env.hook(Some("hub:qsl:code"), None, STOP);
     assert_eq!(r.status, 0);
     assert_eq!(only_record(&env), ("config".into(), "config".into()));
 }
@@ -165,7 +169,12 @@ fn a_malformed_config_leaves_one_config_record() {
 #[test]
 fn tc_017_02_an_unknown_flag_after_hook_exits_zero_and_leaves_one_args_record() {
     let env = Env::new();
-    let r = env.run(&["hook", "claude", "--bogus"], Some("qsl-lead"), None, STOP);
+    let r = env.run(
+        &["hook", "claude", "--bogus"],
+        Some("hub:qsl:code"),
+        None,
+        STOP,
+    );
     assert_eq!(r.status, 0);
     assert_eq!(only_record(&env), ("args".into(), "args".into()));
 }
@@ -176,7 +185,7 @@ fn a_session_that_is_not_a_lead_and_a_subagent_leave_nothing() {
     // No name and no herdr pane: silent, before anything can fail.
     assert_eq!(env.hook(None, None, STOP).status, 0);
     let subagent = r#"{"hook_event_name":"Stop","session_id":"s1","agent_id":"a"}"#;
-    assert_eq!(env.hook(Some("qsl-lead"), None, subagent).status, 0);
+    assert_eq!(env.hook(Some("hub:qsl:code"), None, subagent).status, 0);
     assert!(env.records().is_empty());
 }
 
@@ -188,7 +197,7 @@ fn a_session_that_is_not_a_lead_and_a_subagent_leave_nothing() {
 fn tc_030_05_records_are_typed_and_carry_no_error_text() {
     let env = Env::new();
     env.hook(
-        Some("qsl-lead"),
+        Some("hub:qsl:code"),
         Some(("redis://127.0.0.1:1", "test:")),
         STOP,
     );
@@ -214,7 +223,7 @@ fn tc_030_05_records_are_typed_and_carry_no_error_text() {
     );
     assert_eq!(record["event"], "Stop");
     assert_eq!(record["session_id"], "s1");
-    assert_eq!(record["lead"], "qsl-lead");
+    assert_eq!(record["lead"], serde_json::Value::Null);
     assert!(!record["machine"].as_str().unwrap().is_empty());
     assert!(record["at_ms"].as_i64().unwrap() > 1_700_000_000_000);
 }
@@ -232,7 +241,7 @@ fn tc_030_02_the_next_healthy_hook_ships_three_records_once() {
         let env = Env::new();
         for _ in 0..3 {
             env.hook(
-                Some("qsl-lead"),
+                Some("hub:qsl:code"),
                 Some(("redis://127.0.0.1:1", &prefix)),
                 &payload("PostToolUse"),
             );
@@ -240,7 +249,7 @@ fn tc_030_02_the_next_healthy_hook_ships_three_records_once() {
         assert_eq!(env.records().len(), 3);
 
         let healthy = env.hook(
-            Some("qsl-lead"),
+            Some("hub:qsl:code"),
             Some((&url, &prefix)),
             &payload("PostToolUse"),
         );
@@ -265,14 +274,14 @@ fn tc_030_02_the_next_healthy_hook_ships_three_records_once() {
         for entry in &shipped {
             let record: Value = serde_json::from_str(&entry.record).unwrap();
             assert_eq!(record["stage"], "connect");
-            assert_eq!(entry.lead.as_deref(), Some("qsl-lead"));
+            assert_eq!(entry.lead, None);
             assert!(!entry.machine.as_str().is_empty());
             assert_eq!(record["machine"], entry.machine.as_str());
         }
 
         // Idempotent: nothing left to ship.
         env.hook(
-            Some("qsl-lead"),
+            Some("hub:qsl:code"),
             Some((&url, &prefix)),
             &payload("PostToolUse"),
         );
@@ -286,10 +295,17 @@ fn seed_two(url: &str, prefix: &str) -> Relay {
     let mut relay = Relay::connect(url, Duration::from_secs(2))
         .unwrap()
         .with_prefix(prefix);
-    for lead in ["receiver", "sender"] {
+    for lead in ["hub:EA:code", "hub:EA:sender"] {
         relay
             .register(&Registration {
-                name: lead.parse().unwrap(),
+                name: if lead == "hub:EA:code" {
+                    relay_core::AgentName::for_session(
+                        &"hub".parse().unwrap(),
+                        &"s1".parse().unwrap(),
+                    )
+                } else {
+                    lead.parse().unwrap()
+                },
                 machine: "hub".parse().unwrap(),
                 kind: "claude".into(),
                 session_id: None,
@@ -303,13 +319,25 @@ fn seed_two(url: &str, prefix: &str) -> Relay {
     for text in ["first", "second"] {
         relay
             .send(&Message {
-                from: "sender".parse().unwrap(),
-                to: Target::Agent("receiver".parse().unwrap()),
+                from: "hub:EA:sender".parse().unwrap(),
+                to: Target::Agent(relay_core::AgentName::for_session(
+                    &"hub".parse().unwrap(),
+                    &"s1".parse().unwrap(),
+                )),
                 text: text.into(),
                 sent_at_ms: 1,
             })
             .unwrap();
     }
+    relay
+        .commit_identity(&relay_core::IdentityCommit {
+            session_name: Some((
+                "s1".parse().unwrap(),
+                relay_core::AgentName::for_session(&"hub".parse().unwrap(), &"s1".parse().unwrap()),
+            )),
+            ..Default::default()
+        })
+        .unwrap();
     relay
 }
 
@@ -326,7 +354,7 @@ fn tc_020_01_a_closed_stdout_leaves_the_messages_in_the_inbox_in_order() {
         let mut relay = seed_two(&url, &prefix);
         let env = Env::new();
 
-        let mut cmd = base_cmd(&["hook", "claude"], Some("receiver"));
+        let mut cmd = base_cmd(&["hook", "claude"], Some("hub:EA:code"));
         cmd.env("IX_RELAY_CONFIG", env.config());
         cmd.env("IX_RELAY_URL", &url);
         cmd.env("IX_RELAY_PREFIX", &prefix);
@@ -347,14 +375,18 @@ fn tc_020_01_a_closed_stdout_leaves_the_messages_in_the_inbox_in_order() {
         if support::ran_out_of_time(&env.records()) {
             // Whatever the hook did with the mail, none of it is lost: it is in
             // the inbox, or in flight until its lease returns it (FR-020).
-            let receiver: relay_core::AgentName = "receiver".parse().unwrap();
+            let receiver: relay_core::AgentName =
+                relay_core::AgentName::for_session(&"hub".parse().unwrap(), &"s1".parse().unwrap());
             let safe = relay.inbox_len(&receiver).unwrap() + relay.inflight_len(&receiver).unwrap();
             assert_eq!(safe, 2, "the mail of a run that ran out of time is kept");
             return false;
         }
         let popped = relay
             .pop_inbox(
-                "receiver".parse().as_ref().unwrap(),
+                &relay_core::AgentName::for_session(
+                    &"hub".parse().unwrap(),
+                    &"s1".parse().unwrap(),
+                ),
                 NonZeroUsize::new(10).unwrap(),
             )
             .unwrap();
@@ -362,7 +394,12 @@ fn tc_020_01_a_closed_stdout_leaves_the_messages_in_the_inbox_in_order() {
         assert_eq!(texts, ["first", "second"]);
         assert_eq!(only_record(&env), ("output".into(), "io".into()));
         assert_eq!(
-            relay.inflight_len(&"receiver".parse().unwrap()).unwrap(),
+            relay
+                .inflight_len(&relay_core::AgentName::for_session(
+                    &"hub".parse().unwrap(),
+                    &"s1".parse().unwrap()
+                ))
+                .unwrap(),
             0,
             "the batch went back to the inbox, it is not also still in flight"
         );
@@ -384,7 +421,8 @@ fn tc_020_04_a_hook_killed_after_its_pop_has_its_messages_delivered_by_the_next_
     support::until_in_time(|attempt| {
         let prefix = format!("test:{}:killed-hook-{attempt}:", std::process::id());
         let mut relay = seed_two(&url, &prefix);
-        let receiver: relay_core::AgentName = "receiver".parse().unwrap();
+        let receiver: relay_core::AgentName =
+            relay_core::AgentName::for_session(&"hub".parse().unwrap(), &"s1".parse().unwrap());
         let killed = relay
             .pop_inbox_budget(
                 &receiver,
@@ -397,7 +435,7 @@ fn tc_020_04_a_hook_killed_after_its_pop_has_its_messages_delivered_by_the_next_
         assert_eq!(relay.inbox_len(&receiver).unwrap(), 0, "out of the inbox");
         let env = Env::new();
 
-        let r = env.hook(Some("receiver"), Some((&url, &prefix)), STOP);
+        let r = env.hook(Some("hub:EA:code"), Some((&url, &prefix)), STOP);
 
         assert_eq!(r.status, 0, "stderr: {}", r.stderr);
         if support::ran_out_of_time(&env.records()) {
@@ -406,7 +444,7 @@ fn tc_020_04_a_hook_killed_after_its_pop_has_its_messages_delivered_by_the_next_
         let out: Value = serde_json::from_str(&r.stdout).expect("json stdout");
         assert_eq!(
             out["reason"],
-            "[ix-relay] from sender (redelivered): first\n[ix-relay] from sender (redelivered): second"
+            "[ix-relay] from hub:EA:sender (redelivered): first\n[ix-relay] from hub:EA:sender (redelivered): second"
         );
         assert!(env.records().is_empty(), "not a failure of the hook");
         assert_eq!(relay.inbox_len(&receiver).unwrap(), 0);
@@ -425,7 +463,8 @@ fn tc_020_04_a_batch_still_leased_is_not_delivered_to_a_second_hook() {
     let Some(url) = test_url() else { return };
     let prefix = format!("test:{}:leased-hook:", std::process::id());
     let mut relay = seed_two(&url, &prefix);
-    let receiver: relay_core::AgentName = "receiver".parse().unwrap();
+    let receiver: relay_core::AgentName =
+        relay_core::AgentName::for_session(&"hub".parse().unwrap(), &"s1".parse().unwrap());
     relay
         .pop_inbox_budget(
             &receiver,
@@ -436,7 +475,7 @@ fn tc_020_04_a_batch_still_leased_is_not_delivered_to_a_second_hook() {
         .unwrap();
     let env = Env::new();
 
-    let r = env.hook(Some("receiver"), Some((&url, &prefix)), STOP);
+    let r = env.hook(Some("hub:EA:code"), Some((&url, &prefix)), STOP);
 
     assert_eq!(r.status, 0, "stderr: {}", r.stderr);
     assert_eq!(r.stdout.trim(), "", "nothing to deliver while leased");
@@ -465,7 +504,7 @@ fn tc_020_02_a_registry_read_failure_after_the_pop_still_delivers_both_messages(
             .unwrap();
         let env = Env::new();
 
-        let r = env.hook(Some("receiver"), Some((&url, &prefix)), STOP);
+        let r = env.hook(Some("hub:EA:code"), Some((&url, &prefix)), STOP);
 
         assert_eq!(r.status, 0, "stderr: {}", r.stderr);
         if support::ran_out_of_time(&env.records()) {
@@ -475,7 +514,7 @@ fn tc_020_02_a_registry_read_failure_after_the_pop_still_delivers_both_messages(
         assert_eq!(out["decision"], "block");
         assert_eq!(
             out["reason"],
-            "[ix-relay] from sender: first\n[ix-relay] from sender: second"
+            "[ix-relay] from hub:EA:sender: first\n[ix-relay] from hub:EA:sender: second"
         );
         assert!(env.records().is_empty(), "not a failure of the hook");
         true
@@ -518,30 +557,35 @@ fn run_with_closed_stderr(mut cmd: std::process::Command, stdin: &str) -> i32 {
 #[test]
 fn tc_030_08_a_closed_stderr_still_exits_zero_and_leaves_one_record_at_every_reachable_stage() {
     // (args, name, config contents, stdin, expected stage)
-    let cases: [ClosedStderrCase; 5] = [
+    let cases: [ClosedStderrCase; 4] = [
         (
             &["hook", "claude", "--bogus"],
-            Some("qsl-lead"),
+            Some("hub:qsl:code"),
             None,
             STOP,
             "args",
         ),
         (
             &["hook", "claude"],
-            Some("qsl-lead"),
+            Some("hub:qsl:code"),
             Some("this = [is not toml"),
             STOP,
             "config",
         ),
         (
             &["hook", "claude"],
-            Some("qsl-lead"),
+            Some("hub:qsl:code"),
             None,
             "not json",
             "decode",
         ),
-        (&["hook", "claude"], Some("Bad Name"), None, STOP, "derive"),
-        (&["hook", "claude"], Some("qsl-lead"), None, STOP, "connect"),
+        (
+            &["hook", "claude"],
+            Some("hub:qsl:code"),
+            None,
+            STOP,
+            "connect",
+        ),
     ];
     for (args, name, config, stdin, stage) in cases {
         let env = Env::new();
@@ -559,7 +603,7 @@ fn tc_030_08_a_closed_stderr_still_exits_zero_and_leaves_one_record_at_every_rea
     }
     // The stdin faults reach the same recorder: too large is a `decode` record.
     let env = Env::new();
-    let mut cmd = base_cmd(&["hook", "claude"], Some("qsl-lead"));
+    let mut cmd = base_cmd(&["hook", "claude"], Some("hub:qsl:code"));
     cmd.env("IX_RELAY_CONFIG", env.config());
     cmd.env("IX_RELAY_URL", DEAD_REDIS.0);
     cmd.env("IX_RELAY_PREFIX", DEAD_REDIS.1);
@@ -588,7 +632,7 @@ fn tc_030_08_a_closed_stderr_still_exits_zero_and_leaves_one_record_at_every_rea
 #[test]
 fn tc_030_09_a_relative_config_path_never_writes_a_spool_into_the_working_directory() {
     let cwd = tempfile::tempdir().unwrap();
-    let mut cmd = base_cmd(&["hook", "claude"], Some("qsl-lead"));
+    let mut cmd = base_cmd(&["hook", "claude"], Some("hub:qsl:code"));
     cmd.env("IX_RELAY_CONFIG", "config.toml");
     cmd.env("IX_RELAY_URL", DEAD_REDIS.0);
     cmd.current_dir(cwd.path());
@@ -597,36 +641,18 @@ fn tc_030_09_a_relative_config_path_never_writes_a_spool_into_the_working_direct
     assert!(std::fs::read_dir(cwd.path()).unwrap().next().is_none());
 }
 
-/// An invalid name repeats on every call and never reaches a "next healthy
-/// hook", so it ships the spool itself when Redis is reachable.
+/// Stale metadata cannot opt a one-off process into lead enrollment.
 #[test]
-fn an_invalid_name_ships_its_own_record_when_redis_is_reachable() {
+fn legacy_name_metadata_does_not_touch_a_healthy_bus() {
     let Some(url) = test_url() else { return };
-    support::until_in_time(|attempt| {
-        let prefix = format!("test:{}:bad-name-ships-{attempt}:", std::process::id());
-        let env = Env::new();
-        let r = env.hook(Some("Bad Name"), Some((&url, &prefix)), STOP);
-        assert_eq!(r.status, 0);
-        let mut relay = Relay::connect(&url, Duration::from_secs(2))
-            .unwrap()
-            .with_prefix(prefix);
-        let shipped = relay.hook_health(10).unwrap().entries;
-        // The one attempt to ship is best effort and bounded by the budget: a hook
-        // with no time for it leaves its record in the spool.
-        if shipped.is_empty() && env.records().len() == 1 {
-            assert_eq!(
-                env.records()[0]["error_kind"],
-                "invalid_name",
-                "the record left behind is the failure itself"
-            );
-            return false;
-        }
-        assert!(env.records().is_empty(), "shipped, not left behind");
-        assert_eq!(shipped.len(), 1, "{shipped:?}");
-        assert_eq!(shipped[0].lead, None);
-        let record: Value = serde_json::from_str(&shipped[0].record).unwrap();
-        assert_eq!(record["stage"], "derive");
-        assert_eq!(record["error_kind"], "invalid_name");
-        true
-    });
+    let prefix = format!("test:{}:ignored-name:", std::process::id());
+    let env = Env::new();
+    let r = env.hook(Some("Bad Name"), Some((&url, &prefix)), STOP);
+    assert_eq!(r.status, 0);
+    assert!(env.records().is_empty());
+    let mut relay = Relay::connect(&url, Duration::from_secs(2))
+        .unwrap()
+        .with_prefix(prefix);
+    assert!(relay.agents().unwrap().registrations.is_empty());
+    assert!(relay.hook_health(10).unwrap().entries.is_empty());
 }

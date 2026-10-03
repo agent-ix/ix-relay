@@ -144,7 +144,13 @@ fn upstream_of(url: &str) -> SocketAddr {
 }
 
 fn name(s: &str) -> AgentName {
-    s.parse().unwrap()
+    if s == "receiver" {
+        AgentName::for_session(&"hub".parse().unwrap(), &"s1".parse().unwrap())
+    } else if s == "sender" {
+        "hub:EA:sender".parse().unwrap()
+    } else {
+        s.parse().unwrap()
+    }
 }
 
 /// A bus with `receiver` registered and `count` messages queued for it,
@@ -163,6 +169,12 @@ fn seeded(url: &str, prefix: &str, count: usize) -> Relay {
             herdr_pane: None,
             place: None,
             last_seen_ms: 1,
+        })
+        .unwrap();
+    relay
+        .commit_identity(&relay_core::IdentityCommit {
+            session_name: Some(("s1".parse().unwrap(), name("receiver"))),
+            ..relay_core::IdentityCommit::default()
         })
         .unwrap();
     for i in 0..count {
@@ -188,6 +200,7 @@ fn hook_via(url: &str, prefix: &str, event: &str) -> (String, Vec<serde_json::Va
     cmd.env("IX_RELAY_URL", url);
     cmd.env("IX_RELAY_PREFIX", prefix);
     let stdin = format!(r#"{{"hook_event_name":"{event}","session_id":"s1","cwd":"/work"}}"#);
+    let _topology = support::transport_topology(&mut cmd);
     let r = run(cmd, &stdin);
     assert_eq!(r.status, 0, "stderr: {}", r.stderr);
     let records = std::fs::read_to_string(spool_path(&config))
@@ -221,7 +234,7 @@ fn tc_030_07_a_slow_link_makes_a_user_prompt_hook_defer_its_pop_without_a_record
         upstream_of(&url),
         vec![Rule {
             needle: b"",
-            delay: Duration::from_millis(80),
+            delay: Duration::from_millis(100),
         }],
     );
 

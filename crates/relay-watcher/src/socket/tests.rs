@@ -1930,7 +1930,7 @@ impl Watching {
     fn send(&mut self, text: &str) {
         self.relay
             .send(&relay_core::Message {
-                from: "sender".parse().unwrap(),
+                from: "hub:sender:code".parse().unwrap(),
                 to: relay_core::Target::Agent(self.lead.clone()),
                 text: text.into(),
                 sent_at_ms: 0,
@@ -2158,7 +2158,7 @@ fn tc_044_10_a_late_refusal_requeues_and_herdr_types_it_and_a_reaped_batch_is_le
     assert_eq!(w.dead(), 0);
     assert_eq!(
         *herdr.typed.lock().unwrap(),
-        ["[ix-relay] from sender: first"],
+        ["[ix-relay] from hub:sender:code: first"],
         "{:?}",
         w.log
     );
@@ -3581,7 +3581,7 @@ fn tc_044_14_a_healthy_lead_behind_twenty_wedged_ones_is_served_within_one_round
         sessions.insert(pane, session);
         w.relay
             .send(&relay_core::Message {
-                from: "sender".parse().unwrap(),
+                from: "hub:sender:code".parse().unwrap(),
                 to: relay_core::Target::Agent(lead.parse().unwrap()),
                 text: "hello".into(),
                 sent_at_ms: 0,

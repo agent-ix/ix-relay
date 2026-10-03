@@ -195,7 +195,8 @@ impl ErrorKind {
             | E::MoveUnreadable { .. } => Self::Corrupt,
             E::InvalidName { .. } => Self::InvalidName,
             E::Work(_) => Self::Rejected,
-            E::UnknownAgent(_)
+            E::UnverifiedEnrollment { .. }
+            | E::UnknownAgent(_)
             | E::InvalidAddress { .. }
             | E::RelativeAddressNeedsLocation { .. }
             | E::AmbiguousTarget { .. }

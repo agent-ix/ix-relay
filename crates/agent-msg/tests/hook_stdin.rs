@@ -121,7 +121,7 @@ struct Hook {
 impl Hook {
     fn spawn(redis: &CountingRedis) -> Self {
         let config = nonexistent_config_path();
-        let mut cmd = base_cmd(&["hook", "claude"], Some("receiver"));
+        let mut cmd = base_cmd(&["hook", "claude"], Some("hub:EA:code"));
         cmd.env("IX_RELAY_CONFIG", &config);
         cmd.env("IX_RELAY_URL", &redis.url);
         cmd.env("IX_RELAY_PREFIX", "test:");

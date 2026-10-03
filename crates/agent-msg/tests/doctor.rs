@@ -26,7 +26,7 @@ use relay_core::{
 const MACHINE: &str = "hub";
 
 /// A herdr that reports a supported version and no agents.
-const HERDR_OK: &str = "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'herdr 0.9.1';;\n  agent) echo '{\"result\":{\"agents\":[]}}';;\nesac\n";
+const HERDR_OK: &str = "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'herdr 0.9.1';;\n  agent) echo '{\"result\":{\"agents\":[]}}';;\n  workspace) echo '{\"result\":{\"workspaces\":[]}}';;\n  tab) echo '{\"result\":{\"tabs\":[]}}';;\nesac\n";
 
 /// A systemctl that says the unit is active.
 const SYSTEMCTL_ACTIVE: &str = "#!/bin/sh\necho active\n";
@@ -433,7 +433,12 @@ fn tc_029_07_a_missing_herdr_fails_and_an_unaskable_service_manager_does_not() {
     stub(world.bin.path(), "herdr", HERDR_OK);
     let run = world.run(&["--json"]);
     assert_eq!(run.status, 0, "{}", run.stdout);
-    assert_eq!(codes(&json(&run), "unknown"), ["service_unknown"]);
+    assert_eq!(
+        codes(&json(&run), "unknown"),
+        ["service_unknown"],
+        "{}",
+        run.stdout
+    );
 }
 
 /// Tracing: TC-029-09

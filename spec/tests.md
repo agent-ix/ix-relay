@@ -32,51 +32,25 @@ to fail until the named ticket lands; the ticket is given on each such row.
 
 | Functional Req | Acceptance Criteria | Test Cases | Status |
 |----------------|---------------------|------------|--------|
-| FR-001 | FR-001-AC-1 | TC-001-01 | ✅ written (`tc_001_01_the_named_malformed_forms_are_refused_verbatim`, `tc_001_01_parse_accepts_exactly_two_or_three_nonempty_segments`; fuzz lane `fuzz_address_parse_*` is proptest, not coverage-guided) |
-| FR-001 | FR-001-AC-2 | TC-001-02 | ✅ written (`tc_001_02_a_built_address_parses_back_from_its_printed_form`; fuzz lane `fuzz_address_parse_*`) |
-| FR-001 | FR-001-AC-3 | TC-001-03 | ✅ written (`tc_001_03_no_printed_segment_is_empty_or_holds_whitespace_control_or_colon`) |
-| FR-001 | FR-001-AC-4 | TC-001-04 | ✅ written (`tc_001_04_the_server_segment_is_normalised_like_a_machine_name`) |
-| FR-001 | FR-001-AC-5 | TC-001-05 | ✅ written (`tc_001_05_labels_are_cleaned_in_the_printed_address`) |
-| FR-002 | FR-002-AC-1 | TC-002-01 | ✅ written (`tc_002_01_all_is_the_broadcast_target_for_any_registry`) |
-| FR-002 | FR-002-AC-2 | TC-002-02 | ✅ written (`tc_002_02_every_registered_name_resolves_to_itself`) |
-| FR-002 | FR-002-AC-3 | TC-002-03 | ✅ written (`tc_002_03_an_alias_resolves_one_hop_to_a_registered_canonical_name`; one hop, an alias to an unregistered name is an error) |
-| FR-002 | FR-002-AC-4 | TC-002-04 | ✅ written (`tc_002_03_an_alias_resolves_one_hop_to_a_registered_canonical_name`; one hop, an alias to an unregistered name is an error) |
-| FR-002 | FR-002-AC-5 | TC-002-05 | ✅ written (model: `tc_002_05_resolution_matches_the_priority_ordered_reference_model`; `tc_002_06_colonless_unregistered_text_is_not_registered`; pane matching requires verified placement) |
-| FR-002 | FR-002-AC-6 | TC-002-06 | ✅ written (model: `tc_002_05_resolution_matches_the_priority_ordered_reference_model`; `tc_002_06_colonless_unregistered_text_is_not_registered`) |
-| FR-002 | FR-002-AC-7 | TC-002-07 | 🚧 pending |
-| FR-002 | FR-002-AC-8 | TC-002-08 | ✅ written (model: `tc_002_05_resolution_matches_the_priority_ordered_reference_model`; `tc_002_06_colonless_unregistered_text_is_not_registered`) |
-| FR-003 | FR-003-AC-1 | TC-003-01 | ✅ written (model: `tc_002_05_resolution_matches_the_priority_ordered_reference_model`, typed input in upper, lower and full case; existing untagged unit `a_full_address_resolves_ignoring_case`) |
-| FR-003 | FR-003-AC-2 | TC-003-02 | ✅ written (existing untagged unit `the_tab_is_optional_when_the_workspace_has_one_lead`; model: `tc_002_05_resolution_matches_the_priority_ordered_reference_model`) |
-| FR-003 | FR-003-AC-3 | TC-003-03 | ✅ written (existing untagged unit `a_missing_tab_is_ambiguous_when_the_workspace_has_several_and_lists_them`; `tc_004_01_a_single_lead_is_the_only_match_and_an_ambiguity_lists_all`) |
-| FR-003 | FR-003-AC-4 | TC-003-04 | ✅ written (`tc_003_04_the_same_workspace_on_two_servers_never_crosses_servers`, pure over a registry snapshot, no Redis) |
-| FR-003 | FR-003-AC-5 | TC-003-05 | ✅ written (`tc_003_05_an_address_never_selects_another_server_or_a_lead_without_a_place`) |
-| FR-003 | FR-003-AC-6 | TC-003-06 | ✅ written (`tc_003_05_an_address_never_selects_another_server_or_a_lead_without_a_place`) |
-| FR-004 | FR-004-AC-1 | TC-004-01 | ✅ written (`tc_004_01_a_single_lead_is_the_only_match_and_an_ambiguity_lists_all`; model: `tc_002_05_resolution_matches_the_priority_ordered_reference_model`) |
-| FR-004 | FR-004-AC-2 | TC-004-02 | ✅ written (model: `tc_002_05_resolution_matches_the_priority_ordered_reference_model`, exact candidate set and pane scoping; existing untagged unit `two_leads_on_the_senders_machine_with_one_pane_id_are_ambiguous`) |
-| FR-004 | FR-004-AC-3 | TC-004-03 | ✅ written (`tc_004_01_a_single_lead_is_the_only_match_and_an_ambiguity_lists_all`; model: `tc_002_05_resolution_matches_the_priority_ordered_reference_model`) |
-| FR-004 | FR-004-AC-4 | TC-004-04 | ✅ written (existing untagged integration `an_ambiguous_address_errors_and_lists_the_candidates_without_sending`, `an_unknown_address_says_why_and_suggests_the_near_miss` in `crates/agent-msg/tests/address.rs`; Redis lane) |
-| FR-004 | FR-004-AC-5 | TC-004-05 | ✅ written (model: `tc_002_05_resolution_matches_the_priority_ordered_reference_model`, the cause and its listed servers or tabs) |
-| FR-004 | FR-004-AC-6 | TC-004-06 | 🚧 partial (model: `tc_002_05_resolution_matches_the_priority_ordered_reference_model`; no test names a server with a non-ASCII capital, so the `classify` fix for it is not pinned) |
-| FR-004 | FR-004-AC-7 | TC-004-07 | ✅ written (model: `tc_002_05_resolution_matches_the_priority_ordered_reference_model`, the cause and its listed servers or tabs) |
-| FR-004 | FR-004-AC-8 | TC-004-08 | ✅ written (existing untagged unit `a_mistyped_name_is_not_registered_and_suggests_the_close_name`) |
-| FR-004 | FR-004-AC-9 | TC-004-09 | ✅ written (`tc_004_09_an_unknown_target_has_at_most_five_suggestions_from_the_registry`, `tc_004_09_resolution_is_total_over_arbitrary_text`) |
-| FR-005 | FR-005-AC-1 | TC-005-01 | ✅ written (`a_shared_tab_uses_herdr_pane_ids_to_disambiguate`, `tc_005_01_duplicated_is_exactly_the_addresses_held_more_than_once`) |
-| FR-005 | FR-005-AC-2 | TC-005-02 | ✅ written (`tc_005_02_the_tab_is_always_included`, property over arbitrary workspace and tab labels) |
-| FR-005 | FR-005-AC-3 | TC-005-03 | 🚧 partial (`tc_005_03_the_label_is_the_address_unless_shared_or_unplaced` proves the one rule at `AddressBook` level over every fleet, against a model written from the rule's wording, and that `describe`, `render` and `label_target` agree with `label`; each command's use of it is not driven) |
-| FR-005 | FR-005-AC-4 | TC-005-04 | ✅ written (`tc_005_04_every_printed_address_resolves_back_to_its_lead`, `tc_005_04_tab_addresses_resolve_back_to_their_verified_lead`) |
-| FR-005 | FR-005-AC-5 | TC-005-05 | 🚧 pending |
-| FR-005 | FR-005-AC-6 | TC-005-06 | ✅ written (`tc_005_02_the_tab_is_always_included`, property independent of Herdr topology counts) |
-| FR-005 | FR-005-AC-7 | TC-005-07 | ✅ written (`tc_005_07_an_address_over_the_label_cap_is_shown_as_the_bus_name`) |
-| FR-005 | FR-005-AC-8 | TC-005-08 | ✅ written (`tc_005_08_different_tabs_keep_distinct_tab_addresses`) |
-| FR-005 | FR-005-AC-9 | TC-005-09 | ✅ written (`the_linear_book_equals_the_quadratic_definition`, a property against a quadratic oracle; `building_the_book_for_ten_thousand_leads_is_fast` is the `#[ignore]`d benchmark lane, `cargo test -p relay-core -- --ignored`) |
-| FR-005 | FR-005-AC-10 | TC-005-10 | ✅ written (`a_registration_without_herdr_ids_is_not_advertised_as_an_address`) |
-| FR-003 | FR-003-AC-7 | TC-003-07 | ✅ written (`tc_003_07_equal_labels_on_distinct_herdr_ids_are_ambiguous_with_ids`) |
-| FR-003 | FR-003-AC-8 | TC-003-08 | ✅ written (`workspace_and_tab_prefixes_require_specificity_only_when_multiple_leads_match`) |
-| FR-006 | FR-006-AC-1 | TC-006-01 | 🚧 pending |
-| FR-006 | FR-006-AC-2 | TC-006-02 | 🚧 pending |
-| FR-006 | FR-006-AC-3 | TC-006-03 | 🚧 pending |
-| FR-006 | FR-006-AC-4 | TC-006-04 | ✅ written (model: `tc_012_01_the_store_matches_the_queue_model_over_generated_operation_sequences`, register/alias operations against the real store) |
-| FR-006 | FR-006-AC-5 | TC-006-05 | ✅ written (model: `tc_012_01_the_store_matches_the_queue_model_over_generated_operation_sequences`, register/alias operations against the real store) |
+| FR-001 | FR-001-AC-1 | TC-001-01 | ✅ written (`bare_names_workspace_only_and_pane_qualified_addresses_are_rejected`; 0.3.0 location contract) |
+| FR-001 | FR-001-AC-2 | TC-001-02 | ✅ written (`whitespace_is_preserved_and_unaddressable_labels_are_rejected`; 0.3.0 location contract) |
+| FR-002 | FR-002-AC-1 | TC-002-01 | ✅ written (`both_shortcuts_use_the_verified_callers_server_and_workspace`; 0.3.0 location contract) |
+| FR-002 | FR-002-AC-2 | TC-002-02 | ✅ written (`cold_send_enrolls_local_and_remote_recipient_and_shortcuts_work`; 0.3.0 location contract) |
+| FR-002 | FR-002-AC-3 | TC-002-03 | ✅ written (`bare_names_workspace_only_and_pane_qualified_addresses_are_rejected`; 0.3.0 location contract) |
+| FR-003 | FR-003-AC-1 | TC-003-01 | ✅ written (`cold_send_and_public_surfaces_show_canonical_locations`; 0.3.0 location contract) |
+| FR-003 | FR-003-AC-2 | TC-003-02 | ✅ written (`repeated_pane_and_session_ids_are_scoped_by_machine`; 0.3.0 location contract) |
+| FR-004 | FR-004-AC-1 | TC-004-01 | ✅ written (`duplicate_live_sessions_refuse_instead_of_creating_pane_or_number_aliases`; 0.3.0 location contract) |
+| FR-004 | FR-004-AC-2 | TC-004-02 | ✅ written (`unknown_containers_report_live_addresses_without_alias_suggestions`; 0.3.0 location contract) |
+| FR-005 | FR-005-AC-1 | TC-005-01 | ✅ written (`cold_send_and_public_surfaces_show_canonical_locations`; 0.3.0 location contract) |
+| FR-005 | FR-005-AC-2 | TC-005-02 | ✅ written (`two_leads_sharing_an_address_are_shown_by_name_not_by_a_shared_address`; 0.3.0 location contract) |
+| FR-006 | FR-006-AC-1 | TC-006-01 | ✅ written (`genuine_startup_ignores_stale_pane_and_explicit_alias_then_caches_session`; 0.3.0 location contract) |
+| FR-006 | FR-006-AC-2 | TC-006-02 | ✅ written (`post_tool_stop_and_subagent_hooks_preserve_delivery_semantics`; 0.3.0 location contract) |
+| FR-006 | FR-006-AC-3 | TC-006-03 | ✅ written (`test_interactive_context_and_existing_environment`; 0.3.0 location contract) |
+| FR-021 | FR-021-AC-1 | TC-021-01 | ✅ written (`moving_labels_changes_address_but_not_queue_identity`; 0.3.0 location contract) |
+| FR-021 | FR-021-AC-2 | TC-021-02 | ✅ written (`verified_caller_ignores_a_newer_stale_record_for_the_inherited_pane`; 0.3.0 location contract) |
+| FR-022 | FR-022-AC-1 | TC-022-01 | ✅ written (`concurrent_cold_sends_share_one_session_registration_without_duplicate_messages`; 0.3.0 location contract) |
+| FR-022 | FR-022-AC-2 | TC-022-02 | ✅ written (`unverified_or_different_session_cannot_adopt_a_live_pane`; 0.3.0 location contract) |
+
 | FR-007 | FR-007-AC-1 | TC-007-01 | 🚧 pending |
 | FR-007 | FR-007-AC-2 | TC-007-02 | 🚧 pending |
 | FR-007 | FR-007-AC-3 | TC-007-03 | 🚧 pending |
@@ -93,14 +67,14 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-009 | FR-009-AC-2 | TC-009-02 | 🚧 pending |
 | FR-009 | FR-009-AC-3 | TC-009-03 | 🚧 pending |
 | FR-009 | FR-009-AC-4 | TC-009-04 | 🚧 partial (`a_pane_id_resolves_on_the_senders_machine_only` for the resolver, `the_same_pane_id_on_two_machines_resolves_to_each_machines_own_lead` through the binary, `tc_009_04_a_pane_lookup_returns_only_registrations_on_that_machine` for the store; the watcher's refresh, prune and type paths are not driven) |
-| FR-009 | FR-009-AC-5 | TC-009-05 | ✅ written (`tc_009_05_a_pane_claim_without_session_bound_herdr_proof_is_not_a_send_target`) |
+| FR-009 | FR-009-AC-5 | TC-009-05 | 🚧 0.3.0 evidence remapping required; earlier named test was retired |
 | FR-010 | FR-010-AC-1 | TC-010-01 | ✅ written (model: `tc_012_01_the_store_matches_the_queue_model_over_generated_operation_sequences`; Redis lane) |
 | FR-010 | FR-010-AC-2 | TC-010-02 | ✅ written (model: `tc_012_01_the_store_matches_the_queue_model_over_generated_operation_sequences`; Redis lane) |
 | FR-010 | FR-010-AC-3 | TC-010-03 | ✅ written (model: `tc_012_01_the_store_matches_the_queue_model_over_generated_operation_sequences`; Redis lane) |
 | FR-010 | FR-010-AC-4 | TC-010-04 | ✅ written (model: `tc_012_01_the_store_matches_the_queue_model_over_generated_operation_sequences`; Redis lane) |
 | FR-010 | FR-010-AC-5 | TC-010-05 | 🚧 pending |
 | FR-010 | FR-010-AC-6 | TC-010-06 | 🚧 partial (existing untagged `concurrent_consumers_never_deliver_a_message_twice` runs concurrent pops; a send interleaved with concurrent pops is not driven) |
-| FR-010 | FR-010-AC-7 | TC-010-07 | ✅ written (`tc_010_07_send_by_name_or_alias_reads_only_the_recipient`; Redis lane) |
+| FR-010 | FR-010-AC-7 | TC-010-07 | 🚧 0.3.0 evidence remapping required; earlier named test was retired |
 | FR-011 | FR-011-AC-1 | TC-011-01 | ✅ written (model: `tc_012_01_the_store_matches_the_queue_model_over_generated_operation_sequences`) |
 | FR-011 | FR-011-AC-2 | TC-011-02 | 🚧 partial (the store half is in the model, which broadcasts with no other lead registered; `agent-msg send` printing "logged only" is not driven) |
 | FR-011 | FR-011-AC-3 | TC-011-03 | ✅ written (`tc_016_05_the_address_book_renders_exactly_as_the_message_does`; existing untagged `render_signs_with_sender_and_marks_broadcast`) |
@@ -131,7 +105,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-016 | FR-016-AC-5 | TC-016-05 | 🚧 partial (`tc_016_05_the_address_book_renders_exactly_as_the_message_does`: `inbox`, `log`, the hook and the watcher all print through `AddressBook::render`; the commands are not driven) |
 | FR-017 | FR-017-AC-1 | TC-017-01 | ✅ written (`tc_017_01_the_seed_corpus_of_nasty_stdin_exits_zero_with_empty_or_one_json_object`, `tc_017_01_any_stdin_exits_zero_with_empty_or_one_json_object`, `tc_017_01_against_a_real_bus_stdout_is_empty_or_one_json_object`; fuzz lane `fuzz_hook_stdin_*` is proptest over a spawned binary, not coverage-guided) |
 | FR-017 | FR-017-AC-2 | TC-017-02 | ✅ written (integration; `tc_017_02_an_unknown_flag_after_hook_exits_zero_and_leaves_one_args_record`) |
-| FR-017 | FR-017-AC-3 | TC-017-03 | ✅ written (`tc_017_03_an_invalid_name_exits_zero_silently_and_leaves_one_derive_record`) |
+| FR-017 | FR-017-AC-3 | TC-017-03 | 🚧 0.3.0 evidence remapping required; earlier named test was retired |
 | FR-017 | FR-017-AC-4 | TC-017-04 | 🚧 pending |
 | FR-017 | FR-017-AC-5 | TC-017-05 | ✅ written (`tc_017_05_a_closed_port_exits_zero_with_empty_stdout_for_every_event`) |
 | FR-017 | FR-017-AC-6 | TC-017-06 | 🚧 pending |
@@ -162,21 +136,6 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-020 | FR-020-AC-13 | TC-020-13 | ✅ written (`tc_020_13_the_backlog_lists_stranded_leads_and_reports_its_bound`, `tc_020_13_the_backlog_reports_an_unreadable_key_and_matches_the_prefix_literally`, `inbox_in_flight_lists_stranded_leads_registered_or_not`; Redis lane) |
 | FR-020 | FR-020-AC-14 | TC-020-14 | ✅ written (`tc_020_14_a_hook_at_the_in_flight_cap_records_it_except_at_user_prompt_submit` on the fake bus; `a_lead_at_the_in_flight_cap_is_logged_once_per_episode` and `a_reap_that_keeps_failing_is_logged_once_per_episode` in `relay-watcher`; Redis lane for the watcher's) |
 | FR-020 | FR-020-AC-15 | TC-020-15 | ✅ written (`tc_020_15_an_explicit_name_prompt_at_60_ms_prints_and_acknowledges_with_no_record`, `tc_020_15_a_derived_name_prompt_defers_at_60_ms_and_delivers_and_acknowledges_at_50`, `tc_020_15_the_acknowledgement_follows_the_write_directly`; fake bus and clock, so the times are simulated, not measured over a real link) |
-| FR-021 | FR-021-AC-1 | TC-021-01 | ✅ written (`tc_021_01_every_short_string_slugs_to_a_valid_fixed_point` exhaustive over 11,111 strings, `tc_021_01_every_slug_is_a_valid_bus_name`, seed corpus, fuzz lane `fuzz_slugify_*` is proptest, not coverage-guided) |
-| FR-021 | FR-021-AC-2 | TC-021-02 | ✅ written (`tc_021_02_a_derived_name_is_valid_or_absent_exactly_for_an_escalation_fork`, `tc_021_02_the_display_number_never_changes_the_name`) |
-| FR-021 | FR-021-AC-3 | TC-021-03 | ✅ written (`tc_021_03_the_named_locations_of_workspace_qsl`) |
-| FR-021 | FR-021-AC-4 | TC-021-04 | ✅ written (`tc_021_04_the_named_degenerate_texts`) |
-| FR-021 | FR-021-AC-5 | TC-021-05 | ✅ written (`tc_021_05_slugify_is_idempotent`, `tc_021_01_every_short_string_slugs_to_a_valid_fixed_point`) |
-| FR-022 | FR-022-AC-1 | TC-022-01 | ✅ written (`crates/relay-ops/tests/collision.rs` `tc_022_01_every_collision_resolves_to_the_first_free_name_or_the_candidate`, exhaustive over 456 combinations against the real registry; `crates/relay-core/tests/names.rs` `tc_022_01_*` for `with_suffix` and `free_variant`; Redis lane) |
-| FR-022 | FR-022-AC-2 | TC-022-02 | ✅ written (`crates/relay-ops/tests/collision.rs` `tc_022_01_every_collision_resolves_to_the_first_free_name_or_the_candidate`, exhaustive over 456 combinations against the real registry; `crates/relay-core/tests/names.rs` `tc_022_01_*` for `with_suffix` and `free_variant`; Redis lane) |
-| FR-022 | FR-022-AC-3 | TC-022-03 | ✅ written (`crates/relay-ops/tests/collision.rs` `tc_022_01_every_collision_resolves_to_the_first_free_name_or_the_candidate` and `tc_022_03_a_candidate_ending_in_a_number_still_gets_the_dash_two_variant` (4 cases, real registry); the first is exhaustive over 456 combinations against the real registry; `crates/relay-core/tests/names.rs` `tc_022_01_*` for `with_suffix` and `free_variant`; Redis lane) |
-| FR-022 | FR-022-AC-4 | TC-022-04 | ✅ written (`crates/relay-ops/tests/collision.rs` `tc_022_01_every_collision_resolves_to_the_first_free_name_or_the_candidate`, exhaustive over 456 combinations against the real registry; `crates/relay-core/tests/names.rs` `tc_022_01_*` for `with_suffix` and `free_variant`; Redis lane) |
-| FR-022 | FR-022-AC-5 | TC-022-05 | 🚧 pending |
-| FR-022 | FR-022-AC-6 | TC-022-06 | ✅ written (`tc_022_06_*` in `relay-ops` naming, `hook_run` tests and `agent-msg/tests/name_collision.rs`; `crates/relay-ops/tests/collision.rs` `tc_022_06_with_every_variant_taken_the_resolver_reports_no_free_name_and_writes_nothing`) |
-| FR-022 | FR-022-AC-7 | TC-022-07 | ✅ written (`tc_022_07_*` in `relay-ops` naming, `hook_run` tests and `agent-msg/tests/name_collision.rs`; `crates/relay-ops/tests/collision.rs` `tc_022_07_a_failing_liveness_call_treats_the_holder_as_live`) |
-| FR-022 | FR-022-AC-8 | TC-022-08 | ✅ written (`tc_022_08_*` in `hook_run` tests and `agent-msg/tests/name_collision.rs`, asserting exit 0 and empty stdout) |
-| FR-022 | FR-022-AC-9 | TC-022-09 | ✅ written (the same `tc_022_08_*` tests assert the single `derive` record over five `PostToolUse` hooks) |
-| FR-022 | FR-022-AC-10 | TC-022-10 | ✅ written (`crates/relay-core/tests/names.rs` `tc_022_01_a_variant_never_equals_a_31_or_32_byte_base_ending_in_the_suffix`, `tc_022_01_with_suffix_holds_the_length_invariant_over_the_whole_grid`, `tc_022_01_numbered_variants_are_valid_different_and_distinct_for_every_base_shape`, and the fuzz lanes `fuzz_with_suffix_*`; `crates/relay-ops/tests/collision.rs` `tc_022_03_a_candidate_ending_in_a_number_still_gets_the_dash_two_variant`) |
 | FR-023 | FR-023-AC-1 | TC-023-01 | ✅ written (`tc_023_01_n_escalations_on_a_fresh_bus_get_e1_to_en`; Redis lane) |
 | FR-023 | FR-023-AC-2 | TC-023-02 | 🚧 partial (`tc_023_02_an_escalation_id_parses_iff_it_matches_the_grammar`, `tc_023_02_the_named_ids`: an invalid id cannot be built into a key; `escalation show` exiting non-zero is not driven) |
 | FR-023 | FR-023-AC-3 | TC-023-03 | ✅ written (`tc_023_03_a_ticket_id_parses_iff_it_matches_the_grammar`) |
@@ -228,8 +187,8 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-030 | FR-030-AC-7 | TC-030-07 | ✅ written (`tc_030_07_a_user_prompt_submit_with_too_little_budget_defers_the_pop_and_records_nothing`, `tc_030_07_a_slow_link_makes_a_user_prompt_hook_defer_its_pop_without_a_record`) |
 | FR-030 | FR-030-AC-8 | TC-030-08 | ✅ written (`tc_030_08_every_stage_records_exactly_once_with_a_closed_stderr`, `tc_030_08_a_closed_stderr_still_exits_zero_and_leaves_one_record_at_every_reachable_stage`, `tc_030_08_a_panic_at_any_stage_is_caught_and_recorded_once`) |
 | FR-030 | FR-030-AC-9 | TC-030-09 | ✅ written (`tc_030_09_a_relative_config_path_never_writes_a_spool_into_the_working_directory`) |
-| FR-030 | FR-030-AC-10 | TC-030-10 | ✅ written (`hook_run::tests::tc_030_10_a_herdr_failure_that_names_no_session_leaves_one_record`, `identity::tests::a_failing_herdr_that_names_nothing_is_a_failure_not_a_non_lead`, and the real binary in `naming.rs` `tc_030_10_herdr_failure_at_session_start_records_one_failure_and_registers_nothing`) |
-| FR-030 | FR-030-AC-11 | TC-030-11 | ✅ written (`hook_run::tests::tc_030_11_a_herdr_outage_records_once_per_session_and_the_derivation_retries`, and the real binary in `naming.rs` `tc_030_11_uncached_post_tool_use_calls_record_a_herdr_outage_once_and_retry`) |
+| FR-030 | FR-030-AC-10 | TC-030-10 | 🚧 0.3.0 evidence remapping required; earlier named test was retired |
+| FR-030 | FR-030-AC-11 | TC-030-11 | 🚧 0.3.0 evidence remapping required; earlier named test was retired |
 | FR-031 | FR-031-AC-1 | TC-031-01 | 🚧 pending (red on main, AGE-2033) |
 | FR-031 | FR-031-AC-2 | TC-031-02 | 🚧 pending (red on main, AGE-2033) |
 | FR-031 | FR-031-AC-3 | TC-031-03 | 🚧 pending (red on main, AGE-2033) |
@@ -286,7 +245,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-040 | FR-040-AC-5 | TC-040-05 | ✅ written (`rendered_len_max_bounds_what_render_prints` and `rendered_len_max_is_the_marked_render_with_the_longest_label_plus_a_separator`) |
 | FR-040 | FR-040-AC-6 | TC-040-06 | ✅ written (`tc_040_03_an_identical_fresh_entry_does_not_inherit_a_redelivery_count`; `tc_040_02_a_message_never_acknowledged_is_dead_lettered_after_four_deliveries` for the four deliveries; Redis lane) |
 | FR-041 | FR-041-AC-1 | TC-041-01 | ✅ written (`tc_041_01_send_prints_the_recipients_state_on_the_queued_line` through the binary, `tc_041_01_each_state_reads_as_one_line_of_facts_naming_the_machine` for the stuck and unreadable variants; Redis lane for the first) |
-| FR-041 | FR-041-AC-2 | TC-041-02 | ✅ written (`tc_010_07_send_by_name_or_alias_reads_only_the_recipient`, a counting proxy: 6 requests, the last a read-only `EVAL` of `LLEN` and `GET`; Redis lane) |
+| FR-041 | FR-041-AC-2 | TC-041-02 | 🚧 0.3.0 evidence remapping required; earlier named test was retired |
 | FR-041 | FR-041-AC-3 | TC-041-03 | ✅ written (`tc_041_03_a_stalled_redis_degrades_to_the_plain_line_within_the_probe_bound`, a proxy that stops answering at the state read, bound relative to a measured baseline; raising the timeout to 1000 ms fails it; Redis lane) |
 | FR-041 | FR-041-AC-4 | TC-041-04 | ✅ written (`tc_041_04_the_state_line_never_reaches_the_recipient_and_a_broadcast_has_none`; Redis lane) |
 | FR-041 | FR-041-AC-5 | TC-041-05 | ✅ written (`tc_041_05_only_a_hostname_shaped_machine_name_is_printed` over quotes, brackets, commas, a forged `[ix-relay]` line and control characters; `tc_041_05_a_machine_name_that_is_not_hostname_shaped_is_never_printed` through the binary; Redis lane for the second) |
@@ -402,51 +361,6 @@ to fail until the named ticket lands; the ticket is given on each such row.
 
 | Test ID | Title | Type | Traces To | Status |
 |---------|-------|------|-----------|--------|
-| TC-001-01 | Given malformed address text, including empty segments, a pane without a tab, or more than four segments, parsing refuses it verbatim. | Fuzz | FR-001-AC-1 | ✅ written |
-| TC-001-02 | Every address built from any server, workspace and optional tab text parses back from its printed form to … | Property | FR-001-AC-2 | ✅ written |
-| TC-001-03 | For every address built from any text, no printed segment contains whitespace, a control character or `:`, … | Property | FR-001-AC-3 | ✅ written |
-| TC-001-04 | Given the server text `Hub.local`, the built address's server is `hub`. | Unit | FR-001-AC-4 | ✅ written |
-| TC-001-05 | Given workspace `My Work\nspace` and tab `a:b` on server `hub`, the printed address is … | Unit | FR-001-AC-5 | ✅ written |
-| TC-002-01 | Given any registry, resolving `all` returns the broadcast target. | Unit | FR-002-AC-1 | ✅ written |
-| TC-002-02 | Given a registered lead `ea-plan`, resolving `ea-plan` returns `ea-plan`. | Unit | FR-002-AC-2 | ✅ written |
-| TC-002-03 | Given alias `ea` pointing at registered `ea-code`, resolving `ea` returns `ea-code`. | Unit | FR-002-AC-3 | ✅ written |
-| TC-002-04 | Given alias `ea` pointing at a name that is not registered, and no other match, resolving `ea` returns an … | Unit | FR-002-AC-4 | ✅ written |
-| TC-002-05 | Given one session-verified registration on the sender's machine with pane id `wC:p1`, resolving `wC:p1` returns that lead; an unverified pane claim is not selected. | Unit | FR-002-AC-5 | ✅ written |
-| TC-002-06 | Given text with no `:` that is neither `all`, a registered name nor an alias, resolving it returns an … | Unit | FR-002-AC-6 | ✅ written |
-| TC-002-07 | Resolving a name, alias, pane id or address reads no herdr state and makes no network call other than to … | Unit | FR-002-AC-7 | 🚧 not written |
-| TC-002-08 | Given pane id `wC:p1` registered only on `node-a`, resolving `wC:p1` for a sender on `hub` falls through … | Unit | FR-002-AC-8 | ✅ written |
-| TC-003-01 | Given a lead at `hub:EA:code`, each of `hub:ea:code`, `HUB:EA:CODE` and `Hub.local:Ea:Code` resolves … | Unit | FR-003-AC-1 | ✅ written |
-| TC-003-02 | Given exactly one lead in workspace `research` on `node-a`, both `node-a:research` and `node-a:research:1` … | Unit | FR-003-AC-2 | ✅ written |
-| TC-003-03 | Given leads in tabs `code` and `plan` of `hub:EA`, resolving `hub:EA` is refused as ambiguous and names … | Unit | FR-003-AC-3 | ✅ written |
-| TC-003-04 | Given workspace `EA` on both `hub` and `node-a` with one lead each, `node-a:EA` resolves to the node-a lead … | Integration | FR-003-AC-4 | ✅ written |
-| TC-003-05 | For every registry and every query address, every lead the query selects has the query's server. | Property | FR-003-AC-5 | ✅ written |
-| TC-003-06 | Given a registration with no recorded place, no address query selects it. | Unit | FR-003-AC-6 | ✅ written |
-| TC-004-01 | Every single-lead target returned by resolution, for any registry and typed input, is the only … | Property | FR-004-AC-1 | ✅ written |
-| TC-004-02 | Given two registrations on the sender's machine `hub` with pane id `wB:p1`, resolving `wB:p1` returns an … | Unit | FR-004-AC-2 | ✅ written |
-| TC-004-03 | Given two leads registered at the same full address, resolving that address returns an ambiguous-target … | Unit | FR-004-AC-3 | ✅ written |
-| TC-004-04 | Given an ambiguous or unknown target, `agent-msg send` exits non-zero, every inbox length is unchanged, … | Unit | FR-004-AC-4 | ✅ written |
-| TC-004-05 | Given leads only on `hub` and `node-a`, resolving `node-b:EA:code` reports "unknown server" listing exactly … | Unit | FR-004-AC-5 | ✅ written |
-| TC-004-06 | Given only workspace `EA` on `hub`, resolving `hub:EAA:code` reports "unknown workspace" listing `EA` … | Unit | FR-004-AC-6 | 🚧 partial (see the coverage table: no test names a non-ASCII capital server) |
-| TC-004-07 | Given tabs `code` and `plan` in `hub:EA`, resolving `hub:EA:nope` reports "unknown tab" listing exactly … | Unit | FR-004-AC-7 | ✅ written |
-| TC-004-08 | Given registered `ea-code`, resolving `ea-cod` reports "not registered" with `ea-code` as the first … | Unit | FR-004-AC-8 | ✅ written |
-| TC-004-09 | For every registry and typed input, an unknown-target error carries at most five suggestions and every … | Property | FR-004-AC-9 | ✅ written |
-| TC-005-01 | Given two leads sharing a tab on distinct Herdr panes, their shown addresses include those pane IDs; a lead on another tab keeps its tab address. | Unit | FR-005-AC-1 | ✅ written (`a_shared_tab_uses_herdr_pane_ids_to_disambiguate`) |
-| TC-005-02 | Every verified place prints a workspace and tab address independent of any topology count. | Property | FR-005-AC-2 | ✅ written |
-| TC-005-10 | Given a registration with labels but no Herdr IDs, it is printed by bus name and cannot be selected by address. | Unit | FR-005-AC-10 | ✅ written |
-| TC-003-07 | Given duplicate workspace/tab labels on distinct Herdr IDs, an address query reports ambiguity and both IDs. | Unit | FR-003-AC-7 | ✅ written (`tc_003_07_equal_labels_on_distinct_herdr_ids_are_ambiguous_with_ids`) |
-| TC-003-08 | Workspace/tab prefixes match their containers across multiple tabs and panes; ambiguity lists matching lead addresses, while a Herdr pane qualifier selects one. | Unit | FR-003-AC-8 | ✅ written (`workspace_and_tab_prefixes_require_specificity_only_when_multiple_leads_match`) |
-| TC-005-03 | Every lead in any registry snapshot is printed with the same label by `who`, `find`, the send confirmation … | Property | FR-005-AC-3 | 🚧 partial |
-| TC-005-04 | For every registry snapshot, every printed address resolves back … | Property | FR-005-AC-4 | ✅ written |
-| TC-005-05 | Given a registry read failure while rendering an inbox, the messages are printed signed with bus names and … | Integration | FR-005-AC-5 | 🚧 not written |
-| TC-005-06 | A verified tab address does not depend on a cached tab or pane count. | Property | FR-005-AC-6 | ✅ written |
-| TC-005-07 | Given a lead whose address is 97 bytes long, it is printed by bus name; given one whose address is exactly 96 bytes, it is printed as its address. | Unit | FR-005-AC-7 | ✅ written |
-| TC-005-08 | Verified recipients at distinct tabs retain distinct tab-qualified addresses, independent of topology counts. | Unit | FR-005-AC-8 | ✅ written |
-| TC-005-09 | For every registry snapshot, the address book built in time linear in the number of leads prints every lead as the pairwise definition … | Property | FR-005-AC-9 | ✅ written |
-| TC-006-01 | Given a `SessionStart` hook inside a herdr pane on `Node-B.local`, the stored registration has machine … | Unit | FR-006-AC-1 | 🚧 not written |
-| TC-006-02 | Given a lead registered with a place, a `UserPromptSubmit` re-registration (which reads no herdr state) … | Unit | FR-006-AC-2 | 🚧 not written |
-| TC-006-03 | Given a lead renamed so its old name becomes an alias, the new registration carries the place the pane had … | Unit | FR-006-AC-3 | 🚧 not written |
-| TC-006-04 | For every sequence of register and alias operations, no name is both a key of the registry and a key of … | Property | FR-006-AC-4 | ✅ written |
-| TC-006-05 | Given a registration with no pane and no place, `send` to its bus name queues the message for it. | Unit | FR-006-AC-5 | ✅ written |
 | TC-007-01 | Given a local lead whose recorded tab is `2` and whose live tab is `1`, after one tick the recorded place … | Unit | FR-007-AC-1 | 🚧 not written |
 | TC-007-02 | Given a lead registered on another machine with a pane id present in the local layout, a tick leaves its … | Unit | FR-007-AC-2 | 🚧 not written |
 | TC-007-03 | Given two ticks less than 30 seconds apart, herdr's layout is read once. | Unit | FR-007-AC-3 | 🚧 not written |
@@ -463,7 +377,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-009-02 | Given the same setup, `agent-msg send` run on `hub` in pane `wB:p1` never signs a message as `node-a-lead`. | Integration | FR-009-AC-2 | 🚧 not written |
 | TC-009-03 | Given registrations with pane `wB:p1` on both `hub` and `node-a`, a `SessionStart` hook on `hub` carries … | Unit | FR-009-AC-3 | 🚧 not written |
 | TC-009-04 | For every registry and local machine, every registration the watcher refreshes, prunes or types into has … | Property | FR-009-AC-4 | 🚧 partial |
-| TC-009-05 | Given a registration on the sender's machine with pane claim `wB:p1` but no session-bound Herdr proof, pane-target resolution refuses it; a verified registration at that pane resolves. | Unit | FR-009-AC-5 | ✅ written (`tc_009_05_a_pane_claim_without_session_bound_herdr_proof_is_not_a_send_target`) |
+| TC-009-05 | Given a registration on the sender's machine with pane claim `wB:p1` but no session-bound Herdr proof, pane-target resolution refuses it; a verified registration at that pane resolves. | Unit | FR-009-AC-5 | 🚧 0.3.0 evidence remapping required; earlier named test was retired |
 | TC-047-01 | A placement is addressable only when pane, session, and Herdr identity proof are all present. | Unit | FR-047-AC-1 | ✅ written (`placement_state_requires_pane_session_and_herdr_identity`) |
 | TC-047-02 | Legacy label-only registrations decode but cannot be selected by address. | Unit | FR-047-AC-2 | ✅ written (`legacy_label_only_registration_is_not_routable_by_address`) |
 | TC-047-03 | Herdr session and pane mismatches or absent session proof make a placement unverifiable. | Unit | FR-047-AC-3 | ✅ written (`address_location_requires_a_matching_herdr_session_id`) |
@@ -537,21 +451,6 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-020-13 | Given in-flight rows and dead letters under a name that is not registered, `agent-msg inbox --in-flight` lists that name with its counts; … | Integration | FR-020-AC-13 | ✅ written |
 | TC-020-14 | Given a lead at its in-flight cap, a `Stop` hook records the cap, a `UserPromptSubmit` hook does not, and the watcher logs the cap once over three ticks; … | Integration | FR-020-AC-14 | ✅ written |
 | TC-020-15 | Given a 60 ms round trip, a `UserPromptSubmit` with an explicit name prints and acknowledges with no failure record, and with a derived name it defers without a record; … | Unit | FR-020-AC-15 | ✅ written |
-| TC-021-01 | Every slug of any text parses as a bus name, is at most 32 bytes long and is not `all`. | Fuzz | FR-021-AC-1 | ✅ written |
-| TC-021-02 | Every name derived from any workspace label, tab label, tab id, pane id, first-tab flag and lone-pane flag … | Property | FR-021-AC-2 | ✅ written |
-| TC-021-03 | Given workspace `QSL`: the first unlabelled tab's lone pane is `qsl`; tab `review` is `qsl-review`; an … | Unit | FR-021-AC-3 | ✅ written |
-| TC-021-04 | Given the texts `""`, `---`, `1lead`, `ALL` and 50 `x` characters, slugify yields `lead`, `lead`, … | Unit | FR-021-AC-4 | ✅ written |
-| TC-021-05 | Every slug of any text is unchanged when slugified again. | Property | FR-021-AC-5 | ✅ written |
-| TC-022-01 | Every name chosen for any registry and candidate is a valid bus name, and is either the candidate or a … | Property | FR-022-AC-1 | ✅ written |
-| TC-022-02 | Given a 32-character candidate registered on another machine, the chosen name is not the candidate. | Unit | FR-022-AC-2 | ✅ written |
-| TC-022-03 | Given a 32-character candidate held by a live session on the same machine, the chosen name is not the … | Integration | FR-022-AC-3 | ✅ written |
-| TC-022-04 | Given the candidate is registered with no session id and the caller has no session id, the caller is not … | Unit | FR-022-AC-4 | ✅ written |
-| TC-022-05 | Given a lead `/rename`s itself to a name held by a live session on another machine, the `UserPromptSubmit` … | Unit | FR-022-AC-5 | 🚧 not written |
-| TC-022-06 | Given the candidate and every variant `-2` to `-1000` are held by live sessions, the lead is not … | Unit | FR-022-AC-6 | ✅ written |
-| TC-022-07 | Given the candidate is held by a session with a pane on the same machine and the herdr liveness call fails, the lead is registered under the next free `-N` name, the holder is unchanged, and one `derive` note names the candidate. | Unit | FR-022-AC-7 | ✅ written |
-| TC-022-08 | Given every variant `-2` to `-1000` is held by live sessions, the hook exits 0 and prints nothing. | Integration | FR-022-AC-8 | ✅ written |
-| TC-022-09 | Given every variant `-2` to `-1000` is held by live sessions, five `PostToolUse` hooks of that session leave exactly one `derive` record, naming the candidate. | Integration | FR-022-AC-9 | ✅ written |
-| TC-022-10 | Given a candidate of 31 or 32 characters that already ends with the suffix being added, the suffixed name is valid, differs from the candidate, ends with the whole suffix, and differs only in the byte next to the dash. | Property | FR-022-AC-10 | ✅ written |
 | TC-023-01 | Every escalation id issued on one bus is unique, and N escalations filed on a fresh bus receive exactly … | Property | FR-023-AC-1 | ✅ written |
 | TC-023-02 | Every id not matching `^e[0-9]{1,20}$` (including `E7`, `e`, `seq`, `index`, `e7:attempts`, `e7 `, `*`, … | Property | FR-023-AC-2 | 🚧 partial |
 | TC-023-03 | Every ticket id matching `^[A-Z]+-[0-9]+$` is accepted, and every ticket id containing a character outside … | Property | FR-023-AC-3 | ✅ written |
@@ -661,7 +560,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-040-05 | The marker adds no more bytes to a rendered message than the weight of the pop allows for. | Property | FR-040-AC-5 | ✅ written |
 | TC-040-06 | Given a redelivered entry and a byte-identical entry sent afresh, the fresh one is not marked and is delivered four times before it is dead-lettered. | Integration | FR-040-AC-6 | ✅ written |
 | TC-041-01 | Given a recipient with a pane, `send` prints `watcher heartbeat from <machine> (last tick Ns ago)` when the machine's heartbeat is live, `no watcher heartbeat from <machine>` when there is none, and the herdr, stuck and unreadable variants, each with the number waiting; given no pane it prints that no pane is registered. No line contains `DOWN` or a phrase outside the fixed set. | Integration | FR-041-AC-1 | ✅ written (`tc_041_01_send_prints_the_recipients_state_on_the_queued_line` through the binary, `tc_041_01_each_state_reads_as_one_line_of_facts_naming_the_machine` for the stuck and unreadable variants; Redis lane for the first) |
-| TC-041-02 | Given a send by bus name or alias, the requests the sender makes are the alias read, the recipient read, the send transaction and one read-only request for the state (a script of `LLEN` and `GET`), and never a read of the whole registry. | Integration | FR-041-AC-2 | ✅ written (`tc_010_07_send_by_name_or_alias_reads_only_the_recipient`, a counting proxy: 6 requests, the last a read-only `EVAL` of `LLEN` and `GET`; Redis lane) |
+| TC-041-02 | Given a send by bus name or alias, the requests the sender makes are the alias read, the recipient read, the send transaction and one read-only request for the state (a script of `LLEN` and `GET`), and never a read of the whole registry. | Integration | FR-041-AC-2 | 🚧 0.3.0 evidence remapping required; earlier named test was retired |
 | TC-041-03 | Given a Redis that stops answering once the message is queued, `send` prints the plain `queued for <name>`, exits 0, takes no more than the same send against a healthy Redis plus 250 ms and a margin of 150 ms, and the message is in the inbox. | Integration | FR-041-AC-3 | ✅ written (`tc_041_03_a_stalled_redis_degrades_to_the_plain_line_within_the_probe_bound`, a proxy that stops answering at the state read, bound relative to a measured baseline; raising the timeout to 1000 ms fails it; Redis lane) |
 | TC-041-04 | The message the recipient pops is the text as sent and its rendering carries no state; a broadcast prints `queued for <name>` with no state. | Integration | FR-041-AC-4 | ✅ written (`tc_041_04_the_state_line_never_reaches_the_recipient_and_a_broadcast_has_none`; Redis lane) |
 | TC-041-05 | Given a machine name that is longer than 32 characters or holds a character outside letters, digits, `.`, `-`, `_`, `send` prints the plain `queued for <name>`. | Integration | FR-041-AC-5 | ✅ written (`tc_041_05_only_a_hostname_shaped_machine_name_is_printed` over quotes, brackets, commas, a forged `[ix-relay]` line and control characters; `tc_041_05_a_machine_name_that_is_not_hostname_shaped_is_never_printed` through the binary; Redis lane for the second) |
@@ -763,11 +662,30 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-N004-02 | A change to a stored type ships without a data migration; records the new code cannot decode are handled … | Inspection | NFR-004-AC-2 | 🚧 not written |
 | TC-N004-M-01 | Stored-format version fields, migration functions or legacy readers in the source: target 0, threshold 0 | Inspection | NFR-004-M-1 | 🚧 not written |
 
+| TC-001-01 | FR-001-AC-1 | Integration | Malformed, two-part, bare-name and pane-qualified public inputs are rejected. | ✅ written (`bare_names_workspace_only_and_pane_qualified_addresses_are_rejected`) |
+| TC-001-02 | FR-001-AC-2 | Unit | Case and whitespace do not create substitute aliases. | ✅ written (`whitespace_is_preserved_and_unaddressable_labels_are_rejected`) |
+| TC-002-01 | FR-002-AC-1 | Integration | Both shortcuts resolve in the verified caller scope. | ✅ written (`both_shortcuts_use_the_verified_callers_server_and_workspace`) |
+| TC-002-02 | FR-002-AC-2 | Integration | Cold local and remote sends enroll the actual recipient automatically. | ✅ written (`cold_send_enrolls_local_and_remote_recipient_and_shortcuts_work`) |
+| TC-002-03 | FR-002-AC-3 | Integration | Legacy targets do not enqueue any message. | ✅ written (`bare_names_workspace_only_and_pane_qualified_addresses_are_rejected`) |
+| TC-003-01 | FR-003-AC-1 | Integration | Uppercase input resolves the canonical Herdr location. | ✅ written (`cold_send_and_public_surfaces_show_canonical_locations`) |
+| TC-003-02 | FR-003-AC-2 | Integration | Repeated pane and session identifiers on two servers cannot cross inboxes. | ✅ written (`repeated_pane_and_session_ids_are_scoped_by_machine`) |
+| TC-004-01 | FR-004-AC-1 | Integration | A duplicate tab queues nothing and reports ambiguity. | ✅ written (`duplicate_live_sessions_refuse_instead_of_creating_pane_or_number_aliases`) |
+| TC-004-02 | FR-004-AC-2 | Integration | Unknown containers report live addresses; unverified sessions are not enrolled. | ✅ written (`unknown_containers_report_live_addresses_without_alias_suggestions`) |
+| TC-005-01 | FR-005-AC-1 | Integration | whoami, who, find, send, log and delivered signatures use canonical locations. | ✅ written (`cold_send_and_public_surfaces_show_canonical_locations`) |
+| TC-005-02 | FR-005-AC-2 | Unit | Ambiguous and unplaced records cannot provide a signed public identity. | ✅ written (`two_leads_sharing_an_address_are_shown_by_name_not_by_a_shared_address`) |
+| TC-006-01 | FR-006-AC-1 | Integration | Genuine startup ignores stale pane variables and stale alias metadata. | ✅ written (`genuine_startup_ignores_stale_pane_and_explicit_alias_then_caches_session`) |
+| TC-006-02 | FR-006-AC-2 | Integration | Prompt, tool and stop hooks deliver through the genuine session queue; subagent hooks do not enroll or consume lead mail. | ✅ written (`post_tool_stop_and_subagent_hooks_preserve_delivery_semantics`) |
+| TC-006-03 | FR-006-AC-3 | Unit | Launcher tests verify isolation for interactive starts/resumes and passthrough for CLI commands. | ✅ written (`test_interactive_context_and_existing_environment`) |
+| TC-021-01 | FR-021-AC-1 | Unit | Location moves preserve the session queue identity. | ✅ written (`moving_labels_changes_address_but_not_queue_identity`; 0.3.0 location contract) |
+| TC-021-02 | FR-021-AC-2 | Integration | A newer stale registry record cannot win over genuine session proof. | ✅ written (`verified_caller_ignores_a_newer_stale_record_for_the_inherited_pane`) |
+| TC-022-01 | FR-022-AC-1 | Integration | Concurrent cold sends share one recipient registration while preserving every distinct message. | ✅ written (`concurrent_cold_sends_share_one_session_registration_without_duplicate_messages`; 0.3.0 location contract) |
+| TC-022-02 | FR-022-AC-2 | Integration | Unverified or different sessions cannot register or send through a live pane. | ✅ written (`unverified_or_different_session_cannot_adopt_a_live_pane`) |
+
 ## Coverage Gaps
 
 | Gap ID | Description | Risk Level | Mitigation |
 |--------|-------------|------------|------------|
-| GAP-001 | 276 of 360 rows have a written test (7 of them by a substitute method: proptest fuzz lanes and exhaustive checks) and 19 more are partial; 65 rows have no test: the unbuilt rows (GAP-002), the hook and watcher process behaviour of FR-006/007/009/018/019/027, the fault-injection and benchmark rows, and FR-010-AC-5 and FR-013-AC-4/5. | High | Remaining evidence work under AGE-2029. |
+| GAP-001 | 241 of 318 rows have a written test; changed 0.3.0 obligations have replacement evidence above. Retired alias tests are not evidence for the new contract. Remaining pending/partial rows require their stated evidence. | High | Complete remaining evidence without claiming full coverage. |
 | GAP-002 | 15 rows still say `red on main`: obligations of requirements `main` does not yet meet, red when written (FR-031, FR-033-AC-2, FR-034-AC-4, FR-035, FR-037). The rest of FR-032..FR-034 are written or partial since the relink work (FR-043). | High | AGE-2033 (AGE-2032 landed; the NFR-001 stdin row landed under AGE-2033). |
 | GAP-003 | No `herdr` stub or blackholed-Redis harness exists yet for the fault-injection and benchmark rows. | Medium | Build with the NFR-001..003 suites. |
 
@@ -776,11 +694,11 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | Category | Total | Written, named method | Written, substitute method | Partial | Failed | Blocked | Coverage (named method) |
 |----------|-------|-----------------------|----------------------------|---------|--------|---------|--------------------------|
 | Benchmark | 8 | 5 | 0 | 0 | 0 | 0 | 62% |
-| Fuzz | 5 | 0 | 5 | 0 | 0 | 0 | 0% |
+| Fuzz | 3 | 0 | 3 | 0 | 0 | 0 | 0% |
 | Inspection | 3 | 0 | 0 | 0 | 0 | 0 | 0% |
-| Integration | 145 | 111 | 0 | 10 | 0 | 0 | 77% |
-| Property | 52 | 40 | 0 | 6 | 0 | 0 | 77% |
+| Integration | 154 | 120 | 0 | 10 | 0 | 0 | 78% |
+| Property | 37 | 28 | 0 | 5 | 0 | 0 | 76% |
 | Static | 2 | 0 | 2 | 0 | 0 | 0 | 0% |
-| Unit | 145 | 112 | 0 | 3 | 0 | 0 | 77% |
+| Unit | 111 | 83 | 0 | 3 | 0 | 0 | 75% |
 
 "Written, named method" counts rows whose status names a written test that uses the method the row names. It records that the test exists, not a run: the last recorded run is the `make ci` output in the PR comment for the head commit, and Redis-backed tests skip without `IX_RELAY_TEST_URL`. Fuzz and Static rows are counted separately: the Fuzz rows are property-based fuzz lanes (see `fuzz/README.md`), not recorded `cargo-fuzz` campaigns, and the Static rows are exhaustive checks over a bound, not Kani proofs. Rows marked red (`#[ignore]` with a ticket) are not counted.

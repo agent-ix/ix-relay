@@ -1,10 +1,5 @@
-//! `agent-msg find`: joins the bus registry (canonical names, aliases,
-//! machine, herdr pane, session id, last seen) against live herdr state
-//! across every machine, so a lead can look another one up by name, alias,
-//! workspace/tab label, session name or pane id before messaging it
-//! (AGE-2018, the operator's priority call: "agents must have a way of querying
-//! herdr and then resolving a name" ranks this above the rest of that
-//! ticket's polish).
+//! Live lead discovery joins session queues against Herdr locations.
+//! Public identities are server:workspace:tab; display names are metadata.
 //!
 //! [`join`] and [`matches_query`] are pure — no herdr or Redis calls —
 //! so the join logic is unit-testable over fake data with no process or
@@ -42,7 +37,7 @@ pub struct HerdrAgent {
     pub status: String,
     /// A best-effort session/agent name herdr shows for this pane
     /// (`terminal_title_stripped` — see
-    /// [`crate::naming::LocationHerdr::agent`]'s own doc comment on
+    /// the live agent snapshot's own doc comment on
     /// why this is an approximation).
     pub session_name: Option<String>,
     /// The harness session id herdr reports for the pane (`agent_session.value`),
@@ -101,8 +96,6 @@ pub struct MachineView {
 pub struct FoundAgent {
     /// The lead's canonical bus name, if this pane is registered.
     pub bus_name: Option<AgentName>,
-    /// Any alias names also pointing at `bus_name`, sorted.
-    pub aliases: Vec<AgentName>,
     /// The machine this agent runs on.
     pub machine: MachineName,
     /// Its `server:workspace[:tab[:pane]]` address, when the workspace label is known.
@@ -130,8 +123,7 @@ pub struct FoundAgent {
 }
 
 /// Joins every machine's live herdr agents against the bus registry
-/// (`registrations`, `aliases` as `(alias, canonical)` pairs — see
-/// [`relay_core::Relay::all_aliases`]).
+/// using session-bound registrations.
 ///
 /// Iterates live herdr agents, not bus registrations: a registration whose
 /// pane isn't live on its machine right now doesn't produce a row (its
@@ -141,19 +133,7 @@ pub struct FoundAgent {
 /// `on_bus: false` and `bus_name: None`, so a sender can see why a message
 /// to it wouldn't be picked up.
 #[must_use]
-pub fn join(
-    machines: &[MachineView],
-    registrations: &[Registration],
-    aliases: &[(AgentName, AgentName)],
-) -> Vec<FoundAgent> {
-    let mut aliases_of: HashMap<&str, Vec<&AgentName>> = HashMap::new();
-    for (alias, canonical) in aliases {
-        aliases_of
-            .entry(canonical.as_str())
-            .or_default()
-            .push(alias);
-    }
-
+pub fn join(machines: &[MachineView], registrations: &[Registration]) -> Vec<FoundAgent> {
     let mut rows = Vec::new();
     for view in machines {
         let places = place_map(view);
@@ -174,46 +154,18 @@ pub fn join(
                 None => None,
             };
             let bus_name = reg.map(|r| r.name.clone());
-            let alias_names = bus_name
-                .as_ref()
-                .and_then(|n| aliases_of.get(n.as_str()))
-                .map(|v| v.iter().map(|a| (*a).clone()).collect())
-                .unwrap_or_default();
-
             let place = places.get(&agent.pane_id);
-            // A Herdr location becomes a send address only when this row joins
-            // one registered lead by exact session id.
-            let address = reg.and_then(|_| {
-                place.map(|p| {
-                    let tab_address = p.tab_address(&view.machine);
-                    let shared = registrations
-                        .iter()
-                        .filter_map(|r| {
-                            let verified = r.verified_place()?;
-                            (r.machine == view.machine).then(|| verified.tab_address(&r.machine))
-                        })
-                        .filter(|candidate| candidate == &tab_address)
-                        .count()
-                        > 1;
-                    if shared {
-                        Address::with_pane(
-                            view.machine.as_str(),
-                            &p.workspace,
-                            &p.tab,
-                            agent.pane_id.as_str(),
-                        )
-                    } else {
-                        tab_address
-                    }
-                })
-            });
+            let address = agent
+                .session_id
+                .as_ref()
+                .and(place)
+                .map(|p| p.tab_address(&view.machine));
             let workspace_label = workspace_label(view, agent);
             let tab_label = tab_label(view, agent);
 
             rows.push(FoundAgent {
                 bus_name,
                 address,
-                aliases: alias_names,
                 machine: view.machine.clone(),
                 workspace_label: workspace_label.map(str::to_owned),
                 tab_label: tab_label.map(str::to_owned),
@@ -307,7 +259,7 @@ pub fn sessions(view: &MachineView) -> HashMap<PaneId, Option<SessionId>> {
 }
 
 /// Whether `row` matches `query`, case-insensitively, against any of: its
-/// bus name, any alias, workspace or tab label, session name, or pane id.
+/// address, workspace or tab label, session name, or pane id.
 /// An empty `query` matches everything.
 #[must_use]
 pub fn matches_query(row: &FoundAgent, query: &str) -> bool {
@@ -324,15 +276,10 @@ pub fn matches_query(row: &FoundAgent, query: &str) -> bool {
         Some(row.pane_id.as_str()),
         address.as_deref(),
     ];
-    let alias_hit = row
-        .aliases
-        .iter()
-        .any(|a| a.as_str().to_lowercase().contains(&query));
-    alias_hit
-        || fields
-            .into_iter()
-            .flatten()
-            .any(|f| f.to_lowercase().contains(&query))
+    fields
+        .into_iter()
+        .flatten()
+        .any(|f| f.to_lowercase().contains(&query))
 }
 
 // ============================================================================
@@ -652,7 +599,7 @@ mod tests {
         live.session_id = Some("sid-qsl-review".parse().unwrap());
         let machines = vec![machine_view("node-a", vec![live], "QSL", "review")];
         let regs = vec![reg("qsl-review", "node-a", "wQ:p1")];
-        let rows = join(&machines, &regs, &[]);
+        let rows = join(&machines, &regs);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].bus_name.as_ref().unwrap(), &name("qsl-review"));
         assert_eq!(rows[0].workspace_label.as_deref(), Some("QSL"));
@@ -668,7 +615,7 @@ mod tests {
         let mut stale = reg("stale-lead", "node-a", "wQ:p1");
         stale.session_id = Some("old-session".parse().unwrap());
         let machines = vec![machine_view("node-a", vec![live], "QSL", "review")];
-        let rows = join(&machines, &[stale], &[]);
+        let rows = join(&machines, &[stale]);
         assert_eq!(rows[0].bus_name, None);
         assert!(!rows[0].on_bus);
     }
@@ -682,7 +629,7 @@ mod tests {
             "review",
         )];
         let regs = vec![reg("claimed-lead", "node-a", "wQ:p1")];
-        let rows = join(&machines, &regs, &[]);
+        let rows = join(&machines, &regs);
         assert_eq!(rows[0].bus_name, None);
         assert!(!rows[0].on_bus);
         assert!(
@@ -701,7 +648,7 @@ mod tests {
         let mut live = agent("wQ:p1", "wQ:t1", "wQ", "idle");
         live.session_id = Some("sess-1".parse().unwrap());
         let machines = vec![machine_view("node-a", vec![live], "QSL", "review")];
-        let rows = join(&machines, &[], &[]);
+        let rows = join(&machines, &[]);
         assert_eq!(rows[0].pane_id.as_str(), "wQ:p1");
         assert_eq!(rows[0].tab_id.as_str(), "wQ:t1");
         assert_eq!(rows[0].workspace_id.as_str(), "wQ");
@@ -719,7 +666,7 @@ mod tests {
             "QSL",
             "1",
         )];
-        let rows = join(&machines, &[], &[]);
+        let rows = join(&machines, &[]);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].bus_name, None);
         assert!(!rows[0].on_bus);
@@ -747,16 +694,16 @@ mod tests {
                 verified_at_ms: 1,
             }),
         });
-        let rows = join(&[view.clone()], &[registered.clone()], &[]);
+        let rows = join(&[view.clone()], &[registered.clone()]);
         assert_eq!(rows[0].address.as_ref().unwrap().to_string(), "hub:EA:code");
 
         view.workspaces[0].tab_count = 1;
-        let rows = join(&[view.clone()], &[registered.clone()], &[]);
+        let rows = join(&[view.clone()], &[registered.clone()]);
         assert_eq!(rows[0].address.as_ref().unwrap().to_string(), "hub:EA:code");
 
         // Unknown count (0): conservative, the tab stays.
         view.workspaces[0].tab_count = 0;
-        let rows = join(&[view], &[registered], &[]);
+        let rows = join(&[view], &[registered]);
         assert_eq!(rows[0].address.as_ref().unwrap().to_string(), "hub:EA:code");
     }
 
@@ -794,15 +741,9 @@ mod tests {
         };
         first_reg.place = proof("sid-first");
         second_reg.place = proof("sid-second");
-        let rows = join(&[view], &[first_reg, second_reg], &[]);
-        assert_eq!(
-            rows[0].address.as_ref().unwrap().to_string(),
-            "hub:EA:code:wQ-p1"
-        );
-        assert_eq!(
-            rows[1].address.as_ref().unwrap().to_string(),
-            "hub:EA:code:wQ-p2"
-        );
+        let rows = join(&[view], &[first_reg, second_reg]);
+        assert_eq!(rows[0].address.as_ref().unwrap().to_string(), "hub:EA:code");
+        assert_eq!(rows[1].address.as_ref().unwrap().to_string(), "hub:EA:code");
     }
 
     #[test]
@@ -845,7 +786,7 @@ mod tests {
     fn a_registration_with_no_live_herdr_agent_produces_no_row() {
         let machines = vec![machine_view("node-a", vec![], "QSL", "1")];
         let regs = vec![reg("qsl", "node-a", "wQ:p1")];
-        assert!(join(&machines, &regs, &[]).is_empty());
+        assert!(join(&machines, &regs).is_empty());
     }
 
     #[test]
@@ -859,23 +800,10 @@ mod tests {
             "1",
         )];
         let regs = vec![reg("hub-lead", "hub", "wQ:p1")];
-        let rows = join(&machines, &regs, &[]);
+        let rows = join(&machines, &regs);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].bus_name, None, "must not match hub's registration");
     }
-
-    #[test]
-    fn aliases_are_attached_to_their_canonicals_row() {
-        let mut live = agent("wQ:p1", "wQ:t1", "wQ", "idle");
-        live.session_id = Some("sid-custom-herdr-name".parse().unwrap());
-        let machines = vec![machine_view("node-a", vec![live], "QSL", "1")];
-        let regs = vec![reg("custom-herdr-name", "node-a", "wQ:p1")];
-        let aliases = vec![(name("qsl"), name("custom-herdr-name"))];
-        let rows = join(&machines, &regs, &aliases);
-        assert_eq!(rows[0].aliases, vec![name("qsl")]);
-    }
-
-    // ---- gather_machine_view ------------------------------------------
 
     struct FakeFindHerdr {
         agents: Vec<AgentListEntry>,
@@ -1011,11 +939,11 @@ mod tests {
     }
 
     #[test]
-    fn matches_query_checks_name_alias_labels_session_name_and_pane_id_case_insensitively() {
+    fn matches_query_checks_location_labels_session_name_and_pane_id_case_insensitively() {
         let row = FoundAgent {
             bus_name: Some(name("qsl-review")),
             address: Some(Address::new("node-a", "QSL", Some("Review"))),
-            aliases: vec![name("qsl-old")],
+
             machine: "node-a".parse().unwrap(),
             workspace_label: Some("QSL".into()),
             tab_label: Some("Review".into()),
@@ -1029,7 +957,6 @@ mod tests {
         };
         for query in [
             "QSL-REVIEW",
-            "qsl-old",
             "review",
             "agent-d",
             "wQ:p1",

@@ -71,7 +71,7 @@ import type { Plugin } from "@opencode-ai/plugin";
 /** `agent-msg whoami --json`'s shape: a resolved name, or `{"lead": false}`. */
 interface WhoamiReport {
   name?: string;
-  source?: "explicit" | "derived";
+  source?: "location";
   lead?: false;
 }
 
@@ -91,11 +91,8 @@ interface InboxReport {
 }
 
 export const IxRelayPlugin: Plugin = async ({ client, $ }) => {
-  // Resolves once, at plugin load, whether this process is a lead at all
-  // (AGE-2018): the explicit AGENT_MSG_NAME/--as override when set, else a
-  // name derived from this pane's herdr location. Not a lead session (or a
-  // one-off, or not in herdr at all): stay silent, exactly like
-  // `agent-msg hook` does.
+  // Only a genuine harness session associated with a live Herdr location is
+  // a lead. Agent names and inherited pane variables do not establish identity.
   const whoamiResult = await $`agent-msg whoami --json`.nothrow().quiet();
   if (whoamiResult.exitCode !== 0) {
     console.error(

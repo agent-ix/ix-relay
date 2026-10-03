@@ -28,8 +28,11 @@ pub struct InboxMessage {
 impl InboxMessage {
     fn new(m: &Message, book: &AddressBook) -> Self {
         Self {
-            from: m.from.as_str().to_owned(),
-            to: m.to.to_string(),
+            from: book.label(&m.from),
+            to: match &m.to {
+                relay_core::Target::All => "all".into(),
+                relay_core::Target::Agent(id) => book.label(id),
+            },
             text: m.text.clone(),
             sent_at_ms: m.sent_at_ms,
             rendered: book.render(m),
@@ -81,7 +84,7 @@ mod tests {
     #[test]
     fn reports_a_direct_message_with_its_rendered_line() {
         let popped = PopResult {
-            messages: vec![msg("qsl-lead", "tl-lead", "hi")],
+            messages: vec![msg("draco:qsl:code", "terra:tl:code", "hi")],
             rejected: vec![],
         };
         let report = InboxReport::new(&popped, &AddressBook::default());
@@ -89,11 +92,11 @@ mod tests {
             serde_json::to_value(&report).unwrap(),
             json!({
                 "messages": [{
-                    "from": "qsl-lead",
-                    "to": "tl-lead",
+                    "from": "draco:qsl:code",
+                    "to": "terra:tl:code",
                     "text": "hi",
                     "sent_at_ms": 42,
-                    "rendered": "[ix-relay] from qsl-lead: hi",
+                    "rendered": "[ix-relay] from draco:qsl:code: hi",
                 }],
                 "rejected": [],
             })
@@ -103,14 +106,14 @@ mod tests {
     #[test]
     fn a_broadcast_renders_with_to_all_and_reports_to_as_all() {
         let popped = PopResult {
-            messages: vec![msg("qsl-lead", "all", "merged AGE-2007")],
+            messages: vec![msg("draco:qsl:code", "all", "merged AGE-2007")],
             rejected: vec![],
         };
         let report = InboxReport::new(&popped, &AddressBook::default());
         assert_eq!(report.messages[0].to, "all");
         assert_eq!(
             report.messages[0].rendered,
-            "[ix-relay] from qsl-lead (to all): merged AGE-2007"
+            "[ix-relay] from draco:qsl:code (to all): merged AGE-2007"
         );
     }
 

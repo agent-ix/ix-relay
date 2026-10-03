@@ -48,7 +48,7 @@ pub struct FindReport {
 /// # Errors
 ///
 /// Propagates a Redis failure ([`relay_core::Error`]) reading the registry
-/// or alias table, after retrying a timed-out read (see [`crate::retry`]). A
+/// after retrying a timed-out read (see [`crate::retry`]). A
 /// herdr failure on any one machine does not fail the whole call — it's
 /// recorded in [`FindReport::skipped`] instead.
 pub fn run(
@@ -126,11 +126,10 @@ pub fn run(
 
     // Only reads, so a timed-out one is retried on a fresh connection (after the
     // herdr gathering above, which is not repeated).
-    let (list, aliases) =
-        crate::retry::read(relay, redial, |r| Ok((r.agents()?, r.all_aliases()?)))?;
+    let list = crate::retry::read(relay, redial, |r| r.agents().map_err(Into::into))?;
     let registrations =
         list.into_registrations_reporting(|skipped| eprintln!("agent-msg find: {skipped}"));
-    let rows = find::join(&views, &registrations, &aliases)
+    let rows = find::join(&views, &registrations)
         .into_iter()
         .filter(|row| find::matches_query(row, query))
         .collect();
@@ -146,26 +145,12 @@ pub fn render_line(row: &FoundAgent) -> String {
         .address
         .as_ref()
         .map_or_else(|| "-".to_owned(), ToString::to_string);
-    let name = row
-        .bus_name
-        .as_ref()
-        .map_or_else(|| "-".to_owned(), |n| n.as_str().to_owned());
-    let aliases = if row.aliases.is_empty() {
-        String::new()
-    } else {
-        let names = row
-            .aliases
-            .iter()
-            .map(relay_core::AgentName::as_str)
-            .collect::<Vec<_>>();
-        format!(" aka {}", names.join(", "))
-    };
     let workspace = row.workspace_label.as_deref().unwrap_or("-");
     let tab = row.tab_label.as_deref().unwrap_or("-");
     let session = row.session_name.as_deref().unwrap_or("-");
     let bus_flag = if row.on_bus { "" } else { "  [not on bus]" };
     format!(
-        "{address}  {name}{aliases}  {}  {workspace}/{tab}  {}  {session}  {}{bus_flag}",
+        "{address}  {}  {workspace}/{tab}  {}  {session}  {}{bus_flag}",
         row.machine, row.pane_id, row.herdr_status
     )
 }
@@ -178,9 +163,8 @@ pub struct FoundJson<'a> {
     /// The `server:workspace[:tab[:pane]]` address, when the row has one.
     address: Option<String>,
     /// The bus name, when the row is on the bus.
-    bus_name: Option<&'a str>,
+    bus_name: Option<String>,
     /// Every alias pointing at the bus name.
-    aliases: Vec<&'a str>,
     /// The machine hosting the pane.
     machine: &'a str,
     /// The herdr workspace label.
@@ -201,12 +185,10 @@ impl<'a> From<&'a FoundAgent> for FoundJson<'a> {
     fn from(row: &'a FoundAgent) -> Self {
         Self {
             address: row.address.as_ref().map(ToString::to_string),
-            bus_name: row.bus_name.as_ref().map(relay_core::AgentName::as_str),
-            aliases: row
-                .aliases
-                .iter()
-                .map(relay_core::AgentName::as_str)
-                .collect(),
+            bus_name: row
+                .on_bus
+                .then(|| row.address.as_ref().map(ToString::to_string))
+                .flatten(),
             machine: row.machine.as_str(),
             workspace_label: row.workspace_label.as_deref(),
             tab_label: row.tab_label.as_deref(),
@@ -243,7 +225,7 @@ mod tests {
     fn row() -> FoundAgent {
         FoundAgent {
             bus_name: Some("qsl-lead".parse().unwrap()),
-            aliases: vec!["qsl".parse().unwrap()],
+
             machine: "node-a".parse().unwrap(),
             address: Some("node-a:qsl:main".parse().unwrap()),
             workspace_label: Some("qsl".into()),
@@ -267,11 +249,11 @@ mod tests {
     fn found_json_is_byte_identical_to_main() {
         assert_eq!(
             serde_json::to_string(&FoundJson::from(&row())).unwrap(),
-            r#"{"address":"node-a:qsl:main","bus_name":"qsl-lead","aliases":["qsl"],"machine":"node-a","workspace_label":"qsl","tab_label":null,"pane_id":"p1","session_name":"s","herdr_status":"idle","on_bus":true}"#
+            r#"{"address":"node-a:qsl:main","bus_name":"node-a:qsl:main","machine":"node-a","workspace_label":"qsl","tab_label":null,"pane_id":"p1","session_name":"s","herdr_status":"idle","on_bus":true}"#
         );
         let off_bus = FoundAgent {
             bus_name: None,
-            aliases: vec![],
+
             machine: "hub".parse().unwrap(),
             address: None,
             workspace_label: None,
@@ -286,7 +268,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&FoundJson::from(&off_bus)).unwrap(),
-            r#"{"address":null,"bus_name":null,"aliases":[],"machine":"hub","workspace_label":null,"tab_label":"t","pane_id":"w1:p2","session_name":null,"herdr_status":"working","on_bus":false}"#
+            r#"{"address":null,"bus_name":null,"machine":"hub","workspace_label":null,"tab_label":"t","pane_id":"w1:p2","session_name":null,"herdr_status":"working","on_bus":false}"#
         );
     }
 
@@ -298,8 +280,7 @@ mod tests {
             serde_json::to_value(FoundJson::from(&row)).unwrap(),
             json!({
                 "address": "node-a:qsl:main",
-                "bus_name": "qsl-lead",
-                "aliases": ["qsl"],
+                "bus_name": "node-a:qsl:main",
                 "machine": "node-a",
                 "workspace_label": "qsl",
                 "tab_label": null,

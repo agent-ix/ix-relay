@@ -45,7 +45,7 @@ pub fn panes_of(
     view: &MachineView,
     regs: &[Registration],
 ) -> Vec<PaneSeries> {
-    let mut panes: Vec<PaneSeries> = join(std::slice::from_ref(view), regs, &[])
+    let mut panes: Vec<PaneSeries> = join(std::slice::from_ref(view), regs)
         .into_iter()
         .filter(|row| row.machine == *machine)
         .map(|row| PaneSeries {

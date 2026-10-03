@@ -51,23 +51,19 @@ fn invalid_name_is_silent_and_exits_zero() {
     let r = hook(Some("QSL-Lead"), None, SESSION_START);
     assert_eq!(r.status, 0);
     assert_eq!(r.stdout, "");
-    assert!(
-        r.stderr.contains("invalid agent name"),
-        "stderr: {}",
-        r.stderr
-    );
+    assert!(r.stderr.is_empty(), "stderr: {}", r.stderr);
 }
 
 #[test]
 fn subagent_call_is_silent_and_exits_zero() {
-    let r = hook(Some("qsl-lead"), None, SUBAGENT_PAYLOAD);
+    let r = hook(Some("hub:qsl:code"), None, SUBAGENT_PAYLOAD);
     assert_eq!(r.status, 0);
     assert_eq!(r.stdout, "");
 }
 
 #[test]
 fn codex_subagent_call_is_silent_and_exits_zero() {
-    let r = hook_codex(Some("qsl-lead"), None, CODEX_SUBAGENT_PAYLOAD);
+    let r = hook_codex(Some("hub:qsl:code"), None, CODEX_SUBAGENT_PAYLOAD);
     assert_eq!(r.status, 0);
     assert_eq!(r.stdout, "");
 }
@@ -75,7 +71,11 @@ fn codex_subagent_call_is_silent_and_exits_zero() {
 #[test]
 fn dead_redis_still_exits_zero() {
     // Nothing listens on port 1: connection is refused immediately.
-    let r = hook(Some("qsl-lead"), Some("redis://127.0.0.1:1"), SESSION_START);
+    let r = hook(
+        Some("hub:qsl:code"),
+        Some("redis://127.0.0.1:1"),
+        SESSION_START,
+    );
     assert_eq!(r.status, 0);
     assert_eq!(r.stdout, "");
 }
@@ -97,7 +97,7 @@ fn session_start_registers_and_delivers_the_backlog() {
     // First call just registers; the inbox is empty, so nothing prints.
     let r = agent_msg(
         &["hook", "claude"],
-        Some("receiver"),
+        Some("hub:EA:code"),
         Some(&url),
         Some(&prefix),
         SESSION_START,
@@ -106,8 +106,8 @@ fn session_start_registers_and_delivers_the_backlog() {
     assert_eq!(r.stdout, "");
 
     let r = agent_msg(
-        &["send", "receiver", "hi", "there"],
-        Some("sender"),
+        &["send", "hub:EA:code", "hi", "there"],
+        Some("hub:EA:sender"),
         Some(&url),
         Some(&prefix),
         "",
@@ -116,7 +116,7 @@ fn session_start_registers_and_delivers_the_backlog() {
 
     let r = agent_msg(
         &["hook", "claude"],
-        Some("receiver"),
+        Some("hub:EA:code"),
         Some(&url),
         Some(&prefix),
         SESSION_START,
@@ -127,7 +127,7 @@ fn session_start_registers_and_delivers_the_backlog() {
     let ctx = out["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .expect("additionalContext string");
-    assert!(ctx.contains("from sender"), "context: {ctx}");
+    assert!(ctx.contains("from hub:EA:sender"), "context: {ctx}");
     assert!(ctx.contains("hi there"), "context: {ctx}");
 }
 
@@ -137,14 +137,14 @@ fn stop_blocks_with_pending_messages_as_reason() {
     let prefix = format!("test:{}:stop:", std::process::id());
     agent_msg(
         &["hook", "claude"],
-        Some("receiver"),
+        Some("hub:EA:code"),
         Some(&url),
         Some(&prefix),
         SESSION_START,
     );
     let r = agent_msg(
-        &["send", "receiver", "urgent"],
-        Some("sender"),
+        &["send", "hub:EA:code", "urgent"],
+        Some("hub:EA:sender"),
         Some(&url),
         Some(&prefix),
         "",
@@ -153,7 +153,7 @@ fn stop_blocks_with_pending_messages_as_reason() {
 
     let r = agent_msg(
         &["hook", "claude"],
-        Some("receiver"),
+        Some("hub:EA:code"),
         Some(&url),
         Some(&prefix),
         STOP,
@@ -171,14 +171,14 @@ fn subagent_call_leaves_the_inbox_untouched() {
     let prefix = format!("test:{}:subagent:", std::process::id());
     agent_msg(
         &["hook", "claude"],
-        Some("receiver"),
+        Some("hub:EA:code"),
         Some(&url),
         Some(&prefix),
         SESSION_START,
     );
     let r = agent_msg(
-        &["send", "receiver", "keep"],
-        Some("sender"),
+        &["send", "hub:EA:code", "keep"],
+        Some("hub:EA:sender"),
         Some(&url),
         Some(&prefix),
         "",
@@ -188,7 +188,7 @@ fn subagent_call_leaves_the_inbox_untouched() {
     // A subagent call for the same lead must not pop the message.
     let r = agent_msg(
         &["hook", "claude"],
-        Some("receiver"),
+        Some("hub:EA:code"),
         Some(&url),
         Some(&prefix),
         SUBAGENT_PAYLOAD,
@@ -199,7 +199,7 @@ fn subagent_call_leaves_the_inbox_untouched() {
     // The lead still sees it on its next call.
     let r = agent_msg(
         &["hook", "claude"],
-        Some("receiver"),
+        Some("hub:EA:code"),
         Some(&url),
         Some(&prefix),
         STOP,
@@ -215,7 +215,7 @@ fn session_start_hook_records_the_herdr_pane_from_env() {
     let prefix = format!("test:{}:pane_hook:", std::process::id());
     let r = agent_msg_with_pane(
         &["hook", "claude"],
-        Some("receiver"),
+        Some("hub:EA:code"),
         Some(&url),
         Some(&prefix),
         Some("w1:p1"),
@@ -223,7 +223,7 @@ fn session_start_hook_records_the_herdr_pane_from_env() {
     );
     assert_eq!(r.status, 0, "stderr: {}", r.stderr);
 
-    let r = agent_msg(&["who"], Some("receiver"), Some(&url), Some(&prefix), "");
+    let r = agent_msg(&["who"], Some("hub:EA:code"), Some(&url), Some(&prefix), "");
     assert_eq!(r.status, 0, "stderr: {}", r.stderr);
     assert!(r.stdout.contains("pane w1:p1"), "stdout: {}", r.stdout);
 }
@@ -234,7 +234,7 @@ fn register_command_records_the_herdr_pane_from_env() {
     let prefix = format!("test:{}:pane_register:", std::process::id());
     let r = agent_msg_with_pane(
         &["register"],
-        Some("receiver"),
+        Some("hub:EA:code"),
         Some(&url),
         Some(&prefix),
         Some("w2:p3"),
@@ -242,9 +242,9 @@ fn register_command_records_the_herdr_pane_from_env() {
     );
     assert_eq!(r.status, 0, "stderr: {}", r.stderr);
 
-    let r = agent_msg(&["who"], Some("receiver"), Some(&url), Some(&prefix), "");
+    let r = agent_msg(&["who"], Some("hub:EA:code"), Some(&url), Some(&prefix), "");
     assert_eq!(r.status, 0, "stderr: {}", r.stderr);
-    assert!(r.stdout.contains("pane w2:p3"), "stdout: {}", r.stdout);
+    assert!(r.stdout.contains("pane w1:p1"), "stdout: {}", r.stdout);
 }
 
 #[test]
@@ -253,7 +253,7 @@ fn session_start_hook_without_herdr_pane_env_records_no_pane() {
     let prefix = format!("test:{}:no_pane:", std::process::id());
     let r = agent_msg_with_pane(
         &["hook", "claude"],
-        Some("receiver"),
+        Some("hub:EA:code"),
         Some(&url),
         Some(&prefix),
         None,
@@ -261,9 +261,9 @@ fn session_start_hook_without_herdr_pane_env_records_no_pane() {
     );
     assert_eq!(r.status, 0, "stderr: {}", r.stderr);
 
-    let r = agent_msg(&["who"], Some("receiver"), Some(&url), Some(&prefix), "");
+    let r = agent_msg(&["who"], Some("hub:EA:code"), Some(&url), Some(&prefix), "");
     assert_eq!(r.status, 0, "stderr: {}", r.stderr);
-    assert!(r.stdout.contains("pane -"), "stdout: {}", r.stdout);
+    assert!(r.stdout.contains("pane w1:p1"), "stdout: {}", r.stdout);
 }
 
 #[test]
@@ -272,14 +272,14 @@ fn codex_subagent_call_leaves_the_inbox_untouched() {
     let prefix = format!("test:{}:codexsubagent:", std::process::id());
     agent_msg(
         &["hook", "codex"],
-        Some("receiver"),
+        Some("hub:EA:code"),
         Some(&url),
         Some(&prefix),
         SESSION_START,
     );
     let r = agent_msg(
-        &["send", "receiver", "keep"],
-        Some("sender"),
+        &["send", "hub:EA:code", "keep"],
+        Some("hub:EA:sender"),
         Some(&url),
         Some(&prefix),
         "",
@@ -290,7 +290,7 @@ fn codex_subagent_call_leaves_the_inbox_untouched() {
     // lead must not pop the message.
     let r = agent_msg(
         &["hook", "codex"],
-        Some("receiver"),
+        Some("hub:EA:code"),
         Some(&url),
         Some(&prefix),
         CODEX_SUBAGENT_PAYLOAD,
@@ -301,7 +301,7 @@ fn codex_subagent_call_leaves_the_inbox_untouched() {
     // The lead still sees it on its next call.
     let r = agent_msg(
         &["hook", "codex"],
-        Some("receiver"),
+        Some("hub:EA:code"),
         Some(&url),
         Some(&prefix),
         STOP,
@@ -317,14 +317,14 @@ fn send_to_an_unknown_lead_exits_one() {
     let prefix = format!("test:{}:unknown:", std::process::id());
     let r = agent_msg(
         &["send", "nope-lead", "hi"],
-        Some("sender"),
+        Some("hub:EA:sender"),
         Some(&url),
         Some(&prefix),
         "",
     );
     assert_eq!(r.status, 1);
     assert!(
-        r.stderr.contains("no agent matches \"nope-lead\""),
+        r.stderr.contains("invalid lead address"),
         "stderr: {}",
         r.stderr
     );
@@ -348,7 +348,12 @@ fn hook_stays_silent_and_exits_zero_on_a_malformed_config_file() {
     // relay-core's `config::tests::malformed_file_names_path_line_and_column`).
     std::fs::write(&path, "url = \"redis://x\"\nmachine = \"unterminated\n").unwrap();
 
-    let r = agent_msg_with_config(&["hook", "claude"], Some("qsl-lead"), &path, SESSION_START);
+    let r = agent_msg_with_config(
+        &["hook", "claude"],
+        Some("hub:qsl:code"),
+        &path,
+        SESSION_START,
+    );
 
     assert_eq!(r.status, 0, "stderr: {}", r.stderr);
     assert_eq!(r.stdout, "");
@@ -367,7 +372,7 @@ fn a_non_hook_command_exits_one_on_a_malformed_config_file() {
     let path = dir.join("config.toml");
     std::fs::write(&path, "url = \"redis://x\"\nmachine = \"unterminated\n").unwrap();
 
-    let r = agent_msg_with_config(&["who"], Some("qsl-lead"), &path, "");
+    let r = agent_msg_with_config(&["who"], Some("hub:qsl:code"), &path, "");
 
     assert_eq!(r.status, 1);
     assert!(
@@ -390,7 +395,7 @@ fn the_url_in_the_config_file_is_used_when_no_flag_or_env_overrides_it() {
     // connection, not a parse error).
     std::fs::write(&path, "url = \"agent-msg-canary-not-a-redis-url\"\n").unwrap();
 
-    let r = agent_msg_with_config(&["who"], Some("qsl-lead"), &path, "");
+    let r = agent_msg_with_config(&["who"], Some("hub:qsl:code"), &path, "");
 
     assert_eq!(r.status, 1);
     assert!(

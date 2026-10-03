@@ -181,7 +181,7 @@ agent-msg log       # recent bus history
 If `agent-msg who` only shows leads you expect and `agent-msg log` shows sends
 you've made land, the plugin is reaching the same Redis your CLI does.
 
-`scripts/live-test-opencode-plugin.sh` runs a fuller, automated version of
+The retired pre-0.3 alias-based live driver previously ran a fuller version of
 this against a throwaway Redis and a throwaway opencode config dir, including
 the idle-nudge path (against `opencode serve`) and an exchange with a live
 Claude Code lead in both directions.

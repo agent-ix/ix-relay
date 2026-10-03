@@ -292,15 +292,10 @@ fn tc_008_04_every_registry_and_alias_read_tolerates_bytes_that_are_not_utf8() {
     bus.relay
         .register(&valid("anchor", "hub", "wB:p1"))
         .expect("register");
-    bus.relay
-        .set_alias(&name("old-anchor"), &name("anchor"))
-        .expect("alias");
     // A corrupt record under a valid name, a hash field that is not UTF-8, and
     // alias pairs whose field or value is not.
     bus.plant("qsl", &[0xff, 0xfe]);
     bus.plant_in("agents", &[0xc3, 0x28], b"{}");
-    bus.plant_in("aliases", b"bad-value", &[0xff]);
-    bus.plant_in("aliases", &[0xff, 0x80], b"anchor");
 
     // agent(): the record under `qsl` is a decode failure.
     assert!(matches!(
@@ -330,21 +325,4 @@ fn tc_008_04_every_registry_and_alias_read_tolerates_bytes_that_are_not_utf8() {
         })
         .expect("a broadcast survives an unreadable registry field");
     assert_eq!(recipients, vec![name("anchor"), name("qsl")]);
-    // Alias reads: unreadable pairs are ignored, the good one stays.
-    assert_eq!(
-        bus.relay.resolve_alias(&name("bad-value")).expect("alias"),
-        name("bad-value")
-    );
-    assert_eq!(
-        bus.relay.resolve_alias(&name("old-anchor")).expect("alias"),
-        name("anchor")
-    );
-    assert_eq!(
-        bus.relay.all_aliases().expect("aliases"),
-        vec![(name("old-anchor"), name("anchor"))]
-    );
-    assert_eq!(
-        bus.relay.aliases_of(&name("anchor")).expect("aliases"),
-        vec![name("old-anchor")]
-    );
 }

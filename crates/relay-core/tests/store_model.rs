@@ -149,7 +149,6 @@ struct Held {
 #[derive(Debug, Default)]
 struct Model {
     agents: BTreeMap<usize, Slot>,
-    aliases: BTreeMap<usize, usize>,
     inbox: BTreeMap<usize, VecDeque<Entry>>,
     log: Vec<Message>,
     /// Consumer -> the batch it popped last and has neither delivered nor requeued.
@@ -185,7 +184,7 @@ impl Model {
         }
         let recipients: Vec<usize> = match to {
             To::One(name) => {
-                let canonical = self.aliases.get(name).copied().unwrap_or(*name);
+                let canonical = *name;
                 if !self.agents.contains_key(&canonical) {
                     return SendOutcome::UnknownAgent;
                 }
@@ -260,7 +259,6 @@ enum RawKind {
 #[derive(Debug, Clone)]
 enum Op {
     Register(usize),
-    Alias(usize, usize),
     CorruptRegistry(usize),
     Send {
         from: usize,
@@ -303,7 +301,6 @@ fn op() -> impl Strategy<Value = Op> {
     ];
     prop_oneof![
         4 => idx().prop_map(Op::Register),
-        2 => (idx(), idx()).prop_map(|(a, c)| Op::Alias(a, c)),
         1 => idx().prop_map(Op::CorruptRegistry),
         8 => (idx(), to, body).prop_map(|(from, to, body)| Op::Send { from, to, body }),
         6 => (0usize..2, idx(), 1usize..6, proptest::option::of(proptest::sample::select(vec![0usize, 150, 230, 320, 460, 700, 100_000])), any::<bool>())
@@ -355,7 +352,6 @@ fn apply(bus: &mut Bus, model: &mut Model, op: &Op, n: u64) -> Result<(), String
                 last_seen_ms: model.next_seen,
             };
             bus.relay.register(&reg).map_err(|e| e.to_string())?;
-            model.aliases.remove(i);
             model.agents.insert(
                 *i,
                 Slot::Registered {
@@ -363,22 +359,9 @@ fn apply(bus: &mut Bus, model: &mut Model, op: &Op, n: u64) -> Result<(), String
                 },
             );
         }
-        Op::Alias(alias, canonical) => {
-            bus.relay
-                .set_alias(&lead(*alias), &lead(*canonical))
-                .map_err(|e| e.to_string())?;
-            if alias != canonical {
-                model.agents.remove(alias);
-                model.aliases.insert(*alias, *canonical);
-            }
-        }
         Op::CorruptRegistry(i) => {
-            // Raw plant: a record no binary wrote. Skipped for a name that is an
-            // alias, which the store's own operations keep disjoint (FR-006-AC-4).
-            if !model.aliases.contains_key(i) {
-                bus.hset_raw("agents", &format!("lead-{i}"), "{\"not\": a registration");
-                model.agents.insert(*i, Slot::Corrupt);
-            }
+            bus.hset_raw("agents", &format!("lead-{i}"), "{invalid");
+            model.agents.insert(*i, Slot::Corrupt);
         }
         Op::Send { from, to, body } => {
             let text = text_of(body, n);
@@ -556,18 +539,10 @@ fn apply(bus: &mut Bus, model: &mut Model, op: &Op, n: u64) -> Result<(), String
             let matches = matches!(model.agents.get(who), Some(Slot::Registered { last_seen_ms }) if *last_seen_ms == seen);
             match (matches, got) {
                 (true, Some(removed)) => {
-                    let mut want: Vec<AgentName> = model
-                        .aliases
-                        .iter()
-                        .filter(|(_, c)| *c == who)
-                        .map(|(a, _)| lead(*a))
-                        .collect();
-                    want.sort();
-                    if removed != want {
-                        return Err(format!("removed aliases {removed:?}, model {want:?}"));
+                    if !removed.is_empty() {
+                        return Err("unexpected prune payload".into());
                     }
                     model.agents.remove(who);
-                    model.aliases.retain(|_, c| c != who);
                 }
                 (false, None) => {}
                 (m, g) => return Err(format!("prune matched={m}, store returned {g:?}")),
@@ -619,30 +594,6 @@ fn compare(bus: &mut Bus, model: &Model) -> Result<(), String> {
         {
             return Err(format!("{} last seen {}", r.name, r.last_seen_ms));
         }
-    }
-    let aliases: BTreeSet<(String, String)> = bus
-        .relay
-        .all_aliases()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|(a, c)| (a.to_string(), c.to_string()))
-        .collect();
-    let want_aliases: BTreeSet<(String, String)> = model
-        .aliases
-        .iter()
-        .map(|(a, c)| (format!("lead-{a}"), format!("lead-{c}")))
-        .collect();
-    if aliases != want_aliases {
-        return Err(format!("aliases {aliases:?}, model {want_aliases:?}"));
-    }
-    // FR-006-AC-4: a name is a registry key or an alias, never both.
-    let both: Vec<&String> = skipped
-        .iter()
-        .chain(registered.iter())
-        .filter(|n| aliases.iter().any(|(a, _)| a == *n))
-        .collect();
-    if !both.is_empty() {
-        return Err(format!("names both registered and aliased: {both:?}"));
     }
     let log = bus.relay.log(0, 100_000).map_err(|e| e.to_string())?;
     if log != model.log {

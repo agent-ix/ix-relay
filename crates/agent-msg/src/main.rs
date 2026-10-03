@@ -34,15 +34,13 @@ use std::{
 
 use clap::{Parser, Subcommand, ValueEnum};
 use relay_core::{
-    AddressBook, AgentName, EscalationStatus, MachineName, Message, PaneId, PaneRef, Place,
-    Registration, Relay, SessionId,
+    AddressBook, AgentName, EscalationStatus, MachineName, Message, PaneId, Registration, Relay,
 };
 use relay_ops::{
     clock,
     escalate::{self, EscalateArgs},
     herdr::RealHerdr,
     linear::RealLinear,
-    naming::HerdrEnv,
 };
 
 use crate::{
@@ -72,13 +70,6 @@ struct Cli {
     /// then `IX_RELAY_PREFIX`, then [`relay_core::DEFAULT_PREFIX`].
     #[arg(long, global = true)]
     prefix: Option<String>,
-    /// Your lead name. Signs what you send and picks your inbox.
-    ///
-    /// Taken as a raw string here, not `AgentName`: a hook must never fail to
-    /// parse its way into a nonzero exit (see `hook_run::run`), so validation happens
-    /// per command instead of at the clap layer.
-    #[arg(long = "as", env = "AGENT_MSG_NAME", global = true)]
-    name: Option<String>,
     /// The human inbox `escalate`/`resolve` notify/sign as. Defaults come
     /// from `~/.ix/relay/config.toml`'s `human` key, then `IX_RELAY_HUMAN`,
     /// then `operator`.
@@ -94,11 +85,8 @@ enum Cmd {
     Work(work::WorkArgs),
     /// Send a message to one lead, or to `all`.
     Send {
-        /// Who to send to: `server:workspace[:tab[:pane]]` (e.g. `hub:EA:1` or
-        /// `hub:EA:code:wA-p1`; without a tab this selects the workspace and
-        /// without a pane it selects the whole tab),
-        /// or `all`. A bus name, alias or herdr pane id also works.
-        /// Resolved here, so no `find` is needed first.
+        /// Full server:workspace:tab, :workspace:tab, :tab, or all.
+        /// The relay discovers and enrolls the live Herdr lead automatically.
         to: String,
         /// The message.
         #[arg(required = true, num_args = 1..)]
@@ -133,7 +121,7 @@ enum Cmd {
     },
     /// List registered leads.
     Who,
-    /// Look up an agent by name, alias, workspace/tab label, session name,
+    /// Look up a live lead by address, workspace/tab label, session name,
     /// pane id or `server:workspace[:tab[:pane]]` address, joining the bus registry
     /// against live herdr state on this machine and every saved one
     /// (AGE-2018). Ends with the address(es) to use with `send`. Not needed
@@ -172,21 +160,10 @@ enum Cmd {
         #[arg(long, default_value = "manual")]
         kind: String,
     },
-    /// Print this session's bus name and where it came from: an explicit
-    /// `AGENT_MSG_NAME`/`--as`, or one resolved via `agent_msg::identity`'s
-    /// name-precedence chain (AGE-2018) — see that module's doc comment for
-    /// the 4 real precedence sources (`rename-title`, `herdr-agent-name`,
-    /// `location`, plus `explicit`) and the 5th, non-precedence source,
-    /// `registry`, an interactive command like this one falls back to.
-    /// Prints `not a lead` (or, with `--json`, `{"lead":false}`) when
-    /// nothing resolves — always exits 0, since this is a query, not an
-    /// action.
+    /// Print this session's verified server:workspace:tab identity.
+    /// An unverified session prints not a lead; aliases never supply identity.
     Whoami {
-        /// Print `{"name": "...", "source": "..."}` (`source` is one of
-        /// `explicit`, `rename-title`, `herdr-agent-name`, `location`,
-        /// `registry` — see `identity::Source`), or `{"lead": false}` when
-        /// this session isn't a lead — for a caller that parses the output
-        /// (e.g. the opencode plugin, once at startup).
+        /// Print the canonical address and location source, or {"lead":false}.
         #[arg(long)]
         json: bool,
     },
@@ -287,15 +264,6 @@ enum HookKind {
     Codex,
 }
 
-impl HookKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Codex => "codex",
-        }
-    }
-}
-
 fn main() -> ExitCode {
     // A hook must never fail an agent's turn with a nonzero exit, not even on a
     // bad `--as`/`AGENT_MSG_NAME` or an argv clap can't parse at all: Claude Code
@@ -319,7 +287,7 @@ fn main() -> ExitCode {
         }
     };
 
-    if let Cmd::Hook { kind } = cli.cmd {
+    if let Cmd::Hook { kind: _ } = cli.cmd {
         // No explicit name and not running inside a herdr-managed pane
         // either: stay silent, exactly as before AGE-2018 — checked *before*
         // the config file is ever read, so a malformed
@@ -328,8 +296,7 @@ fn main() -> ExitCode {
         // with no explicit name but *inside* herdr still needs the config
         // loaded next, to reach the registry for the derived-name collision
         // check.
-        let has_explicit_name = matches!(cli.name.as_deref(), Some(n) if !n.is_empty());
-        if !has_explicit_name && relay_ops::naming::HerdrEnv::from_process_env().is_none() {
+        if std::env::var("HERDR_ENV").as_deref() != Ok("1") {
             return ExitCode::SUCCESS;
         }
         let clock = SystemClock::start();
@@ -346,8 +313,6 @@ fn main() -> ExitCode {
             }
         };
         let cx = HookCtx {
-            cli_name: cli.name.as_deref(),
-            kind,
             machine: &settings.machine.value,
         };
         // A panic anywhere in the hook is caught inside `run` and recorded;
@@ -424,7 +389,14 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
             let broadcast = matches!(resolved.target, relay_core::Target::All);
             let unreadable = resolved.unreadable;
             let msg = Message {
-                from: me(cli.name.as_deref(), &mut relay, &settings.machine.value)?,
+                from: {
+                    let id = me(None, &mut relay, &settings.machine.value)?;
+                    let address = relay
+                        .agent(&id)?
+                        .and_then(|r| r.full_address())
+                        .ok_or("sender has no verified tab address")?;
+                    address.to_string().parse()?
+                },
                 to: resolved.target,
                 text: text.join(" "),
                 sent_at_ms: now_ms(),
@@ -435,11 +407,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 resolved.registry.as_deref(),
                 &recipients,
             );
-            // The confirmation names the recipients by address where it can.
-            // A send by bus name or alias read only that one lead's record, so
-            // it confirms by name and reads nothing more (AGE-2028); an address
-            // or pane id already read the registry, and a broadcast names every
-            // lead, so it reads it once.
+            // Reuse verified recipient metadata for public confirmation.
             let book = match resolved.registry {
                 Some(registrations) => AddressBook::from_registrations(&registrations),
                 None if broadcast => address_book(&mut relay),
@@ -501,7 +469,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
         Cmd::Inbox {
             dead: true, max, ..
         } => {
-            let name = me(cli.name.as_deref(), &mut relay, &settings.machine.value)?;
+            let name = me(None, &mut relay, &settings.machine.value)?;
             let found = relay.dead_letters(&name, max)?;
             if found.messages.is_empty() && found.rejected.is_empty() {
                 writeln!(out, "no dead letters")?;
@@ -519,7 +487,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
             }
         }
         Cmd::Inbox { count: true, .. } => {
-            let name = me(cli.name.as_deref(), &mut relay, &settings.machine.value)?;
+            let name = me(None, &mut relay, &settings.machine.value)?;
             let n = relay.inbox_len(&name)?;
             writeln!(out, "{n}")?;
         }
@@ -530,7 +498,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
             dead: false,
             in_flight: false,
         } => {
-            let name = me(cli.name.as_deref(), &mut relay, &settings.machine.value)?;
+            let name = me(None, &mut relay, &settings.machine.value)?;
             let popped = relay.pop_inbox(&name, max)?;
             if json {
                 let report = InboxReport::new(&popped, &display_book(&mut relay, &redial));
@@ -550,15 +518,11 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
             }
         }
         Cmd::Who => {
-            // AGE-2018 PR review, finding 11: one `all_aliases` round trip
-            // for every row, instead of one `aliases_of` call per registered
-            // lead (which made `who`'s Redis cost O(leads), not O(1)).
-            let (all_aliases, list, replaced) = retry::read(&mut relay, &redial, |r| {
-                let aliases = r.all_aliases()?;
+            let (list, replaced) = retry::read(&mut relay, &redial, |r| {
                 let list = r.agents()?;
                 let names: Vec<&AgentName> = list.registrations.iter().map(|x| &x.name).collect();
                 let replaced = r.panes_replaced(&names);
-                Ok((aliases, list, replaced))
+                Ok((list, replaced))
             })?;
             // Whether a pane now hosts another session is extra: a failed read of
             // it is said, and the listing is still printed.
@@ -566,17 +530,6 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 eprintln!("agent-msg who: could not read which panes were replaced: {e}");
                 std::collections::BTreeMap::new()
             });
-            let mut aliases_by_canonical: std::collections::BTreeMap<AgentName, Vec<AgentName>> =
-                std::collections::BTreeMap::new();
-            for (alias, canonical) in all_aliases {
-                aliases_by_canonical
-                    .entry(canonical)
-                    .or_default()
-                    .push(alias);
-            }
-            for aliases in aliases_by_canonical.values_mut() {
-                aliases.sort();
-            }
             let registrations =
                 list.into_registrations_reporting(|skipped| eprintln!("agent-msg who: {skipped}"));
             // The address column follows the one shown-address rule (a lead's
@@ -604,20 +557,10 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                     Some(ids) => format!("Herdr {}:{}", ids.workspace, ids.tab),
                     None => "location unverified".to_owned(),
                 };
-                // AGE-2018: any name(s) this lead is also reachable as
-                // (e.g. its herdr-location name, kept as an alias once a
-                // `/rename` or a herdr agent name takes over as canonical).
-                let empty = Vec::new();
-                let aliases = aliases_by_canonical.get(&r.name).unwrap_or(&empty);
                 write!(
                     out,
-                    "{address}  {}  {machine}  {kind}  seen {seen}  pane {pane}  {cwd}  {place_cache}",
-                    r.name
+                    "{address}  {machine}  {kind}  seen {seen}  pane {pane}  {cwd}  {place_cache}"
                 )?;
-                if !aliases.is_empty() {
-                    let names = aliases.iter().map(AgentName::as_str).collect::<Vec<_>>();
-                    write!(out, "  aka {}", names.join(", "))?;
-                }
                 // FR-032: the watcher found this lead's pane hosting another
                 // session, so what is listed for it is stale, not live.
                 if let Some(found) = replaced.get(&r.name).filter(|f| f.describes(&r)) {
@@ -674,14 +617,10 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
             }
         }
         Cmd::Register { kind } => {
-            let cwd = std::env::current_dir()
-                .ok()
-                .map(|p| p.display().to_string());
-            let machine = settings.machine.value.clone();
-            let name = me(cli.name.as_deref(), &mut relay, &settings.machine.value)?;
-            let place = identity::current_place().or(registered_place(&mut relay, &name)?);
-            relay.register(&registration(name, machine, &kind, None, cwd, place))?;
-            writeln!(out, "registered")?;
+            let _ = kind;
+            let name = me(None, &mut relay, &settings.machine.value)?;
+            let address = display_book(&mut relay, &redial).label(&name);
+            writeln!(out, "registered {address}")?;
         }
         Cmd::Escalate {
             ticket,
@@ -689,7 +628,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
             option,
             recommend,
         } => {
-            let name = me(cli.name.as_deref(), &mut relay, &settings.machine.value)?;
+            let name = me(None, &mut relay, &settings.machine.value)?;
             let outcome = escalate::run_escalate(
                 &mut relay,
                 &name,
@@ -759,16 +698,9 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
             // AGE-2018 PR review, finding 11: a Redis failure inside
             // `derive` propagates as a real error here (via `?`), not a
             // silently-swallowed "not a lead".
-            let identity = match cli.name.as_deref() {
-                None | Some("") => retry::read(&mut relay, &redial, |r| {
-                    derive_or_hint(r, &settings.machine.value)
-                })?,
-                Some(raw) => Some(identity::Identity {
-                    name: raw.parse()?,
-                    source: identity::Source::Explicit,
-                    location_alias: None,
-                }),
-            };
+            let identity = retry::read(&mut relay, &redial, |r| {
+                derive_or_hint(r, &settings.machine.value)
+            })?;
             let address = identity.as_ref().and_then(|id| {
                 display_book(&mut relay, &redial)
                     .place_address(&id.name)
@@ -786,10 +718,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                     if let Some(address) = &address {
                         write!(out, "{address}  ")?;
                     }
-                    write!(out, "{} ({})", id.name, id.source.as_str())?;
-                    if let Some(alias) = &id.location_alias {
-                        write!(out, ", reachable as {alias}")?;
-                    }
+                    write!(out, "({})", id.source.as_str())?;
                     writeln!(out)?;
                 }
                 None if json => {
@@ -811,10 +740,7 @@ fn derive_or_hint(
     machine: &MachineName,
 ) -> Result<Option<identity::Identity>, BoxError> {
     identity::derive(relay, machine).map_err(|e| match e {
-        identity::CollisionError::Relay(e) => e.into(),
-        identity::CollisionError::NoFreeName { .. } => {
-            format!("{e}; pass --as <name> or set AGENT_MSG_NAME").into()
-        }
+        identity::IdentityError::Relay(e) => e.into(),
     })
 }
 
@@ -826,9 +752,7 @@ fn me(
     relay: &mut Relay,
     machine: &MachineName,
 ) -> Result<AgentName, BoxError> {
-    if let Some(raw) = explicit_name {
-        return Ok(raw.parse::<AgentName>()?);
-    }
+    let _ = explicit_name; // Preserved environment metadata, never a routing identity.
     // AGE-2018 PR review, finding 11: a genuine Redis failure inside
     // `derive` must surface as itself, not get relabeled "set
     // AGENT_MSG_NAME" — that message is only for the real "not a lead" case
@@ -836,32 +760,28 @@ fn me(
     match derive_or_hint(relay, machine)? {
         Some(id) => Ok(id.name),
         None => Err(
-            "set AGENT_MSG_NAME (or pass --as), or run this inside a herdr-managed pane, \
-         to establish your lead name"
+            "no verified lead location; run the genuine terminal session in Herdr (Codex requires --no-daemon)"
                 .into(),
         ),
     }
 }
 
+#[cfg(test)]
 fn registration(
     name: AgentName,
     machine: MachineName,
     kind: &str,
-    session_id: Option<SessionId>,
+    session_id: Option<relay_core::SessionId>,
     cwd: Option<String>,
-    _place: Option<Place>,
+    _place: Option<relay_core::Place>,
 ) -> Registration {
     // Set whenever this process runs inside a herdr-managed pane (every lead
     // session does); `relay-watcher` needs it to type messages in later.
-    let herdr_pane = HerdrEnv::pane_id_from_process_env();
-    // Hook and interactive processes may inherit Herdr's pane variables from a
-    // shared harness daemon. Keep the human labels as a claim, but only the
-    // watcher may attach the verified Herdr IDs after matching the registered
-    // harness session to a live Herdr agent.
-    // Human labels from this process are not a verification source. The
-    // watcher will attach a complete Place only after Herdr confirms the
-    // registration's session at the claimed pane.
-    let place = None;
+    let herdr_pane = _place
+        .as_ref()
+        .and_then(|p| p.herdr_ids.as_ref())
+        .map(|ids| ids.pane.clone());
+    let place = _place;
     Registration {
         name,
         machine,
@@ -877,13 +797,11 @@ fn registration(
 /// Who `send` is addressed to, and the registry when resolving it had to read it.
 struct SendTarget {
     target: relay_core::Target,
-    /// Every decodable registration, present only for a pane id or a
-    /// `server:workspace[:tab[:pane]]` address.
+    /// Verified recipient metadata gathered during address resolution.
     registry: Option<Vec<Registration>>,
     /// The named lead's record exists but this binary cannot read it.
     unreadable: bool,
-    /// The one recipient's registration when resolving it read it: a bus name or
-    /// alias reads exactly that record.
+    /// The unique live recipient enrolled by address resolution.
     recipient: Option<Registration>,
 }
 
@@ -903,89 +821,48 @@ fn recipient_registration(
         .or_else(|| registry?.iter().find(|r| r.name == *name).cloned())
 }
 
-/// Turns what `send` was given into who it goes to. A bus name, alias or `all`
-/// is checked against just that one registration (two point reads: the alias
-/// table and the agent), so one undecodable record elsewhere in the registry
-/// cannot block a plain send and its cost does not grow with the number of
-/// leads; only a pane id or a `server:workspace[:tab[:pane]]` address reads the whole
-/// registry.
+/// Resolves full addresses and verified relative addresses from live Herdr state.
+/// The unique genuine recipient is enrolled before its durable queue is used.
 fn resolve_send_target(
     relay: &mut Relay,
     machine: &MachineName,
     input: &str,
 ) -> Result<SendTarget, BoxError> {
-    if let Ok(target) = input.parse::<relay_core::Target>() {
-        match target {
-            relay_core::Target::All => {
-                return Ok(SendTarget {
-                    target,
-                    registry: None,
-                    unreadable: false,
-                    recipient: None,
-                });
-            }
-            relay_core::Target::Agent(name) => {
-                let canonical = relay.resolve_alias(&name)?;
-                // A record this binary cannot decode still names a registered
-                // lead (an older writer's odd id): send to it, as before.
-                let slot = relay.agent_slot(&canonical)?;
-                if slot != relay_core::AgentSlot::Absent {
-                    let unreadable = slot == relay_core::AgentSlot::Unreadable;
-                    let recipient = match slot {
-                        relay_core::AgentSlot::Registered(reg) => Some(*reg),
-                        _ => None,
-                    };
-                    return Ok(SendTarget {
-                        target: relay_core::Target::Agent(canonical),
-                        registry: None,
-                        unreadable,
-                        recipient,
-                    });
-                }
-            }
-        }
+    if input == "all" {
+        return Ok(SendTarget {
+            target: relay_core::Target::All,
+            registry: None,
+            unreadable: false,
+            recipient: None,
+        });
     }
-    let registrations = relay
-        .agents()?
-        .into_registrations_reporting(|skipped| eprintln!("agent-msg send: {skipped}"));
-    let sender_place = pane_place(relay, machine)?.map(|place| place.address(machine));
-    let target = relay_core::resolve_target_scoped(
-        input,
-        machine,
-        sender_place.as_ref(),
-        &registrations,
-        &relay.all_aliases()?,
-    )?;
-    Ok(SendTarget {
-        target,
-        registry: Some(registrations),
-        unreadable: false,
-        recipient: None,
-    })
-}
-
-/// The workspace/tab last registered for `name`, so a re-registration that
-/// made no herdr call does not erase it.
-fn registered_place(relay: &mut Relay, name: &AgentName) -> relay_core::Result<Option<Place>> {
-    Ok(match relay.agent_slot(name)? {
-        relay_core::AgentSlot::Registered(reg) => reg.place,
-        relay_core::AgentSlot::Absent | relay_core::AgentSlot::Unreadable => None,
-    })
-}
-
-/// The workspace/tab this pane last registered under *any* name. Read before
-/// a hook derives its name: a `/rename` demotes the old name to an alias,
-/// which deletes its registration — and the place with it — before the new
-/// name registers.
-fn pane_place(relay: &mut Relay, machine: &MachineName) -> relay_core::Result<Option<Place>> {
-    let Some(pane) = HerdrEnv::pane_id_from_process_env() else {
-        return Ok(None);
+    let address = if let Some(relative) = input.strip_prefix(':') {
+        let identity = identity::derive(relay, machine)?
+            .ok_or("relative addresses require this session's verified Herdr location")?;
+        let sender = relay
+            .agent(&identity.name)?
+            .ok_or("sender enrollment missing")?;
+        let place = sender
+            .verified_place()
+            .ok_or("sender location unverified")?;
+        let expanded = match relative.split(':').collect::<Vec<_>>().as_slice() {
+            [tab] if !tab.is_empty() => format!("{machine}:{}:{tab}", place.workspace),
+            [workspace, tab] if !workspace.is_empty() && !tab.is_empty() => {
+                format!("{machine}:{workspace}:{tab}")
+            }
+            _ => return Err("use :tab or :workspace:tab".into()),
+        };
+        relay_ops::enrollment::validate_address(&expanded)?
+    } else {
+        relay_ops::enrollment::validate_address(input)?
     };
-    // Pane ids repeat across machines: only this machine's registrations count.
-    Ok(relay
-        .registrations_for_pane(&PaneRef::new(machine.clone(), pane))?
-        .into_iter()
-        .find_map(|r| r.verified_place().cloned()))
+    let recipient = relay_ops::enrollment::recipient(relay, machine, &address)?;
+    Ok(SendTarget {
+        target: relay_core::Target::Agent(recipient.name.clone()),
+        registry: Some(vec![recipient.clone()]),
+        unreadable: false,
+        recipient: Some(recipient),
+    })
 }
 
 /// Addresses for printing, or why the registry could not be read.
@@ -999,11 +876,11 @@ fn try_address_book(relay: &mut Relay) -> relay_core::Result<AddressBook> {
 }
 
 /// Addresses for printing. A registry read failure only costs the labels:
-/// bare bus names are printed instead, and the command carries on.
+/// unresolved identities are marked unverified, and the command carries on.
 fn address_book(relay: &mut Relay) -> AddressBook {
     try_address_book(relay).unwrap_or_else(|e| {
         report::line(format_args!(
-            "agent-msg: could not read addresses, showing bus names: {e}"
+            "agent-msg: could not read addresses; unresolved labels are unverified: {e}"
         ));
         AddressBook::default()
     })
@@ -1014,7 +891,7 @@ fn address_book(relay: &mut Relay) -> AddressBook {
 fn display_book(relay: &mut Relay, redial: &retry::Redial) -> AddressBook {
     retry::read(relay, redial, |r| Ok(try_address_book(r)?)).unwrap_or_else(|e| {
         report::line(format_args!(
-            "agent-msg: could not read addresses, showing bus names: {e}"
+            "agent-msg: could not read addresses; unresolved labels are unverified: {e}"
         ));
         AddressBook::default()
     })

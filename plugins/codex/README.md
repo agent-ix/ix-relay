@@ -9,8 +9,7 @@ is Codex's version of the same four hooks plus the same lead guidance.
 This plugin is for **team leads only**. A subagent session should not use it
 — `agent-msg hook codex` already stays silent for subagent calls (Codex marks
 them with a top-level `agent_id`, exactly like Claude Code's subagent marker)
-and for any session that isn't a lead: no explicit `AGENT_MSG_NAME` *and* no
-herdr location to derive one from (AGE-2018).
+and for sessions without a verified live Herdr session association.
 
 Unlike Claude Code, Codex has no `--plugin-dir`-style auto-loading for hooks:
 there is one `$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`), so
@@ -82,7 +81,7 @@ pointed at directly.
    trust for **every** hook enabled in that `CODEX_HOME`, not only this
    plugin's — anything else configured in the same `hooks.json` runs
    unreviewed too. Reach for it in an isolated, scratch `CODEX_HOME` for
-   testing (see `scripts/live-test-codex-plugin.sh`), not for a real lead's
+   testing (using the isolated Herdr startup acceptance procedure below), not for a real lead's
    normal environment; a real lead should go through the interactive prompt
    once instead.
 
@@ -91,20 +90,18 @@ pointed at directly.
    Once trust is granted (interactively, or via the bypass for a headless
    run), each subsequent invocation runs the hooks without prompting again.
 
-5. **`AGENT_MSG_NAME` is optional (AGE-2018).** A lead running inside a
-   herdr-managed pane gets a bus name derived from where it sits in herdr —
-   see the main [README.md](../../README.md#automatic-bus-names) for the
-   naming rule. Set `AGENT_MSG_NAME` explicitly only to override that (it's
-   never rewritten):
+5. **Isolate the real terminal context.** Interactive Herdr Codex leads must
+   start with `codex --no-daemon` so a shared daemon cannot supply another
+   terminal's stale environment. Install `scripts/codex-herdr-launcher.py` as
+   `codex` in a PATH directory before the real executable, or use the flag
+   directly for both starts and resumes. The launcher preserves environment
+   variables and leaves noninteractive CLI commands unchanged.
 
-   ```bash
-   export AGENT_MSG_NAME=qsl-lead
-   ```
-
-   Leave it unset for any session that is not a team lead (a subagent, a
-   one-off session, or one outside herdr); the hooks and CLI stay silent
-   without it. Run `agent-msg whoami` to see what name (if any) a session
-   resolved to and where it came from.
+   Herdr's SessionStart association hook must run before the relay hook.
+   Enrollment uses the genuine payload session ID and live Herdr association.
+   `AGENT_MSG_NAME` is preserved but ignored for identity and routing. The
+   lead's public identity is always `server:workspace:tab`. Run
+   `agent-msg whoami` to verify it.
 
 6. **Set `~/.ix/relay/config.toml` if this machine needs different settings**
    — Redis isn't reachable at the default address (`redis://127.0.0.1:6379`),
@@ -171,3 +168,17 @@ credentials, or fabricated events. Compare that event's session ID with
 `herdr agent get <the actual terminal pane>`. Remove the diagnostic hook after
 capturing the event. Never synthesize a SessionStart or substitute another
 session's ID to make verification pass.
+
+## Startup acceptance
+
+Use an owned isolated Herdr session and isolated Redis namespace. Launch an
+interactive Codex through `scripts/codex-herdr-launcher.py`, submit its first
+prompt, and capture only the genuine SessionStart event, session ID, transcript
+path, and Herdr context. Verify that Herdr reports that exact session ID and that
+registration was written by the installed hook before invoking `whoami`.
+`whoami` must show `server:workspace:tab` even with a stale `AGENT_MSG_NAME`.
+Repeat for resume, then verify `:tab`, `:workspace:tab`, and a remote cold send
+without running `register` or `find` first. Never infer a successful startup from
+the welcome screen, manually register to hide a failure, or guess a pane from
+focus. The pre-0.3 alias-based live drivers were removed; their historical
+results do not verify this contract.

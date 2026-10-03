@@ -63,7 +63,7 @@ fn tc_032_02_who_shows_a_replaced_pane_until_the_lead_registers_again() {
         .unwrap();
     let listed = who(&url, &prefix);
     assert!(
-        listed.contains("lead-a")
+        listed.contains("location unverified")
             && listed.contains("UNDELIVERABLE: pane w1:p3 now hosts another session"),
         "{listed}"
     );

@@ -1,56 +1,20 @@
 ---
 id: FR-001
-title: "Address grammar and segment cleaning"
+title: "Exact tab address grammar"
 type: FR
-relationships:
-  - target: "ix://agent-ix/ix-relay/US-001"
-    type: "implements"
 ---
-# FR-001: Address grammar and segment cleaning
+# FR-001: Exact tab address grammar
 
-## Description
-
-When text is parsed as an address, the address parser shall accept exactly the
-forms `server:workspace`, `server:workspace:tab`, and
-`server:workspace:tab:pane`, with every segment non-empty, and shall refuse
-every other text with an invalid-address error that carries the input verbatim.
-
-## Inputs
-
-- Text typed by a sender, or a machine name and Herdr workspace, tab, and pane
-  identifiers captured in the registry.
-
-## Outputs
-
-- An address with a server and workspace, and optional tab and pane; or an
-  invalid-address error.
+Updated for 0.3.0. This replaces the earlier alias and name-precedence contract.
 
 ## Behavior
 
-- The address parser shall split the input on `:` and accept two, three, or four
-  segments, each non-empty; a pane segment shall be present only after a tab.
-- The address builder shall replace every whitespace character, every control
-  character and every `:` inside a segment with `-`.
-- If a segment is empty after cleaning, then the address builder shall store the
-  segment as `-`.
-- The address builder shall normalise the server segment as a machine name:
-  lowercased, and cut at the first `.`.
-- The address printer shall print the two, three, or four segments present in
-  the address, in Herdr hierarchy order.
+- Public addresses shall contain exactly three nonempty levels: `server:workspace:tab`.
+- Labels shall be preserved, including spaces; control characters, embedded separators and addresses over 96 bytes shall be rejected without slugification.
 
 ## Acceptance Criteria
 
 | ID | Criteria | Verification |
 |----|----------|--------------|
-| FR-001-AC-1 | Given each of `""`, `hub`, `hub:`, `:EA`, `hub::1`, `hub:EA:`, `hub:EA:code:` and `a:b:c:d:e`, parsing returns an invalid-address error whose input equals the given text. | Test |
-| FR-001-AC-2 | Every address built from any server, workspace and optional tab and pane text parses back from its printed form to an address equal to itself. | Test |
-| FR-001-AC-3 | For every address built from any text, no printed segment contains whitespace, a control character or `:`, and no printed segment is empty. | Test |
-| FR-001-AC-4 | Given the server text `Hub.local`, the built address's server is `hub`. | Test |
-| FR-001-AC-5 | Given workspace `My Work\nspace` and tab `a:b` on server `hub`, the printed address is `hub:My-Work-space:a-b`. | Test |
-
-## Dependencies
-
-- **Upstream**: [US-001](../usecase/US-001-message-a-lead-by-where-it-sits.md)
-- **Downstream**: [FR-003](./FR-003-address-matching-ignores-case.md),
-  [FR-005](./FR-005-shown-address-rule.md)
-- Delivered by AGE-2022.
+| FR-001-AC-1 | Malformed, two-part, bare-name and pane-qualified public inputs are rejected. | Test |
+| FR-001-AC-2 | Case and whitespace do not create substitute aliases. | Test |

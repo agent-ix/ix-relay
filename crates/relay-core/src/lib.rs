@@ -16,7 +16,6 @@ mod ids;
 mod message;
 pub mod moves;
 mod name;
-pub mod naming;
 mod resolve;
 pub mod socket_status;
 mod store;
@@ -37,11 +36,10 @@ pub use name::{AgentName, Target};
 pub use resolve::{resolve_target, resolve_target_scoped};
 pub use store::{
     AgentList, AgentSlot, BACKLOG_SCAN_BOUND, Backlog, BatchId, BudgetPopResult, Claim,
-    CommitOutcome, DEAD_LETTER_CAP, DEFAULT_PREFIX, Demotion, HERDR_FAILED_TTL_SECS, HOOK_LEASE,
-    Heartbeats, HookHealth, HookHealthEntry, INFLIGHT_ROW_OVERHEAD, IdentityCommit, InboxOverview,
-    LeadBacklog, LeadOverview, LeaseState, MAX_HEARTBEAT_KEYS, MAX_INFLIGHT_BATCHES,
-    MAX_INFLIGHT_BYTES, MAX_LEASE, MAX_MESSAGE_BYTES, MAX_REDELIVERIES, Moves, Now, PanesReplaced,
-    PlaceRefresh, PopResult, Popper, Reaped, RecipientProbe, RefusedDemotion, Relay, Salvage,
-    Salvaged, ScanCut, SessionProbe, SkippedRegistration, Sweep, UNRESOLVED_TTL_SECS,
-    WATCHER_LEASE,
+    CommitOutcome, DEAD_LETTER_CAP, DEFAULT_PREFIX, HERDR_FAILED_TTL_SECS, HOOK_LEASE, Heartbeats,
+    HookHealth, HookHealthEntry, INFLIGHT_ROW_OVERHEAD, IdentityCommit, InboxOverview, LeadBacklog,
+    LeadOverview, LeaseState, MAX_HEARTBEAT_KEYS, MAX_INFLIGHT_BATCHES, MAX_INFLIGHT_BYTES,
+    MAX_LEASE, MAX_MESSAGE_BYTES, MAX_REDELIVERIES, Moves, Now, PanesReplaced, PlaceRefresh,
+    PopResult, Popper, Reaped, RecipientProbe, Relay, Salvage, Salvaged, ScanCut, SessionProbe,
+    SkippedRegistration, Sweep, UNRESOLVED_TTL_SECS, WATCHER_LEASE,
 };

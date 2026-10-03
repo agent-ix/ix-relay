@@ -128,7 +128,13 @@ fn upstream_of(url: &str) -> SocketAddr {
 }
 
 fn name(s: &str) -> AgentName {
-    s.parse().unwrap()
+    if s == "receiver" {
+        AgentName::for_session(&"hub".parse().unwrap(), &"s1".parse().unwrap())
+    } else if s == "sender" {
+        "hub:EA:sender".parse().unwrap()
+    } else {
+        s.parse().unwrap()
+    }
 }
 
 /// A bus with `receiver` registered, reached directly.
@@ -157,6 +163,7 @@ fn agent_msg(proxy: &Proxy, prefix: &str, args: &[&str]) -> support::Run {
     cmd.env("IX_RELAY_URL", proxy.url());
     cmd.env("IX_RELAY_PREFIX", prefix);
     cmd.env("IX_RELAY_MACHINE", "hub");
+    let _topology = support::transport_topology(&mut cmd);
     run(cmd, "")
 }
 
@@ -184,7 +191,7 @@ fn tc_039_02_read_only_commands_retry_a_timed_out_read_on_a_fresh_connection() {
         let r = agent_msg(&proxy, &prefix, args);
         assert_eq!(r.status, 0, "{args:?}: stderr: {}", r.stderr);
         let expect = if args[0] == "who" {
-            "receiver"
+            "location unverified"
         } else {
             "hello"
         };
@@ -212,7 +219,7 @@ fn tc_039_03_send_is_never_retried() {
     let prefix = format!("test:{}:retry-send:", std::process::id());
     let mut relay = seeded(&url, &prefix);
     let proxy = Proxy::start(upstream_of(&url), Swallow::SlowReplyTo(b"XADD"));
-    let r = agent_msg(&proxy, &prefix, &["send", "receiver", "once"]);
+    let r = agent_msg(&proxy, &prefix, &["send", "hub:EA:code", "once"]);
     assert_ne!(r.status, 0, "the timed-out send is reported, not retried");
     assert_eq!(proxy.accepted(), 1, "no second connection was opened");
     assert_eq!(

@@ -17,25 +17,10 @@
 //! command line that will not parse, happens before a Redis URL is known: those
 //! records wait for any other hook on the machine that does reach Redis.
 //!
-//! # An unresolved name leaves the lead unregistered
+//! # Session verification
 //!
-//! When every variant of the derived name is taken ([`HookError::NoFreeName`]),
-//! the hook registers nothing, caches no name, pops nothing and records one
-//! `derive` failure that names the collided name. A lead with no registration
-//! has no inbox (inboxes are keyed by bus name): senders cannot address it and
-//! the watcher cannot wake it, and its own hooks pop nothing, so no mail is
-//! lost, only undelivered. Falling back to the taken name is never an option:
-//! that put two live leads on one inbox (FR-022-AC-6).
-//!
-//! The failure is remembered per session for [`relay_core::UNRESOLVED_TTL_SECS`]
-//! (`SET NX EX`): the record is written only by the call that set the mark, and a
-//! `PostToolUse`/`Stop` that finds the mark skips the derivation and stays silent.
-//! `SessionStart` derives again whatever the mark says.
-//!
-//! A herdr failure while checking whether the holder is still live is not this
-//! failure: the holder is treated as live, the lead registers under the next free
-//! number, and the herdr error is recorded as a note (`liveness_unknown`, or
-//! `budget_exhausted` when the hook ran out of time before asking).
+//! Hooks enroll only the genuine harness session at its unique live Herdr tab.
+//! An unavailable or ambiguous placement never creates a substitute identity.
 //!
 //! Nor is a herdr failure that leaves the session without any name (AGE-2059):
 //! in a herdr pane, a hook that cannot learn who the session is registers and
@@ -94,14 +79,13 @@ use serde::Deserialize;
 
 use relay_core::{
     AddressBook, AgentName, BatchId, BudgetPopResult, Claim, CommitOutcome, HookHealthEntry,
-    IdentityCommit, MachineName, Message, Place, Popper, Relay, SessionId, SessionProbe,
+    IdentityCommit, MachineName, Message, Popper, Relay, SessionId, SessionProbe,
 };
 
 use crate::{
-    HookKind,
     budget::{Budget, Clock},
     hook::{self, Event, HOOK_BATCH, HookInput},
-    identity::{self, CollisionError, Derived, HookIdentity, HookRequest, LivenessNote},
+    identity::{self, Derived, HookIdentity, HookRequest, IdentityError},
     spool::{ErrorKind, Spool, SpoolRecord, Stage, Subject},
     stdin::{InputFault, InputSource},
 };
@@ -205,7 +189,6 @@ pub(crate) trait Bus {
     /// Bounds every later read and write to `timeout`.
     fn set_timeout(&mut self, timeout: Duration) -> relay_core::Result<()>;
     /// Where this pane last registered, under any name.
-    fn pane_place(&mut self) -> relay_core::Result<Option<Place>>;
     /// What the session cache holds for `session_id`, in one request.
     fn probe_session(&mut self, session_id: &SessionId) -> relay_core::Result<SessionProbe>;
     /// Who this session is, given what [`Bus::probe_session`] found. Reads only;
@@ -216,16 +199,14 @@ pub(crate) trait Bus {
         request: &HookRequest<'_>,
         probe: &SessionProbe,
         budget: &Budget<'_>,
-    ) -> Result<HookIdentity, CollisionError>;
+    ) -> Result<HookIdentity, IdentityError>;
     /// Marks `session_id` as having no free name for a while. `true` when this
     /// call set the mark (the first failure), `false` when it was already set.
-    fn mark_unresolved(&mut self, session_id: &SessionId) -> relay_core::Result<bool>;
     /// Marks `session_id` as having had a herdr failure recorded for a while.
     /// `true` when this call set the mark (record it), `false` when it was
-    /// already set. Unlike [`Bus::mark_unresolved`] it never stops a derivation.
+    /// already set. The mark limits diagnostics without stopping session verification.
     fn mark_herdr_failed(&mut self, session_id: &SessionId) -> relay_core::Result<bool>;
     /// The place `name` last registered.
-    fn registered_place(&mut self, name: &AgentName) -> relay_core::Result<Option<Place>>;
     /// Every identity write of this hook call, as one atomic step.
     fn commit_identity(&mut self, commit: &IdentityCommit) -> relay_core::Result<CommitOutcome>;
     /// Takes `name`'s next batch of messages into flight, in one round trip.
@@ -268,10 +249,6 @@ impl Bus for RelayBus {
         self.relay.set_timeout(timeout)
     }
 
-    fn pane_place(&mut self) -> relay_core::Result<Option<Place>> {
-        crate::pane_place(&mut self.relay, &self.machine)
-    }
-
     fn probe_session(&mut self, session_id: &SessionId) -> relay_core::Result<SessionProbe> {
         self.relay.probe_session(session_id)
     }
@@ -281,20 +258,12 @@ impl Bus for RelayBus {
         request: &HookRequest<'_>,
         probe: &SessionProbe,
         budget: &Budget<'_>,
-    ) -> Result<HookIdentity, CollisionError> {
+    ) -> Result<HookIdentity, IdentityError> {
         identity::derive_for_hook(&mut self.relay, &self.machine, request, probe, budget)
-    }
-
-    fn mark_unresolved(&mut self, session_id: &SessionId) -> relay_core::Result<bool> {
-        self.relay.mark_session_unresolved(session_id)
     }
 
     fn mark_herdr_failed(&mut self, session_id: &SessionId) -> relay_core::Result<bool> {
         self.relay.mark_session_herdr_failed(session_id)
-    }
-
-    fn registered_place(&mut self, name: &AgentName) -> relay_core::Result<Option<Place>> {
-        crate::registered_place(&mut self.relay, name)
     }
 
     fn commit_identity(&mut self, commit: &IdentityCommit) -> relay_core::Result<CommitOutcome> {
@@ -330,10 +299,6 @@ impl Bus for RelayBus {
 
 /// What a hook call was invoked with, apart from stdin.
 pub(crate) struct HookCtx<'a> {
-    /// `--as`/`AGENT_MSG_NAME`, verbatim.
-    pub(crate) cli_name: Option<&'a str>,
-    /// Which harness is calling.
-    pub(crate) kind: HookKind,
     /// This machine's bus name.
     pub(crate) machine: &'a MachineName,
 }
@@ -370,22 +335,11 @@ pub(crate) enum HookError {
     /// Working out who this session is failed.
     #[error("could not derive this session's name: {0}")]
     Derive(#[source] relay_core::Error),
-    /// The derived name is held by another session and every variant of it is
-    /// taken too. Nothing was registered and the holder's registration is
-    /// untouched (FR-022-AC-6).
-    #[error("no free bus name near {candidate}; not registering")]
-    NoFreeName {
-        /// The name that collided.
-        candidate: AgentName,
-    },
     /// The hook runs in a herdr pane and herdr failed (an error, or a call that
     /// timed out) before it could say who the session is, and nothing else named
     /// it. Nothing was registered.
     #[error("herdr could not say who this session is; not registering")]
     HerdrFailed,
-    /// `AGENT_MSG_NAME` is not a bus name.
-    #[error("{0}")]
-    InvalidName(#[source] relay_core::Error),
     /// Reading or writing the registration, aliases or session cache failed.
     #[error("could not register: {0}")]
     Register(#[source] relay_core::Error),
@@ -460,10 +414,7 @@ impl HookError {
             }
             Self::BudgetExhausted { .. } => Stage::Budget,
             Self::Connect(_) => Stage::Connect,
-            Self::Derive(_)
-            | Self::NoFreeName { .. }
-            | Self::HerdrFailed
-            | Self::InvalidName(_) => Stage::Derive,
+            Self::Derive(_) | Self::HerdrFailed => Stage::Derive,
             Self::Register(_) => Stage::Register,
             Self::Pop(_) => Stage::Pop,
             Self::Encode(_) | Self::Output(_) => Stage::Output,
@@ -482,12 +433,10 @@ impl HookError {
             Self::InputTooLarge => ErrorKind::TooLarge,
             Self::InputTimeout => ErrorKind::StdinTimeout,
             Self::BudgetExhausted { .. } => ErrorKind::BudgetExhausted,
-            Self::Connect(e)
-            | Self::Derive(e)
-            | Self::InvalidName(e)
-            | Self::Register(e)
-            | Self::Pop(e) => ErrorKind::of(e),
-            Self::NoFreeName { .. } => ErrorKind::NoFreeName,
+            Self::Connect(e) | Self::Derive(e) | Self::Register(e) | Self::Pop(e) => {
+                ErrorKind::of(e)
+            }
+
             Self::HerdrFailed => ErrorKind::HerdrFailed,
             Self::RequeueFailed { kind, .. } | Self::AckFailed { kind, .. } => *kind,
             Self::AckStale => ErrorKind::LeaseExpired,
@@ -500,7 +449,6 @@ impl HookError {
     /// The derived name that collided, for the failure that has one.
     fn candidate(&self) -> Option<&AgentName> {
         match self {
-            Self::NoFreeName { candidate } => Some(candidate),
             Self::ReadInput(_)
             | Self::ParseInput(_)
             | Self::InputTooLarge
@@ -509,7 +457,6 @@ impl HookError {
             | Self::HerdrFailed
             | Self::Connect(_)
             | Self::Derive(_)
-            | Self::InvalidName(_)
             | Self::Register(_)
             | Self::Pop(_)
             | Self::Encode(_)
@@ -534,8 +481,6 @@ impl HookError {
             | Self::HerdrFailed
             | Self::Connect(_)
             | Self::Derive(_)
-            | Self::NoFreeName { .. }
-            | Self::InvalidName(_)
             | Self::Register(_)
             | Self::Pop(_)
             | Self::Encode(_)
@@ -554,7 +499,7 @@ impl HookError {
     fn is_persistent_input_fault(&self) -> bool {
         matches!(
             self,
-            Self::ReadInput(_) | Self::InputTooLarge | Self::ParseInput(_) | Self::InvalidName(_)
+            Self::ReadInput(_) | Self::InputTooLarge | Self::ParseInput(_)
         )
     }
 }
@@ -591,18 +536,6 @@ impl Recorder<'_> {
     /// not decode, a refused demotion), with `text` for stderr.
     fn note(&mut self, stage: Stage, kind: ErrorKind, text: fmt::Arguments<'_>) {
         self.write_spool(stage, kind, None, &[]);
-        self.say(text);
-    }
-
-    /// [`Recorder::note`] for a failure about the derived name `candidate`.
-    fn note_about(
-        &mut self,
-        stage: Stage,
-        kind: ErrorKind,
-        candidate: &AgentName,
-        text: fmt::Arguments<'_>,
-    ) {
-        self.write_spool(stage, kind, Some(candidate), &[]);
         self.say(text);
     }
 
@@ -654,7 +587,7 @@ pub(crate) fn record_early(
 /// `connect` opens the bus with the timeout it is given (what is left of the
 /// budget).
 pub(crate) fn run<B: Bus>(
-    cx: &HookCtx<'_>,
+    _cx: &HookCtx<'_>,
     clock: &dyn Clock,
     spool: Option<&Spool>,
     (stdin, out, err): (&mut dyn InputSource, &mut dyn Write, &mut dyn Write),
@@ -663,14 +596,14 @@ pub(crate) fn run<B: Bus>(
     let mut recorder = Recorder {
         spool,
         clock,
-        subject: Subject::on(cx.machine.clone()),
+        subject: Subject::on(_cx.machine.clone()),
         err,
     };
     // The deadline of the whole call starts here, before stdin is read.
     let started = clock.elapsed();
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         try_run(
-            cx,
+            _cx,
             (clock, started),
             &mut recorder,
             stdin,
@@ -702,7 +635,7 @@ pub(crate) fn decode_input(raw: &[u8]) -> Result<HookInput, serde_json::Error> {
 }
 
 fn try_run<B: Bus>(
-    cx: &HookCtx<'_>,
+    _cx: &HookCtx<'_>,
     (clock, started): (&dyn Clock, Duration),
     rec: &mut Recorder<'_>,
     stdin: &mut dyn InputSource,
@@ -739,15 +672,6 @@ fn try_run<B: Bus>(
     // of it (AGE-2018 PR review, finding 6). See [`hook_deadline_budget`] for
     // how it is sized per event.
     let budget = Budget::starting_at(clock, started, hook_deadline_budget(event));
-    // Checked before connecting: a name that is not a bus name needs no
-    // connection to be refused.
-    let explicit = match cx.cli_name {
-        Some(raw) if !raw.is_empty() => {
-            Some(raw.parse::<AgentName>().map_err(HookError::InvalidName)?)
-        }
-        _ => None,
-    };
-    rec.subject.lead = explicit.as_ref().map(|name| name.as_str().to_owned());
     let connect_timeout = budget
         .remaining()
         .ok_or(HookError::BudgetExhausted { step: "connecting" })?;
@@ -760,9 +684,7 @@ fn try_run<B: Bus>(
     // only the connect, which through a tunnel measures nothing.
     let mut sampled = false;
 
-    let identity = if let Some(name) = explicit {
-        HookIdentity::Lead(Box::new(Derived::cached(name)))
-    } else {
+    let identity = {
         arm(&mut bus, &budget, "reading the session", HookError::Derive)?;
         // One request for every independent read about the session (suppressed,
         // cached name, unresolved mark). It is also the round trip the pop window
@@ -784,24 +706,15 @@ fn try_run<B: Bus>(
         )?;
         let request = HookRequest {
             session_id: input.session_id.as_ref(),
-            transcript_path: input.transcript_path.as_deref(),
             source: input.source.as_deref(),
             event,
         };
         match bus.derive(&request, &probe, &budget) {
             Ok(identity) => identity,
-            Err(CollisionError::Relay(e)) => return Err(HookError::Derive(e)),
-            Err(CollisionError::NoFreeName { candidate }) => {
-                return unresolved(&mut bus, &budget, input.session_id.as_ref(), candidate);
-            }
+            Err(IdentityError::Relay(e)) => return Err(HookError::Derive(e)),
         }
     };
-    let Derived {
-        name,
-        place,
-        mut commit,
-        note,
-    } = match identity {
+    let Derived { name, commit } = match identity {
         HookIdentity::NotALead => return Ok(()),
         HookIdentity::Suppress { session_id } => {
             if let Some(session_id) = session_id {
@@ -822,70 +735,7 @@ fn try_run<B: Bus>(
         }
     };
     rec.subject.lead = Some(name.as_str().to_owned());
-    if let Some(note) = &note {
-        let kind = match note {
-            LivenessNote::HerdrDown { .. } => ErrorKind::LivenessUnknown,
-            LivenessNote::BudgetSpent { .. } => ErrorKind::BudgetExhausted,
-        };
-        rec.note_about(
-            Stage::Derive,
-            kind,
-            note.candidate(),
-            format_args!("agent-msg hook: {note}"),
-        );
-    }
 
-    // Refreshed at SessionStart and, per AGE-2018's precedence chain,
-    // UserPromptSubmit too — that's the other event `identity::derive_for_hook`
-    // re-derives on, so a mid-session rename is both resolved AND published to
-    // the registry on the very next prompt.
-    if matches!(event, Event::SessionStart | Event::UserPromptSubmit) {
-        // A hook that made no herdr call (`UserPromptSubmit`, and any explicit
-        // `AGENT_MSG_NAME`) has no fresh place: keep the registered one. Fresh
-        // from herdr, else this lead's own registration, else what this pane
-        // registered under its previous name (a `/rename`).
-        let place = match place {
-            Some(place) => Some(place),
-            None => {
-                arm(
-                    &mut bus,
-                    &budget,
-                    "reading the registration",
-                    HookError::Register,
-                )?;
-                // A point read of this lead's own registration: one request. For an
-                // explicit name it is also the round trip the pop window is sized
-                // from (see [`pop_window`]).
-                let step_started = clock.elapsed();
-                let registered = bus.registered_place(&name).map_err(HookError::Register)?;
-                rtt = rtt.max(clock.elapsed().saturating_sub(step_started));
-                sampled = true;
-                match registered {
-                    Some(place) => Some(place),
-                    None => {
-                        // First registration under this name, or a `/rename`: the
-                        // place lives under the pane's previous name. Reading it
-                        // scans the registry, so only this rare case pays for it.
-                        arm(
-                            &mut bus,
-                            &budget,
-                            "reading the pane's place",
-                            HookError::Derive,
-                        )?;
-                        bus.pane_place().map_err(HookError::Derive)?
-                    }
-                }
-            }
-        };
-        commit.registration = Some(crate::registration(
-            name.clone(),
-            cx.machine.clone(),
-            cx.kind.as_str(),
-            input.session_id.clone(),
-            input.cwd.clone(),
-            place,
-        ));
-    }
     // Every identity write — registration, alias demotions, session cache — is
     // this one step, made only after everything that reads and waits is done,
     // so a call that ran out of time before here has written nothing.
@@ -993,26 +843,6 @@ fn try_run<B: Bus>(
     Ok(())
 }
 
-/// A derivation found no free name. The first such failure of a session is
-/// recorded and remembered; while the mark stands later ones are silent
-/// (the mark is best effort: when it cannot be set the failure is recorded).
-fn unresolved<B: Bus>(
-    bus: &mut B,
-    budget: &Budget<'_>,
-    session_id: Option<&SessionId>,
-    candidate: AgentName,
-) -> Result<(), HookError> {
-    let first = session_id.is_none_or(|sid| {
-        arm(bus, budget, "marking the session", HookError::Derive).is_err()
-            || bus.mark_unresolved(sid).unwrap_or(true)
-    });
-    if first {
-        Err(HookError::NoFreeName { candidate })
-    } else {
-        Ok(())
-    }
-}
-
 /// herdr could not name the session. The first failure of a session in a window
 /// is returned as the failure to record (`budget` when a herdr call was refused
 /// for want of time, else `derive`/`herdr_failed`); later ones are silent while
@@ -1058,26 +888,10 @@ fn apply<B: Bus>(
     bus: &mut B,
     budget: &Budget<'_>,
     commit: &IdentityCommit,
-    rec: &mut Recorder<'_>,
+    _rec: &mut Recorder<'_>,
 ) -> Result<(), HookError> {
     arm(bus, budget, "writing the registration", HookError::Register)?;
-    let outcome = bus.commit_identity(commit).map_err(HookError::Register)?;
-    for refused in outcome.refused {
-        rec.note(
-            Stage::Register,
-            ErrorKind::Rejected,
-            format_args!(
-                "agent-msg: not aliasing {}: it is currently registered to a different \
-                 session/pane (session {:?}, pane {:?})",
-                refused.alias,
-                refused
-                    .session_id
-                    .as_ref()
-                    .map(relay_core::SessionId::as_str),
-                refused.herdr_pane.as_ref().map(relay_core::PaneId::as_str)
-            ),
-        );
-    }
+    bus.commit_identity(commit).map_err(HookError::Register)?;
     Ok(())
 }
 
