@@ -647,7 +647,8 @@ mod tests {
     }
 
     fn other_dead_addr() -> SocketAddr {
-        "127.0.0.2:1".parse().unwrap()
+        // Use the same loopback host: macOS need not route 127.0.0.2.
+        "127.0.0.1:2".parse().unwrap()
     }
 
     fn live_addr(collector: &FakeCollector) -> SocketAddr {
