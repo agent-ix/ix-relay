@@ -258,10 +258,7 @@ fn tc_039_04_a_hard_down_redis_fails_read_only_commands_within_the_deadline() {
                 let r = agent_msg(&proxy, &prefix, args);
                 let took = started.elapsed().as_secs_f64();
                 eprintln!("{args:?} failed in {took:.2}s");
-                // `whoami` with a given name only loses its address column.
-                if args[0] != "whoami" {
-                    assert_ne!(r.status, 0, "{args:?}");
-                }
+                assert_ne!(r.status, 0, "{args:?}: unavailable enrollment is an error");
                 assert!(took < bound, "{args:?} took {took:.1}s, bound {bound}s");
             });
         }
