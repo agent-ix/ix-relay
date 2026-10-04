@@ -1722,12 +1722,21 @@ mod tests {
 
         tick(
             &mut relay,
-            &ViewHerdr(Some(view)),
+            &socket::Routed::herdr_only(ViewHerdr(Some(view))),
             &here,
             &mut state,
             &mut |_| {},
         )
         .unwrap();
+        assert!(
+            matches!(
+                relay
+                    .directory_recipient(&"here:EA:code".parse().unwrap())
+                    .unwrap(),
+                relay_core::DirectoryRead::Unique(_)
+            ),
+            "the actual routed adapter must publish the verified directory"
+        );
         let body = String::from_utf8(bodies.recv().unwrap()).unwrap();
         assert!(
             body.contains("\"workspace_label\",\"value\":{\"stringValue\":\"EA\"}")

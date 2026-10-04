@@ -761,3 +761,62 @@ fn a_sigterm_removes_the_reply_socket_and_the_status_file() {
     assert!(!socket.exists(), "the reply socket is removed");
     assert!(!status.exists(), "the status file is removed");
 }
+
+/// Complete production wiring, including the Routed adapter: a real watcher
+/// binary publishes local Herdr evidence with either delivery configuration.
+#[test]
+fn a_real_watcher_publishes_the_directory_with_both_delivery_modes() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(mut bus) = relay_test_support::Bus::connect("directory-real-watcher") else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("owned watcher fixture");
+    let script = r#"#!/bin/sh
+case "$1 $2" in
+'agent list') printf '%s\n' '{"result":{"agents":[{"agent":"claude","pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle","agent_session":{"kind":"id","value":"startup-proof"}}]}}' ;;
+'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"IR","tab_count":1}]}}' ;;
+' tab list'|'tab list') printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","label":"plan"}]}}' ;;
+*) exit 1 ;;
+esac
+"#;
+    let herdr = dir.path().join("herdr");
+    std::fs::write(&herdr, script).expect("fixture Herdr");
+    std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755))
+        .expect("executable fixture");
+    let runtime = dir.path().join("runtime");
+    std::fs::create_dir(&runtime).expect("runtime");
+    for mode in ["herdr", "socket"] {
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, format!("[watcher]\ndelivery = \"{mode}\"\n"))
+            .expect("delivery config");
+        let output = Command::new(env!("CARGO_BIN_EXE_relay-watcher"))
+            .env_clear()
+            .env("HOME", dir.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", dir.path().display()))
+            .env("HERDR_ENV", "1")
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("IX_RELAY_CONFIG", &config)
+            .env("IX_RELAY_MACHINE", "luna")
+            .args(["--once", "--url", &bus.url, "--prefix", &bus.prefix])
+            .output()
+            .expect("real routed watcher");
+        assert!(
+            output.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let resolved = bus
+            .relay
+            .directory_recipient(&"luna:IR:plan".parse().expect("address"))
+            .expect("directory read");
+        assert!(
+            matches!(resolved, relay_core::DirectoryRead::Unique(_)),
+            "{mode}: production wrapper did not publish local evidence"
+        );
+        // Force the next mode to prove publication itself, not reuse the first.
+        let _: i64 = redis::cmd("DEL")
+            .arg(bus.key("directory:luna"))
+            .query(&mut bus.raw)
+            .expect("remove owned snapshot");
+    }
+}

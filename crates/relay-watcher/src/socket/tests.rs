@@ -4317,3 +4317,12 @@ fn tc_044_02_macos_native_process_identity_rejects_a_reused_pid() {
         Err(Unresolved::Stale(1))
     );
 }
+
+#[test]
+fn both_delivery_routes_preserve_local_directory_observation_authority() {
+    use crate::herdr::{Herdr, RealHerdr};
+    assert!(Routed::herdr_only(RealHerdr::default()).directory_observations());
+    let rig = Rig::new(Act::Silent);
+    assert!(Routed::socket_first(RealHerdr::default(), rig.deliverer).directory_observations());
+    assert!(!Routed::herdr_only(FakeHerdr::default()).directory_observations());
+}

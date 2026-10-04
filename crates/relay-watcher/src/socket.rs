@@ -69,6 +69,9 @@ impl<H> Routed<H> {
 }
 
 impl<H: Herdr> Herdr for Routed<H> {
+    fn directory_observations(&self) -> bool {
+        self.herdr.directory_observations()
+    }
     fn get(&self, pane: &PaneId) -> Result<Option<AgentGet>, ProcessError> {
         self.herdr.get(pane)
     }
