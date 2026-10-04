@@ -29,6 +29,9 @@ pub enum Error {
         /// The rejected input.
         input: String,
     },
+    /// Atomic enqueue rejected a changed or expired directory; nothing written.
+    #[error("recipient directory changed or expired before enqueue; nothing queued")]
+    DirectoryChanged,
     /// Enrollment had no genuine session and verified placement.
     #[error("unverified enrollment: {reason}")]
     UnverifiedEnrollment {
@@ -301,6 +304,7 @@ impl Error {
             Self::Work(_)
             | Self::InvalidName { .. }
             | Self::UnverifiedEnrollment { .. }
+            | Self::DirectoryChanged
             | Self::UnknownAgent(_)
             | Self::InvalidAddress { .. }
             | Self::RelativeAddressNeedsLocation { .. }

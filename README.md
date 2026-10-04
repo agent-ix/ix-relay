@@ -172,16 +172,27 @@ hostname-shaped (letters, digits, `.`, `-`, `_`, at most 32) is never printed.
 
 ### Location identities and automatic enrollment
 
-Remote reads use the exact SSH target and session recorded by `herdr machine
-list --json`, invoking the installed Herdr CLI in that session. No local pane
-context is forwarded. Missing, disabled, or ambiguous profiles are refused;
-a cold send does not require a preceding `find`.
+Recipient resolution uses ix-relay's leased Redis directory first. Each watcher
+publishes a complete verified observation from its own local Herdr, including
+empty and ambiguous states. A sender needs no outbound SSH or remote Herdr
+machine profiles. Cold remote resolution requests a destination-watcher
+refresh through Redis and waits up to 35 seconds; local Herdr is a fallback
+for cold local recovery. Enqueue atomically checks the publication lease and
+fence again. Stale durable registrations do not establish address ownership.
+
+Successful topology observations receive ordered Redis fences before reading
+Herdr and publish with a 90-second Redis-clock lease, normally refreshed every
+30 seconds. Failed or incomplete reads cannot renew that lease. Delayed or
+replayed observations cannot restore superseded ownership. Session queues
+survive renames, moves, closure, and address reuse; routing never transfers old
+mail to the new session occupying a pane. These guarantees and their limits
+are modeled in [the directory state model](spec/reviews/relay-directory-state-model.md).
 
 Every lead is identified by `server:workspace:tab`. The tab is always included.
 Send a full address, `:workspace:tab` on your verified server, or `:tab` in your
-verified workspace. The relay checks live Herdr session associations and
-registers an absent recipient automatically; the watcher reconciles live
-sessions as well. A stale registry record never supplies caller identity.
+verified workspace. The owning watcher checks live Herdr session associations and
+registers an absent recipient automatically, publishing current ownership
+through the relay. A stale registry record never supplies caller identity.
 
 Renames and moves change the visible address while the genuine session keeps
 its immutable queue identity. Agent nicknames, `/rename` titles, old aliases,

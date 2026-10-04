@@ -22,10 +22,13 @@ an address containing spaces. Bare names, raw pane IDs, two-part addresses,
 and four-part addresses are rejected. Multiple live sessions sharing a tab
 are an error; put each lead in a separate tab.
 
-Send cold: do not run `find` first. The relay reads live Herdr topology,
-verifies the recipient's genuine session association, and enrolls a lead that
-has no relay record. The watcher performs the same enrollment automatically.
-Startup hooks register the genuine session and its verified location.
+Send cold: do not run `find` first. `agent-msg` resolves through ix-relay's
+leased directory. Each watcher verifies its own local Herdr topology and
+publishes genuine session associations to Redis. A missing or expired entry
+requests a refresh from the destination watcher through Redis; the sender
+needs no outbound SSH or remote Herdr profiles. Local Herdr is a fallback
+for cold local recovery. Startup hooks register the genuine session and its
+verified location. Ambiguous ownership is rejected, never guessed.
 
 `queued for` means successful enqueue. Do not duplicate it through Herdr or
 retry merely because the watcher is delayed. For a timeout, check the log or

@@ -55,9 +55,9 @@ fn unknown_containers_report_live_addresses_without_alias_suggestions() {
         return;
     };
     for (address, diagnostic) in [
-        ("draco:misc:typo", "tab typo does not exist"),
-        ("draco:typo:code", "workspace typo does not exist"),
-        ("unknown:misc:code", "no enabled Herdr machine profile"),
+        ("draco:misc:typo", "no session-verified live lead"),
+        ("draco:typo:code", "no session-verified live lead"),
+        ("unknown:misc:code", "destination watcher on unknown"),
     ] {
         let out = run(f.cmd(&["send", address, "refuse"]), "");
         assert_ne!(out.status, 0);
@@ -72,9 +72,10 @@ fn duplicate_live_sessions_refuse_instead_of_creating_pane_or_number_aliases() {
         return;
     };
     f.state(true, true);
+    f.publish("draco");
     let out = run(f.cmd(&["send", "draco:misc:code", "refuse"]), "");
     assert_ne!(out.status, 0);
-    assert!(out.stderr.contains("multiple live leads"));
+    assert!(out.stderr.contains("multiple live leads"), "{}", out.stderr);
     assert!(f.relay().log(0, 10).unwrap().is_empty());
 }
 

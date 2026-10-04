@@ -57,6 +57,58 @@ pub fn run(
     this_machine: &MachineName,
     query: &str,
 ) -> Result<FindReport, BoxError> {
+    // Relay directory is authoritative across one-way networks. SSH discovery
+    // is a fallback only when no fresh directory publication is available.
+    let registered = crate::retry::read(relay, redial, |relay| relay.agents().map_err(Into::into))?;
+    let machines: std::collections::BTreeSet<_> = registered
+        .registrations
+        .iter()
+        .map(|registration| registration.machine.clone())
+        .collect();
+    let mut directory_rows = Vec::new();
+    let mut fresh = false;
+    for machine in machines {
+        if let Some(entries) = relay.directory_entries(&machine)? {
+            fresh = true;
+            for registration in &entries {
+                let Some(place) = registration.verified_place() else {
+                    continue;
+                };
+                let Some(ids) = &place.herdr_ids else {
+                    continue;
+                };
+                let unique = entries
+                    .iter()
+                    .filter(|other| {
+                        other.name == registration.name
+                            || other.full_address() == registration.full_address()
+                    })
+                    .count()
+                    == 1;
+                directory_rows.push(FoundAgent {
+                    bus_name: unique.then(|| registration.name.clone()),
+                    address: unique.then(|| registration.full_address()).flatten(),
+                    machine: machine.clone(),
+                    workspace_label: Some(place.workspace.clone()),
+                    tab_label: Some(place.tab.clone()),
+                    pane_id: ids.pane.clone(),
+                    tab_id: ids.tab.clone(),
+                    workspace_id: ids.workspace.clone(),
+                    session_id: registration.session_id.clone(),
+                    session_name: None,
+                    herdr_status: "unknown".into(),
+                    on_bus: unique,
+                });
+            }
+        }
+    }
+    if fresh {
+        directory_rows.retain(|row| find::matches_query(row, query));
+        return Ok(FindReport {
+            rows: directory_rows,
+            skipped: Vec::new(),
+        });
+    }
     let herdr = RealFindHerdr::new();
     let mut views: Vec<MachineView> = Vec::new();
     let mut skipped = Vec::new();

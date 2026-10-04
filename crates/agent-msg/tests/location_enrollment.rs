@@ -41,6 +41,7 @@ fn cold_send_enrolls_local_and_remote_recipient_and_shortcuts_work() {
     let Some(f) = Fixture::new("location-cold-send") else {
         return;
     };
+    f.publish("terra");
     for address in ["draco:misc:code", ":misc:code", ":code", "terra:laya:code"] {
         let result = run(f.cmd(&["send", address, "cold message"]), "");
         assert_eq!(result.status, 0, "{address}: {}", result.stderr);
@@ -81,6 +82,7 @@ fn ambiguous_and_unverified_live_recipients_never_enqueue() {
     assert_ne!(result.status, 0);
     assert!(result.stderr.contains("multiple live leads"));
     f.state(false, false);
+    f.publish("draco");
     let result = run(f.cmd(&["send", "draco:misc:code", "refuse"]), "");
     assert_ne!(result.status, 0);
     assert!(result.stderr.contains("session-verified"));
@@ -224,6 +226,8 @@ fn renamed_tabs_keep_the_session_queue_and_preserve_public_history_snapshots() {
         serde_json::to_vec(&state).unwrap(),
     )
     .unwrap();
+    // The owning watcher, not the sender, publishes topology changes.
+    f.publish("draco");
     let old = run(
         f.cmd(&["send", "draco:misc:code", "refuse old address"]),
         "",
@@ -275,7 +279,7 @@ fn one_session_claimed_by_multiple_panes_is_not_enrolled_even_in_separate_tabs()
     let result = run(f.cmd(&["send", "draco:misc:code", "refuse"]), "");
     assert_ne!(result.status, 0);
     assert!(
-        result.stderr.contains("multiple live Herdr panes"),
+        result.stderr.contains("multiple live leads"),
         "{}",
         result.stderr
     );
@@ -341,6 +345,99 @@ fn malformed_topology_and_unaddressable_labels_never_create_fallback_identities(
         let result = run(f.cmd(&["send", "draco:misc:code", "refuse"]), "");
         assert_ne!(result.status, 0, "{changed}: {}", result.stdout);
         assert!(f.relay().log(0, 100).unwrap().is_empty());
-        assert!(f.relay().agents().unwrap().registrations.is_empty());
+        assert!(
+            f.relay()
+                .agents()
+                .unwrap()
+                .registrations
+                .iter()
+                .all(|registration| {
+                    registration.name
+                        == AgentName::for_session(
+                            &"draco".parse().unwrap(),
+                            &"sender-session".parse().unwrap(),
+                        )
+                        && registration.full_address().unwrap().to_string()
+                            == "draco:misc:agent-skills"
+                })
+        );
     }
+}
+
+#[test]
+fn relay_hit_sends_with_no_herdr_or_ssh_access_for_sender_or_recipient() {
+    let Some(f) = Fixture::new("location-relay-only") else {
+        return;
+    };
+    f.publish("draco");
+    f.publish("terra");
+    std::fs::write(
+        f.dir.join("herdr"),
+        "#!/bin/sh\necho forbidden-herdr >&2\nexit 99\n",
+    )
+    .unwrap();
+    std::fs::write(
+        f.dir.join("ssh"),
+        "#!/bin/sh\necho forbidden-ssh >&2\nexit 99\n",
+    )
+    .unwrap();
+    for address in ["terra:laya:code", ":code", ":misc:code"] {
+        let result = run(f.cmd(&["send", address, "redis-only proof"]), "");
+        assert_eq!(result.status, 0, "{address}: {}", result.stderr);
+        assert!(!result.stderr.contains("forbidden"));
+    }
+    let found = run(f.cmd(&["find", "laya", "--json"]), "");
+    assert_eq!(found.status, 0, "{}", found.stderr);
+    assert!(found.stdout.contains("terra:laya:code"), "{}", found.stdout);
+    assert!(!found.stderr.contains("forbidden"));
+    assert_eq!(f.relay().log(0, 10).unwrap().len(), 3);
+}
+
+#[test]
+fn cold_remote_send_waits_for_destination_watcher_without_remote_herdr() {
+    let Some(f) = Fixture::new("location-remote-refresh") else {
+        return;
+    };
+    f.publish("draco");
+    std::fs::write(
+        f.dir.join("herdr"),
+        "#!/bin/sh\necho forbidden-herdr >&2\nexit 99\n",
+    )
+    .unwrap();
+    std::fs::write(
+        f.dir.join("ssh"),
+        "#!/bin/sh\necho forbidden-ssh >&2\nexit 99\n",
+    )
+    .unwrap();
+    std::thread::scope(|scope| {
+        let sender = scope.spawn(|| {
+            run(
+                f.cmd(&["send", "terra:laya:code", "cold redis-only proof"]),
+                "",
+            )
+        });
+        let mut raw = redis::Client::open(f.url.as_str())
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let requested: bool =
+                redis::Commands::exists(&mut raw, format!("{}directory-refresh:terra", f.prefix))
+                    .unwrap();
+            if requested {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "remote refresh not requested"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        f.publish("terra");
+        let result = sender.join().unwrap();
+        assert_eq!(result.status, 0, "{}", result.stderr);
+        assert!(result.stdout.contains("queued for terra:laya:code"));
+    });
+    assert_eq!(f.relay().log(0, 10).unwrap().len(), 1);
 }

@@ -25,6 +25,22 @@ impl Keys {
         }
     }
 
+    pub(super) fn directory_key(&self, machine: &MachineName) -> String {
+        format!("{}directory:{machine}", self.prefix)
+    }
+
+    pub(super) fn directory_sequence_key(&self, machine: &MachineName) -> String {
+        format!("{}directory-sequence:{machine}", self.prefix)
+    }
+
+    pub(super) fn directory_committed_key(&self, machine: &MachineName) -> String {
+        format!("{}directory-committed:{machine}", self.prefix)
+    }
+
+    pub(super) fn directory_refresh_key(&self, machine: &MachineName) -> String {
+        format!("{}directory-refresh:{machine}", self.prefix)
+    }
+
     pub(super) fn work_key(
         &self,
         machine: &MachineName,
@@ -157,6 +173,19 @@ mod tests {
         let sid: SessionId = "sid-1".parse().unwrap();
         let machine: MachineName = "node-a".parse().unwrap();
         vec![
+            (
+                "directory_committed_key",
+                relay.directory_committed_key(&machine),
+            ),
+            ("directory_key", relay.directory_key(&machine)),
+            (
+                "directory_sequence_key",
+                relay.directory_sequence_key(&machine),
+            ),
+            (
+                "directory_refresh_key",
+                relay.directory_refresh_key(&machine),
+            ),
             ("work_key", relay.work_key(&machine, &sid, 42)),
             ("inbox_key", relay.inbox_key(&agent)),
             ("agents_key", relay.agents_key()),
@@ -185,6 +214,10 @@ mod tests {
     #[test]
     fn the_keys_are_the_documented_ones() {
         let want = [
+            ("directory_committed_key", "p:directory-committed:node-a"),
+            ("directory_key", "p:directory:node-a"),
+            ("directory_sequence_key", "p:directory-sequence:node-a"),
+            ("directory_refresh_key", "p:directory-refresh:node-a"),
             ("work_key", "p:work:node-a:sid-1:42"),
             ("inbox_key", "p:inbox:lead-a"),
             ("agents_key", "p:agents"),
@@ -238,6 +271,10 @@ mod tests {
         let sid: SessionId = "sid-1".parse().unwrap();
         let machine: MachineName = "node-a".parse().unwrap();
         let moved = [
+            other.directory_committed_key(&machine),
+            other.directory_key(&machine),
+            other.directory_sequence_key(&machine),
+            other.directory_refresh_key(&machine),
             other.work_key(&machine, &sid, 42),
             other.inbox_key(&agent),
             other.agents_key(),

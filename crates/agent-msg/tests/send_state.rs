@@ -50,31 +50,41 @@ impl Bus {
         let mut relay = Relay::connect(url, Duration::from_secs(2))
             .unwrap()
             .with_prefix(prefix.clone());
-        for (name, machine, pane) in [
-            ("hub:EA:code", "hub", receiver_pane),
-            ("hub:EA:sender", "node-a", Some("w9:p9")),
+        // Model the owning watchers' complete verified publications. A stale
+        // registry record alone must no longer authorize cross-machine routing.
+        for (machine, session, pane, tab) in [
+            ("hub", "s1", receiver_pane.unwrap_or("w1:p1"), "code"),
+            ("node-a", "sender-session", "w1:p2", "sender"),
         ] {
+            let machine = machine.parse().unwrap();
+            let session = session.parse().unwrap();
+            let pane: relay_core::PaneId = pane.parse().unwrap();
+            let registration = Registration {
+                name: relay_core::AgentName::for_session(&machine, &session),
+                machine: machine.clone(),
+                kind: "claude".into(),
+                session_id: Some(session.clone()),
+                cwd: None,
+                herdr_pane: Some(pane.clone()),
+                last_seen_ms: now_ms(),
+                place: Some(relay_core::Place {
+                    workspace: "EA".into(),
+                    tab: tab.into(),
+                    herdr_ids: Some(relay_core::HerdrPlaceIds {
+                        workspace: "w1".parse().unwrap(),
+                        tab: if tab == "code" { "w1:t1" } else { "w1:t2" }
+                            .parse()
+                            .unwrap(),
+                        pane,
+                        session_id: session,
+                        verified_at_ms: now_ms(),
+                    }),
+                }),
+            };
+            relay_ops::enrollment::enroll(&mut relay, &registration).unwrap();
+            let revision = relay.begin_directory_observation(&machine).unwrap();
             relay
-                .register(&Registration {
-                    name: if name == "hub:EA:code" {
-                        relay_core::AgentName::for_session(
-                            &"hub".parse().unwrap(),
-                            &"s1".parse().unwrap(),
-                        )
-                    } else {
-                        relay_core::AgentName::for_session(
-                            &"node-a".parse().unwrap(),
-                            &"sender-session".parse().unwrap(),
-                        )
-                    },
-                    machine: machine.parse().unwrap(),
-                    kind: "claude".into(),
-                    session_id: None,
-                    cwd: None,
-                    herdr_pane: pane.map(|p| p.parse().unwrap()),
-                    place: None,
-                    last_seen_ms: now_ms(),
-                })
+                .publish_directory(&machine, revision, &[registration])
                 .unwrap();
         }
         Self {

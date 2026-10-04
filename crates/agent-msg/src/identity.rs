@@ -145,6 +145,20 @@ fn caller_claude_session() -> Option<SessionId> {
 
 /// Interactive commands heal their own enrollment from live session evidence.
 pub fn derive(relay: &mut Relay, machine: &MachineName) -> Result<Option<Identity>, IdentityError> {
+    let session = std::env::var("CODEX_THREAD_ID")
+        .ok()
+        .and_then(|value| value.parse::<SessionId>().ok())
+        .or_else(caller_claude_session);
+    if let Some(session) = session
+        && let Some(registration) = relay.directory_session(machine, &session)?
+    {
+        // Refresh metadata from the same fresh snapshot before shortcut expansion.
+        enrollment::enroll(relay, &registration)?;
+        return Ok(Some(Identity {
+            name: registration.name,
+            source: Source::Location,
+        }));
+    }
     match process_registration(machine) {
         Ok(registration) => {
             enrollment::enroll(relay, &registration)?;

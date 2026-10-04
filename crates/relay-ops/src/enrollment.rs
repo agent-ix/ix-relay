@@ -1,5 +1,5 @@
 //! Session-bound enrollment from current Herdr topology. No names or aliases.
-use crate::find::{self, FindHerdr, MachineView, RealFindHerdr};
+use crate::find::{self, MachineView, RealFindHerdr};
 use relay_core::{Address, AgentName, MachineName, Registration, Relay, SessionId};
 use std::time::Duration;
 
@@ -32,7 +32,7 @@ pub fn registrations(view: &MachineView) -> Result<Vec<Registration>, Enrollment
         registrations.push(Registration {
             name: AgentName::for_session(&view.machine, session),
             machine: view.machine.clone(),
-            kind: "herdr".into(),
+            kind: agent.kind.clone(),
             session_id: Some(session.clone()),
             cwd: None,
             herdr_pane: Some(agent.pane_id.clone()),
@@ -126,82 +126,114 @@ pub fn current(
     Ok(found.clone())
 }
 
-/// Refreshes an address's live topology and enrolls the uniquely identified lead.
+/// Publish a complete verified LOCAL observation for cold fallback recovery.
+/// Normal sender lookups and remote resolution do not invoke this operation.
+pub fn refresh_local_directory(
+    relay: &mut Relay,
+    machine: &MachineName,
+) -> Result<(), EnrollmentError> {
+    // This cold machine fallback is not needed for a fresh directory hit.
+    let revision = relay.begin_directory_observation(machine)?;
+    let view =
+        find::gather_machine_view(&RealFindHerdr::new(), None, machine, Duration::from_secs(3))?;
+    let live = registrations(&view)?;
+    for registration in &live {
+        if live
+            .iter()
+            .filter(|other| {
+                other.name == registration.name
+                    || other.full_address() == registration.full_address()
+            })
+            .count()
+            == 1
+        {
+            enroll(relay, registration)?;
+        }
+    }
+    relay.publish_directory(machine, revision, &live)?;
+    Ok(())
+}
+
+/// Resolve through the relay directory. Local Herdr is a fallback only; remote
+/// resolution requests the owning watcher through Redis, never outbound SSH.
 pub fn recipient(
     relay: &mut Relay,
     local: &MachineName,
     address: &Address,
-) -> Result<Registration, EnrollmentError> {
-    let herdr = RealFindHerdr::new();
+) -> Result<relay_core::DirectoryRecipient, EnrollmentError> {
     let machine: MachineName = address.server().parse()?;
-    let selector = if machine == *local {
-        None
-    } else {
-        let mut profiles = herdr
-            .machine_list(Duration::from_secs(2))?
-            .into_iter()
-            .filter(|p| {
-                p.enabled && p.label.parse::<MachineName>().ok().as_ref() == Some(&machine)
-            });
-        let selected = profiles
-            .next()
-            .ok_or_else(|| format!("no enabled Herdr machine profile for {machine}"))?;
-        if profiles.next().is_some() {
-            return Err(format!("multiple Herdr profiles for {machine}").into());
+    match relay.directory_recipient(address)? {
+        relay_core::DirectoryRead::Unique(recipient) => return Ok(*recipient),
+        relay_core::DirectoryRead::Ambiguous => {
+            return Err(format!("multiple live leads at {address}; use separate tabs").into());
         }
-        Some(selected.label)
-    };
-    // A saved remote profile may need its first SSH connection established.
-    // This is a human send, not a latency-limited hook: retain a bounded cold
-    // connection budget without requiring a prior find to warm the transport.
-    let timeout = if selector.is_some() {
-        Duration::from_secs(30)
-    } else {
-        Duration::from_secs(3)
-    };
-    let view = find::gather_machine_view(&herdr, selector.as_deref(), &machine, timeout)?;
-    let live = registrations(&view)?;
-    let candidates: Vec<_> = live
-        .iter()
-        .filter(|r| {
-            r.verified_place()
-                .is_some_and(|p| p.tab_address(&machine) == *address)
-        })
-        .cloned()
-        .collect();
-    let [recipient] = candidates.as_slice() else {
-        return Err(if candidates.is_empty() {
-            let available: Vec<_> = find::places(&view).values().map(|p| p.tab_address(&machine).to_string()).collect();
-            if !view.workspaces.iter().any(|w| w.label.eq_ignore_ascii_case(address.workspace())) {
-                format!("workspace {} does not exist on {machine}; live addresses: {}", address.workspace(), available.join(", "))
-            } else if !view.agents.iter().any(|agent| {
-                view.workspaces.iter().any(|w| w.workspace_id == agent.workspace_id && w.label.eq_ignore_ascii_case(address.workspace()))
-                    && view.tabs.iter().any(|t| t.tab_id == agent.tab_id && address.tab().is_some_and(|tab| t.label.eq_ignore_ascii_case(tab)))
-            }) {
-                format!("tab {} does not exist in {machine}:{}; live addresses: {}", address.tab().unwrap_or(""), address.workspace(), available.join(", "))
-            } else {
-                format!("no session-verified live lead at {address}; Herdr must associate the real session before enrollment")
-            }
-        } else { format!("multiple live leads at {address}; use separate tabs") }.into());
-    };
-    if view
-        .agents
-        .iter()
-        .filter(|agent| agent.session_id == recipient.session_id)
-        .count()
-        != 1
-    {
-        return Err(format!(
-            "session at {address} appears in multiple live Herdr panes; refusing enrollment"
-        )
-        .into());
+        _ => {}
     }
-    enroll(relay, recipient)?;
-    Ok(recipient.clone())
+    if machine == *local {
+        refresh_local_directory(relay, local)?;
+    } else {
+        relay.request_directory_refresh(&machine)?;
+    }
+    let deadline =
+        std::time::Instant::now() + Duration::from_secs(if machine == *local { 3 } else { 35 });
+    loop {
+        match relay.directory_recipient(address)? {
+            relay_core::DirectoryRead::Unique(recipient) => return Ok(*recipient),
+            relay_core::DirectoryRead::Ambiguous => return Err(format!("multiple live leads at {address}; use separate tabs").into()),
+            relay_core::DirectoryRead::Absent if machine == *local => return Err(format!("no session-verified live lead at {address}").into()),
+            _ if std::time::Instant::now() >= deadline => return Err(format!("no fresh verified relay directory entry for {address}; destination watcher on {machine} must refresh its local Herdr topology; nothing queued").into()),
+            _ => std::thread::sleep(Duration::from_millis(200)),
+        }
+    }
 }
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "test fixtures")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directory_preserves_harness_kind_and_requires_genuine_session_for_every_adapter() {
+        for kind in ["claude", "codex", "opencode"] {
+            let session: SessionId = format!("{kind}-genuine-session").parse().unwrap();
+            let mut view = MachineView {
+                machine: "luna".parse().unwrap(),
+                dropped: 0,
+                agents: vec![find::HerdrAgent {
+                    kind: kind.into(),
+                    pane_id: "w1:p1".parse().unwrap(),
+                    tab_id: "w1:t1".parse().unwrap(),
+                    workspace_id: "w1".parse().unwrap(),
+                    status: "idle".into(),
+                    session_name: Some("legacy-alias".into()),
+                    session_id: Some(session.clone()),
+                }],
+                workspaces: vec![find::HerdrWorkspace {
+                    workspace_id: "w1".parse().unwrap(),
+                    label: "IR".into(),
+                    tab_count: 1,
+                }],
+                tabs: vec![find::HerdrTab {
+                    tab_id: "w1:t1".parse().unwrap(),
+                    label: "plan".into(),
+                }],
+            };
+            let entries = registrations(&view).unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].kind, kind);
+            assert_eq!(entries[0].session_id, Some(session));
+            assert_eq!(
+                entries[0].full_address().unwrap().to_string(),
+                "luna:IR:plan"
+            );
+            view.agents[0].session_id = None;
+            assert!(registrations(&view).unwrap().is_empty());
+        }
+    }
 }

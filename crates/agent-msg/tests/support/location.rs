@@ -54,6 +54,76 @@ raise SystemExit(subprocess.run([os.path.join(os.path.dirname(__file__),'herdr')
         let remote = serde_json::json!({"agents":[agent("terra-session","w1:p1","w1:t1")],"workspaces":[{"workspace_id":"w1","label":"laya"}],"tabs":[{"tab_id":"w1:t1","label":"code"}]});
         fs::write(self.dir.join("state.json"),serde_json::to_vec(&serde_json::json!({"draco":local,"terra":remote,"profiles":[{"label":"terra","enabled":true,"target":"fixture-terra","session":"default"}]})).unwrap()).unwrap();
     }
+    /// Simulate the destination watcher publishing its own complete topology.
+    pub fn publish(&self, machine: &str) {
+        use relay_core::{AgentName, HerdrPlaceIds, Place, Registration};
+        let state: serde_json::Value =
+            serde_json::from_slice(&fs::read(self.dir.join("state.json")).unwrap()).unwrap();
+        let topology = &state[machine];
+        let machine = machine.parse().unwrap();
+        let registrations: Vec<_> = topology["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|agent| {
+                let session = agent["agent_session"]["value"].as_str()?.parse().unwrap();
+                let pane: relay_core::PaneId = agent["pane_id"].as_str()?.parse().unwrap();
+                let tab = agent["tab_id"].as_str()?;
+                let workspace = agent["workspace_id"].as_str()?;
+                let tab_label = topology["tabs"]
+                    .as_array()?
+                    .iter()
+                    .find(|entry| entry["tab_id"] == tab)?["label"]
+                    .as_str()?;
+                let workspace_label = topology["workspaces"]
+                    .as_array()?
+                    .iter()
+                    .find(|entry| entry["workspace_id"] == workspace)?["label"]
+                    .as_str()?;
+                Some(Registration {
+                    name: AgentName::for_session(&machine, &session),
+                    machine: machine.clone(),
+                    kind: "codex".into(),
+                    session_id: Some(session.clone()),
+                    cwd: None,
+                    herdr_pane: Some(pane.clone()),
+                    last_seen_ms: 1,
+                    place: Some(Place {
+                        workspace: workspace_label.into(),
+                        tab: tab_label.into(),
+                        herdr_ids: Some(HerdrPlaceIds {
+                            workspace: workspace.parse().unwrap(),
+                            tab: tab.parse().unwrap(),
+                            pane,
+                            session_id: session,
+                            verified_at_ms: 1,
+                        }),
+                    }),
+                })
+            })
+            .collect();
+        let mut relay = self.relay();
+        for registration in &registrations {
+            if registrations
+                .iter()
+                .filter(|other| {
+                    other.name == registration.name
+                        || other.full_address() == registration.full_address()
+                })
+                .count()
+                == 1
+            {
+                relay_ops::enrollment::enroll(&mut relay, registration).unwrap();
+            }
+        }
+        let revision = relay.begin_directory_observation(&machine).unwrap();
+        assert!(
+            relay
+                .publish_directory(&machine, revision, &registrations)
+                .unwrap()
+        );
+    }
+
     pub fn cmd(&self, args: &[&str]) -> Command {
         let mut cmd = base_cmd(args, Some("filament-code-old-15"));
         cmd.env("IX_RELAY_URL", &self.url)

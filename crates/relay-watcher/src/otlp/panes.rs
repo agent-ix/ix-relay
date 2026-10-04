@@ -106,6 +106,7 @@ mod tests {
 
     fn agent(pane: &str, tab: &str, ws: &str, status: &str, session: Option<&str>) -> HerdrAgent {
         HerdrAgent {
+            kind: "unknown".into(),
             pane_id: pane.parse().unwrap(),
             tab_id: tab.parse().unwrap(),
             workspace_id: ws.parse().unwrap(),

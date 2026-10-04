@@ -27,6 +27,8 @@ pub use crate::lenient::Lenient;
 /// the bus registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HerdrAgent {
+    /// Harness kind reported by local Herdr, or unknown if unavailable.
+    pub kind: String,
     /// The pane hosting it, e.g. `wE:p1`.
     pub pane_id: PaneId,
     /// The tab it's in.
@@ -315,6 +317,9 @@ pub struct MachineProfile {
 /// for a different slice of the same command).
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentListEntry {
+    /// Harness executable kind reported by Herdr.
+    #[serde(default)]
+    pub agent: Option<String>,
     /// The pane hosting it.
     pub pane_id: PaneId,
     /// The tab it's in.
@@ -623,6 +628,7 @@ pub fn gather_machine_view(
     let agents = entries
         .into_iter()
         .map(|a| HerdrAgent {
+            kind: a.agent.unwrap_or_else(|| "unknown".into()),
             pane_id: a.pane_id,
             tab_id: a.tab_id,
             workspace_id: a.workspace_id,
@@ -809,6 +815,7 @@ mod tests {
 
     fn agent(pane: &str, tab: &str, workspace: &str, status: &str) -> HerdrAgent {
         HerdrAgent {
+            kind: "unknown".into(),
             pane_id: pane.parse().unwrap(),
             tab_id: tab.parse().unwrap(),
             workspace_id: workspace.parse().unwrap(),
@@ -1110,6 +1117,7 @@ mod tests {
         let herdr = FakeFindHerdr {
             agents: vec![
                 AgentListEntry {
+                    agent: None,
                     pane_id: "wQ:p1".parse().unwrap(),
                     tab_id: "wQ:t1".parse().unwrap(),
                     workspace_id: "wQ".parse().unwrap(),
@@ -1118,6 +1126,7 @@ mod tests {
                     agent_session: None,
                 },
                 AgentListEntry {
+                    agent: None,
                     pane_id: "wR:p1".parse().unwrap(),
                     tab_id: "wR:t1".parse().unwrap(),
                     workspace_id: "wR".parse().unwrap(),

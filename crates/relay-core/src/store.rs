@@ -50,6 +50,7 @@ const SESSION_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 pub const HERDR_FAILED_TTL_SECS: u64 = 300;
 
 mod commit;
+mod directory;
 mod health;
 mod inflight;
 #[cfg(test)]
@@ -64,6 +65,7 @@ mod work;
 use keys::Keys;
 
 pub use commit::{CommitOutcome, IdentityCommit};
+pub use directory::{DIRECTORY_LEASE, DirectoryRead, DirectoryRecipient};
 pub use health::{
     Heartbeats, InboxOverview, LeadOverview, LeaseState, MAX_HEARTBEAT_KEYS, RecipientProbe,
 };

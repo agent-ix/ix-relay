@@ -379,10 +379,10 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
     match cli.cmd {
         Cmd::Work(args) => work::run(args, &mut relay, settings, &mut out)?,
         Cmd::Send { to, text } => {
-            let resolved = resolve_send_target(&mut relay, &settings.machine.value, &to)?;
+            let mut resolved = resolve_send_target(&mut relay, &settings.machine.value, &to)?;
             let broadcast = matches!(resolved.target, relay_core::Target::All);
             let unreadable = resolved.unreadable;
-            let msg = Message {
+            let mut msg = Message {
                 from: {
                     let id = me(None, &mut relay, &settings.machine.value)?;
                     let address = relay
@@ -391,11 +391,11 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                         .ok_or("sender has no verified tab address")?;
                     address.to_string().parse()?
                 },
-                to: resolved.target,
+                to: resolved.target.clone(),
                 text: text.join(" "),
                 sent_at_ms: now_ms(),
             };
-            let recipients = relay.send(&msg)?;
+            let recipients = enqueue_resolved(&mut relay, &mut resolved, &mut msg)?;
             let recipient = recipient_registration(
                 resolved.recipient,
                 resolved.registry.as_deref(),
@@ -790,6 +790,7 @@ fn registration(
 
 /// Who `send` is addressed to, and the registry when resolving it had to read it.
 struct SendTarget {
+    directory: Option<relay_core::DirectoryRecipient>,
     target: relay_core::Target,
     /// Verified recipient metadata gathered during address resolution.
     registry: Option<Vec<Registration>>,
@@ -797,6 +798,42 @@ struct SendTarget {
     unreadable: bool,
     /// The unique live recipient enrolled by address resolution.
     recipient: Option<Registration>,
+}
+
+/// Retry only an atomic directory rejection, which proves nothing was queued.
+/// Transport timeouts remain uncertain and are never automatically retried.
+fn enqueue_resolved(
+    relay: &mut Relay,
+    resolved: &mut SendTarget,
+    msg: &mut Message,
+) -> relay_core::Result<Vec<AgentName>> {
+    if matches!(msg.to, relay_core::Target::All) {
+        return relay.send_directory_broadcast(msg);
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let Some(proof) = &resolved.directory else {
+            return relay.send(msg);
+        };
+        match relay.send_directory(msg, proof) {
+            Err(relay_core::Error::DirectoryChanged) if std::time::Instant::now() < deadline => {
+                let address = proof
+                    .registration
+                    .full_address()
+                    .ok_or(relay_core::Error::DirectoryChanged)?;
+                let relay_core::DirectoryRead::Unique(next) =
+                    relay.directory_recipient(&address)?
+                else {
+                    return Err(relay_core::Error::DirectoryChanged);
+                };
+                msg.to = relay_core::Target::Agent(next.registration.name.clone());
+                resolved.recipient = Some(next.registration.clone());
+                resolved.registry = Some(vec![next.registration.clone()]);
+                resolved.directory = Some(*next);
+            }
+            result => return result,
+        }
+    }
 }
 
 /// The registration of the single lead `queued_for`, from what resolving the
@@ -815,7 +852,7 @@ fn recipient_registration(
         .or_else(|| registry?.iter().find(|r| r.name == *name).cloned())
 }
 
-/// Resolves full addresses and verified relative addresses from live Herdr state.
+/// Resolves full and relative addresses through the relay directory.
 /// The unique genuine recipient is enrolled before its durable queue is used.
 fn resolve_send_target(
     relay: &mut Relay,
@@ -823,7 +860,11 @@ fn resolve_send_target(
     input: &str,
 ) -> Result<SendTarget, BoxError> {
     if input == "all" {
+        if !relay.directory_available(machine)? {
+            relay_ops::enrollment::refresh_local_directory(relay, machine)?;
+        }
         return Ok(SendTarget {
+            directory: None,
             target: relay_core::Target::All,
             registry: None,
             unreadable: false,
@@ -850,8 +891,10 @@ fn resolve_send_target(
     } else {
         relay_ops::enrollment::validate_address(input)?
     };
-    let recipient = relay_ops::enrollment::recipient(relay, machine, &address)?;
+    let directory = relay_ops::enrollment::recipient(relay, machine, &address)?;
+    let recipient = directory.registration.clone();
     Ok(SendTarget {
+        directory: Some(directory),
         target: relay_core::Target::Agent(recipient.name.clone()),
         registry: Some(vec![recipient.clone()]),
         unreadable: false,
