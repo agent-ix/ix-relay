@@ -176,7 +176,7 @@ Recipient resolution uses ix-relay's leased Redis directory first. Each watcher
 publishes a complete verified observation from its own local Herdr, including
 empty and ambiguous states. A sender needs no outbound SSH or remote Herdr
 machine profiles. Cold remote resolution requests a destination-watcher
-refresh through Redis and waits up to 35 seconds; local Herdr is a fallback
+refresh through Redis and waits up to 60 seconds; local Herdr is a fallback
 for cold local recovery. Enqueue atomically checks the publication lease and
 fence again. Stale durable registrations do not establish address ownership.
 

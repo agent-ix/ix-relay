@@ -220,7 +220,7 @@ impl Relay {
         Ok(())
     }
 
-    /// Consume a refresh request, allowing a sweep to bypass its normal interval.
+    /// Consume a refresh request at the next eligible topology observation.
     pub fn take_directory_refresh(&mut self, machine: &MachineName) -> Result<bool> {
         let value: Option<String> = redis::cmd("GETDEL")
             .arg(self.keys.directory_refresh_key(machine))

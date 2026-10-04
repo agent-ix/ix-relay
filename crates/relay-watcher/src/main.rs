@@ -380,16 +380,19 @@ fn refresh_places(
     state: &mut WatcherState,
     log: &mut impl FnMut(String),
 ) -> relay_core::Result<HashSet<AgentName>> {
-    let requested = relay.take_directory_refresh(machine)?;
-    if !requested
-        && state
-            .last_place_refresh
-            .is_some_and(|at| at.elapsed() < PLACE_REFRESH_EVERY)
+    if state
+        .last_place_refresh
+        .is_some_and(|at| at.elapsed() < PLACE_REFRESH_EVERY)
     {
         return Ok(HashSet::new());
     }
     state.last_place_refresh = Some(Instant::now());
-    let directory_revision = relay.begin_directory_observation(machine)?;
+    let directory_revision = if herdr.directory_observations() {
+        relay.take_directory_refresh(machine)?;
+        Some(relay.begin_directory_observation(machine)?)
+    } else {
+        None
+    };
     let layout = match herdr.layout(machine) {
         Ok(layout) => {
             if std::mem::take(&mut state.layout_failed_reported) {
@@ -450,7 +453,9 @@ fn refresh_places(
                         regs.push(registration.clone());
                     }
                 }
-                relay.publish_directory(machine, directory_revision, &live)?;
+                if let Some(revision) = directory_revision {
+                    relay.publish_directory(machine, revision, &live)?;
+                }
             }
             Err(error) => log(format!("cannot enroll Herdr sessions: {error}")),
         }
@@ -1616,6 +1621,9 @@ mod tests {
     struct ViewHerdr(Option<relay_ops::find::MachineView>);
 
     impl Herdr for ViewHerdr {
+        fn directory_observations(&self) -> bool {
+            true
+        }
         fn get(&self, _pane: &PaneId) -> Result<Option<AgentGet>, ProcessError> {
             Ok(None)
         }

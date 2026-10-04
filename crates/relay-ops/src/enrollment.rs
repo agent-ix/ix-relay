@@ -175,7 +175,7 @@ pub fn recipient(
         relay.request_directory_refresh(&machine)?;
     }
     let deadline =
-        std::time::Instant::now() + Duration::from_secs(if machine == *local { 3 } else { 35 });
+        std::time::Instant::now() + Duration::from_secs(if machine == *local { 3 } else { 60 });
     loop {
         match relay.directory_recipient(address)? {
             relay_core::DirectoryRead::Unique(recipient) => return Ok(*recipient),
