@@ -123,7 +123,11 @@ identity on timeout.
 - Real Redis: snapshot atomic replacement and enqueue fencing, wrong key
   types, offline/recovered watcher, request coalescing and deadline bounds.
 - One-way network acceptance: Luna has no remote profiles and no outbound
-  SSH; fresh and cold Luna -> Terra sends and replies work through Redis.
+  SSH; fresh and cold Luna -> Terra and Luna -> Draco sends and replies work
+  through Redis. Run sends from the actual Luna IR lead, without `find`
+  first or adding remote Herdr profiles. Record its version and verified
+  identity, successful enqueue, recipient receipt, and reply separately.
+  A Draco-originating send to Luna does not satisfy this release gate.
 - Kill/crash between claim, adapter acceptance and ack for each harness;
   record duplicate/loss behavior and distinguish queue, delivery and reply.
 - Genuine fresh/resumed startup for Claude, Codex and OpenCode; subagent
