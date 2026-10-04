@@ -1,7 +1,8 @@
 # Relay directory and harness lifecycle design
 
 Status: 0.3.2 implementation in progress. The Rust directory model and Redis
-refinement tests run; real cross-server acceptance and rollout are pending.
+refinement tests pass; live Luna cross-server acceptance and native fleet
+rollout are recorded in `relay-0.3.2-live-acceptance.md`.
 Bounded exploration is not an unbounded formal proof.
 
 ## Audit evidence
