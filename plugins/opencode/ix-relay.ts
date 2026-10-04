@@ -50,18 +50,13 @@
 // to have worked, and a session resumed without a fresh `session.created`
 // still registers via the same opportunistic check every other handler does.
 //
-// AGENT_MSG_NAME is optional (AGE-2018): `agent-msg` derives a bus name from
-// this pane's herdr location when it's unset, so this plugin no longer reads
-// the env var itself to decide whether it's in a lead session. It asks
-// `agent-msg whoami --json` once, at plugin load, which resolves the same
-// way agent-msg's own hook does: the explicit env var if set, else a
-// herdr-derived name, else "not a lead". Every later `agent-msg` call this
-// plugin makes (register/inbox/...) re-resolves its own identity the same
-// way, from the herdr env vars the child process inherits — this plugin
-// never needs to pass a resolved name down to them itself.
-//
-// Silent when whoami resolves to "not a lead" (no explicit name and no
-// herdr location to derive from), same as `agent-msg hook`. Never throws
+// Identity is exactly server:workspace:tab from a genuine root session's
+// verified relay directory binding. AGENT_MSG_NAME is preserved and ignored.
+// This adapter currently checks whoami at load; a session without genuine
+// caller evidence stays disabled. Session-created registration and claim/ack
+// delivery need separate adapter work; see the directory state model. It never
+// fabricates identity from an inherited pane, nickname, or focused terminal.
+// Silent when whoami resolves to "not a lead". Never throws
 // back into opencode's own turn: every `agent-msg` call is best-effort, and
 // a failure is logged to stderr (visible in opencode's own logs, alongside
 // `agent-msg log`'s own history) rather than swallowed.
