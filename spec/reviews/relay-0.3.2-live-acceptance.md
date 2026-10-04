@@ -75,9 +75,9 @@ Draco, Terra and Luna. Terra and Luna services are active; Draco is supervised
 by its enabled LaunchAgent. Running agents may retain their previously loaded
 plugin instructions until their next authorized fresh session.
 
-The older Draco Codex lead still needs a restart/receipt check. This is an
-explicit remaining integration limitation, not a failure of the verified Luna
-round trips or fresh Codex startup/receipt checks. OpenCode's known adapter
+At release time, the older Draco Codex lead still had pending messages.
+The post-release normal-hook receipt below clears that acceptance concern;
+a restart is no longer required solely on the basis of the pending inbox. OpenCode's known adapter
 limitations are documented in relay-directory-state-model.md.
 
 ## Final smoke then IR check
@@ -92,3 +92,18 @@ At 11:29 PDT, Luna sent the final nonce once to Terra QSL plan and Draco
 misc mods. Both leads explicitly acknowledged normal receipt to Luna. Luna
 confirmed receiving both acknowledgements, first-attempt enqueue exit 0, no
 repeats, no `find` and no SSH changes. Final post-smoke IR acceptance passed.
+
+## Post-release receipt in the original Codex lead
+
+The original `draco:ix-relay:code` lead subsequently received the complete
+acceptance batch through its normal receiving hook, including
+`IXR032-SELF-20261004`, `IXR032-LUNA-DRACO-20261004`, the Terra and Draco
+Claude acknowledgements, all three fresh Codex fixture acknowledgements,
+and Luna's final post-smoke round-trip report. No manual inbox pop or
+fabricated hook event was used. `whoami --json` still reports the verified
+`draco:ix-relay:code` address. An acknowledgement was queued to `luna:IR:plan`.
+
+This proves normal receipt in the original lead as well as the fresh fixture.
+Earlier pending-inbox and timeout observations are retained as historical
+facts, not a diagnosis that the current session needs a restart. This evidence
+addition does not move the published 0.3.2 tags or change executable code.
