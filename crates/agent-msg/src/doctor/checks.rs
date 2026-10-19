@@ -175,13 +175,13 @@ fn socket(f: &Facts, checks: &mut Vec<Check>) {
                 pid_alive: Some(false),
                 ..
             } if any_live => {}
-            other => socket_state(other, checks),
+            other => socket_state(other, f.now_ms, checks),
         }
     }
 }
 
 /// The check for one watcher's status.
-fn socket_state(state: &SocketState, checks: &mut Vec<Check>) {
+fn socket_state(state: &SocketState, now_ms: i64, checks: &mut Vec<Check>) {
     let fix = "start relay-watcher; it writes its report after each socket delivery";
     let unknown = |why: String| {
         Check::unknown(
@@ -240,19 +240,12 @@ fn socket_state(state: &SocketState, checks: &mut Vec<Check>) {
             .to_owned(),
     );
     let subject = format!("watcher pid {}", status.pid);
-    let mut versions: Vec<&str> = status.leads.iter().map(|l| l.version.as_str()).collect();
-    versions.sort_unstable();
-    versions.dedup();
-    let unverified: Vec<String> = versions
-        .into_iter()
-        .filter(|v| *v != claude_wire::CAPTURED_ON)
-        .map(|v| {
-            format!(
-                "wire format captured on {}; running {v}: unverified",
-                claude_wire::CAPTURED_ON
-            )
-        })
-        .collect();
+    let versions = version_windows(status, now_ms);
+    details.extend(
+        versions
+            .iter()
+            .map(|(version, window)| version_line(version, window)),
+    );
     details.push(format!(
         "wire format captured on Claude Code {} (claude-wire); the version gate is >= {}.{}.{}, \
          peerProtocol {}",
@@ -262,18 +255,13 @@ fn socket_state(state: &SocketState, checks: &mut Vec<Check>) {
         claude_wire::MIN_VERSION.2,
         claude_wire::KNOWN_PEER_PROTOCOL
     ));
-    details.extend(unverified.iter().cloned());
-    let mut summary = format!(
+    let summary = format!(
         "delivery = socket: {} lead(s) resolved, {} held, {} using herdr",
         status.leads.len(),
         status.held.len(),
         status.notes.len()
     );
-    for note in &unverified {
-        summary.push_str("; ");
-        summary.push_str(note);
-    }
-    wire_drift(status, &subject, checks);
+    wire_drift(&versions, now_ms, &subject, checks);
     if !status.dead_lettered.is_empty() {
         // Dead letters are bare messages with no reason: the reasons are only here.
         checks.push(
@@ -337,56 +325,165 @@ fn socket_state(state: &SocketState, checks: &mut Vec<Check>) {
     }
 }
 
-/// The drift signals of the typed Claude Code wire formats (`claude-wire`): warns, never
-/// fails, and never changes how a message is delivered.
-fn wire_drift(
+/// Each Claude Code version the status file names (a drift member, or a resolved lead),
+/// with its drift over the last 24 hours at `now_ms`: what the watcher wrote may be older
+/// than the window by now. Neutralised, since the file is another process's word.
+fn version_windows(
     status: &relay_core::socket_status::SocketStatus,
+    now_ms: i64,
+) -> Vec<(String, relay_core::socket_status::DriftWindow)> {
+    use relay_core::{socket_status::DriftWindow, text::sanitise_line};
+    let mut found: std::collections::BTreeMap<String, DriftWindow> =
+        std::collections::BTreeMap::new();
+    for lead in &status.leads {
+        found
+            .entry(sanitise_line(&lead.version))
+            .or_insert_with(|| DriftWindow {
+                counts: relay_core::socket_status::DriftCounts::default(),
+                last: Vec::new(),
+            });
+    }
+    for v in &status.versions {
+        found.insert(sanitise_line(&v.version), v.window(now_ms));
+    }
+    found.into_iter().collect()
+}
+
+/// A last offending line as `type "t", action "a"`.
+fn shape_text(line: &relay_core::socket_status::LastDriftLine) -> String {
+    use relay_core::text::sanitise_line;
+    let part = |name: &str, value: &Option<String>| {
+        value
+            .as_deref()
+            .map(|v| format!("{name} \"{}\"", sanitise_line(v)))
+    };
+    let parts: Vec<String> = [part("type", &line.line_type), part("action", &line.action)]
+        .into_iter()
+        .flatten()
+        .collect();
+    if parts.is_empty() {
+        "no type or action".to_owned()
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// The one line `doctor` says about a version: working, drift, or listed with no verdict.
+/// None of them is a failure.
+fn version_line(version: &str, window: &relay_core::socket_status::DriftWindow) -> String {
+    let counts = &window.counts;
+    if counts.drift_total() > 0 {
+        format!(
+            "Claude Code {version}: drift in the last 24 h ({} line(s) or receipt(s) in a shape \
+             not known; see the warnings)",
+            counts.drift_total()
+        )
+    } else if counts.acknowledged > 0 {
+        format!(
+            "Claude Code {version}: working ({} socket deliveries acknowledged in the last 24 h, \
+             no drift)",
+            counts.acknowledged
+        )
+    } else {
+        format!(
+            "Claude Code {version}: no acknowledged socket delivery and no drift in the last 24 h"
+        )
+    }
+}
+
+/// The drift signals of the typed Claude Code wire formats (`claude-wire`), one warning per
+/// version and kind: warns, never fails, and never changes how a message is delivered.
+fn wire_drift(
+    versions: &[(String, relay_core::socket_status::DriftWindow)],
+    now_ms: i64,
     subject: &str,
     checks: &mut Vec<Check>,
 ) {
-    let d = &status.drift;
-    if d.control_total() > 0 {
-        checks.push(
-            Check::warn(
+    use relay_core::socket_status::DriftKind;
+    for (version, window) in versions {
+        let d = &window.counts;
+        if d.control_total() > 0 {
+            let control = [
+                DriftKind::UnrecognisedLine,
+                DriftKind::NotJsonLine,
+                DriftKind::UnknownStatusReceipt,
+            ];
+            let lines: Vec<&relay_core::socket_status::LastDriftLine> = window
+                .last
+                .iter()
+                .filter(|l| control.contains(&l.kind))
+                .collect();
+            let newest = lines.iter().max_by_key(|l| l.at_ms);
+            let last = newest.map(|l| {
+                format!(
+                    "last offending line: {}, {} ago",
+                    shape_text(l),
+                    ago(now_ms.saturating_sub(l.at_ms))
+                )
+            });
+            checks.push(
+                Check::warn(
+                    Family::Socket,
+                    Code::SocketWireDrift,
+                    Some(subject),
+                    format!(
+                        "Claude Code {version} sent {} reply-socket line(s) in a shape this build \
+                         does not know in the last 24 h ({} unrecognised, {} not JSON, {} \
+                         receipt(s) with an unknown status)",
+                        d.control_total(),
+                        d.unrecognised_lines,
+                        d.not_json_lines,
+                        d.unknown_status_receipts
+                    ),
+                    "Claude Code's cross-session formats are undocumented and can change in any \
+                     release; this version's lines no longer match the wire format the watcher \
+                     was built against",
+                    "delivery goes on (an unknown receipt leaves the batch in flight); update the \
+                     claude-wire crate's types and fixtures for this Claude Code version. The \
+                     warning ends 24 hours after the last drift",
+                )
+                .with_details(last.into_iter().chain(lines.iter().map(|l| {
+                    format!(
+                        "{:?}: last {}, {} ago",
+                        l.kind,
+                        shape_text(l),
+                        ago(now_ms.saturating_sub(l.at_ms))
+                    )
+                }))),
+            );
+        }
+        if d.transcript_shape_unrecognised > 0 {
+            let last = window
+                .last
+                .iter()
+                .find(|l| l.kind == DriftKind::TranscriptShapeUnrecognised)
+                .map(|l| {
+                    format!(
+                        "last offending transcript line: {}, {} ago",
+                        shape_text(l),
+                        ago(now_ms.saturating_sub(l.at_ms))
+                    )
+                });
+            checks.push(
+                Check::warn(
                 Family::Socket,
-                Code::SocketWireDrift,
+                Code::SocketTranscriptShapeUnrecognised,
                 Some(subject),
                 format!(
-                    "Claude Code sent {} reply-socket line(s) in a shape this build does not \
-                     know ({} unrecognised, {} not JSON, {} receipt(s) with an unknown status)",
-                    d.control_total(),
-                    d.unrecognised_lines,
-                    d.not_json_lines,
-                    d.unknown_status_receipts
+                    "Claude Code {version}: {} transcript look(s) found a message id without a \
+                     structured origin.msg_id in the last 24 h",
+                    d.transcript_shape_unrecognised
                 ),
-                "Claude Code's cross-session formats are undocumented and can change in any \
-                 release; the running version may not be the one the wire format was captured on",
-                "delivery goes on (an unknown receipt leaves the batch in flight); check the \
-                 Claude Code version against the one the wire format was captured on and update \
-                 the claude-wire crate's types and fixtures",
+                "Claude Code's transcript shape may have changed: such a message is acknowledged \
+                 as received but unconfirmed (its transcript names it), with no herdr fallback and \
+                 no redelivery; it can also be a lead that read socket-<pid>.json, which lists \
+                 held message ids",
+                "update the claude-wire crate's transcript type and fixtures for this Claude Code \
+                 version. The warning ends 24 hours after the last drift",
             )
-            .with_details([format!(
-                "wire format captured on Claude Code {}",
-                claude_wire::CAPTURED_ON
-            )]),
-        );
-    }
-    if d.transcript_shape_unrecognised > 0 {
-        checks.push(Check::warn(
-            Family::Socket,
-            Code::SocketTranscriptShapeUnrecognised,
-            Some(subject),
-            format!(
-                "{} transcript look(s) found a message id without a structured origin.msg_id",
-                d.transcript_shape_unrecognised
-            ),
-            "Claude Code's transcript shape may have changed: such a message is acknowledged as \
-             received but unconfirmed (its transcript names it), with no herdr fallback and no \
-             redelivery; it can also be a lead that read socket-<pid>.json, which lists held \
-             message ids",
-            "check the Claude Code version against the one the wire format was captured on and \
-             update the claude-wire crate's transcript type and fixtures",
-        ));
+            .with_details(last),
+            );
+        }
     }
 }
 
@@ -2947,52 +3044,148 @@ mod tests {
             .collect()
     }
 
+    /// A status whose versions hold the drift `book` was given, as the watcher writes it.
+    fn status_with(
+        leads: &[&str],
+        fill: impl FnOnce(&mut relay_core::socket_status::DriftBook),
+    ) -> relay_core::socket_status::SocketStatus {
+        let mut book = relay_core::socket_status::DriftBook::default();
+        fill(&mut book);
+        let mut status = socket_status(&[], &[], true);
+        status.leads = leads
+            .iter()
+            .map(|v| relay_core::socket_status::LeadSocket {
+                lead: format!("lead-{v}"),
+                pid: 9,
+                socket: "/run/user/1/cc-socks/9.sock".into(),
+                version: (*v).into(),
+            })
+            .collect();
+        status.versions = book.snapshot(NOW);
+        status
+    }
+
+    fn all_text(found: &[Check]) -> String {
+        found
+            .iter()
+            .flat_map(|c| {
+                [
+                    c.message.clone(),
+                    c.cause.clone().unwrap_or_default(),
+                    c.fix.clone().unwrap_or_default(),
+                ]
+                .into_iter()
+                .chain(c.details.clone())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Tracing: TC-046-10
     /// ACs: FR-046-AC-10
     ///
-    /// Doctor shows the version the wire format was captured on, and says so when a
-    /// resolved Claude Code is another version; neither is ever a failure.
+    /// Each version is working, in drift (a warning with its counts, the last line's type and
+    /// action and when) or listed with no verdict; none says `unverified`, none is a failure,
+    /// whatever the captured version.
     #[test]
-    fn tc_046_10_doctor_shows_the_captured_version_and_flags_an_unverified_one() {
-        let found = socket_checks(socket_status(&[], &[], true));
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].status, Status::Ok);
+    fn tc_046_10_doctor_says_working_drift_or_nothing_for_each_version() {
+        use relay_core::socket_status::DriftKind;
+        let status = status_with(&["2.1.302", "2.1.303", "2.1.290"], |book| {
+            book.acknowledged("2.1.302", NOW - 60_000);
+            book.acknowledged("2.1.303", NOW - 120_000);
+            book.record(
+                "2.1.303",
+                DriftKind::NotJsonLine,
+                None,
+                None,
+                NOW - 5 * 60_000,
+            );
+        });
+        let found = socket_checks(status);
+        assert!(found.iter().all(|c| c.status != Status::Fail));
+        let text = all_text(&found);
+        assert!(!text.contains("unverified"), "{text}");
+        assert!(text.contains("Claude Code 2.1.302: working"), "{text}");
         assert!(
-            found[0]
+            text.contains("Claude Code 2.1.290: no acknowledged socket delivery and no drift"),
+            "{text}"
+        );
+        assert!(!text.contains("2.1.290: working") && !text.contains("2.1.290: drift"));
+        let drift = found
+            .iter()
+            .find(|c| c.code == Code::SocketWireDrift)
+            .expect("2.1.303 warns");
+        assert_eq!(drift.status, Status::Warn);
+        assert!(drift.message.contains("2.1.303"), "{}", drift.message);
+        assert!(drift.message.contains("1 not JSON"), "{}", drift.message);
+        assert!(
+            drift
                 .details
                 .iter()
-                .any(|d| d.contains("captured on Claude Code 2.1.283")),
+                .any(|d| d.contains("last offending line") && d.contains("5m ago")),
             "{:?}",
-            found[0].details
+            drift.details
         );
-        assert!(!found[0].message.contains("unverified"));
-        let mut newer = socket_status(&[], &[], true);
-        newer.leads[0].version = "2.1.290".into();
-        let found = socket_checks(newer);
-        assert_eq!(found.len(), 1);
-        assert_ne!(found[0].status, Status::Fail);
-        assert!(
-            found[0]
-                .message
-                .contains("wire format captured on 2.1.283; running 2.1.290: unverified"),
-            "{}",
-            found[0].message
+        assert_eq!(
+            found
+                .iter()
+                .filter(|c| c.code == Code::SocketWireDrift)
+                .count(),
+            1,
+            "one per version"
         );
+        // Whatever the captured version: a version other than it is not a finding.
+        let other = socket_checks(status_with(&["9.9.9"], |_| {}));
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].status, Status::Ok);
+        assert!(!all_text(&other).contains("unverified"));
     }
 
     /// Tracing: TC-046-11
     /// ACs: FR-046-AC-11
     ///
-    /// Drift counts surface as their own warns, with the counts, and never fail.
+    /// Reply-socket drift and transcript drift are their own warnings, one per version,
+    /// naming the version, the counts and the last offending line's type and action; never
+    /// a failure; none when there is none.
     #[test]
-    fn tc_046_11_doctor_warns_on_wire_drift_and_an_unrecognised_transcript_shape() {
-        let mut status = socket_status(&[], &[], true);
-        status.drift = relay_core::socket_status::WireDrift {
-            unrecognised_lines: 2,
-            not_json_lines: 1,
-            unknown_status_receipts: 4,
-            transcript_shape_unrecognised: 3,
-        };
+    fn tc_046_11_doctor_warns_per_version_on_wire_drift_and_transcript_shape() {
+        use relay_core::socket_status::DriftKind;
+        let status = status_with(&[], |book| {
+            for _ in 0..2 {
+                book.record(
+                    "2.1.310",
+                    DriftKind::UnrecognisedLine,
+                    Some("control"),
+                    Some("peer_status"),
+                    NOW - 90_000,
+                );
+            }
+            book.record(
+                "2.1.310",
+                DriftKind::NotJsonLine,
+                None,
+                None,
+                NOW - 3_600_000,
+            );
+            for _ in 0..4 {
+                book.record(
+                    "2.1.310",
+                    DriftKind::UnknownStatusReceipt,
+                    Some("control"),
+                    Some("peer_message_status"),
+                    NOW - 7_200_000,
+                );
+            }
+            for _ in 0..3 {
+                book.record(
+                    "2.1.311",
+                    DriftKind::TranscriptShapeUnrecognised,
+                    Some("queue-operation"),
+                    None,
+                    NOW - 30_000,
+                );
+            }
+        });
         let found = socket_checks(status);
         let codes: Vec<_> = found.iter().map(|c| (c.code, c.status)).collect();
         assert!(
@@ -3008,25 +3201,117 @@ mod tests {
             .iter()
             .find(|c| c.code == Code::SocketWireDrift)
             .unwrap();
+        for needle in [
+            "Claude Code 2.1.310",
+            "7 reply-socket line(s)",
+            "2 unrecognised, 1 not JSON, 4 receipt(s)",
+        ] {
+            assert!(
+                drift.message.contains(needle),
+                "{needle}: {}",
+                drift.message
+            );
+        }
         assert!(
-            drift.message.contains("7 reply-socket line(s)")
-                && drift
-                    .message
-                    .contains("2 unrecognised, 1 not JSON, 4 receipt(s)"),
-            "{}",
-            drift.message
+            drift.details.iter().any(|d| d.contains(
+                "last offending line: type \"control\", action \"peer_status\", 90s ago"
+            )),
+            "{:?}",
+            drift.details
         );
         let shape = found
             .iter()
             .find(|c| c.code == Code::SocketTranscriptShapeUnrecognised)
             .unwrap();
+        for needle in ["2.1.311", "3 transcript look(s)"] {
+            assert!(
+                shape.message.contains(needle),
+                "{needle}: {}",
+                shape.message
+            );
+        }
         assert!(
-            shape.message.contains("3 transcript look(s)"),
-            "{}",
-            shape.message
+            shape
+                .details
+                .iter()
+                .any(|d| d.contains("type \"queue-operation\"")),
+            "{:?}",
+            shape.details
         );
-        // No drift, no extra checks.
-        assert_eq!(socket_checks(socket_status(&[], &[], true)).len(), 1);
+        // No drift, neither warning.
+        let quiet = socket_checks(socket_status(&[], &[], true));
+        assert_eq!(quiet.len(), 1);
+        assert!(!quiet.iter().any(|c| matches!(
+            c.code,
+            Code::SocketWireDrift | Code::SocketTranscriptShapeUnrecognised
+        )));
+    }
+
+    /// Tracing: TC-046-16
+    /// ACs: FR-046-AC-16
+    ///
+    /// Drift the watcher wrote 25 hours ago and nothing since is gone from `doctor`'s
+    /// output, and a version with acknowledged deliveries reads as working; drift 23 hours
+    /// ago is still there. `doctor` windows what it reads by its own clock.
+    #[test]
+    fn tc_046_16_doctor_ignores_drift_older_than_a_day() {
+        use relay_core::socket_status::DriftKind;
+        for (ago_hours, warns) in [(25_i64, false), (23, true)] {
+            let at = NOW - ago_hours * 3_600_000;
+            let mut book = relay_core::socket_status::DriftBook::default();
+            book.acknowledged("2.1.320", NOW - 600_000);
+            book.record("2.1.320", DriftKind::NotJsonLine, Some("x"), None, at);
+            let mut status = socket_status(&[], &[], true);
+            // As written when the drift happened, the acknowledgement added since.
+            status.versions = book.snapshot(NOW - 600_000);
+            let found = socket_checks(status);
+            let text = all_text(&found);
+            assert_eq!(
+                found.iter().any(|c| c.code == Code::SocketWireDrift),
+                warns,
+                "{ago_hours}h: {text}"
+            );
+            assert_eq!(
+                text.contains("2.1.320: working"),
+                !warns,
+                "{ago_hours}h: {text}"
+            );
+        }
+    }
+
+    /// Tracing: TC-046-17
+    /// ACs: FR-046-AC-17
+    ///
+    /// What `doctor` prints of a status file it did not write holds no control character,
+    /// whatever the file says.
+    #[test]
+    fn tc_046_17_doctor_prints_no_control_character_from_the_status_file() {
+        use relay_core::socket_status::{DriftBucket, DriftCounts, LastDriftLine, VersionDrift};
+        let mut status = socket_status(&[], &[], true);
+        status.versions = vec![VersionDrift {
+            version: "2.1.\u{1b}[31m330".into(),
+            buckets: vec![DriftBucket {
+                hour: NOW / 3_600_000,
+                counts: DriftCounts {
+                    not_json_lines: 1,
+                    ..DriftCounts::default()
+                },
+            }],
+            last: vec![LastDriftLine {
+                kind: relay_core::socket_status::DriftKind::NotJsonLine,
+                at_ms: NOW,
+                line_type: Some("ty\u{7}pe".into()),
+                action: Some("ac\u{202e}tion".into()),
+            }],
+        }];
+        let text = all_text(&socket_checks(status));
+        assert!(text.contains("330"), "{text}");
+        assert!(
+            !text
+                .chars()
+                .any(|c| (c.is_control() && c != '\n') || c == '\u{202e}'),
+            "{text:?}"
+        );
     }
 
     /// Tracing: TC-054-03

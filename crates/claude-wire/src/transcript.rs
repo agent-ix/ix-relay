@@ -39,16 +39,36 @@ pub enum TranscriptMatch {
     Acked,
 }
 
+/// What one scan found, with the `type` of the first line that showed a changed shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scan {
+    /// The result.
+    pub found: TranscriptMatch,
+    /// For [`TranscriptMatch::ShapeUnrecognised`], the `type` string of the last offending
+    /// line when it is a JSON object with one, cut to [`crate::MAX_SHAPE_CHARS`]
+    /// characters: the only text of that line that is kept.
+    pub line_type: Option<String>,
+}
+
 /// Scans `bytes` (whole lines of a transcript, read lossily as UTF-8) for
 /// `msg_id`. `Acked` beats `ShapeUnrecognised` beats `Absent`. Total over any
 /// input. An empty `msg_id` matches nothing.
 #[must_use]
 pub fn scan(bytes: &[u8], msg_id: &str) -> TranscriptMatch {
+    scan_detail(bytes, msg_id).found
+}
+
+/// [`scan`], and the `type` of the line that was not recognised.
+#[must_use]
+pub fn scan_detail(bytes: &[u8], msg_id: &str) -> Scan {
+    let mut scan = Scan {
+        found: TranscriptMatch::Absent,
+        line_type: None,
+    };
     if msg_id.is_empty() {
-        return TranscriptMatch::Absent;
+        return scan;
     }
     let text = String::from_utf8_lossy(bytes);
-    let mut found = TranscriptMatch::Absent;
     for line in text.lines().filter(|l| l.contains(msg_id)) {
         match serde_json::from_str::<Line>(line) {
             Ok(Line {
@@ -57,14 +77,22 @@ pub fn scan(bytes: &[u8], msg_id: &str) -> TranscriptMatch {
                 }),
             }) => {
                 if id == msg_id {
-                    return TranscriptMatch::Acked;
+                    return Scan {
+                        found: TranscriptMatch::Acked,
+                        line_type: None,
+                    };
                 }
                 // Structured, and another message's id: not ours, not drift.
             }
-            _ => found = TranscriptMatch::ShapeUnrecognised,
+            _ => {
+                scan = Scan {
+                    found: TranscriptMatch::ShapeUnrecognised,
+                    line_type: crate::line_shape(line).line_type,
+                };
+            }
         }
     }
-    found
+    scan
 }
 
 #[cfg(test)]

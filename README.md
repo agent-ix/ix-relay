@@ -487,9 +487,13 @@ and can change in any release. They are typed in one crate, `crates/claude-wire`
 no I/O, and every format has a drift signal so a change is detected, not silently absorbed:
 
 - Parsing is total. A reply-socket line that is JSON in an unknown shape, one that is not
-  JSON, and a receipt with an unknown status are **counted** per watcher (in
-  `~/.ix/relay/state/socket/socket-<pid>.json`, one log line for the first of each kind) and
-  shown by `agent-msg doctor` as `socket_wire_drift`. Delivery is otherwise unchanged.
+  JSON, and a receipt with an unknown status are **counted against the Claude Code version**
+  they came from, in hourly buckets that age out after 24 hours (in
+  `~/.ix/relay/state/socket/socket-<pid>.json`, one log line for the first of each kind and
+  version), with the last offending line's `type` and `action` (cut to 64 characters, never a
+  body or a path), and shown by `agent-msg doctor` as a `socket_wire_drift` warning per
+  version. Delivery is otherwise unchanged. For each version `doctor` also says whether it is
+  working (acknowledged deliveries, no drift in the window), in drift, or just listed.
 - A transcript line that names a message id without a structured `origin.msg_id` is evidence
   Claude Code received it: the batch is acknowledged as received but unconfirmed (a drift
   note, no herdr fallback, no redelivery) and shows as `socket_transcript_shape_unrecognised`.
@@ -498,8 +502,9 @@ no I/O, and every format has a drift signal so a change is detected, not silentl
   receives a message (it would be counted as drift for every busy lead). Also, a lead that
   reads `socket-<pid>.json` (it lists held message ids) can cause a false drift count.
 - The formats were captured on Claude Code 2.1.283 (`claude_wire::CAPTURED_ON`); `doctor`
-  shows that version and says `wire format captured on 2.1.283; running X: unverified` for
-  another. Contract fixtures in `crates/claude-wire/fixtures/claude-2.1.283/` are marked in
+  prints that version as what the fixtures describe, but whether another version works is
+  told by what the watcher observes of it (the drift above), not by comparing versions.
+  Contract fixtures in `crates/claude-wire/fixtures/claude-2.1.283/` are marked in
   their `MANIFEST` as `captured` (unedited live bytes), `captured-shape` (a live shape or our
   own golden with placeholder values), `derived-from-program-text` (read from the installed
   program, never seen live) or `synthetic` (a drift sample of our own).

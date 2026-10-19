@@ -22,7 +22,7 @@
 //! each receipt, by the message id it names, to the batch it is about.
 
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs,
     hash::{DefaultHasher, Hash, Hasher},
     io::{self, BufRead, BufReader, Read, Write},
@@ -33,19 +33,21 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, PoisonError,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
 use claude_wire::{
-    ControlLine, Envelope, Receipt, TranscriptMatch, Verdict, parse_control_line, wrap,
+    ControlLine, Envelope, LineShape, Receipt, Scan, TranscriptMatch, Verdict, line_shape,
+    parse_control_line, wrap,
 };
 use relay_core::{
     BatchId,
     socket_status::{
-        self, DeadLetterNote, HeldBatch, LeadSocket, OwedSettlement, SocketStatus, WireDrift,
+        self, DeadLetterNote, DriftBook, DriftKind, HeldBatch, LeadSocket, OwedSettlement,
+        SocketStatus, UNKNOWN_VERSION, VersionDrift,
     },
     text::sanitise_line,
 };
@@ -299,28 +301,128 @@ impl From<SocketError> for DeliverError {
 }
 
 /// What the receipt thread hands over: receipts, oldest first.
-#[derive(Default)]
 struct Shared {
     receipts: Mutex<VecDeque<Receipt>>,
     arrived: Condvar,
     stop: AtomicBool,
-    /// Reply-socket lines that were JSON in a shape not known (drift).
-    unrecognised: AtomicU64,
-    /// Reply-socket lines that were not JSON (drift).
-    not_json: AtomicU64,
+    /// Where the lines this thread cannot read are counted.
+    drift: Arc<Drift>,
 }
 
-/// Adds one to `counter` (saturating) and returns what it was: `0` means this is
-/// the first of an episode, so the caller logs once.
-fn bump(counter: &AtomicU64) -> u64 {
-    counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-            Some(n.saturating_add(1))
+/// The drift and acknowledgement counts of every Claude Code version (FR-046), shared by the
+/// delivery side and the receipt thread. A leaf: nothing else is locked while one of its
+/// locks is held.
+struct Drift {
+    book: Mutex<DriftBook>,
+    /// The version of the lead most recently posted to. A reply-socket line names no lead, and
+    /// is answering the newest post, so it is counted against this version.
+    last_posted: Mutex<String>,
+    /// The kinds and versions already logged in this run: one line each.
+    logged: Mutex<HashSet<(DriftKind, String)>>,
+}
+
+/// The most (kind, version) pairs remembered as logged: a bound on the memory a stream of
+/// invented versions can take.
+const MAX_LOGGED_DRIFT: usize = 128;
+
+impl Drift {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            book: Mutex::new(DriftBook::default()),
+            last_posted: Mutex::new(String::new()),
+            logged: Mutex::new(HashSet::new()),
         })
-        .unwrap_or(u64::MAX)
+    }
+
+    fn book(&self) -> MutexGuard<'_, DriftBook> {
+        self.book.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Notes a delivery to `version`: it is listed, and a reply-socket line that follows is
+    /// counted against it.
+    fn posted(&self, version: &str) {
+        self.book().seen(version, now_ms());
+        *self
+            .last_posted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = version.to_owned();
+    }
+
+    /// Counts one drift of `kind` against `version` (the version of the last post when
+    /// `None`), keeping the line's shape, and logs the first of its kind and version.
+    fn count(&self, version: Option<&str>, kind: DriftKind, shape: &LineShape) {
+        let version = version.map_or_else(
+            || {
+                self.last_posted
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone()
+            },
+            str::to_owned,
+        );
+        let version = if version.is_empty() {
+            UNKNOWN_VERSION.to_owned()
+        } else {
+            version
+        };
+        self.book().record(
+            &version,
+            kind,
+            shape.line_type.as_deref(),
+            shape.action.as_deref(),
+            now_ms(),
+        );
+        let first = {
+            let mut logged = self.logged.lock().unwrap_or_else(PoisonError::into_inner);
+            logged.len() < MAX_LOGGED_DRIFT && logged.insert((kind, version.clone()))
+        };
+        if first {
+            let version = sanitise_line(&version);
+            let what = match kind {
+                DriftKind::UnrecognisedLine => {
+                    "socket_wire_drift: a reply-socket line is JSON in a shape this build does not know"
+                }
+                DriftKind::NotJsonLine => "socket_wire_drift: a reply-socket line is not JSON",
+                DriftKind::UnknownStatusReceipt => {
+                    "socket_wire_drift: Claude Code sent a receipt status this build does not know"
+                }
+                DriftKind::TranscriptShapeUnrecognised => {
+                    "socket_transcript_shape_unrecognised: a transcript line names a message id without a structured origin.msg_id; the message is acknowledged as received but unconfirmed"
+                }
+            };
+            eprintln!(
+                "relay-watcher: {what} (Claude Code {version}; claude-wire captured on {}); \
+                 counted, further ones of this kind for this version are not logged",
+                claude_wire::CAPTURED_ON
+            );
+        }
+    }
+
+    /// Counts one acknowledged socket delivery to `version`.
+    fn acknowledged(&self, version: &str) {
+        let version = if version.is_empty() {
+            UNKNOWN_VERSION
+        } else {
+            version
+        };
+        self.book().acknowledged(version, now_ms());
+    }
+
+    fn snapshot(&self) -> Vec<VersionDrift> {
+        self.book().snapshot(now_ms())
+    }
 }
 
 impl Shared {
+    fn new(drift: Arc<Drift>) -> Self {
+        Self {
+            receipts: Mutex::new(VecDeque::new()),
+            arrived: Condvar::new(),
+            stop: AtomicBool::new(false),
+            drift,
+        }
+    }
+
     fn queue(&self) -> MutexGuard<'_, VecDeque<Receipt>> {
         self.receipts.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -373,6 +475,9 @@ struct Resolution {
 struct Pending {
     lead: String,
     session: String,
+    /// The Claude Code version the lead's process reported when it was resolved (empty for
+    /// a send restored from a dead watcher's status file): what a count is kept under.
+    version: String,
     batch: BatchId,
     msg_id: String,
     at: Instant,
@@ -447,40 +552,11 @@ struct State {
     /// Whether writing the status file is failing (the directory is not trusted, say): the
     /// failure is logged and alerted once per episode, not on every write.
     status_failing: bool,
-    /// Drift counted on this side of the reply socket: unknown receipt statuses and
-    /// transcript lines of an unrecognised shape. The reply socket's own counts live
-    /// in [`Shared`] and are joined at publish.
-    drift: WireDrift,
+    /// Drift and acknowledgements per Claude Code version, shared with the receipt thread.
+    drift: Arc<Drift>,
 }
 
 impl State {
-    /// Counts a receipt whose status is not known (drift), and logs the first of them.
-    fn count_unknown_status(&mut self) {
-        self.drift.unknown_status_receipts = self.drift.unknown_status_receipts.saturating_add(1);
-        if self.drift.unknown_status_receipts == 1 {
-            eprintln!(
-                "relay-watcher: socket_wire_drift: Claude Code sent a receipt status this build does not know \
-                 (claude-wire captured on {}); counted, further ones are not logged",
-                claude_wire::CAPTURED_ON
-            );
-        }
-    }
-
-    /// Counts a transcript look that found our message id without a structured
-    /// `origin.msg_id` (drift), and logs the first of them.
-    fn count_transcript_shape(&mut self) {
-        self.drift.transcript_shape_unrecognised =
-            self.drift.transcript_shape_unrecognised.saturating_add(1);
-        if self.drift.transcript_shape_unrecognised == 1 {
-            eprintln!(
-                "relay-watcher: socket_transcript_shape_unrecognised: a transcript line names a message id \
-                 without a structured origin.msg_id (claude-wire captured on {}); the message is \
-                 acknowledged as received but unconfirmed, counted, further ones are not logged",
-                claude_wire::CAPTURED_ON
-            );
-        }
-    }
-
     fn max_hold_ms(&self) -> u128 {
         self.max_hold.as_millis()
     }
@@ -519,7 +595,8 @@ impl SocketDeliverer {
     pub fn start(config: SocketConfig, procs: Box<dyn Procs + Send + Sync>) -> Self {
         let adopted = remove_stale(&config, procs.as_ref());
         let probe = Arc::new(AtomicBool::new(false));
-        let reply = match bind_reply(&config.socket_dir, &probe) {
+        let drift = Drift::new();
+        let reply = match bind_reply(&config.socket_dir, &probe, &drift) {
             Ok(reply) => ReplyState::Bound(reply),
             Err(why) => {
                 eprintln!(
@@ -550,7 +627,7 @@ impl SocketDeliverer {
             alerts: Vec::new(),
             failed_notes: BTreeMap::new(),
             status_failing: false,
-            drift: WireDrift::default(),
+            drift,
         };
         state.prune_dead_notes(config.dead_note_age);
         // A batch held across a restart is still held: keep renewing it, and post
@@ -603,6 +680,7 @@ impl SocketDeliverer {
                 Pending {
                     lead: h.lead,
                     session: h.session,
+                    version: String::new(),
                     batch: BatchId::new(h.batch),
                     msg_id: h.msg_id,
                     at: Instant::now(),
@@ -659,6 +737,7 @@ impl SocketDeliverer {
                 Pending {
                     lead: o.lead,
                     session: String::new(),
+                    version: String::new(),
                     batch,
                     msg_id: format!("owed-{}", o.batch),
                     at: Instant::now(),
@@ -721,7 +800,7 @@ impl SocketDeliverer {
         if Instant::now() < *next_try {
             return;
         }
-        match bind_reply(&self.config.socket_dir, probe) {
+        match bind_reply(&self.config.socket_dir, probe, &state.drift) {
             Ok(reply) => {
                 eprintln!(
                     "relay-watcher: reply socket bound at {}; socket delivery is available",
@@ -946,6 +1025,7 @@ impl SocketDeliverer {
             // The transcript is watched from where it ends *before* the line is written:
             // a receiver may record the message the instant it reads it.
             let watch = transcript::find(&self.config.projects_dir, session).map(Watch::new);
+            state.drift.posted(&resolved.version);
             state.sent.insert(key, Instant::now());
             if let Err(e) = write_within(&mut stream, line.as_bytes(), WRITE_TIMEOUT) {
                 // Part of the line may have been read: unconfirmed, and a receiver that
@@ -978,6 +1058,7 @@ impl SocketDeliverer {
                 Pending {
                     lead: lead.to_owned(),
                     session: session.to_owned(),
+                    version: resolved.version.clone(),
                     batch: target.batch,
                     msg_id: msg_id.clone(),
                     at: Instant::now(),
@@ -1032,24 +1113,44 @@ impl SocketDeliverer {
             watch = watch.or_else(|| {
                 transcript::find(&self.config.projects_dir, session).map(Watch::from_start)
             });
-            match watch.as_mut().map(|w| w.records(msg_id)) {
-                Some(TranscriptMatch::Acked) => {
+            match watch.as_mut().map(|w| w.look(msg_id)) {
+                Some(Scan {
+                    found: TranscriptMatch::Acked,
+                    ..
+                }) => {
                     let mut state = self.lock();
-                    state.pending.remove(msg_id);
+                    if let Some(p) = state.pending.remove(msg_id) {
+                        state.drift.acknowledged(&p.version);
+                    }
                     state.held.remove(target.lead);
                     return Ok(());
                 }
-                Some(TranscriptMatch::ShapeUnrecognised) => {
+                Some(Scan {
+                    found: TranscriptMatch::ShapeUnrecognised,
+                    line_type,
+                }) => {
                     // Our fresh id is in the transcript, so Claude Code received the message;
                     // the shape it recorded it in is not one this build knows. Acknowledge it as
                     // received but unconfirmed: no herdr fallback, no redelivery loop.
                     let mut state = self.lock();
-                    state.count_transcript_shape();
-                    state.pending.remove(msg_id);
+                    if let Some(p) = state.pending.remove(msg_id) {
+                        state.drift.count(
+                            Some(&p.version),
+                            DriftKind::TranscriptShapeUnrecognised,
+                            &LineShape {
+                                line_type,
+                                action: None,
+                            },
+                        );
+                    }
                     state.held.remove(target.lead);
                     return Ok(());
                 }
-                Some(TranscriptMatch::Absent) | None => {}
+                Some(Scan {
+                    found: TranscriptMatch::Absent,
+                    ..
+                })
+                | None => {}
             }
             let now = Instant::now();
             if now >= deadline {
@@ -1169,7 +1270,12 @@ impl SocketDeliverer {
                 "Claude Code reports the message expired".to_owned(),
             ))),
             Verdict::Unknown => {
-                state.count_unknown_status();
+                let version = state.pending.get(msg_id).map(|p| p.version.clone());
+                state.drift.count(
+                    version.as_deref(),
+                    DriftKind::UnknownStatusReceipt,
+                    &LineShape::receipt(),
+                );
                 state.notes.insert(
                     target.lead.to_owned(),
                     "Claude Code sent a receipt status this watcher does not know".to_owned(),
@@ -1357,7 +1463,8 @@ impl SocketDeliverer {
             .settle_cursor
             .wrapping_add(TRANSCRIPT_CHECKS_PER_SETTLE);
         let projects = self.config.projects_dir.clone();
-        let mut shape_seen: Vec<String> = Vec::new();
+        let mut shape_seen: Vec<(String, String, Option<String>)> = Vec::new();
+        let mut acked: Vec<String> = Vec::new();
         for id in picked {
             let Some(p) = state.pending.get_mut(&id) else {
                 continue;
@@ -1373,18 +1480,25 @@ impl SocketDeliverer {
                     }
                 });
             }
-            match p.watch.as_mut().map(|w| w.records(&id)) {
-                Some(TranscriptMatch::Acked) => {
+            match p.watch.as_mut().map(|w| w.look(&id)) {
+                Some(Scan {
+                    found: TranscriptMatch::Acked,
+                    ..
+                }) => {
                     p.resolution = Some(Resolution {
                         action: SettleAction::Ack,
                         why: "the transcript shows the message".to_owned(),
                         notice: None,
                         reason: None,
                     });
+                    acked.push(p.version.clone());
                 }
                 // The id is in the transcript: received, in a shape not known. Acknowledged
                 // like `delivered_unconfirmed`, with a drift note; never left to redeliver.
-                Some(TranscriptMatch::ShapeUnrecognised) => {
+                Some(Scan {
+                    found: TranscriptMatch::ShapeUnrecognised,
+                    line_type,
+                }) => {
                     p.resolution = Some(Resolution {
                         action: SettleAction::Ack,
                         why: "transcript_shape_unrecognised: the transcript names the message \
@@ -1393,13 +1507,27 @@ impl SocketDeliverer {
                         notice: None,
                         reason: None,
                     });
-                    shape_seen.push(p.lead.clone());
+                    shape_seen.push((p.lead.clone(), p.version.clone(), line_type));
                 }
-                Some(TranscriptMatch::Absent) | None => {}
+                Some(Scan {
+                    found: TranscriptMatch::Absent,
+                    ..
+                })
+                | None => {}
             }
         }
-        for lead in shape_seen {
-            state.count_transcript_shape();
+        for version in acked {
+            state.drift.acknowledged(&version);
+        }
+        for (lead, version, line_type) in shape_seen {
+            state.drift.count(
+                Some(&version),
+                DriftKind::TranscriptShapeUnrecognised,
+                &LineShape {
+                    line_type,
+                    action: None,
+                },
+            );
             state.notes.insert(
                 lead,
                 "transcript_shape_unrecognised: the transcript names a message without a \
@@ -1411,14 +1539,14 @@ impl SocketDeliverer {
         // acknowledged after the grace (Claude Code itself said delivered); a hold nobody
         // answers is dead-lettered at the maximum hold.
         let (grace, max_hold) = (self.config.delivered_grace, self.config.max_hold);
-        let mut unconfirmed: Vec<String> = Vec::new();
+        let mut unconfirmed: Vec<(String, String)> = Vec::new();
         for p in state
             .pending
             .values_mut()
             .filter(|p| p.resolution.is_none())
         {
             if p.delivered_at.is_some_and(|at| at.elapsed() >= grace) {
-                unconfirmed.push(p.lead.clone());
+                unconfirmed.push((p.lead.clone(), p.version.clone()));
                 p.resolution = Some(Resolution {
                     action: SettleAction::Ack,
                     why: "delivered_unconfirmed: Claude Code reported it delivered; the \
@@ -1445,7 +1573,9 @@ impl SocketDeliverer {
                 });
             }
         }
-        for lead in unconfirmed {
+        for (lead, version) in unconfirmed {
+            // Claude Code itself reported the message delivered.
+            state.drift.acknowledged(&version);
             state.notes.insert(
                 lead,
                 "delivered_unconfirmed: Claude Code reported a held message delivered but its \
@@ -1568,7 +1698,12 @@ impl SocketDeliverer {
                 );
             }
             Verdict::Unknown => {
-                state.count_unknown_status();
+                let version = state.pending.get(id).map(|p| p.version.clone());
+                state.drift.count(
+                    version.as_deref(),
+                    DriftKind::UnknownStatusReceipt,
+                    &LineShape::receipt(),
+                );
                 state.notes.insert(
                     lead,
                     "Claude Code sent a receipt status this watcher does not know".to_owned(),
@@ -1604,11 +1739,6 @@ impl SocketDeliverer {
                 None
             }
         };
-        let mut drift = state.drift;
-        if let ReplyState::Bound(reply) = &state.reply {
-            drift.unrecognised_lines = reply.shared.unrecognised.load(Ordering::Relaxed);
-            drift.not_json_lines = reply.shared.not_json.load(Ordering::Relaxed);
-        }
         let mut held: Vec<String> = state.held.keys().cloned().collect();
         held.sort();
         let now = now_ms();
@@ -1656,7 +1786,7 @@ impl SocketDeliverer {
                 })
                 .collect(),
             dead_lettered: state.dead_notes.iter().cloned().collect(),
-            drift,
+            versions: state.drift.snapshot(),
             notes,
         };
         match status.write(&path) {
@@ -1821,7 +1951,11 @@ pub(super) fn run_within(
 /// An existing `<pid>.sock` is removed only when it is a socket nothing answers
 /// on: a live listener there (a session in a sibling pid namespace that shares
 /// this directory can hold the same pid) is a collision and is not touched.
-fn bind_reply(socket_dir: &Path, probe_busy: &Arc<AtomicBool>) -> Result<Reply, String> {
+fn bind_reply(
+    socket_dir: &Path,
+    probe_busy: &Arc<AtomicBool>,
+    drift: &Arc<Drift>,
+) -> Result<Reply, String> {
     let path = socket_dir.join(format!("{}.sock", std::process::id()));
     match fs::symlink_metadata(&path) {
         Ok(meta) if meta.file_type().is_socket() => {
@@ -1851,7 +1985,7 @@ fn bind_reply(socket_dir: &Path, probe_busy: &Arc<AtomicBool>) -> Result<Reply, 
         let _ = fs::remove_file(&path);
         return Err(format!("{}: {e}", path.display()));
     }
-    let shared = Arc::new(Shared::default());
+    let shared = Arc::new(Shared::new(Arc::clone(drift)));
     let thread = {
         let shared = Arc::clone(&shared);
         thread::spawn(move || receive(&listener, &shared))
@@ -1916,24 +2050,15 @@ fn receive(listener: &UnixListener, shared: &Shared) {
                 shared.arrived.notify_all();
             }
             ControlLine::KnownIgnored(_) => {}
-            ControlLine::Unrecognised { reason } => {
-                if bump(&shared.unrecognised) == 0 {
-                    eprintln!(
-                        "relay-watcher: socket_wire_drift: a reply-socket line is JSON in a shape \
-                         this build does not know ({reason:?}; claude-wire captured on {}); \
-                         counted, further ones are not logged",
-                        claude_wire::CAPTURED_ON
-                    );
-                }
-            }
+            ControlLine::Unrecognised { .. } => shared.drift.count(
+                None,
+                DriftKind::UnrecognisedLine,
+                &line_shape(&String::from_utf8_lossy(&line)),
+            ),
             ControlLine::NotJson => {
-                if bump(&shared.not_json) == 0 {
-                    eprintln!(
-                        "relay-watcher: socket_wire_drift: a reply-socket line is not JSON \
-                         (claude-wire captured on {}); counted, further ones are not logged",
-                        claude_wire::CAPTURED_ON
-                    );
-                }
+                shared
+                    .drift
+                    .count(None, DriftKind::NotJsonLine, &LineShape::default());
             }
         }
     }

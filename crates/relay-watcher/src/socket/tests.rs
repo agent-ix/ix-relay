@@ -4054,6 +4054,25 @@ fn tc_044_15_an_untrusted_status_directory_is_alerted_once_and_delivery_goes_on(
 
 // ---- FR-046: drift is counted, not swallowed ---------------------------------
 
+/// The drift and acknowledgement counts a status holds over all its versions, in the window
+/// ending now.
+fn drift_of(status: &SocketStatus) -> relay_core::socket_status::DriftCounts {
+    let mut total = relay_core::socket_status::DriftCounts::default();
+    for v in &status.versions {
+        let c = v.window(wall_ms()).counts;
+        total.unrecognised_lines += c.unrecognised_lines;
+        total.not_json_lines += c.not_json_lines;
+        total.unknown_status_receipts += c.unknown_status_receipts;
+        total.transcript_shape_unrecognised += c.transcript_shape_unrecognised;
+        total.acknowledged += c.acknowledged;
+    }
+    total
+}
+
+fn drift_now(rig: &Rig) -> relay_core::socket_status::DriftCounts {
+    drift_of(&SocketStatus::read(&rig.home.status()).unwrap())
+}
+
 /// Tracing: TC-046-03
 /// ACs: FR-046-AC-3
 ///
@@ -4064,11 +4083,11 @@ fn tc_046_03_unrecognised_and_non_json_reply_lines_are_counted_and_change_nothin
     let renamed = r#"{"type":"control","action":"peer_status","status":"held","orig_msg_id":"x"}"#;
     let rig = Rig::new(Act::ReplyLine(renamed));
     assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
-    let drift = SocketStatus::read(&rig.home.status()).unwrap().drift;
+    let drift = drift_now(&rig);
     assert_eq!((drift.unrecognised_lines, drift.not_json_lines), (1, 0));
     let rig = Rig::new(Act::ReplyLine("this is not json"));
     assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
-    let drift = SocketStatus::read(&rig.home.status()).unwrap().drift;
+    let drift = drift_now(&rig);
     assert_eq!((drift.unrecognised_lines, drift.not_json_lines), (0, 1));
     // A liveness check and a receipt for another message are known, not drift.
     let rig = Rig::new(Act::Silent);
@@ -4082,7 +4101,7 @@ fn tc_046_03_unrecognised_and_non_json_reply_lines_are_counted_and_change_nothin
     .unwrap();
     drop(other);
     assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
-    let drift = SocketStatus::read(&rig.home.status()).unwrap().drift;
+    let drift = drift_now(&rig);
     assert_eq!(drift.control_total(), 0);
 }
 
@@ -4097,7 +4116,7 @@ fn tc_046_03_a_reply_line_of_invalid_utf8_is_counted() {
     conn.write_all(b"\xff\xfe\x00 garbage\n").unwrap();
     drop(conn);
     assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
-    let drift = SocketStatus::read(&rig.home.status()).unwrap().drift;
+    let drift = drift_now(&rig);
     assert_eq!(drift.not_json_lines, 1);
 }
 
@@ -4109,12 +4128,12 @@ fn tc_046_03_a_reply_line_of_invalid_utf8_is_counted() {
 fn tc_046_04_an_unknown_receipt_status_is_ambiguous_and_counted() {
     let rig = Rig::new(Act::Receipt("something-new", None));
     assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
-    let drift = SocketStatus::read(&rig.home.status()).unwrap().drift;
+    let drift = drift_now(&rig);
     assert_eq!(drift.unknown_status_receipts, 1);
     // A known status is not counted.
     let rig = Rig::new(Act::Receipt("held", None));
     assert!(matches!(rig.send("m"), Err(SocketError::Held(_))));
-    let drift = SocketStatus::read(&rig.home.status()).unwrap().drift;
+    let drift = drift_now(&rig);
     assert_eq!(drift.control_total(), 0);
 }
 
@@ -4129,7 +4148,7 @@ fn tc_046_05_a_renamed_transcript_origin_is_acked_counted_and_never_falls_back()
     let rig = Rig::new(Act::RenamedOrigin);
     assert_eq!(rig.send("one"), Ok(()));
     let status = SocketStatus::read(&rig.home.status()).unwrap();
-    assert_eq!(status.drift.transcript_shape_unrecognised, 1);
+    assert_eq!(drift_of(&status).transcript_shape_unrecognised, 1);
     // Not suspect: the socket is tried again (a suspect lead would be NotSent, to herdr).
     assert_eq!(rig.send("two"), Ok(()));
     assert_eq!(rig.claude.received().len(), 2, "still posted to the socket");
@@ -4137,7 +4156,7 @@ fn tc_046_05_a_renamed_transcript_origin_is_acked_counted_and_never_falls_back()
     let silent = Rig::new(Act::Silent);
     assert!(matches!(silent.send("one"), Err(SocketError::Ambiguous(_))));
     assert!(matches!(silent.send("two"), Err(SocketError::NotSent(_))));
-    let drift = SocketStatus::read(&silent.home.status()).unwrap().drift;
+    let drift = drift_now(&silent);
     assert_eq!(drift.transcript_shape_unrecognised, 0);
 }
 
@@ -4174,7 +4193,7 @@ fn tc_046_12_settle_acks_an_unrecognised_shape_with_a_note() {
         acks[0].why
     );
     let status = SocketStatus::read(&rig.home.status()).unwrap();
-    assert_eq!(status.drift.transcript_shape_unrecognised, 1);
+    assert_eq!(drift_of(&status).transcript_shape_unrecognised, 1);
     assert!(
         status
             .notes
@@ -4241,7 +4260,7 @@ fn tc_046_06_a_clean_transcript_is_absent_not_drift() {
     )
     .unwrap();
     assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
-    let drift = SocketStatus::read(&rig.home.status()).unwrap().drift;
+    let drift = drift_now(&rig);
     assert_eq!(drift.transcript_shape_unrecognised, 0);
 }
 
@@ -4751,4 +4770,198 @@ fn tc_055_03_a_registry_read_that_fails_drops_no_entry() {
     assert_eq!(SocketStatus::read(&home.status()).unwrap().leads.len(), 1);
     drop(relay);
     server.join().unwrap();
+}
+
+// ---- FR-046: drift is attributed to a version and ages out -------------------
+
+fn versions_of(rig: &Rig) -> Vec<relay_core::socket_status::VersionDrift> {
+    SocketStatus::read(&rig.home.status()).unwrap().versions
+}
+
+/// Tracing: TC-046-03
+/// ACs: FR-046-AC-3
+///
+/// A drifting reply-socket line is counted against the version of the lead it came from,
+/// with its `type` and `action` as the last offending line and nothing else of it; a line
+/// that is not JSON has neither.
+#[test]
+fn tc_046_03_a_drifting_line_is_counted_against_the_leads_version_with_its_shape() {
+    let renamed = r#"{"type":"control","action":"peer_status","status":"held","orig_msg_id":"x","body":"secret"}"#;
+    let rig = Rig::new(Act::ReplyLine(renamed));
+    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    let versions = versions_of(&rig);
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].version, "2.1.283");
+    let window = versions[0].window(wall_ms());
+    assert_eq!(window.counts.unrecognised_lines, 1);
+    assert_eq!(window.last.len(), 1);
+    assert_eq!(window.last[0].line_type.as_deref(), Some("control"));
+    assert_eq!(window.last[0].action.as_deref(), Some("peer_status"));
+    let file = fs::read_to_string(rig.home.status()).unwrap();
+    assert!(!file.contains("secret"), "no body is kept");
+
+    let rig = Rig::new(Act::ReplyLine("this is not json"));
+    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    let window = versions_of(&rig)[0].window(wall_ms());
+    assert_eq!(window.counts.not_json_lines, 1);
+    assert_eq!(
+        (
+            window.last[0].line_type.clone(),
+            window.last[0].action.clone()
+        ),
+        (None, None)
+    );
+}
+
+/// Tracing: TC-046-04
+/// ACs: FR-046-AC-4
+///
+/// An unknown receipt status is counted against the lead's version, and a delivery the
+/// transcript acknowledges is counted as acknowledged for it.
+#[test]
+fn tc_046_04_an_unknown_receipt_and_an_acknowledgement_are_counted_per_version() {
+    let rig = Rig::new(Act::Receipt("something-new", None));
+    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    let window = versions_of(&rig)[0].window(wall_ms());
+    assert_eq!(window.counts.unknown_status_receipts, 1);
+    assert_eq!(window.last[0].line_type.as_deref(), Some("control"));
+    assert_eq!(
+        window.last[0].action.as_deref(),
+        Some("peer_message_status")
+    );
+
+    let rig = Rig::new(Act::Consume);
+    assert_eq!(rig.send("m"), Ok(()));
+    let versions = versions_of(&rig);
+    assert_eq!(versions[0].version, "2.1.283");
+    let window = versions[0].window(wall_ms());
+    assert_eq!(window.counts.acknowledged, 1);
+    assert_eq!(window.counts.drift_total(), 0);
+}
+
+/// Tracing: TC-046-05
+/// ACs: FR-046-AC-5
+///
+/// The transcript line's `type` is the last offending line kept, and nothing else of it.
+#[test]
+fn tc_046_05_the_transcript_line_type_is_kept_and_nothing_else() {
+    let rig = Rig::new(Act::RenamedOrigin);
+    assert_eq!(rig.send("one"), Ok(()));
+    let window = versions_of(&rig)[0].window(wall_ms());
+    assert_eq!(window.counts.transcript_shape_unrecognised, 1);
+    assert_eq!(window.last[0].line_type.as_deref(), Some("user"));
+    assert_eq!(window.last[0].action, None);
+    let file = fs::read_to_string(rig.home.status()).unwrap();
+    assert!(!file.contains("peer"), "no other text of the line");
+}
+
+/// Tracing: TC-046-17
+/// ACs: FR-046-AC-17
+///
+/// A reply-socket line whose `type` and `action` hold control characters and 10,000
+/// characters, and that carries a body and a path: the status file holds at most 64
+/// characters each of `type` and `action`, no control character, no body and no path.
+#[test]
+fn tc_046_17_an_offending_line_leaves_only_a_bounded_neutralised_type_and_action() {
+    let long = "y".repeat(10_000);
+    let line = Box::leak(
+        json!({
+            "type": format!("t\u{1b}[31m\u{7}{long}"),
+            "action": format!("a\nb\u{202e}{long}"),
+            "body": "secret message body",
+            "path": "/home/peter/secret/path",
+        })
+        .to_string()
+        .into_boxed_str(),
+    );
+    let rig = Rig::new(Act::ReplyLine(line));
+    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    let file = fs::read_to_string(rig.home.status()).unwrap();
+    assert!(!file.contains("secret"), "no body or path");
+    assert!(!file.contains("/home/peter"));
+    let last = versions_of(&rig)[0].last[0].clone();
+    for text in [last.line_type.unwrap(), last.action.unwrap()] {
+        assert!(text.chars().count() <= 64, "{}", text.chars().count());
+        assert!(
+            !text
+                .chars()
+                .any(|c| relay_core::text::is_unsafe_char(c) || c == '\n'),
+            "{text:?}"
+        );
+    }
+}
+
+/// Tracing: TC-046-18
+/// ACs: FR-046-AC-18
+///
+/// A lead that leaves the resolved leads leaves its version's counts for the window.
+#[test]
+fn tc_046_18_a_lead_leaving_the_resolved_leads_leaves_its_versions_counts() {
+    let rig = Rig::new(Act::RenamedOrigin);
+    assert_eq!(rig.send("one"), Ok(()));
+    rig.deliverer.registry_read(&[]);
+    let status = SocketStatus::read(&rig.home.status()).unwrap();
+    assert!(status.leads.is_empty());
+    assert_eq!(drift_of(&status).transcript_shape_unrecognised, 1);
+    assert_eq!(status.versions[0].version, "2.1.283");
+}
+
+/// Tracing: TC-046-19
+/// ACs: FR-046-AC-19
+///
+/// Drift from 20 distinct versions, one with a 1,000-character version string and a control
+/// character: the status file holds 16 versions, the newest, each string at most 64
+/// characters and free of control characters, and every delivery proceeds.
+#[test]
+fn tc_046_19_drift_is_kept_for_at_most_sixteen_versions_without_affecting_delivery() {
+    let home = Home::new();
+    let pid = 4242;
+    home.record(pid, SESSION, |_| {});
+    let _claude = FakeClaude::start(
+        &home.socket(pid),
+        home.transcript(SESSION),
+        Act::RenamedOrigin,
+    );
+    let deliverer = SocketDeliverer::start(home.config(), Box::new(FakeProcs::with(&[pid])));
+    let session: SessionId = SESSION.parse().unwrap();
+    for n in 0..20 {
+        let version = if n == 17 {
+            format!("2.1.417-\u{7}{}", "v".repeat(1_000))
+        } else {
+            format!("2.1.{}", 400 + n)
+        };
+        home.record(pid, SESSION, |r| r["version"] = json!(version));
+        let sent = deliverer.deliver(
+            &BatchTarget {
+                kind: "claude",
+                batch: BatchId::new(n + 1),
+                lead: "ea",
+                session: Some(&session),
+                senders: "s",
+            },
+            &format!("message {n}"),
+        );
+        assert_eq!(sent, Ok(()), "delivery {n} proceeds as without drift");
+    }
+    let status = SocketStatus::read(&home.status()).unwrap();
+    assert_eq!(status.versions.len(), 16);
+    let names: Vec<&str> = status.versions.iter().map(|v| v.version.as_str()).collect();
+    assert!(
+        names.contains(&"2.1.419") && names.contains(&"2.1.404"),
+        "{names:?}"
+    );
+    assert!(
+        !names.contains(&"2.1.400") && !names.contains(&"2.1.402"),
+        "{names:?}"
+    );
+    let long = status
+        .versions
+        .iter()
+        .find(|v| v.version.starts_with("2.1.417"))
+        .expect("the long version is among the newest");
+    assert_eq!(long.version.chars().count(), 64, "cut");
+    for v in &status.versions {
+        assert!(v.version.chars().count() <= 64, "{}", v.version.len());
+        assert!(!v.version.chars().any(char::is_control), "{:?}", v.version);
+    }
 }
