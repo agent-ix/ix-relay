@@ -27,11 +27,15 @@ counting leads that no longer existed.
 - When a tick starts, the watcher shall drop from the resolved leads every entry whose lead has
   no registration in the registry it read for the tick, whose registration is on another
   machine, or whose registration's `kind` is not `claude` ([FR-054](./FR-054-socket-delivery-is-for-claude-leads.md)).
-- When a tick starts, the watcher shall drop every entry whose process is gone: the pid has no
-  process, or the process there started at another time than the entry resolved
-  ([FR-044](./FR-044-watcher-delivers-through-claude-codes-inbox-socket.md)'s liveness rule).
-- The watcher shall drop an entry only for these reasons, and without delaying or failing
-  any delivery.
+- At most once per place-refresh period, the watcher shall drop every entry whose process is
+  gone: the pid has no process, or the process there started at another time than the entry
+  resolved ([FR-044](./FR-044-watcher-delivers-through-claude-codes-inbox-socket.md)'s
+  liveness rule). Looking at a process can fork a program, so it is done outside the lock
+  that delivery takes, and a process that exited is dropped within that period at the
+  latest; a delivery to it that fails drops the entry at once.
+- The watcher shall drop an entry only for these reasons. The registration checks are table
+  lookups and run on every tick; the process look does not hold the lock delivery takes, so
+  no delivery waits for it.
 - When the watcher dropped any entry, it shall write the status file.
 - If the registry cannot be read in a tick, then the watcher shall drop no entry for
   registration reasons.
@@ -48,6 +52,7 @@ counting leads that no longer existed.
 | FR-055-AC-2 | Given a resolved lead whose Claude Code process exits (and one whose pid is reused by a process started at another time), the next tick drops its entry. | Test |
 | FR-055-AC-3 | Given a resolved lead that is registered and whose process is alive, a tick keeps its entry; given a registry read that fails, no entry is dropped. | Test |
 | FR-055-AC-4 | Given an entry dropped for a lead that has a held batch, a pending decision, a dead-letter reason or a drift count, those remain. | Test |
+| FR-055-AC-5 | Given several resolved leads and several ticks within one place-refresh period, the watcher looks at each lead's process once for the period, with the delivery lock released; a lead that is no longer registered still leaves at the next tick. | Test |
 
 ## Dependencies
 

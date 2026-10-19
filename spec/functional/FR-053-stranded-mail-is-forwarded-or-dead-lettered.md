@@ -56,11 +56,19 @@ the sender wrote it to a session whose context the new holder does not share.
 
 ### A new session holds the address
 
-- When a session is replaced and exactly one other registration of the same machine
-  has the registration's `server:workspace:tab` address, and that registration's session
+- When a session is replaced or gone and exactly one other registration of the same
+  machine has the registration's `server:workspace:tab` address, and that registration's session
   is the one herdr verifies in its pane ([FR-047](./FR-047-herdr-placement-must-be-verified.md)),
   then the watcher shall move every queued message of the replaced registration to the
   inbox of that registration, and shall leave the replaced registration in place.
+- The address the mail was written to shall be, for a replaced session, the address herdr
+  lists for the registration's pane now, and for a gone session the last address the
+  watcher verified for the registration. The watcher shall keep that address for each
+  registered lead of its machine in a file in its state directory (at most one address
+  per registered lead, forgotten when the lead is no longer registered), so that a
+  restart does not forget it. If the address of a gone session is not known (the
+  registration lost its place before the watcher kept addresses), then the watcher shall
+  treat it as held by no registration.
 - If no registration, or more than one, qualifies, then the watcher shall move nothing:
   the mail stays queued until the new session registers or the replaced registration
   reaches the pruning age (see "Nothing holds the address"), and an ambiguous address is
@@ -132,7 +140,11 @@ the sender wrote it to a session whose context the new holder does not share.
   none for a pass that did nothing.
 - `agent-msg who` and `agent-msg doctor` shall stop reporting a registration as
   undeliverable or `registration_pane_gone` for mail this requirement moved, because
-  the registration no longer holds it.
+  the registration no longer holds it: `agent-msg who` shall print the
+  `UNDELIVERABLE` marker ([FR-032](./FR-032-sender-sees-undeliverable-recipients.md)) only
+  while the registration's inbox holds mail (or cannot be read), and `agent-msg doctor`
+  shall say in `registration_pane_gone` that queued mail waits for the lead only while its
+  inbox holds mail.
 
 ## Acceptance Criteria
 
@@ -151,6 +163,9 @@ the sender wrote it to a session whose context the new holder does not share.
 | FR-053-AC-10 | Given a registration 25 hours old whose pane herdr lists no agent in, holding two queued messages and no registration holding its address, one pass leaves both in the dead-letter list byte for byte with reason `recipient-pruned` and the registration pruned; given it is 23 hours old, nothing moves; given the dead-lettering fails, the registration is not pruned and the mail stays. | Test |
 | FR-053-AC-11 | Given a leased in-flight batch of a replaced registration, the pass does not move it, and after the lease expires the next pass does. | Test |
 | FR-053-AC-13 | Given a registration 25 hours old whose pane herdr says now hosts another session, holding two queued messages and no registration holding its address, one pass leaves both in the dead-letter list byte for byte with reason `recipient-pruned` and the registration pruned; given it is 23 hours old, nothing moves. | Test |
+| FR-053-AC-14 | Given a registration whose session is gone from its pane (herdr lists no agent in the pane and no pane hosting the session) with two queued messages, one pass with exactly one verified registration holding its address moves both, in order, to it; with two registrations holding the address, or one whose session herdr does not verify, nothing moves. | Test |
+| FR-053-AC-15 | Given a watcher that restarted after the registration lost its place, a replaced session's mail is forwarded to the one verified holder of the address herdr lists for its pane, and a gone session's mail to the one verified holder of the address the watcher kept in its state file; the file holds at most one address per registered lead. | Test |
+| FR-053-AC-16 | Given a registration whose pane now hosts another session, `agent-msg who` prints `UNDELIVERABLE` for it while its inbox holds mail and not once the inbox is empty, and `agent-msg doctor`'s `registration_pane_gone` claims waiting mail only while the inbox holds some. | Test |
 
 ## Dependencies
 
@@ -160,6 +175,9 @@ the sender wrote it to a session whose context the new holder does not share.
   (the evidence and the compare-and-set), [FR-047](./FR-047-herdr-placement-must-be-verified.md)
   (a verified placement) and [FR-032](./FR-032-sender-sees-undeliverable-recipients.md)
   (the undeliverable report).
-- An older `agent-msg` or watcher on the receiving machine may not draw the notice line
-  from a message it does not know to be moved; the machines of a fleet are upgraded
-  together, and no compatibility layer is kept ([NFR-004](../non-functional/NFR-004-prerelease-no-compatibility-layers.md)).
+- An `agent-msg` older than this requirement rejects a forwarded entry whole, because
+  `Message` refuses members it does not know: the batch containing it fails to decode and
+  goes to redelivery ([FR-040](./FR-040-redelivery-is-marked-bounded-and-dead-lettered.md))
+  and then to the dead-letter list, so a lead on an older `agent-msg` loses the
+  notice line and its batch. The machines of a fleet are upgraded together, and no
+  compatibility layer is kept ([NFR-004](../non-functional/NFR-004-prerelease-no-compatibility-layers.md)).

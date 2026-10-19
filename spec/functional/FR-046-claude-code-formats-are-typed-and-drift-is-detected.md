@@ -113,7 +113,10 @@ message is already in Claude Code's hands, which delivers it on approval.
   These last-line members age out with the counts.
 - A lead's version shall be the version its session record reported when the watcher
   resolved it; a line from a lead with no resolved version is counted against the version
-  `unknown`.
+  `unknown`. A reply-socket line names no lead, so it is counted against the version of the
+  lead the watcher most recently posted to: an approximation, wrong for a late line when
+  two Claude Code versions run on one machine. `agent-msg doctor` shall say so in the
+  detail lines of `socket_wire_drift`.
 - The watcher shall keep these members for at most 16 versions
   ([NFR-002](../non-functional/NFR-002-bounded-resources.md)), each version string cut to
   64 characters and neutralised; when a further version appears it shall first drop the
@@ -180,7 +183,7 @@ Recorded because they are delivery-visible, though neither is reachable from Cla
 | FR-046-AC-8 | Given every fixture of the captured version, each parses to its exact typed result, and the manifest lists exactly the files on disk, each as `captured`, `derived-from-program-text` or `synthetic`, with every `drift-` fixture synthetic. | Test |
 | FR-046-AC-9 | Given the envelope line and the wrapper for plain and hostile names and bodies, the bytes are the golden ones; for any text, no `<` survives in the wrapped body and the wrapper's own two tags are the only ones. | Property |
 | FR-046-AC-10 | Given versions 2.1.302 with acknowledged deliveries and no drift, 2.1.303 with acknowledged deliveries and one `not_json` line, and 2.1.290 with neither, `agent-msg doctor` says 2.1.302 is working, warns for 2.1.303 with its counts, the last line's `type` and `action` and when, and lists 2.1.290 with no verdict; no output contains `unverified`, and none is a failure, whatever the captured version. | Test |
-| FR-046-AC-11 | Given per-version drift counts, `agent-msg doctor` warns `socket_wire_drift` with the version, the counts and the last offending line's `type` and `action` and time, and `socket_transcript_shape_unrecognised` likewise, never a failure; given none, neither is present. | Test |
+| FR-046-AC-11 | Given per-version drift counts, `agent-msg doctor` warns `socket_wire_drift` with the version, the counts and the last offending line's `type` and `action` and time, and `socket_transcript_shape_unrecognised` likewise, never a failure, with a detail line saying that reply-socket lines are attributed to the version of the lead most recently posted to; given none, neither is present. | Test |
 | FR-046-AC-12 | Given a transcript line naming the id under a renamed field that arrives after the ack wait, a `settle` acknowledges the batch once, with a `transcript_shape_unrecognised` reason and note, and counts it once. | Test |
 | FR-046-AC-13 | Given a batch acknowledged as received but unconfirmed for an unrecognised shape, when its lease expires and the watcher ticks over many rounds, nothing is posted again, nothing is typed through herdr, nothing is redelivered and nothing is dead-lettered. | Test |
 | FR-046-AC-14 | Given the crate's library sources, no identifier of a file, socket, process, environment or thread API appears in the code in any import form (a grouped `std::{..}` import included). | Test |
