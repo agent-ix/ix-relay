@@ -20,7 +20,7 @@
 //! - a herdr whose shape ix-relay cannot read fails (the watcher types into no
 //!   pane), an old version with a good shape warns.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use relay_core::ScanCut;
 use relay_core::moves::{MoveEvent, MoveKind};
@@ -458,14 +458,23 @@ fn wire_drift(
                      claude-wire crate's types and fixtures for this Claude Code version. The \
                      warning ends 24 hours after the last drift",
                 )
-                .with_details(last.into_iter().chain(lines.iter().map(|l| {
-                    format!(
-                        "{:?}: last {}, {} ago",
-                        l.kind,
-                        shape_text(l),
-                        ago(now_ms.saturating_sub(l.at_ms))
-                    )
-                }))),
+                .with_details(
+                    last.into_iter()
+                        .chain(lines.iter().map(|l| {
+                            format!(
+                                "{:?}: last {}, {} ago",
+                                l.kind,
+                                shape_text(l),
+                                ago(now_ms.saturating_sub(l.at_ms))
+                            )
+                        }))
+                        .chain(std::iter::once(
+                            "reply-socket lines name no lead: each is counted against the version \
+                             of the lead the watcher most recently posted to, an approximation \
+                             when two Claude Code versions run on this machine"
+                                .to_owned(),
+                        )),
+                ),
             );
         }
         if d.transcript_shape_unrecognised > 0 {
@@ -1363,12 +1372,9 @@ fn bus_failures(f: &Facts, up: &RedisUp, checks: &mut Vec<Check>) {
     let Ok(failures) = &up.hook_failures else {
         return;
     };
-    // A failure is counted once per record id: a second stream entry with an id already
-    // counted adds nothing to any count or rule (FR-030).
-    let mut seen = HashSet::new();
+    // `failures` already counts each record id once (FR-030, `HookHealth::distinct`).
     let recent: Vec<&SpoolRecord> = failures
         .iter()
-        .filter(|b| b.id.as_deref().is_none_or(|id| seen.insert(id)))
         .filter_map(|BusFailure { record, .. }| record.as_ref())
         .filter(|r| f.now_ms.saturating_sub(r.at_ms) < DAY_MS)
         .collect();
@@ -1588,7 +1594,7 @@ fn registrations(f: &Facts, up: &RedisUp, checks: &mut Vec<Check>) {
     }
     let mut unchecked_panes = false;
     for reg in regs {
-        registration_problems(f, reg, &mut unchecked_panes, checks);
+        registration_problems(f, up, reg, &mut unchecked_panes, checks);
     }
     if unchecked_panes && let Err(error) = &f.panes {
         checks.push(Check::unknown(
@@ -1610,6 +1616,7 @@ fn registrations(f: &Facts, up: &RedisUp, checks: &mut Vec<Check>) {
 
 fn registration_problems(
     f: &Facts,
+    up: &RedisUp,
     reg: &Registration,
     unchecked_panes: &mut bool,
     checks: &mut Vec<Check>,
@@ -1657,7 +1664,18 @@ fn registration_problems(
                     "{name}'s pane {pane} has not been in herdr for about {}",
                     ago(age)
                 ),
-                "the session was closed; mail queued for it waits until the lead registers again",
+                // Mail this lead had queued is forwarded or dead-lettered by the watcher
+                // (FR-053), so only a registration that still holds some waits on one.
+                if up
+                    .inboxes
+                    .iter()
+                    .any(|(lead, inbox)| lead == &reg.name && !inbox.as_ref().is_ok_and(|o| o.len == 0))
+                {
+                    "the session was closed; mail queued for it waits until the lead registers again, \
+                     or the watcher forwards or dead-letters it"
+                } else {
+                    "the session was closed; nothing is queued for it"
+                },
                 "nothing to do: the watcher prunes it after 24 hours idle",
             ));
         }
@@ -2126,13 +2144,11 @@ mod tests {
         }
     }
 
-    /// Bus entries for `records`, each with an id of its own.
+    /// Bus entries for `records`.
     fn bus_failures_of(records: impl IntoIterator<Item = SpoolRecord>) -> Vec<BusFailure> {
         records
             .into_iter()
-            .enumerate()
-            .map(|(n, r)| BusFailure {
-                id: Some(format!("id-{n}")),
+            .map(|r| BusFailure {
                 machine: r.machine.clone(),
                 record: Some(r),
             })
@@ -2616,7 +2632,6 @@ mod tests {
             }),
             (Code::HookFailuresRecorded, Warn, |f| {
                 up(f).hook_failures = Ok(vec![BusFailure {
-                    id: None,
                     machine: "hub".parse().unwrap(),
                     record: Some(record(Stage::Pop, K::Timeout, "hub", NOW - 5 * HOUR_MS)),
                 }]);
@@ -2903,11 +2918,6 @@ mod tests {
             Status::Fail,
             "50 from one session"
         );
-        // 50 stream entries that carry only 49 distinct ids.
-        let mut entries =
-            bus_failures_of((0..50).map(|n| failure("hub", Some("x"), min + 1_000 * n)));
-        entries[49].id = entries[48].id.clone();
-        assert_eq!(status_of(entries), Status::Warn, "an id is counted once");
         // The 49th and 50th windows: exactly 15 minutes old is not under 15 minutes.
         assert_eq!(
             status_of(bus_failures_of((0..50).map(|n| failure(
@@ -3064,6 +3074,35 @@ mod tests {
         assert!(check.details.iter().any(|d| d.contains("requeue_failed")));
     }
 
+    /// Tracing: TC-053-18
+    /// ACs: FR-053-AC-16
+    ///
+    /// `registration_pane_gone` says mail waits for the lead only while its inbox holds
+    /// mail: once the watcher moved it, the check stays (the record is stale) but no
+    /// longer claims anything is queued.
+    #[test]
+    fn tc_053_18_pane_gone_claims_waiting_mail_only_while_the_inbox_holds_some() {
+        let cause = |inboxes: Vec<(AgentName, Result<InboxOverview, String>)>| {
+            let mut f = healthy();
+            up(&mut f).registrations = Ok((vec![reg("a", "hub", Some("w9:p9"), 2 * HOUR_MS)], 0));
+            up(&mut f).inboxes = inboxes;
+            evaluate(&f)
+                .into_iter()
+                .find(|c| c.code == Code::RegistrationPaneGone)
+                .and_then(|c| c.cause)
+        };
+        let waits = cause(waiting("a", 60_000)).unwrap();
+        assert!(waits.contains("mail queued for it waits"), "{waits}");
+        let unreadable = cause(vec![(name("a"), Err("denied".into()))]).unwrap();
+        assert!(
+            unreadable.contains("mail queued for it waits"),
+            "{unreadable}"
+        );
+        let moved = cause(vec![empty_inbox("a")]).unwrap();
+        assert!(!moved.contains("waits"), "{moved}");
+        assert!(moved.contains("nothing is queued"), "{moved}");
+    }
+
     /// The spool's `dropped` count (records dropped for the bound, lines removed
     /// unreadable) is shown, not only carried on the record.
     #[test]
@@ -3073,7 +3112,6 @@ mod tests {
         let mut flush = record(Stage::Decode, K::Corrupt, "hub", NOW - 1_000);
         flush.dropped = 3;
         up(&mut f).hook_failures = Ok(vec![BusFailure {
-            id: None,
             machine: flush.machine.clone(),
             record: Some(flush),
         }]);
@@ -3238,7 +3276,6 @@ mod tests {
         up(&mut f).hook_failures = Ok(entries
             .into_iter()
             .map(|r| BusFailure {
-                id: None,
                 machine: r.machine.clone(),
                 record: Some(r),
             })
@@ -3644,6 +3681,14 @@ mod tests {
                 "last offending line: type \"control\", action \"peer_status\", 90s ago"
             )),
             "{:?}",
+            drift.details
+        );
+        assert!(
+            drift
+                .details
+                .iter()
+                .any(|d| d.contains("most recently posted to, an approximation")),
+            "the attribution is said to be approximate: {:?}",
             drift.details
         );
         let shape = found

@@ -385,6 +385,46 @@ fn a_hook_health_entry_with_a_malformed_machine_is_skipped() {
     assert_eq!(entries[0].machine.as_str(), "node-a");
 }
 
+/// Tracing: TC-030-12
+/// ACs: FR-030-AC-12
+///
+/// A stream entry with no `id` field whose record carries one is counted by the record's
+/// id, so two such entries are one failure; an entry with an empty id of both kinds stays
+/// distinct. The read does this once, for every reader (the gauge and doctor).
+#[test]
+fn tc_030_12_a_hook_health_entry_without_a_stream_id_is_counted_by_its_records_id() {
+    let Some(mut bus) = Bus::connect("wire-health-inner-id") else {
+        return;
+    };
+    for rec in [
+        r#"{"id":"r1"}"#,
+        r#"{"id":"r1"}"#,
+        r#"{"id":""}"#,
+        r#"{"id":""}"#,
+    ] {
+        redis::cmd("XADD")
+            .arg(bus.key("health:hooks"))
+            .arg("*")
+            .arg("machine")
+            .arg("node-a")
+            .arg("lead")
+            .arg("")
+            .arg("rec")
+            .arg(rec)
+            .exec(&mut bus.raw)
+            .unwrap();
+    }
+    let read = bus.relay.hook_health(10).unwrap();
+    assert_eq!(read.entries[0].id.as_deref(), Some("r1"));
+    assert_eq!(read.entries[2].id, None);
+    assert_eq!(read.entries.len(), 4);
+    assert_eq!(
+        read.distinct().len(),
+        3,
+        "r1 once, and the two id-less ones"
+    );
+}
+
 #[test]
 fn a_pane_id_is_a_bare_json_string() {
     let pane: PaneId = "w1:p1".parse().unwrap();

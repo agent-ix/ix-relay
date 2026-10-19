@@ -1154,11 +1154,17 @@ fn hook_health_of(reply: &StreamRangeReply) -> HookHealth {
         // An entry a reader cannot use (a missing field, or a machine outside
         // its type's rule) is counted, never silently dropped.
         let read = (|| {
+            let record = entry.get::<String>("rec")?;
             Some(HookHealthEntry {
-                id: entry.get::<String>("id").filter(|id| !id.is_empty()),
+                // The stream's own `id` field, else the record's: the one rule every
+                // reader counts a failure by (FR-030).
+                id: entry
+                    .get::<String>("id")
+                    .filter(|id| !id.is_empty())
+                    .or_else(|| record_id(&record)),
                 machine: entry.get::<String>("machine")?.parse().ok()?,
                 lead: entry.get::<String>("lead").filter(|l| !l.is_empty()),
-                record: entry.get::<String>("rec")?,
+                record,
             })
         })();
         match read {
@@ -1170,6 +1176,16 @@ fn hook_health_of(reply: &StreamRangeReply) -> HookHealth {
         entries,
         unreadable,
     }
+}
+
+/// The `id` member of a failure record's JSON, when it has a non-empty one.
+fn record_id(record: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(record)
+        .ok()?
+        .get("id")?
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
 }
 
 impl HookHealth {
