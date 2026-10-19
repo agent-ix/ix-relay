@@ -66,8 +66,12 @@ the sender wrote it to a session whose context the new holder does not share.
   never resolved by guessing ([FR-004](./FR-004-resolution-never-guesses.md)).
 - The move shall be one atomic bus operation per batch of messages: each message shall
   be in exactly one of the two inboxes at every instant a reader can observe, and a
-  failure, a crash or a second watcher running the same pass shall leave every message
-  in at least one inbox and in no more than one. The move shall be a compare-and-set
+  crash of the watcher or a second watcher running the same pass shall leave every
+  message in exactly one inbox. The move shall follow the store's script discipline
+  ([FR-020](./FR-020-hook-never-loses-popped-messages.md)): it checks every key it writes
+  before its first write and writes the destination before it deletes the source, so a
+  script that fails part-way leaves a message in both inboxes (a duplicate), never in
+  neither. The move shall be a compare-and-set
   against the registrations the watcher read, like a relink
   ([FR-043](./FR-043-moves-and-renames-are-followed-and-recorded.md)): it shall do
   nothing if either registration changed, or was pruned, since the read.
@@ -86,6 +90,20 @@ the sender wrote it to a session whose context the new holder does not share.
 - The line shall be written by ix-relay, shall not be part of the sender's text, and
   shall be present on every rendering path of a moved message. A message moved twice
   (the new session was itself replaced) shall name its original send time and sender.
+- The move shall mark each moved entry, in the same atomic operation, with a member
+  recording that it was forwarded from a prior session of the address, and shall change
+  no other member; a second move keeps the first mark. The mark is what every rendering
+  path reads, and a moved message later dead-lettered is kept byte for byte as stored,
+  mark included ([FR-031](./FR-031-dead-letters-instead-of-drops.md)).
+- The notice shall be part of the message's first, signed line (for example
+  `[ix-relay] from <sender> (sent <time> to a prior session of this address): `), so that
+  the first line remains the only one beginning with `[ix-relay]` and the sender's text
+  stays on indented continuation lines
+  ([FR-016](./FR-016-render-neutralises-control-characters.md)).
+- A moved entry's pop weight shall include the notice's bytes
+  ([FR-012](./FR-012-inbox-pops-are-atomic-and-budgeted.md)), so that the hook-output and
+  watcher-prompt bounds of [NFR-002](../non-functional/NFR-002-bounded-resources.md) hold
+  for a batch of moved messages.
 - The text of a moved message shall be neutralised when rendered, as for any message
   from another lead ([FR-016](./FR-016-render-neutralises-control-characters.md),
   `relay_core::text::neutralise`); moving a message shall not change what the sender
@@ -123,7 +141,8 @@ the sender wrote it to a session whose context the new holder does not share.
 | FR-053-AC-3 | Given a moved message whose text and sender name contain ESC, newlines and a forged closing line, the rendered output contains no control character from them and no second copy of the notice line. | Test |
 | FR-053-AC-4 | Given a registration whose pane hosts its registered session, with any inbox, any age and any herdr answer other than a positive one, no message leaves its inbox and nothing is pruned. | Test |
 | FR-053-AC-5 | Given herdr fails, times out, answers in an unreadable shape, lists nothing, or names no session for the pane, the watcher moves, forwards and prunes nothing; given the replaced pane's address is held by no registration, or by two, nothing is moved. | Test |
-| FR-053-AC-6 | For any interleaving of a pass with sends, pops, prunes, registrations, relinks and a second watcher's pass, and with a bus failure injected at each step, every message is afterwards in the old inbox, in the new inbox, or in the dead-letter list, and in exactly one of them. | Property |
+| FR-053-AC-6 | For any interleaving of a pass with sends, pops, prunes, registrations, relinks and a second watcher's pass, and with a bus failure injected at each step, every message is afterwards in the old inbox, in the new inbox, or in the dead-letter list, never in none of them, and in exactly one of them unless the injected failure stopped a script part-way, which may leave it in two. | Property |
+| FR-053-AC-12 | Given a batch of moved messages, every rendering has only its first line beginning with `[ix-relay]` and carries the notice on that line, and the hook output stays within 6 KiB plus one rendered message plus the pending-count line. | Test |
 | FR-053-AC-7 | Given a registration that is pruned, or registered again, between the watcher's read and the move, the move does nothing. | Test |
 | FR-053-AC-8 | Given a message moved to a session that was itself replaced, it moves again and the notice still names the first send time and the original sender. | Test |
 | FR-053-AC-9 | Given a registration of another machine in the same state, the watcher moves, forwards and prunes nothing for it. | Test |

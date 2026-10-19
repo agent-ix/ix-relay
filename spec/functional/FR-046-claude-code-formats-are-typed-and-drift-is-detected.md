@@ -114,6 +114,11 @@ message is already in Claude Code's hands, which delivers it on approval.
 - A lead's version shall be the version its session record reported when the watcher
   resolved it; a line from a lead with no resolved version is counted against the version
   `unknown`.
+- The watcher shall keep these members for at most 16 versions
+  ([NFR-002](../non-functional/NFR-002-bounded-resources.md)), each version string cut to
+  64 characters and neutralised; when a further version appears it shall first drop the
+  version whose newest bucket is oldest, and it shall never fail or delay a delivery to
+  keep the bound.
 - The counts and last-line members shall be kept apart from the resolved-lead entries
   ([FR-055](./FR-055-socket-status-keeps-only-live-leads.md)), so that a lead that left the
   file leaves its version's counts for the window.
@@ -183,6 +188,7 @@ Recorded because they are delivery-visible, though neither is reachable from Cla
 | FR-046-AC-16 | Given drift recorded 25 hours ago and none since, the counts, the last-line members and the warning are gone and a version with acknowledged deliveries reads as working; given drift 23 hours ago, they are still there. | Test |
 | FR-046-AC-17 | Given an offending reply-socket line whose `type`, `action` and body hold control characters, a message body, a path and 10,000 characters, the status file and `doctor` hold no body or path, at most 64 characters each of `type` and `action`, and no control character. | Test |
 | FR-046-AC-18 | Given a lead that leaves the status file's resolved leads (FR-055), its version's counts remain for the rest of the window. | Test |
+| FR-046-AC-19 | Given drift from 20 distinct versions, one of them with a 1,000-character version string, the status file holds 16 versions, the ones with the newest buckets, no version string over 64 characters and no control character, and every delivery proceeds as without drift. | Test |
 
 ## Dependencies
 

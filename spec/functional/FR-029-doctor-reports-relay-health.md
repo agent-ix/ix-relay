@@ -62,7 +62,13 @@ and shall exit 0 unless a check failed.
   the failures recorded in the last 24 hours, either (a) at least 50 are under 15 minutes old,
   fleet-wide, or (b) one session has failed in each of at least three distinct 15-minute
   windows of the last hour and its newest failure is under 15 minutes old. Otherwise it shall
-  give the code `warn`. A single recent record, or a short burst on one machine, is a `warn`.
+  give the code `warn`. A single recent record, fewer than 50 recent failures, or a burst that
+  ended more than 15 minutes ago, is a `warn`; a burst of 50 or more under 15 minutes old is a
+  `fail` by (a) whichever machine or session it came from. The four 15-minute windows of the
+  last hour are counted back from the time of the check (under 15 minutes old, 15 to under 30,
+  30 to under 45, 45 to under 60), not aligned to the clock. A failure is counted once per
+  record id ([FR-030](./FR-030-hook-failures-are-spooled-and-reported.md)): a second stream
+  entry with an id already counted adds nothing to any count or rule.
   The thresholds are the doctor's own: 50 in 15 minutes is more than 15 times the fleet's
   observed average of about 3 per 15 minutes (about 300 a day), so only an outage reaches it;
   a connect-timeout burst ends within one window, so failures in three windows mean the
@@ -130,7 +136,7 @@ and shall exit 0 unless a check failed.
 | FR-029-AC-11 | Given a stuck inbox, the code is a `warn` under a fresh heartbeat and a `fail` under a wedged or missing one; given a spool with only undecodable lines, `hook_spool_pending` is a `fail` while the file is being written and a `warn` after 15 min. | Test |
 | FR-029-AC-12 | Given `node-a`'s watcher died and its leads' stamps stopped moving, `watcher_heartbeat_missing` for `node-a` is a `fail` half an hour, three hours and 23 hours after its last tick, and a `warn` after 25 hours. | Test |
 | FR-029-AC-13 | Given the bus refuses the password (including `NOAUTH` and `WRONGPASS`), refuses the connection, accepts and then drops it, does not answer, or has no route, `redis_unreachable`'s cause and fix name, respectively, the machine's ACL user, hub's forwarder, relay-redis behind the forwarder, the WireGuard link, and WireGuard not being up on this machine. | Test |
-| FR-029-AC-14 | Given one hook failure two minutes old, or 49 failures spread over several machines within 15 minutes, or a burst of 100 failures from one session within a single 15-minute window, `hook_failures_recorded` is a `warn`; given 50 failures under 15 minutes old, it is a `fail`. | Test |
+| FR-029-AC-14 | Given one hook failure two minutes old, or 49 failures spread over several machines within 15 minutes, or a burst of 100 failures from one session all between 20 and 30 minutes old, `hook_failures_recorded` is a `warn`; given 50 failures under 15 minutes old (spread over machines, or all from one session), it is a `fail`; given 50 stream entries under 15 minutes old that carry only 49 distinct record ids, it is a `warn`. | Test |
 | FR-029-AC-15 | Given one session that failed 84 times with the same stage and error kind over the last hour, in at least three distinct 15-minute windows and most recently three minutes ago, `hook_failures_recorded` is a `fail`; given the same records with the newest 20 minutes old it is a `warn`. | Test |
 | FR-029-AC-16 | Given failures of several sessions on several machines, the check's detail names the three sessions and the three machines with the most failures, with their counts, repeating stage and error kind and newest time, and no text taken from a failure message. | Test |
 

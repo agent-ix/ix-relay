@@ -61,12 +61,23 @@ hook-failure stream.
   entries), each entry carrying the record, its machine and its lead, and shall
   remove from the spool exactly the records shipped. A flush that fails leaves the
   records it did not ship in the spool and is not itself recorded.
+- Each spooled record shall carry an `id` minted when it is appended, unique to that
+  record: records that look alike (the same stage, error kind and session over and over
+  again) are distinct records with distinct ids. The flush shall remove from the spool
+  by id.
 - Each spooled record shall reach the stream at most once: a flush that overlaps
   another, a flush that retries after a failed or partly applied ship, and a crash
   after shipping and before the removal shall not put a record on the stream a second
-  time. Records that look alike (the same stage, error kind and session over and over
-  again) are distinct records, each shipped once. A record the bounded spool discarded
-  is never shipped, and is counted in a `dropped` field as before.
+  time. Each chunk's ship shall be one atomic bus request that adds only the records
+  whose ids the bus has not already recorded as shipped, and records those ids in the
+  same request, so deduplication costs no request beyond the chunk's own
+  ([NFR-001](../non-functional/NFR-001-hook-time-budget.md)). The record of shipped ids
+  shall be bounded ([NFR-002](../non-functional/NFR-002-bounded-resources.md)): it
+  keeps every id shipped in the last 24 hours, up to 2,000 ids, and drops the oldest
+  beyond either bound. Every reader of the stream (`agent-msg doctor`, the watcher's
+  metrics) shall count a record id once, so an entry shipped again after its id aged
+  out of that record is never counted twice. A record the bounded spool discarded is
+  never shipped, and is counted in a `dropped` field as before.
 - If a hook fails before it can connect for a reason that repeats on every call
   (an invalid `--as` name, unreadable hook input), then the handler shall connect
   once and flush. A configuration or command-line failure has no Redis address
@@ -99,7 +110,7 @@ hook-failure stream.
 | FR-030-AC-9 | Given a relative `IX_RELAY_CONFIG`, a failing hook exits 0 and creates no spool in its working directory. | Test |
 | FR-030-AC-10 | Given a hook in a herdr pane whose herdr fails or times out and no other name for the session, the hook registers and pops nothing and leaves one `derive` record with code `herdr_failed`; given that a herdr call was refused because the time budget was spent, it leaves one `budget` record with code `budget_exhausted` instead. | Test |
 | FR-030-AC-11 | Given herdr failing for five uncached `PostToolUse` calls of one session, the spool holds one record and every call attempted the derivation; given herdr answering on the sixth call, the lead is registered by it and no further record is left. | Test |
-| FR-030-AC-12 | Given 1,000 spooled records, including runs of identical ones, and two flushes started at the same time, a flush whose ship fails after the server applied part of it and is then retried, and a process killed after shipping and before removing, the stream afterwards holds each record exactly once and the spool holds none of them. | Test |
+| FR-030-AC-12 | Given 1,000 spooled records, including runs of identical ones, and two flushes started at the same time, a flush whose ship fails after the server applied part of it and is then retried, and a process killed after shipping and before removing, the stream afterwards holds each record id exactly once and the spool holds none of them; given a stream that holds one id twice, `agent-msg doctor` and the watcher's metrics count it once. | Test |
 
 ## Dependencies
 

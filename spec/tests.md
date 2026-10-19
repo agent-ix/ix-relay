@@ -329,6 +329,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-046 | FR-046-AC-16 | TC-046-16 | 🚧 not written |
 | FR-046 | FR-046-AC-17 | TC-046-17 | 🚧 not written |
 | FR-046 | FR-046-AC-18 | TC-046-18 | 🚧 not written |
+| FR-046 | FR-046-AC-19 | TC-046-19 | 🚧 not written |
 | FR-047 | FR-047-AC-1 | TC-047-01 | ✅ written (`placement_state_requires_pane_session_and_herdr_identity`; `address_location_requires_a_matching_herdr_session_id`) |
 | FR-047 | FR-047-AC-2 | TC-047-02 | ✅ written (`placement_state_requires_pane_session_and_herdr_identity`; `legacy_label_only_registration_is_not_routable_by_address`) |
 | FR-047 | FR-047-AC-3 | TC-047-03 | ✅ written (`address_location_requires_a_matching_herdr_session_id`, mismatch and absent-session cases) |
@@ -345,6 +346,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-053 | FR-053-AC-9 | TC-053-09 | 🚧 not written |
 | FR-053 | FR-053-AC-10 | TC-053-10 | 🚧 not written |
 | FR-053 | FR-053-AC-11 | TC-053-11 | 🚧 not written |
+| FR-053 | FR-053-AC-12 | TC-053-12 | 🚧 not written |
 | FR-054 | FR-054-AC-1 | TC-054-01 | 🚧 not written |
 | FR-054 | FR-054-AC-2 | TC-054-02 | 🚧 not written |
 | FR-054 | FR-054-AC-3 | TC-054-03 | 🚧 not written |
@@ -414,12 +416,13 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-053-03 | Hostile text and sender names in a moved message are neutralised and cannot forge the notice. | Unit | FR-053-AC-3 | 🚧 not written |
 | TC-053-04 | The mail of a registration whose pane hosts its session never moves. | Integration | FR-053-AC-4 | 🚧 not written |
 | TC-053-05 | A herdr failure, an unreadable answer, an unnamed session, or an address held by none or by two, moves nothing. | Integration | FR-053-AC-5 | 🚧 not written |
-| TC-053-06 | Under any interleaving and injected bus failure, every message ends in exactly one of the old inbox, the new inbox or the dead-letter list. | Property | FR-053-AC-6 | 🚧 not written |
+| TC-053-06 | Under any interleaving and injected bus failure, every message ends in the old inbox, the new inbox or the dead-letter list, never in none, and in exactly one unless a script failed part-way. | Property | FR-053-AC-6 | 🚧 not written |
 | TC-053-07 | A registration pruned or re-registered between read and move makes the move do nothing. | Integration | FR-053-AC-7 | 🚧 not written |
 | TC-053-08 | A message moved twice names its first send time and original sender. | Integration | FR-053-AC-8 | 🚧 not written |
 | TC-053-09 | Another machine's registration is never moved, forwarded or pruned. | Integration | FR-053-AC-9 | 🚧 not written |
 | TC-053-10 | A gone, old-enough registration with mail is dead-lettered as `recipient-pruned` byte for byte and then pruned; failures prune nothing. | Integration | FR-053-AC-10 | 🚧 not written |
 | TC-053-11 | An in-flight batch is not moved until its lease expires. | Integration | FR-053-AC-11 | 🚧 not written |
+| TC-053-12 | Moved messages carry the notice on their one signed first line and a batch of them stays within the hook-output bound. | Integration | FR-053-AC-12 | 🚧 not written |
 | TC-054-01 | Codex and opencode leads go straight to herdr with no status entry or note. | Integration | FR-054-AC-1 | 🚧 not written |
 | TC-054-02 | A claude lead with no record still goes to herdr with the note. | Integration | FR-054-AC-2 | 🚧 not written |
 | TC-054-03 | Doctor does not warn about non-claude leads and still warns for a claude lead without a record. | Integration | FR-054-AC-3 | 🚧 not written |
@@ -689,6 +692,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-046-16 | Per-version drift and its last-line members age out after 24 hours. | Unit | FR-046-AC-16 | 🚧 not written |
 | TC-046-17 | Only bounded, neutralised `type` and `action` of an offending line are kept, never a body or path. | Unit | FR-046-AC-17 | 🚧 not written |
 | TC-046-18 | A lead leaving the resolved leads leaves its version's counts for the window. | Integration | FR-046-AC-18 | 🚧 not written |
+| TC-046-19 | Per-version drift members are kept for at most 16 versions, each version string cut and neutralised, without affecting delivery. | Unit | FR-046-AC-19 | 🚧 not written |
 | TC-N001-M-01 | `UserPromptSubmit` wall time, Redis blackholed: target 300 ms, threshold 400 ms | Benchmark | NFR-001-M-1 | ✅ written |
 | TC-N001-M-02 | `PostToolUse` and `Stop` wall time, Redis blackholed: target 900 ms, threshold 1000 ms | Benchmark | NFR-001-M-2 | ✅ written |
 | TC-N001-M-03 | `SessionStart` wall time, Redis and herdr blackholed: target 3300 ms, threshold 3400 ms | Benchmark | NFR-001-M-3 | 🚧 not written |
@@ -737,7 +741,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 
 | Gap ID | Description | Risk Level | Mitigation |
 |--------|-------------|------------|------------|
-| GAP-001 | 235 of 344 rows have a written test; changed 0.3.0 obligations have replacement evidence above. Retired alias tests are not evidence for the new contract. Remaining pending/partial rows require their stated evidence. | High | Complete remaining evidence without claiming full coverage. |
+| GAP-001 | 235 of 346 rows have a written test; changed 0.3.0 obligations have replacement evidence above. Retired alias tests are not evidence for the new contract. Remaining pending/partial rows require their stated evidence. | High | Complete remaining evidence without claiming full coverage. |
 | GAP-002 | 15 rows still say `red on main`: obligations of requirements `main` does not yet meet, red when written (FR-031, FR-033-AC-2, FR-034-AC-4, FR-035, FR-037). The rest of FR-032..FR-034 are written or partial since the relink work (FR-043). | High | AGE-2033 (AGE-2032 landed; the NFR-001 stdin row landed under AGE-2033). |
 | GAP-003 | No `herdr` stub or blackholed-Redis harness exists yet for the fault-injection and benchmark rows. | Medium | Build with the NFR-001..003 suites. |
 
@@ -748,10 +752,10 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | Benchmark | 8 | 5 | 0 | 0 | 0 | 0 | 62% |
 | Fuzz | 3 | 0 | 3 | 0 | 0 | 0 | 0% |
 | Inspection | 3 | 0 | 0 | 0 | 0 | 0 | 0% |
-| Integration | 173 | 116 | 0 | 10 | 0 | 0 | 67% |
+| Integration | 174 | 116 | 0 | 10 | 0 | 0 | 67% |
 | Property | 38 | 28 | 0 | 5 | 0 | 0 | 74% |
 | Static | 2 | 0 | 2 | 0 | 0 | 0 | 0% |
-| Unit | 117 | 81 | 0 | 3 | 0 | 0 | 69% |
+| Unit | 118 | 81 | 0 | 3 | 0 | 0 | 69% |
 
 "Written, named method" counts rows whose status names a written test that uses the method the row names. It records that the test exists, not a run: the last recorded run is the `make ci` output in the PR comment for the head commit, and Redis-backed tests skip without `IX_RELAY_TEST_URL`. Fuzz and Static rows are counted separately: the Fuzz rows are property-based fuzz lanes (see `fuzz/README.md`), not recorded `cargo-fuzz` campaigns, and the Static rows are exhaustive checks over a bound, not Kani proofs. Rows marked red (`#[ignore]` with a ticket) are not counted.
 
