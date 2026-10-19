@@ -285,6 +285,7 @@ pub(crate) fn session_matches(registered: Option<&SessionId>, live: Option<&Sess
 pub fn try_deliver<H: Herdr + Deliverer>(
     herdr: &H,
     lead: &str,
+    kind: &str,
     pane: &PaneId,
     registered_session_id: Option<&SessionId>,
     notice: Notice,
@@ -325,7 +326,7 @@ pub fn try_deliver<H: Herdr + Deliverer>(
             if recheck.state_change_seq != first.state_change_seq {
                 return Outcome::SkippedSeqChanged;
             }
-            if herdr.holds(lead, registered_session_id) {
+            if relay_core::tries_socket(kind) && herdr.holds(lead, registered_session_id) {
                 return Outcome::SocketHeldQuiet;
             }
             match inbox.pop() {
@@ -335,6 +336,7 @@ pub fn try_deliver<H: Herdr + Deliverer>(
                 PopOutcome::Popped(batch) => match herdr.deliver_to(
                     &BatchTarget {
                         lead,
+                        kind,
                         session: registered_session_id,
                         batch: batch.batch,
                         senders: &batch.senders,
@@ -580,6 +582,7 @@ mod tests {
         try_deliver(
             herdr,
             "tl-lead",
+            "claude",
             &"w1:p1".parse().unwrap(),
             Some(&SID.parse().unwrap()),
             notice,
@@ -997,6 +1000,7 @@ mod tests {
         let outcome = try_deliver(
             &herdr,
             "tl-lead",
+            "claude",
             &"w1:p1".parse().unwrap(),
             None,
             Notice::Needed,

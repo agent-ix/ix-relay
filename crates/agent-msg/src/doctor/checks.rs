@@ -3029,6 +3029,49 @@ mod tests {
         assert_eq!(socket_checks(socket_status(&[], &[], true)).len(), 1);
     }
 
+    /// Tracing: TC-054-03
+    /// ACs: FR-054-AC-3
+    ///
+    /// A status file with no entry and no note for the codex and opencode leads (the watcher
+    /// creates none) gives no warning, no using-herdr count and no note; one with a note for a
+    /// `claude` lead warns for that lead only.
+    #[test]
+    fn tc_054_03_doctor_does_not_warn_about_leads_that_do_not_try_the_socket() {
+        let mut quiet = socket_status(&[], &[], true);
+        quiet.leads.clear();
+        let found = socket_checks(quiet);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].status, Status::Ok);
+        assert!(
+            found[0].message.contains("0 using herdr"),
+            "{}",
+            found[0].message
+        );
+        assert!(!found[0].message.contains("codex") && !found[0].message.contains("opencode"));
+
+        let warned = socket_checks(socket_status(
+            &[],
+            &["ea: no Claude Code session record names this session"],
+            true,
+        ));
+        assert_eq!(warned.len(), 1);
+        assert_eq!(warned[0].code, Code::SocketFallback);
+        assert_eq!(warned[0].status, Status::Warn);
+        assert!(
+            warned[0].message.contains("1 using herdr"),
+            "{}",
+            warned[0].message
+        );
+        assert!(
+            warned[0]
+                .details
+                .iter()
+                .any(|d| d.starts_with("ea: no Claude Code session record")),
+            "{:?}",
+            warned[0].details
+        );
+    }
+
     /// Tracing: TC-044-09
     /// ACs: FR-044-AC-9
     ///

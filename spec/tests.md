@@ -347,10 +347,10 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-053 | FR-053-AC-10 | TC-053-10 | 🚧 not written |
 | FR-053 | FR-053-AC-11 | TC-053-11 | 🚧 not written |
 | FR-053 | FR-053-AC-12 | TC-053-12 | 🚧 not written |
-| FR-054 | FR-054-AC-1 | TC-054-01 | 🚧 not written |
-| FR-054 | FR-054-AC-2 | TC-054-02 | 🚧 not written |
-| FR-054 | FR-054-AC-3 | TC-054-03 | 🚧 not written |
-| FR-054 | FR-054-AC-4 | TC-054-04 | 🚧 not written |
+| FR-054 | FR-054-AC-1 | TC-054-01 | ✅ written (`tc_054_01_codex_and_opencode_leads_go_straight_to_herdr_with_no_status_entry`, `tc_054_01_a_lead_that_stopped_being_claude_loses_its_status_entry`) |
+| FR-054 | FR-054-AC-2 | TC-054-02 | ✅ written (`tc_054_02_a_claude_lead_with_no_record_still_goes_to_herdr_with_the_note`) |
+| FR-054 | FR-054-AC-3 | TC-054-03 | ✅ written (`tc_054_03_doctor_does_not_warn_about_leads_that_do_not_try_the_socket`) |
+| FR-054 | FR-054-AC-4 | TC-054-04 | ✅ written (`tc_054_04_a_claude_lead_with_a_record_is_delivered_by_socket_and_an_unknown_kind_is_not`) |
 | FR-055 | FR-055-AC-1 | TC-055-01 | 🚧 not written |
 | FR-055 | FR-055-AC-2 | TC-055-02 | 🚧 not written |
 | FR-055 | FR-055-AC-3 | TC-055-03 | 🚧 not written |
@@ -423,10 +423,10 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-053-10 | A gone, old-enough registration with mail is dead-lettered as `recipient-pruned` byte for byte and then pruned; failures prune nothing. | Integration | FR-053-AC-10 | 🚧 not written |
 | TC-053-11 | An in-flight batch is not moved until its lease expires. | Integration | FR-053-AC-11 | 🚧 not written |
 | TC-053-12 | Moved messages carry the notice on their one signed first line and a batch of them stays within the hook-output bound. | Integration | FR-053-AC-12 | 🚧 not written |
-| TC-054-01 | Codex and opencode leads go straight to herdr with no status entry or note. | Integration | FR-054-AC-1 | 🚧 not written |
-| TC-054-02 | A claude lead with no record still goes to herdr with the note. | Integration | FR-054-AC-2 | 🚧 not written |
-| TC-054-03 | Doctor does not warn about non-claude leads and still warns for a claude lead without a record. | Integration | FR-054-AC-3 | 🚧 not written |
-| TC-054-04 | A claude lead with a record is delivered as before; an empty or unknown kind goes to herdr with no note. | Integration | FR-054-AC-4 | 🚧 not written |
+| TC-054-01 | Codex and opencode leads go straight to herdr with no status entry or note. | Integration | FR-054-AC-1 | ✅ written (`tc_054_01_codex_and_opencode_leads_go_straight_to_herdr_with_no_status_entry`, `tc_054_01_a_lead_that_stopped_being_claude_loses_its_status_entry`) |
+| TC-054-02 | A claude lead with no record still goes to herdr with the note. | Integration | FR-054-AC-2 | ✅ written (`tc_054_02_a_claude_lead_with_no_record_still_goes_to_herdr_with_the_note`) |
+| TC-054-03 | Doctor does not warn about non-claude leads and still warns for a claude lead without a record. | Integration | FR-054-AC-3 | ✅ written (`tc_054_03_doctor_does_not_warn_about_leads_that_do_not_try_the_socket`) |
+| TC-054-04 | A claude lead with a record is delivered as before; an empty or unknown kind goes to herdr with no note. | Integration | FR-054-AC-4 | ✅ written (`tc_054_04_a_claude_lead_with_a_record_is_delivered_by_socket_and_an_unknown_kind_is_not`) |
 | TC-055-01 | An unregistered or pruned lead leaves the resolved leads on the next tick. | Integration | FR-055-AC-1 | 🚧 not written |
 | TC-055-02 | A lead whose Claude Code process exited, or whose pid was reused, is dropped. | Integration | FR-055-AC-2 | 🚧 not written |
 | TC-055-03 | A registered live lead is kept and a failed registry read drops nothing. | Integration | FR-055-AC-3 | 🚧 not written |

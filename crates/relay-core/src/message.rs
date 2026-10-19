@@ -192,6 +192,17 @@ pub enum PlacementState<'a> {
     },
 }
 
+/// The harness kind of a Claude Code lead: the only kind whose inbox socket the watcher
+/// tries (FR-054).
+pub const CLAUDE_KIND: &str = "claude";
+
+/// Whether the watcher tries Claude Code's inbox socket for a lead of harness `kind`
+/// (FR-054): `claude` does; any other value, an unknown or empty one included, does not.
+#[must_use]
+pub fn tries_socket(kind: &str) -> bool {
+    kind == CLAUDE_KIND
+}
+
 /// A lead's entry in the registry: where it runs and what session it is.
 ///
 /// Deliberately tolerant of unknown fields: registrations are read by every

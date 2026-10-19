@@ -753,6 +753,20 @@ impl SocketDeliverer {
         }
     }
 
+    /// Forgets what the status file said about `lead`'s socket (its resolved entry, its note
+    /// and its suspicion) because the lead does not try the socket: a lead whose
+    /// registration changed `kind` is judged by the registration the tick read (FR-054).
+    /// A held batch, a pending decision and a dead-letter reason are not touched.
+    pub fn not_tried(&self, lead: &str) {
+        let mut state = self.lock();
+        let had = state.leads.remove(lead).is_some()
+            | state.notes.remove(lead).is_some()
+            | state.suspect.remove(lead).is_some();
+        if had {
+            self.publish(&mut state);
+        }
+    }
+
     /// Posts `text` for `target` and waits for the outcome.
     ///
     /// # Errors

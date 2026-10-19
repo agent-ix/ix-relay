@@ -109,6 +109,13 @@ impl<H: Deliverer> Deliverer for Routed<H> {
         let Some(socket) = &self.socket else {
             return self.herdr.deliver_to(target, pane, text);
         };
+        // The socket is Claude Code's: any other harness has no session record by design,
+        // so it goes straight to herdr, leaves no note, and Claude Code's registry is not
+        // read for it (FR-054).
+        if !relay_core::tries_socket(target.kind) {
+            socket.not_tried(target.lead);
+            return self.herdr.deliver_to(target, pane, text);
+        }
         match socket.deliver(target, text) {
             Ok(()) => Ok(()),
             Err(deliverer::SocketError::NotSent(why)) => {

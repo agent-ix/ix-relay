@@ -965,6 +965,7 @@ fn tick<H: Herdr + Deliverer>(
         let outcome = try_deliver(
             herdr,
             name.as_str(),
+            &reg.kind,
             pane,
             reg.session_id.as_ref(),
             notice,

@@ -72,6 +72,9 @@ impl From<ProcessError> for DeliverError {
 pub struct BatchTarget<'a> {
     /// The lead's bus name.
     pub lead: &'a str,
+    /// The harness kind the lead registered (`claude`, `codex`, ...): the socket is tried
+    /// only for a Claude Code lead (FR-054).
+    pub kind: &'a str,
     /// The in-flight batch being delivered.
     pub batch: BatchId,
     /// The harness session id the lead registered under (for Claude, the

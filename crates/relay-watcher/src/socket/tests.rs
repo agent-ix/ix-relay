@@ -280,6 +280,7 @@ impl Rig {
     fn send(&self, text: &str) -> Result<(), SocketError> {
         self.deliverer.deliver(
             &BatchTarget {
+                kind: "claude",
                 batch: BatchId::new(1),
                 lead: "ea",
                 session: Some(&self.session),
@@ -891,6 +892,7 @@ fn routed_send(
     let pane: PaneId = "w1:p1".parse().unwrap();
     let result = routed.deliver_to(
         &BatchTarget {
+            kind: "claude",
             batch: BatchId::new(1),
             lead: "ea",
             session: Some(&session),
@@ -947,6 +949,7 @@ fn tc_044_06_a_missing_session_a_refused_connection_and_no_registry_go_to_herdr(
     let routed = Routed::socket_first(herdr.clone(), deliverer);
     let session: SessionId = SESSION.parse().unwrap();
     let target = |session| BatchTarget {
+        kind: "claude",
         batch: BatchId::new(1),
         lead: "ea",
         session,
@@ -981,6 +984,7 @@ fn tc_044_16_a_reply_socket_that_cannot_be_bound_sends_nothing_and_says_so() {
     let session: SessionId = SESSION.parse().unwrap();
     let got = deliverer.deliver(
         &BatchTarget {
+            kind: "claude",
             batch: BatchId::new(1),
             lead: "ea",
             session: Some(&session),
@@ -1083,6 +1087,7 @@ fn tc_044_08_the_registry_and_the_projects_are_only_read() {
     let session: SessionId = SESSION.parse().unwrap();
     let _ = deliverer.deliver(
         &BatchTarget {
+            kind: "claude",
             batch: BatchId::new(1),
             lead: "ea",
             session: Some(&session),
@@ -1172,6 +1177,7 @@ fn tc_044_01_herdr_alone_passes_every_batch_straight_through() {
     let session: SessionId = SESSION.parse().unwrap();
     let got = routed.deliver_to(
         &BatchTarget {
+            kind: "claude",
             batch: BatchId::new(1),
             lead: "ea",
             session: Some(&session),
@@ -1444,6 +1450,7 @@ fn tc_044_06_an_ambiguous_socket_attempt_sends_the_redelivery_through_herdr() {
     let routed = Routed::socket_first(herdr.clone(), deliverer);
     let pane: PaneId = "w1:p1".parse().unwrap();
     let target = BatchTarget {
+        kind: "claude",
         batch: BatchId::new(2),
         lead: "ea",
         session: Some(&session),
@@ -1481,6 +1488,7 @@ fn tc_044_16_the_reply_socket_is_bound_later_when_its_directory_appears() {
     let deliverer = SocketDeliverer::start(config, Box::new(FakeProcs::with(&[4242])));
     assert!(deliverer.reply_path().is_none());
     let target = BatchTarget {
+        kind: "claude",
         batch: BatchId::new(1),
         lead: "ea",
         session: Some(&session),
@@ -1530,6 +1538,7 @@ fn tc_044_16_a_failed_bind_backs_off_before_it_tries_again() {
     let session: SessionId = SESSION.parse().unwrap();
     let deliverer = SocketDeliverer::start(config, Box::new(FakeProcs::with(&[4242])));
     let target = BatchTarget {
+        kind: "claude",
         batch: BatchId::new(1),
         lead: "ea",
         session: Some(&session),
@@ -1661,6 +1670,7 @@ fn tc_044_03_the_from_name_is_sanitised_and_bounded() {
     rig.deliverer
         .deliver(
             &BatchTarget {
+                kind: "claude",
                 batch: BatchId::new(1),
                 lead: "ea",
                 session: Some(&session),
@@ -2554,6 +2564,7 @@ fn tc_044_06_a_receiver_that_never_confirms_gets_one_post_and_then_herdr_at_prod
     let routed = Routed::socket_first(herdr.clone(), deliverer);
     let pane: PaneId = "w1:p1".parse().unwrap();
     let target = |n: u64| BatchTarget {
+        kind: "claude",
         batch: BatchId::new(n),
         lead: "ea",
         session: Some(&session),
@@ -2600,6 +2611,7 @@ fn tc_044_14_a_healthy_lead_after_a_wedged_one_is_deferred_not_flagged() {
     let send = |lead: &str, session: &SessionId, n: u64| {
         deliverer.deliver(
             &BatchTarget {
+                kind: "claude",
                 batch: BatchId::new(n),
                 lead,
                 session: Some(session),
@@ -2659,6 +2671,7 @@ fn tc_044_14_twenty_wedged_leads_cannot_hold_a_tick_past_its_budget() {
     let deliver = |i: usize| {
         deliverer.deliver(
             &BatchTarget {
+                kind: "claude",
                 batch: BatchId::new(1 + u64::try_from(i).unwrap()),
                 lead: &format!("lead-{i}"),
                 session: Some(&sessions[i]),
@@ -2706,6 +2719,7 @@ fn tc_044_04_the_transcript_checks_rotate_so_a_late_send_still_gets_its_ack() {
     for i in 0..40_u64 {
         let _ = rig.deliverer.deliver(
             &BatchTarget {
+                kind: "claude",
                 batch: BatchId::new(i + 1),
                 lead: "ea",
                 session: Some(&rig.session),
@@ -2788,6 +2802,7 @@ fn tc_044_16_the_reply_probe_flag_persists_across_retries() {
     for _ in 0..30 {
         let _ = d.deliver(
             &BatchTarget {
+                kind: "claude",
                 batch: BatchId::new(1),
                 lead: "ea",
                 session: Some(&session),
@@ -2803,6 +2818,7 @@ fn tc_044_16_the_reply_probe_flag_persists_across_retries() {
     for _ in 0..5 {
         let _ = d.deliver(
             &BatchTarget {
+                kind: "claude",
                 batch: BatchId::new(1),
                 lead: "ea",
                 session: Some(&session),
@@ -2819,6 +2835,7 @@ fn tc_044_16_the_reply_probe_flag_persists_across_retries() {
     flag.store(false, Ordering::SeqCst);
     let _ = d.deliver(
         &BatchTarget {
+            kind: "claude",
             batch: BatchId::new(1),
             lead: "ea",
             session: Some(&session),
@@ -3660,6 +3677,7 @@ fn tc_044_14_a_slow_reader_cannot_stretch_the_write_past_its_deadline() {
     let deliverer = SocketDeliverer::start(home.production(), Box::new(FakeProcs::with(&[4242])));
     let session: SessionId = SESSION.parse().unwrap();
     let target = |n: u64| BatchTarget {
+        kind: "claude",
         batch: BatchId::new(n),
         lead: "ea",
         session: Some(&session),
@@ -3737,6 +3755,7 @@ fn tc_044_11_a_settlement_failed_note_survives_a_later_delivery_note() {
     let other: SessionId = "cccccccc-3333-4333-8333-cccccccccccc".parse().unwrap();
     let _ = rig.deliverer.deliver(
         &BatchTarget {
+            kind: "claude",
             batch: BatchId::new(9),
             lead: "ea",
             session: Some(&other),
@@ -3786,6 +3805,7 @@ fn tc_044_11_owed_decisions_are_persisted_and_applied_after_a_restart() {
     let session: SessionId = SESSION.parse().unwrap();
     let d = SocketDeliverer::start(home.config(), Box::new(FakeProcs::with(&[4242])));
     let target = |n: u64| BatchTarget {
+        kind: "claude",
         batch: BatchId::new(n),
         lead: "ea",
         session: Some(&session),
@@ -4003,6 +4023,7 @@ fn tc_044_15_an_untrusted_status_directory_is_alerted_once_and_delivery_goes_on(
     for n in 1..=3_u64 {
         let got = d.deliver(
             &BatchTarget {
+                kind: "claude",
                 batch: BatchId::new(n),
                 lead: "ea",
                 session: Some(&session),
@@ -4325,4 +4346,124 @@ fn both_delivery_routes_preserve_local_directory_observation_authority() {
     let rig = Rig::new(Act::Silent);
     assert!(Routed::socket_first(RealHerdr::default(), rig.deliverer).directory_observations());
     assert!(!Routed::herdr_only(FakeHerdr::default()).directory_observations());
+}
+
+// ---- FR-054: the socket is tried only for Claude Code leads ------------------
+
+/// Delivers one batch for a lead of harness `kind` through `routed`.
+fn route_as(routed: &Routed<FakeHerdr>, kind: &str, session: &SessionId, text: &str) {
+    let pane: PaneId = "w1:p1".parse().unwrap();
+    let got = routed.deliver_to(
+        &BatchTarget {
+            kind,
+            batch: BatchId::new(1),
+            lead: "ea",
+            session: Some(session),
+            senders: "s",
+        },
+        &pane,
+        text,
+    );
+    assert_eq!(got, Ok(()), "{kind}");
+}
+
+/// Tracing: TC-054-01
+/// ACs: FR-054-AC-1
+///
+/// A `codex` and an `opencode` lead each have a session id. The registry holds a live
+/// record naming that session, so a build that read it would post to the socket: the fake
+/// Claude Code receives nothing, herdr types the batch, and the status file holds no note
+/// and no lead entry.
+#[test]
+fn tc_054_01_codex_and_opencode_leads_go_straight_to_herdr_with_no_status_entry() {
+    let rig = Rig::new(Act::Consume);
+    let Rig {
+        home,
+        claude,
+        deliverer,
+        session,
+    } = rig;
+    let herdr = FakeHerdr::default();
+    let routed = Routed::socket_first(herdr.clone(), deliverer);
+    for kind in ["codex", "opencode"] {
+        route_as(&routed, kind, &session, kind);
+    }
+    assert_eq!(*herdr.typed.lock().unwrap(), ["codex", "opencode"]);
+    assert!(
+        claude.received().is_empty(),
+        "the registry was not read, so nothing was posted"
+    );
+    let status = SocketStatus::read(&home.status()).unwrap();
+    assert!(status.notes.is_empty(), "{:?}", status.notes);
+    assert!(status.leads.is_empty(), "{:?}", status.leads);
+}
+
+/// Tracing: TC-054-02
+/// ACs: FR-054-AC-2
+#[test]
+fn tc_054_02_a_claude_lead_with_no_record_still_goes_to_herdr_with_the_note() {
+    let home = Home::new();
+    let deliverer = SocketDeliverer::start(home.config(), Box::new(FakeProcs::with(&[])));
+    let herdr = FakeHerdr::default();
+    let routed = Routed::socket_first(herdr.clone(), deliverer);
+    let session: SessionId = SESSION.parse().unwrap();
+    route_as(&routed, "claude", &session, "typed");
+    assert_eq!(*herdr.typed.lock().unwrap(), ["typed"]);
+    let status = SocketStatus::read(&home.status()).unwrap();
+    assert_eq!(status.notes.len(), 1, "{:?}", status.notes);
+    assert!(
+        status.notes[0].contains("no Claude Code session record names this session"),
+        "{:?}",
+        status.notes
+    );
+}
+
+/// Tracing: TC-054-04
+/// ACs: FR-054-AC-4
+#[test]
+fn tc_054_04_a_claude_lead_with_a_record_is_delivered_by_socket_and_an_unknown_kind_is_not() {
+    let rig = Rig::new(Act::Consume);
+    let Rig {
+        home,
+        claude,
+        deliverer,
+        session,
+    } = rig;
+    let herdr = FakeHerdr::default();
+    let routed = Routed::socket_first(herdr.clone(), deliverer);
+    route_as(&routed, "claude", &session, "by socket");
+    assert_eq!(claude.received().len(), 1);
+    assert!(herdr.typed.lock().unwrap().is_empty());
+    for kind in ["", "Claude", "claude-code", "unknown"] {
+        route_as(&routed, kind, &session, kind);
+    }
+    assert_eq!(
+        *herdr.typed.lock().unwrap(),
+        ["", "Claude", "claude-code", "unknown"]
+    );
+    assert_eq!(claude.received().len(), 1, "no further post");
+    let status = SocketStatus::read(&home.status()).unwrap();
+    assert!(status.notes.is_empty(), "{:?}", status.notes);
+}
+
+/// Tracing: TC-054-01
+/// ACs: FR-054-AC-1
+///
+/// A lead whose registration changed `kind` is judged by the registration the tick read:
+/// what the status file said about it as a Claude Code lead is forgotten.
+#[test]
+fn tc_054_01_a_lead_that_stopped_being_claude_loses_its_status_entry() {
+    let rig = Rig::new(Act::Consume);
+    let Rig {
+        home,
+        claude: _claude,
+        deliverer,
+        session,
+    } = rig;
+    let herdr = FakeHerdr::default();
+    let routed = Routed::socket_first(herdr.clone(), deliverer);
+    route_as(&routed, "claude", &session, "one");
+    assert_eq!(SocketStatus::read(&home.status()).unwrap().leads.len(), 1);
+    route_as(&routed, "codex", &session, "two");
+    assert!(SocketStatus::read(&home.status()).unwrap().leads.is_empty());
 }
