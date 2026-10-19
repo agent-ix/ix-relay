@@ -40,6 +40,13 @@ const LOG_CAP: usize = 10_000;
 /// Roughly how many entries the hook health stream keeps (`XADD MAXLEN ~`).
 const HEALTH_HOOKS_CAP: usize = 1_000;
 
+/// How long the bus remembers that a hook failure record was shipped (FR-030): the ids it
+/// answers "already shipped" for, in milliseconds.
+const HEALTH_HOOKS_SHIPPED_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// The most shipped record ids the bus remembers; the oldest go first (NFR-002).
+const HEALTH_HOOKS_SHIPPED_MAX: usize = 2_000;
+
 /// How long a session's remembered name or suppression lasts: 30 days, in
 /// seconds. A harness session id is one-shot (never reused across restarts),
 /// so entries would otherwise accumulate forever with nothing to clean them up.
@@ -328,14 +335,17 @@ return {suppressed, cached}
     }
 
     /// Appends hook failure records to the capped `<prefix>health:hooks`
-    /// stream, one entry per record, in one pipelined round trip. Each entry
-    /// carries the record's JSON under `rec` and, as plain fields, the
-    /// machine and the lead (when known) it came from, so a reader can
-    /// attribute one without parsing it. The stream keeps roughly the newest
-    /// thousand.
-    ///
-    /// This is at-least-once: a caller that crashes after this returns but
-    /// before clearing its spool sends the same records again.
+    /// stream, one entry per record, in **one atomic request**: only the records
+    /// whose id the bus has not already recorded as shipped are added, and their ids
+    /// are recorded in the same request (FR-030). So a flush that overlaps another, one
+    /// that retries after a failed or partly applied ship, and a crash after shipping and
+    /// before the spool is cleared never put a record on the stream twice, and the
+    /// deduplication costs no round trip beyond the chunk's own. The record of shipped
+    /// ids keeps the ids of the last 24 hours up to 2,000 of them (NFR-002); an entry with
+    /// no id is always added. Each entry carries the record's JSON under `rec` and, as
+    /// plain fields, the machine, the lead (when known) and the id, so a reader can
+    /// attribute and count one without parsing it. The stream keeps roughly the newest
+    /// thousand. Returns how many entries were added.
     ///
     /// Record text is untrusted: a record can carry a lead's message text
     /// (see `agent-msg`'s failed-requeue record), so anything that renders
@@ -343,31 +353,57 @@ return {suppressed, cached}
     ///
     /// # Errors
     ///
-    /// [`Error::Redis`] when Redis fails or times out. Then nothing is known
-    /// to have been appended and the caller keeps its records.
-    pub fn push_hook_health(&mut self, entries: &[HookHealthEntry]) -> Result<()> {
+    /// [`Error::Redis`] when Redis fails or times out, or a key of another type is in
+    /// the way (nothing is written then). Then nothing is known to have been appended
+    /// and the caller keeps its records.
+    pub fn push_hook_health(&mut self, entries: &[HookHealthEntry]) -> Result<usize> {
+        // KEYS: the stream, the shipped ids (a sorted set scored by shipping time).
+        // ARGV: stream cap, window ms, id cap, then per entry: id, machine, lead, rec.
+        // Both keys are checked before anything is written.
+        const SCRIPT: &str = r#"
+for i = 1, 2 do
+    local t = redis.call('TYPE', KEYS[i]).ok
+    if t ~= 'none' and t ~= (i == 1 and 'stream' or 'zset') then
+        return redis.error_reply('WRONGTYPE hook health key ' .. i)
+    end
+end
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local window = tonumber(ARGV[2])
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now - window)
+local added = 0
+for i = 4, #ARGV, 4 do
+    local id = ARGV[i]
+    if id == '' or not redis.call('ZSCORE', KEYS[2], id) then
+        redis.call('XADD', KEYS[1], 'MAXLEN', '~', ARGV[1], '*',
+            'machine', ARGV[i + 1], 'lead', ARGV[i + 2], 'id', id, 'rec', ARGV[i + 3])
+        if id ~= '' then redis.call('ZADD', KEYS[2], now, id) end
+        added = added + 1
+    end
+end
+local over = redis.call('ZCARD', KEYS[2]) - tonumber(ARGV[3])
+if over > 0 then redis.call('ZREMRANGEBYRANK', KEYS[2], 0, over - 1) end
+if redis.call('EXISTS', KEYS[2]) == 1 then redis.call('PEXPIRE', KEYS[2], window) end
+return added
+"#;
         if entries.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
-        let key = self.keys.health_hooks_key();
-        let mut pipe = redis::pipe();
+        let script = redis::Script::new(SCRIPT);
+        let mut call = script.prepare_invoke();
+        call.key(self.keys.health_hooks_key())
+            .key(self.keys.health_hooks_shipped_key())
+            .arg(HEALTH_HOOKS_CAP)
+            .arg(HEALTH_HOOKS_SHIPPED_WINDOW_MS)
+            .arg(HEALTH_HOOKS_SHIPPED_MAX);
         for entry in entries {
-            pipe.cmd("XADD")
-                .arg(&key)
-                .arg("MAXLEN")
-                .arg("~")
-                .arg(HEALTH_HOOKS_CAP)
-                .arg("*")
-                .arg("machine")
+            call.arg(entry.id.as_deref().unwrap_or(""))
                 .arg(entry.machine.as_str())
-                .arg("lead")
                 .arg(entry.lead.as_deref().unwrap_or(""))
-                .arg("rec")
-                .arg(&entry.record)
-                .ignore();
+                .arg(&entry.record);
         }
-        let () = pipe.query(&mut self.conn)?;
-        Ok(())
+        let added: usize = call.invoke(&mut self.conn)?;
+        Ok(added)
     }
 
     /// Up to `max` entries from the hook health stream, oldest first: what
@@ -1076,6 +1112,10 @@ pub enum AgentSlot {
 /// One entry of the hook health stream: a failure record and where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookHealthEntry {
+    /// The record's id, minted when it was appended to the spool: unique to the record.
+    /// The bus ships a record once however often it is offered, and readers count one id
+    /// once ([`HookHealth::distinct`]). `None` for an entry written without one.
+    pub id: Option<String>,
     /// The machine that spooled it, normalised.
     pub machine: MachineName,
     /// The lead's bus name, when the hook knew it.
@@ -1115,6 +1155,7 @@ fn hook_health_of(reply: &StreamRangeReply) -> HookHealth {
         // its type's rule) is counted, never silently dropped.
         let read = (|| {
             Some(HookHealthEntry {
+                id: entry.get::<String>("id").filter(|id| !id.is_empty()),
                 machine: entry.get::<String>("machine")?.parse().ok()?,
                 lead: entry.get::<String>("lead").filter(|l| !l.is_empty()),
                 record: entry.get::<String>("rec")?,
@@ -1128,6 +1169,19 @@ fn hook_health_of(reply: &StreamRangeReply) -> HookHealth {
     HookHealth {
         entries,
         unreadable,
+    }
+}
+
+impl HookHealth {
+    /// The entries with each record id counted once, in order: a second stream entry whose id
+    /// was already seen adds nothing (FR-030). An entry with no id is always kept.
+    #[must_use]
+    pub fn distinct(&self) -> Vec<&HookHealthEntry> {
+        let mut seen = std::collections::HashSet::new();
+        self.entries
+            .iter()
+            .filter(|e| e.id.as_deref().is_none_or(|id| seen.insert(id)))
+            .collect()
     }
 }
 

@@ -280,6 +280,7 @@ impl Rig {
     fn send(&self, text: &str) -> Result<(), SocketError> {
         self.deliverer.deliver(
             &BatchTarget {
+                kind: "claude",
                 batch: BatchId::new(1),
                 lead: "ea",
                 session: Some(&self.session),
@@ -891,6 +892,7 @@ fn routed_send(
     let pane: PaneId = "w1:p1".parse().unwrap();
     let result = routed.deliver_to(
         &BatchTarget {
+            kind: "claude",
             batch: BatchId::new(1),
             lead: "ea",
             session: Some(&session),
@@ -947,6 +949,7 @@ fn tc_044_06_a_missing_session_a_refused_connection_and_no_registry_go_to_herdr(
     let routed = Routed::socket_first(herdr.clone(), deliverer);
     let session: SessionId = SESSION.parse().unwrap();
     let target = |session| BatchTarget {
+        kind: "claude",
         batch: BatchId::new(1),
         lead: "ea",
         session,
@@ -981,6 +984,7 @@ fn tc_044_16_a_reply_socket_that_cannot_be_bound_sends_nothing_and_says_so() {
     let session: SessionId = SESSION.parse().unwrap();
     let got = deliverer.deliver(
         &BatchTarget {
+            kind: "claude",
             batch: BatchId::new(1),
             lead: "ea",
             session: Some(&session),
@@ -1084,6 +1088,7 @@ fn tc_044_08_the_registry_and_the_projects_are_only_read() {
     let session: SessionId = SESSION.parse().unwrap();
     let _ = deliverer.deliver(
         &BatchTarget {
+            kind: "claude",
             batch: BatchId::new(1),
             lead: "ea",
             session: Some(&session),
@@ -1173,6 +1178,7 @@ fn tc_044_01_herdr_alone_passes_every_batch_straight_through() {
     let session: SessionId = SESSION.parse().unwrap();
     let got = routed.deliver_to(
         &BatchTarget {
+            kind: "claude",
             batch: BatchId::new(1),
             lead: "ea",
             session: Some(&session),
@@ -1445,6 +1451,7 @@ fn tc_044_06_an_ambiguous_socket_attempt_sends_the_redelivery_through_herdr() {
     let routed = Routed::socket_first(herdr.clone(), deliverer);
     let pane: PaneId = "w1:p1".parse().unwrap();
     let target = BatchTarget {
+        kind: "claude",
         batch: BatchId::new(2),
         lead: "ea",
         session: Some(&session),
@@ -1482,6 +1489,7 @@ fn tc_044_16_the_reply_socket_is_bound_later_when_its_directory_appears() {
     let deliverer = SocketDeliverer::start(config, Box::new(FakeProcs::with(&[4242])));
     assert!(deliverer.reply_path().is_none());
     let target = BatchTarget {
+        kind: "claude",
         batch: BatchId::new(1),
         lead: "ea",
         session: Some(&session),
@@ -1531,6 +1539,7 @@ fn tc_044_16_a_failed_bind_backs_off_before_it_tries_again() {
     let session: SessionId = SESSION.parse().unwrap();
     let deliverer = SocketDeliverer::start(config, Box::new(FakeProcs::with(&[4242])));
     let target = BatchTarget {
+        kind: "claude",
         batch: BatchId::new(1),
         lead: "ea",
         session: Some(&session),
@@ -1662,6 +1671,7 @@ fn tc_044_03_the_from_name_is_sanitised_and_bounded() {
     rig.deliverer
         .deliver(
             &BatchTarget {
+                kind: "claude",
                 batch: BatchId::new(1),
                 lead: "ea",
                 session: Some(&session),
@@ -2556,6 +2566,7 @@ fn tc_044_06_a_receiver_that_never_confirms_gets_one_post_and_then_herdr_at_prod
     let routed = Routed::socket_first(herdr.clone(), deliverer);
     let pane: PaneId = "w1:p1".parse().unwrap();
     let target = |n: u64| BatchTarget {
+        kind: "claude",
         batch: BatchId::new(n),
         lead: "ea",
         session: Some(&session),
@@ -2602,6 +2613,7 @@ fn tc_044_14_a_healthy_lead_after_a_wedged_one_is_deferred_not_flagged() {
     let send = |lead: &str, session: &SessionId, n: u64| {
         deliverer.deliver(
             &BatchTarget {
+                kind: "claude",
                 batch: BatchId::new(n),
                 lead,
                 session: Some(session),
@@ -2661,6 +2673,7 @@ fn tc_044_14_twenty_wedged_leads_cannot_hold_a_tick_past_its_budget() {
     let deliver = |i: usize| {
         deliverer.deliver(
             &BatchTarget {
+                kind: "claude",
                 batch: BatchId::new(1 + u64::try_from(i).unwrap()),
                 lead: &format!("lead-{i}"),
                 session: Some(&sessions[i]),
@@ -2708,6 +2721,7 @@ fn tc_044_04_the_transcript_checks_rotate_so_a_late_send_still_gets_its_ack() {
     for i in 0..40_u64 {
         let _ = rig.deliverer.deliver(
             &BatchTarget {
+                kind: "claude",
                 batch: BatchId::new(i + 1),
                 lead: "ea",
                 session: Some(&rig.session),
@@ -2790,6 +2804,7 @@ fn tc_044_16_the_reply_probe_flag_persists_across_retries() {
     for _ in 0..30 {
         let _ = d.deliver(
             &BatchTarget {
+                kind: "claude",
                 batch: BatchId::new(1),
                 lead: "ea",
                 session: Some(&session),
@@ -2805,6 +2820,7 @@ fn tc_044_16_the_reply_probe_flag_persists_across_retries() {
     for _ in 0..5 {
         let _ = d.deliver(
             &BatchTarget {
+                kind: "claude",
                 batch: BatchId::new(1),
                 lead: "ea",
                 session: Some(&session),
@@ -2821,6 +2837,7 @@ fn tc_044_16_the_reply_probe_flag_persists_across_retries() {
     flag.store(false, Ordering::SeqCst);
     let _ = d.deliver(
         &BatchTarget {
+            kind: "claude",
             batch: BatchId::new(1),
             lead: "ea",
             session: Some(&session),
@@ -3663,6 +3680,7 @@ fn tc_044_14_a_slow_reader_cannot_stretch_the_write_past_its_deadline() {
     let deliverer = SocketDeliverer::start(home.production(), Box::new(FakeProcs::with(&[4242])));
     let session: SessionId = SESSION.parse().unwrap();
     let target = |n: u64| BatchTarget {
+        kind: "claude",
         batch: BatchId::new(n),
         lead: "ea",
         session: Some(&session),
@@ -3740,6 +3758,7 @@ fn tc_044_11_a_settlement_failed_note_survives_a_later_delivery_note() {
     let other: SessionId = "cccccccc-3333-4333-8333-cccccccccccc".parse().unwrap();
     let _ = rig.deliverer.deliver(
         &BatchTarget {
+            kind: "claude",
             batch: BatchId::new(9),
             lead: "ea",
             session: Some(&other),
@@ -3789,6 +3808,7 @@ fn tc_044_11_owed_decisions_are_persisted_and_applied_after_a_restart() {
     let session: SessionId = SESSION.parse().unwrap();
     let d = SocketDeliverer::start(home.config(), Box::new(FakeProcs::with(&[4242])));
     let target = |n: u64| BatchTarget {
+        kind: "claude",
         batch: BatchId::new(n),
         lead: "ea",
         session: Some(&session),
@@ -4006,6 +4026,7 @@ fn tc_044_15_an_untrusted_status_directory_is_alerted_once_and_delivery_goes_on(
     for n in 1..=3_u64 {
         let got = d.deliver(
             &BatchTarget {
+                kind: "claude",
                 batch: BatchId::new(n),
                 lead: "ea",
                 session: Some(&session),
@@ -4036,6 +4057,25 @@ fn tc_044_15_an_untrusted_status_directory_is_alerted_once_and_delivery_goes_on(
 
 // ---- FR-046: drift is counted, not swallowed ---------------------------------
 
+/// The drift and acknowledgement counts a status holds over all its versions, in the window
+/// ending now.
+fn drift_of(status: &SocketStatus) -> relay_core::socket_status::DriftCounts {
+    let mut total = relay_core::socket_status::DriftCounts::default();
+    for v in &status.versions {
+        let c = v.window(wall_ms()).counts;
+        total.unrecognised_lines += c.unrecognised_lines;
+        total.not_json_lines += c.not_json_lines;
+        total.unknown_status_receipts += c.unknown_status_receipts;
+        total.transcript_shape_unrecognised += c.transcript_shape_unrecognised;
+        total.acknowledged += c.acknowledged;
+    }
+    total
+}
+
+fn drift_now(rig: &Rig) -> relay_core::socket_status::DriftCounts {
+    drift_of(&SocketStatus::read(&rig.home.status()).unwrap())
+}
+
 /// Tracing: TC-046-03
 /// ACs: FR-046-AC-3
 ///
@@ -4046,11 +4086,11 @@ fn tc_046_03_unrecognised_and_non_json_reply_lines_are_counted_and_change_nothin
     let renamed = r#"{"type":"control","action":"peer_status","status":"held","orig_msg_id":"x"}"#;
     let rig = Rig::new(Act::ReplyLine(renamed));
     assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
-    let drift = SocketStatus::read(&rig.home.status()).unwrap().drift;
+    let drift = drift_now(&rig);
     assert_eq!((drift.unrecognised_lines, drift.not_json_lines), (1, 0));
     let rig = Rig::new(Act::ReplyLine("this is not json"));
     assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
-    let drift = SocketStatus::read(&rig.home.status()).unwrap().drift;
+    let drift = drift_now(&rig);
     assert_eq!((drift.unrecognised_lines, drift.not_json_lines), (0, 1));
     // A liveness check and a receipt for another message are known, not drift.
     let rig = Rig::new(Act::Silent);
@@ -4064,7 +4104,7 @@ fn tc_046_03_unrecognised_and_non_json_reply_lines_are_counted_and_change_nothin
     .unwrap();
     drop(other);
     assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
-    let drift = SocketStatus::read(&rig.home.status()).unwrap().drift;
+    let drift = drift_now(&rig);
     assert_eq!(drift.control_total(), 0);
 }
 
@@ -4079,7 +4119,7 @@ fn tc_046_03_a_reply_line_of_invalid_utf8_is_counted() {
     conn.write_all(b"\xff\xfe\x00 garbage\n").unwrap();
     drop(conn);
     assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
-    let drift = SocketStatus::read(&rig.home.status()).unwrap().drift;
+    let drift = drift_now(&rig);
     assert_eq!(drift.not_json_lines, 1);
 }
 
@@ -4091,12 +4131,12 @@ fn tc_046_03_a_reply_line_of_invalid_utf8_is_counted() {
 fn tc_046_04_an_unknown_receipt_status_is_ambiguous_and_counted() {
     let rig = Rig::new(Act::Receipt("something-new", None));
     assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
-    let drift = SocketStatus::read(&rig.home.status()).unwrap().drift;
+    let drift = drift_now(&rig);
     assert_eq!(drift.unknown_status_receipts, 1);
     // A known status is not counted.
     let rig = Rig::new(Act::Receipt("held", None));
     assert!(matches!(rig.send("m"), Err(SocketError::Held(_))));
-    let drift = SocketStatus::read(&rig.home.status()).unwrap().drift;
+    let drift = drift_now(&rig);
     assert_eq!(drift.control_total(), 0);
 }
 
@@ -4111,7 +4151,7 @@ fn tc_046_05_a_renamed_transcript_origin_is_acked_counted_and_never_falls_back()
     let rig = Rig::new(Act::RenamedOrigin);
     assert_eq!(rig.send("one"), Ok(()));
     let status = SocketStatus::read(&rig.home.status()).unwrap();
-    assert_eq!(status.drift.transcript_shape_unrecognised, 1);
+    assert_eq!(drift_of(&status).transcript_shape_unrecognised, 1);
     // Not suspect: the socket is tried again (a suspect lead would be NotSent, to herdr).
     assert_eq!(rig.send("two"), Ok(()));
     assert_eq!(rig.claude.received().len(), 2, "still posted to the socket");
@@ -4119,7 +4159,7 @@ fn tc_046_05_a_renamed_transcript_origin_is_acked_counted_and_never_falls_back()
     let silent = Rig::new(Act::Silent);
     assert!(matches!(silent.send("one"), Err(SocketError::Ambiguous(_))));
     assert!(matches!(silent.send("two"), Err(SocketError::NotSent(_))));
-    let drift = SocketStatus::read(&silent.home.status()).unwrap().drift;
+    let drift = drift_now(&silent);
     assert_eq!(drift.transcript_shape_unrecognised, 0);
 }
 
@@ -4156,7 +4196,7 @@ fn tc_046_12_settle_acks_an_unrecognised_shape_with_a_note() {
         acks[0].why
     );
     let status = SocketStatus::read(&rig.home.status()).unwrap();
-    assert_eq!(status.drift.transcript_shape_unrecognised, 1);
+    assert_eq!(drift_of(&status).transcript_shape_unrecognised, 1);
     assert!(
         status
             .notes
@@ -4223,7 +4263,7 @@ fn tc_046_06_a_clean_transcript_is_absent_not_drift() {
     )
     .unwrap();
     assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
-    let drift = SocketStatus::read(&rig.home.status()).unwrap().drift;
+    let drift = drift_now(&rig);
     assert_eq!(drift.transcript_shape_unrecognised, 0);
 }
 
@@ -4328,4 +4368,604 @@ fn both_delivery_routes_preserve_local_directory_observation_authority() {
     let rig = Rig::new(Act::Silent);
     assert!(Routed::socket_first(RealHerdr::default(), rig.deliverer).directory_observations());
     assert!(!Routed::herdr_only(FakeHerdr::default()).directory_observations());
+}
+
+// ---- FR-054: the socket is tried only for Claude Code leads ------------------
+
+/// Delivers one batch for a lead of harness `kind` through `routed`.
+fn route_as(routed: &Routed<FakeHerdr>, kind: &str, session: &SessionId, text: &str) {
+    let pane: PaneId = "w1:p1".parse().unwrap();
+    let got = routed.deliver_to(
+        &BatchTarget {
+            kind,
+            batch: BatchId::new(1),
+            lead: "ea",
+            session: Some(session),
+            senders: "s",
+        },
+        &pane,
+        text,
+    );
+    assert_eq!(got, Ok(()), "{kind}");
+}
+
+/// Tracing: TC-054-01
+/// ACs: FR-054-AC-1
+///
+/// A `codex` and an `opencode` lead each have a session id. The registry holds a live
+/// record naming that session, so a build that read it would post to the socket: the fake
+/// Claude Code receives nothing, herdr types the batch, and the status file holds no note
+/// and no lead entry.
+#[test]
+fn tc_054_01_codex_and_opencode_leads_go_straight_to_herdr_with_no_status_entry() {
+    let rig = Rig::new(Act::Consume);
+    let Rig {
+        home,
+        claude,
+        deliverer,
+        session,
+    } = rig;
+    let herdr = FakeHerdr::default();
+    let routed = Routed::socket_first(herdr.clone(), deliverer);
+    for kind in ["codex", "opencode"] {
+        route_as(&routed, kind, &session, kind);
+    }
+    assert_eq!(*herdr.typed.lock().unwrap(), ["codex", "opencode"]);
+    assert!(
+        claude.received().is_empty(),
+        "the registry was not read, so nothing was posted"
+    );
+    let status = SocketStatus::read(&home.status()).unwrap();
+    assert!(status.notes.is_empty(), "{:?}", status.notes);
+    assert!(status.leads.is_empty(), "{:?}", status.leads);
+}
+
+/// Tracing: TC-054-02
+/// ACs: FR-054-AC-2
+#[test]
+fn tc_054_02_a_claude_lead_with_no_record_still_goes_to_herdr_with_the_note() {
+    let home = Home::new();
+    let deliverer = SocketDeliverer::start(home.config(), Box::new(FakeProcs::with(&[])));
+    let herdr = FakeHerdr::default();
+    let routed = Routed::socket_first(herdr.clone(), deliverer);
+    let session: SessionId = SESSION.parse().unwrap();
+    route_as(&routed, "claude", &session, "typed");
+    assert_eq!(*herdr.typed.lock().unwrap(), ["typed"]);
+    let status = SocketStatus::read(&home.status()).unwrap();
+    assert_eq!(status.notes.len(), 1, "{:?}", status.notes);
+    assert!(
+        status.notes[0].contains("no Claude Code session record names this session"),
+        "{:?}",
+        status.notes
+    );
+}
+
+/// Tracing: TC-054-04
+/// ACs: FR-054-AC-4
+#[test]
+fn tc_054_04_a_claude_lead_with_a_record_is_delivered_by_socket_and_an_unknown_kind_is_not() {
+    let rig = Rig::new(Act::Consume);
+    let Rig {
+        home,
+        claude,
+        deliverer,
+        session,
+    } = rig;
+    let herdr = FakeHerdr::default();
+    let routed = Routed::socket_first(herdr.clone(), deliverer);
+    route_as(&routed, "claude", &session, "by socket");
+    assert_eq!(claude.received().len(), 1);
+    assert!(herdr.typed.lock().unwrap().is_empty());
+    for kind in ["", "Claude", "claude-code", "unknown"] {
+        route_as(&routed, kind, &session, kind);
+    }
+    assert_eq!(
+        *herdr.typed.lock().unwrap(),
+        ["", "Claude", "claude-code", "unknown"]
+    );
+    assert_eq!(claude.received().len(), 1, "no further post");
+    let status = SocketStatus::read(&home.status()).unwrap();
+    assert!(status.notes.is_empty(), "{:?}", status.notes);
+}
+
+/// Tracing: TC-054-01
+/// ACs: FR-054-AC-1
+///
+/// A lead whose registration changed `kind` is judged by the registration the tick read:
+/// what the status file said about it as a Claude Code lead is forgotten.
+#[test]
+fn tc_054_01_a_lead_that_stopped_being_claude_loses_its_status_entry() {
+    let rig = Rig::new(Act::Consume);
+    let Rig {
+        home,
+        claude: _claude,
+        deliverer,
+        session,
+    } = rig;
+    let herdr = FakeHerdr::default();
+    let routed = Routed::socket_first(herdr.clone(), deliverer);
+    route_as(&routed, "claude", &session, "one");
+    assert_eq!(SocketStatus::read(&home.status()).unwrap().leads.len(), 1);
+    route_as(&routed, "codex", &session, "two");
+    assert!(SocketStatus::read(&home.status()).unwrap().leads.is_empty());
+}
+
+// ---- FR-055: the status file lists only registered leads whose process is alive ----
+
+/// A process table a test can change after the deliverer has taken it.
+#[derive(Clone)]
+struct SharedProcs(Arc<Mutex<HashMap<u32, String>>>);
+
+impl SharedProcs {
+    fn with(pids: &[u32]) -> Self {
+        Self(Arc::new(Mutex::new(
+            pids.iter().map(|p| (*p, START.to_owned())).collect(),
+        )))
+    }
+    fn set(&self, pid: u32, start: Option<&str>) {
+        let mut table = self.0.lock().unwrap();
+        match start {
+            Some(start) => table.insert(pid, start.to_owned()),
+            None => table.remove(&pid),
+        };
+    }
+}
+
+impl Procs for SharedProcs {
+    fn start_time(&self, pid: u32) -> Option<String> {
+        self.0.lock().unwrap().get(&pid).cloned()
+    }
+    fn domain(&self) -> Option<String> {
+        Some(DOMAIN.to_owned())
+    }
+    fn uid(&self) -> Option<u32> {
+        Some(nix::unistd::Uid::current().as_raw())
+    }
+}
+
+/// A rig whose process table the test can change.
+fn rig_with_procs(act: Act) -> (Rig, SharedProcs) {
+    let home = Home::new();
+    let pid = 4242;
+    home.record(pid, SESSION, |_| {});
+    let claude = FakeClaude::start(&home.socket(pid), home.transcript(SESSION), act);
+    let procs = SharedProcs::with(&[pid]);
+    let deliverer = SocketDeliverer::start(home.config(), Box::new(procs.clone()));
+    let rig = Rig {
+        home,
+        claude,
+        deliverer,
+        session: SESSION.parse().unwrap(),
+    };
+    (rig, procs)
+}
+
+fn registered<'a>(name: &'a str, kind: &'a str, here: bool) -> crate::deliver::RegisteredLead<'a> {
+    crate::deliver::RegisteredLead { name, kind, here }
+}
+
+fn resolved_leads(rig: &Rig) -> Vec<String> {
+    SocketStatus::read(&rig.home.status())
+        .unwrap()
+        .leads
+        .into_iter()
+        .map(|l| l.lead)
+        .collect()
+}
+
+/// Tracing: TC-055-01
+/// ACs: FR-055-AC-1
+///
+/// A lead that is unregistered or pruned (no registration in the registry the tick read),
+/// registered on another machine, or registered as another harness leaves the resolved
+/// leads at the next tick.
+#[test]
+fn tc_055_01_an_unregistered_lead_leaves_the_resolved_leads() {
+    for (name, case) in [
+        ("unregistered", None),
+        ("other machine", Some(registered("ea", "claude", false))),
+        ("other harness", Some(registered("ea", "codex", true))),
+        (
+            "other lead",
+            Some(registered("someone-else", "claude", true)),
+        ),
+    ] {
+        let rig = Rig::new(Act::Consume);
+        assert_eq!(rig.send("one"), Ok(()));
+        assert_eq!(resolved_leads(&rig), ["ea"], "{name}");
+        // Registered and here: kept.
+        rig.deliverer
+            .registry_read(&[registered("ea", "claude", true)]);
+        assert_eq!(
+            resolved_leads(&rig),
+            ["ea"],
+            "{name}: kept while registered"
+        );
+        rig.deliverer
+            .registry_read(&case.into_iter().collect::<Vec<_>>());
+        assert!(resolved_leads(&rig).is_empty(), "{name}");
+    }
+}
+
+/// Tracing: TC-055-02
+/// ACs: FR-055-AC-2
+#[test]
+fn tc_055_02_a_lead_whose_process_exited_or_whose_pid_was_reused_is_dropped() {
+    let here = [registered("ea", "claude", true)];
+    let (rig, procs) = rig_with_procs(Act::Consume);
+    assert_eq!(rig.send("one"), Ok(()));
+    procs.set(4242, None);
+    rig.deliverer.registry_read(&here);
+    assert!(resolved_leads(&rig).is_empty(), "the process exited");
+
+    let (rig, procs) = rig_with_procs(Act::Consume);
+    assert_eq!(rig.send("one"), Ok(()));
+    procs.set(4242, Some("9999"));
+    rig.deliverer.registry_read(&here);
+    assert!(
+        resolved_leads(&rig).is_empty(),
+        "the pid is another process that started at another time"
+    );
+}
+
+/// Tracing: TC-055-03
+/// ACs: FR-055-AC-3
+#[test]
+fn tc_055_03_a_registered_live_lead_is_kept() {
+    let (rig, _procs) = rig_with_procs(Act::Consume);
+    assert_eq!(rig.send("one"), Ok(()));
+    let before = SocketStatus::read(&rig.home.status()).unwrap();
+    for _ in 0..3 {
+        rig.deliverer
+            .registry_read(&[registered("ea", "claude", true)]);
+    }
+    assert_eq!(
+        SocketStatus::read(&rig.home.status()).unwrap().leads,
+        before.leads
+    );
+}
+
+/// Tracing: TC-055-04
+/// ACs: FR-055-AC-4
+///
+/// Dropping an entry keeps a held batch, a decision still owed a write and a dead-letter
+/// reason.
+#[test]
+fn tc_055_04_dropping_an_entry_keeps_held_batches_decisions_and_dead_letter_reasons() {
+    // A held batch.
+    let rig = Rig::new(Act::Receipt("held", None));
+    assert!(matches!(rig.send("one"), Err(SocketError::Held(_))));
+    rig.deliverer.registry_read(&[]);
+    let status = SocketStatus::read(&rig.home.status()).unwrap();
+    assert!(status.leads.is_empty());
+    assert_eq!(status.held, ["ea"]);
+    assert_eq!(status.held_batches.len(), 1);
+
+    // A decision owed a write, and then the dead-letter reason once it is written.
+    let rig = Rig::new(Act::Receipt("denied", None));
+    assert!(matches!(rig.send("one"), Err(SocketError::Denied(_))));
+    rig.deliverer.registry_read(&[]);
+    let status = SocketStatus::read(&rig.home.status()).unwrap();
+    assert!(status.leads.is_empty());
+    assert_eq!(status.owed.len(), 1, "{:?}", status.owed);
+    let s = only(settled(&rig.deliverer));
+    rig.deliverer.applied(&s, &Ok(1));
+    rig.deliverer.registry_read(&[]);
+    let status = SocketStatus::read(&rig.home.status()).unwrap();
+    assert_eq!(status.dead_lettered.len(), 1);
+    assert_eq!(status.dead_lettered[0].reason, "denied");
+}
+
+/// A herdr whose one pane holds an idle agent of `session`.
+#[derive(Clone)]
+struct IdleAgentHerdr;
+
+impl crate::herdr::Herdr for IdleAgentHerdr {
+    fn get(
+        &self,
+        _pane: &PaneId,
+    ) -> Result<Option<crate::herdr::AgentGet>, crate::herdr::ProcessError> {
+        Ok(Some(crate::herdr::AgentGet {
+            status: crate::herdr::AgentStatus::Idle,
+            state_change_seq: 1,
+            session_id: Some(SESSION.parse().unwrap()),
+        }))
+    }
+    fn notify(&self, _t: &str, _b: &str) -> Result<(), crate::herdr::ProcessError> {
+        Ok(())
+    }
+}
+
+impl Deliverer for IdleAgentHerdr {
+    fn deliver(&self, _pane: &PaneId, _text: &str) -> Result<(), DeliverError> {
+        panic!("the batch goes by socket")
+    }
+}
+
+/// Tracing: TC-055-01
+/// ACs: FR-055-AC-1
+///
+/// Through the watcher's tick: a lead delivered to by socket is in the status file, and
+/// the tick after it is pruned from the registry leaves no entry for it (Redis lane).
+#[test]
+fn tc_055_01_a_tick_after_the_lead_is_pruned_leaves_no_entry() {
+    let Ok(url) = std::env::var("IX_RELAY_TEST_URL") else {
+        eprintln!("skipping: IX_RELAY_TEST_URL unset (run `make test-redis`)");
+        return;
+    };
+    let mut relay = relay_core::Relay::connect(&url, Duration::from_secs(2))
+        .unwrap()
+        .with_prefix(format!("test:{}:tc055tick:", std::process::id()));
+    let name: relay_core::AgentName = "ea".parse().unwrap();
+    relay
+        .register(&relay_core::Registration {
+            name: name.clone(),
+            machine: "node-a".parse().unwrap(),
+            kind: "claude".into(),
+            session_id: Some(SESSION.parse().unwrap()),
+            cwd: None,
+            herdr_pane: Some("w1:p1".parse().unwrap()),
+            place: None,
+            last_seen_ms: 1,
+        })
+        .unwrap();
+    relay
+        .send(&relay_core::Message {
+            from: "sender".parse().unwrap(),
+            to: relay_core::Target::Agent(name.clone()),
+            text: "hi".into(),
+            sent_at_ms: 0,
+            forwarded: false,
+        })
+        .unwrap();
+    let Rig {
+        home,
+        claude: _claude,
+        deliverer,
+        session: _,
+    } = Rig::new(Act::Consume);
+    let routed = Routed::socket_first(IdleAgentHerdr, deliverer);
+    let machine = "node-a".parse().unwrap();
+    let mut state = crate::WatcherState::default();
+    crate::tick(&mut relay, &routed, &machine, &mut state, &mut |_| {}).unwrap();
+    assert_eq!(
+        SocketStatus::read(&home.status()).unwrap().leads.len(),
+        1,
+        "delivered by socket"
+    );
+    relay.prune(&name, 1).unwrap();
+    crate::tick(&mut relay, &routed, &machine, &mut state, &mut |_| {}).unwrap();
+    assert!(SocketStatus::read(&home.status()).unwrap().leads.is_empty());
+}
+
+/// Tracing: TC-055-03
+/// ACs: FR-055-AC-3
+///
+/// A registry read that fails ends the tick before any entry is judged: none is dropped.
+#[test]
+fn tc_055_03_a_registry_read_that_fails_drops_no_entry() {
+    use std::io::Read;
+    let rig = Rig::new(Act::Consume);
+    assert_eq!(rig.send("one"), Ok(()));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("redis://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0_u8; 4096];
+        while stream.read(&mut buf).is_ok_and(|n| n > 0) {}
+    });
+    let Rig {
+        home,
+        claude: _claude,
+        deliverer,
+        session: _,
+    } = rig;
+    let routed = Routed::socket_first(IdleAgentHerdr, deliverer);
+    let mut relay = relay_core::Relay::connect(&url, Duration::from_millis(300)).unwrap();
+    let mut state = crate::WatcherState::default();
+    let failed = crate::tick(
+        &mut relay,
+        &routed,
+        &"node-a".parse().unwrap(),
+        &mut state,
+        &mut |_| {},
+    );
+    assert!(failed.is_err());
+    assert_eq!(SocketStatus::read(&home.status()).unwrap().leads.len(), 1);
+    drop(relay);
+    server.join().unwrap();
+}
+
+// ---- FR-046: drift is attributed to a version and ages out -------------------
+
+fn versions_of(rig: &Rig) -> Vec<relay_core::socket_status::VersionDrift> {
+    SocketStatus::read(&rig.home.status()).unwrap().versions
+}
+
+/// Tracing: TC-046-03
+/// ACs: FR-046-AC-3
+///
+/// A drifting reply-socket line is counted against the version of the lead it came from,
+/// with its `type` and `action` as the last offending line and nothing else of it; a line
+/// that is not JSON has neither.
+#[test]
+fn tc_046_03_a_drifting_line_is_counted_against_the_leads_version_with_its_shape() {
+    let renamed = r#"{"type":"control","action":"peer_status","status":"held","orig_msg_id":"x","body":"secret"}"#;
+    let rig = Rig::new(Act::ReplyLine(renamed));
+    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    let versions = versions_of(&rig);
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].version, "2.1.283");
+    let window = versions[0].window(wall_ms());
+    assert_eq!(window.counts.unrecognised_lines, 1);
+    assert_eq!(window.last.len(), 1);
+    assert_eq!(window.last[0].line_type.as_deref(), Some("control"));
+    assert_eq!(window.last[0].action.as_deref(), Some("peer_status"));
+    let file = fs::read_to_string(rig.home.status()).unwrap();
+    assert!(!file.contains("secret"), "no body is kept");
+
+    let rig = Rig::new(Act::ReplyLine("this is not json"));
+    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    let window = versions_of(&rig)[0].window(wall_ms());
+    assert_eq!(window.counts.not_json_lines, 1);
+    assert_eq!(
+        (
+            window.last[0].line_type.clone(),
+            window.last[0].action.clone()
+        ),
+        (None, None)
+    );
+}
+
+/// Tracing: TC-046-04
+/// ACs: FR-046-AC-4
+///
+/// An unknown receipt status is counted against the lead's version, and a delivery the
+/// transcript acknowledges is counted as acknowledged for it.
+#[test]
+fn tc_046_04_an_unknown_receipt_and_an_acknowledgement_are_counted_per_version() {
+    let rig = Rig::new(Act::Receipt("something-new", None));
+    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    let window = versions_of(&rig)[0].window(wall_ms());
+    assert_eq!(window.counts.unknown_status_receipts, 1);
+    assert_eq!(window.last[0].line_type.as_deref(), Some("control"));
+    assert_eq!(
+        window.last[0].action.as_deref(),
+        Some("peer_message_status")
+    );
+
+    let rig = Rig::new(Act::Consume);
+    assert_eq!(rig.send("m"), Ok(()));
+    let versions = versions_of(&rig);
+    assert_eq!(versions[0].version, "2.1.283");
+    let window = versions[0].window(wall_ms());
+    assert_eq!(window.counts.acknowledged, 1);
+    assert_eq!(window.counts.drift_total(), 0);
+}
+
+/// Tracing: TC-046-05
+/// ACs: FR-046-AC-5
+///
+/// The transcript line's `type` is the last offending line kept, and nothing else of it.
+#[test]
+fn tc_046_05_the_transcript_line_type_is_kept_and_nothing_else() {
+    let rig = Rig::new(Act::RenamedOrigin);
+    assert_eq!(rig.send("one"), Ok(()));
+    let window = versions_of(&rig)[0].window(wall_ms());
+    assert_eq!(window.counts.transcript_shape_unrecognised, 1);
+    assert_eq!(window.last[0].line_type.as_deref(), Some("user"));
+    assert_eq!(window.last[0].action, None);
+    let file = fs::read_to_string(rig.home.status()).unwrap();
+    assert!(!file.contains("peer"), "no other text of the line");
+}
+
+/// Tracing: TC-046-17
+/// ACs: FR-046-AC-17
+///
+/// A reply-socket line whose `type` and `action` hold control characters and 10,000
+/// characters, and that carries a body and a path: the status file holds at most 64
+/// characters each of `type` and `action`, no control character, no body and no path.
+#[test]
+fn tc_046_17_an_offending_line_leaves_only_a_bounded_neutralised_type_and_action() {
+    let long = "y".repeat(10_000);
+    let line = Box::leak(
+        json!({
+            "type": format!("t\u{1b}[31m\u{7}{long}"),
+            "action": format!("a\nb\u{202e}{long}"),
+            "body": "secret message body",
+            "path": "/home/peter/secret/path",
+        })
+        .to_string()
+        .into_boxed_str(),
+    );
+    let rig = Rig::new(Act::ReplyLine(line));
+    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    let file = fs::read_to_string(rig.home.status()).unwrap();
+    assert!(!file.contains("secret"), "no body or path");
+    assert!(!file.contains("/home/peter"));
+    let last = versions_of(&rig)[0].last[0].clone();
+    for text in [last.line_type.unwrap(), last.action.unwrap()] {
+        assert!(text.chars().count() <= 64, "{}", text.chars().count());
+        assert!(
+            !text
+                .chars()
+                .any(|c| relay_core::text::is_unsafe_char(c) || c == '\n'),
+            "{text:?}"
+        );
+    }
+}
+
+/// Tracing: TC-046-18
+/// ACs: FR-046-AC-18
+///
+/// A lead that leaves the resolved leads leaves its version's counts for the window.
+#[test]
+fn tc_046_18_a_lead_leaving_the_resolved_leads_leaves_its_versions_counts() {
+    let rig = Rig::new(Act::RenamedOrigin);
+    assert_eq!(rig.send("one"), Ok(()));
+    rig.deliverer.registry_read(&[]);
+    let status = SocketStatus::read(&rig.home.status()).unwrap();
+    assert!(status.leads.is_empty());
+    assert_eq!(drift_of(&status).transcript_shape_unrecognised, 1);
+    assert_eq!(status.versions[0].version, "2.1.283");
+}
+
+/// Tracing: TC-046-19
+/// ACs: FR-046-AC-19
+///
+/// Drift from 20 distinct versions, one with a 1,000-character version string and a control
+/// character: the status file holds 16 versions, the newest, each string at most 64
+/// characters and free of control characters, and every delivery proceeds.
+#[test]
+fn tc_046_19_drift_is_kept_for_at_most_sixteen_versions_without_affecting_delivery() {
+    let home = Home::new();
+    let pid = 4242;
+    home.record(pid, SESSION, |_| {});
+    let _claude = FakeClaude::start(
+        &home.socket(pid),
+        home.transcript(SESSION),
+        Act::RenamedOrigin,
+    );
+    let deliverer = SocketDeliverer::start(home.config(), Box::new(FakeProcs::with(&[pid])));
+    let session: SessionId = SESSION.parse().unwrap();
+    for n in 0..20 {
+        let version = if n == 17 {
+            format!("2.1.417-\u{7}{}", "v".repeat(1_000))
+        } else {
+            format!("2.1.{}", 400 + n)
+        };
+        home.record(pid, SESSION, |r| r["version"] = json!(version));
+        let sent = deliverer.deliver(
+            &BatchTarget {
+                kind: "claude",
+                batch: BatchId::new(n + 1),
+                lead: "ea",
+                session: Some(&session),
+                senders: "s",
+            },
+            &format!("message {n}"),
+        );
+        assert_eq!(sent, Ok(()), "delivery {n} proceeds as without drift");
+    }
+    let status = SocketStatus::read(&home.status()).unwrap();
+    assert_eq!(status.versions.len(), 16);
+    let names: Vec<&str> = status.versions.iter().map(|v| v.version.as_str()).collect();
+    assert!(
+        names.contains(&"2.1.419") && names.contains(&"2.1.404"),
+        "{names:?}"
+    );
+    assert!(
+        !names.contains(&"2.1.400") && !names.contains(&"2.1.402"),
+        "{names:?}"
+    );
+    let long = status
+        .versions
+        .iter()
+        .find(|v| v.version.starts_with("2.1.417"))
+        .expect("the long version is among the newest");
+    assert_eq!(long.version.chars().count(), 64, "cut");
+    for v in &status.versions {
+        assert!(v.version.chars().count() <= 64, "{}", v.version.len());
+        assert!(!v.version.chars().any(char::is_control), "{:?}", v.version);
+    }
 }

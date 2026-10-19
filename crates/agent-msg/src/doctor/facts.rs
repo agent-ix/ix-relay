@@ -237,6 +237,8 @@ pub(crate) enum SpoolState {
 /// One hook failure record on the bus.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BusFailure {
+    /// The record's id, when it has one: an id is counted once.
+    pub id: Option<String>,
     /// The machine that spooled it.
     pub machine: MachineName,
     /// The record, when it decodes.
@@ -497,9 +499,20 @@ fn gather_redis(env: &Env) -> RedisFacts {
     let hook_failures = health.map(|h| {
         h.entries
             .into_iter()
-            .map(|e| BusFailure {
-                machine: e.machine,
-                record: serde_json::from_str(&e.record).ok(),
+            .map(|e| {
+                let record: Option<SpoolRecord> = serde_json::from_str(&e.record).ok();
+                BusFailure {
+                    // The stream's own `id` field, else the record's: one failure is
+                    // counted once however many stream entries carry it (FR-030).
+                    id: e.id.or_else(|| {
+                        record
+                            .as_ref()
+                            .map(|r| r.id.clone())
+                            .filter(|id| !id.is_empty())
+                    }),
+                    machine: e.machine,
+                    record,
+                }
             })
             .collect()
     });

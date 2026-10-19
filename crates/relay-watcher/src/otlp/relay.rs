@@ -203,7 +203,12 @@ pub(super) fn read(
     }
     match relay.hook_health_newest(HOOK_ENTRIES) {
         Ok(stream) => {
-            for entry in stream.entries.iter().filter(|e| e.machine == *machine) {
+            // A record id is counted once, however many stream entries carry it (FR-030).
+            for entry in stream
+                .distinct()
+                .into_iter()
+                .filter(|e| e.machine == *machine)
+            {
                 let Some((at_ms, stage, kind)) = hook_failure(&entry.record) else {
                     continue;
                 };
@@ -407,6 +412,7 @@ mod tests {
         let hub = hub();
         let now_ms = 1_700_000_000_000_i64;
         let entry = |stage: &str| relay_core::HookHealthEntry {
+            id: None,
             machine: hub.clone(),
             lead: None,
             record: format!(r#"{{"at_ms":{now_ms},"stage":"{stage}","error_kind":"timeout"}}"#),
@@ -430,6 +436,51 @@ mod tests {
                 .get(&("new".to_owned(), "timeout".to_owned())),
             Some(&100),
             "the newest failures are counted: {:?}",
+            health.hook_failures
+        );
+    }
+
+    /// The gauge counts a record id once: a stream that holds one id twice (it aged out of
+    /// the bus's record of shipped ids in between) is one failure. Redis lane.
+    ///
+    /// Tracing: TC-030-12
+    /// ACs: FR-030-AC-12
+    #[test]
+    fn tc_030_12_the_hook_gauge_counts_a_record_id_once() {
+        let Some(mut relay) = test_relay("hook-distinct") else {
+            eprintln!("skipping: IX_RELAY_TEST_URL unset (run `make test-redis`)");
+            return;
+        };
+        let url = std::env::var("IX_RELAY_TEST_URL").unwrap();
+        let mut conn = redis::Client::open(url).unwrap().get_connection().unwrap();
+        let key = format!("test:{}:hook-distinct:health:hooks", std::process::id());
+        let now_ms = 1_700_000_000_000_i64;
+        let record = format!(r#"{{"at_ms":{now_ms},"stage":"pop","error_kind":"timeout"}}"#);
+        for id in ["same", "same", "same", "other"] {
+            let _entry: String = redis::cmd("XADD")
+                .arg(&key)
+                .arg("*")
+                .arg("machine")
+                .arg("hub")
+                .arg("lead")
+                .arg("")
+                .arg("id")
+                .arg(id)
+                .arg("rec")
+                .arg(&record)
+                .query(&mut conn)
+                .unwrap();
+        }
+        let mut lead = reg_for("a-lead", "hub", "w1:p1");
+        lead.last_seen_ms = now_ms;
+        let (health, _, failed) = read(&mut relay, &hub(), &[lead], 0, now_ms);
+        assert!(failed.is_none(), "{failed:?}");
+        assert_eq!(
+            health
+                .hook_failures
+                .get(&("pop".to_owned(), "timeout".to_owned())),
+            Some(&2),
+            "four entries, two ids: {:?}",
             health.hook_failures
         );
     }

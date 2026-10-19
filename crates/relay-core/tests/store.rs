@@ -1152,6 +1152,7 @@ fn commit_identity_is_never_observed_half_applied() {
 
 fn health_entry(n: usize) -> HookHealthEntry {
     HookHealthEntry {
+        id: Some(format!("id-{n}")),
         machine: "hub".parse().unwrap(),
         lead: n.is_multiple_of(2).then(|| "qsl-lead".to_owned()),
         record: format!("{{\"n\":{n}}}"),
@@ -1170,6 +1171,148 @@ fn hook_health_round_trips_records_with_their_machine_and_lead_in_order() {
     // Pushing nothing is a no-op, not an error.
     r.push_hook_health(&[]).unwrap();
     assert_eq!(r.hook_health(10).unwrap().entries, entries);
+}
+
+/// A raw connection to the test Redis, for looking at what the store wrote.
+fn raw(test: &str) -> Option<(redis::Connection, String)> {
+    let url = std::env::var("IX_RELAY_TEST_URL").ok()?;
+    let conn = redis::Client::open(url).unwrap().get_connection().unwrap();
+    Some((conn, format!("test:{}:{test}:", std::process::id())))
+}
+
+/// Tracing: TC-030-12
+/// ACs: FR-030-AC-12
+///
+/// A record offered again is skipped by its id, in the same request that adds the new ones:
+/// pushing the same entries twice, and pushing an overlapping chunk, leave each id on the
+/// stream once; the call says how many it added.
+#[test]
+fn tc_030_12_a_record_id_reaches_the_stream_once_however_often_it_is_offered() {
+    let Some(mut r) = relay("health-once") else {
+        return;
+    };
+    let first: Vec<HookHealthEntry> = (0..5).map(health_entry).collect();
+    assert_eq!(r.push_hook_health(&first).unwrap(), 5);
+    assert_eq!(
+        r.push_hook_health(&first).unwrap(),
+        0,
+        "all already shipped"
+    );
+    let overlap: Vec<HookHealthEntry> = (3..8).map(health_entry).collect();
+    assert_eq!(
+        r.push_hook_health(&overlap).unwrap(),
+        3,
+        "only 5, 6 and 7 are new"
+    );
+    let all = r.hook_health(100).unwrap();
+    let ids: Vec<&str> = all.entries.iter().filter_map(|e| e.id.as_deref()).collect();
+    assert_eq!(
+        ids,
+        [
+            "id-0", "id-1", "id-2", "id-3", "id-4", "id-5", "id-6", "id-7"
+        ]
+    );
+    // Records that look alike are distinct records with distinct ids: both are kept.
+    let alike = |id: &str| HookHealthEntry {
+        id: Some(id.into()),
+        ..health_entry(0)
+    };
+    assert_eq!(r.push_hook_health(&[alike("a"), alike("b")]).unwrap(), 2);
+    // A chunk that repeats an id within itself adds it once.
+    assert_eq!(r.push_hook_health(&[alike("c"), alike("c")]).unwrap(), 1);
+}
+
+/// Tracing: TC-030-12
+/// ACs: FR-030-AC-12
+///
+/// Two ships racing with the same records add each once.
+#[test]
+fn tc_030_12_two_overlapping_ships_add_each_record_once() {
+    let Some(mut r) = relay("health-race") else {
+        return;
+    };
+    let url = std::env::var("IX_RELAY_TEST_URL").unwrap();
+    let prefix = format!("test:{}:health-race:", std::process::id());
+    let entries: Vec<HookHealthEntry> = (0..300).map(health_entry).collect();
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let (url, prefix, entries) = (url.clone(), prefix.clone(), entries.clone());
+            thread::spawn(move || {
+                let mut other = Relay::connect(&url, Duration::from_secs(5))
+                    .unwrap()
+                    .with_prefix(prefix);
+                for chunk in entries.chunks(50) {
+                    other.push_hook_health(chunk).unwrap();
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    let read = r.hook_health(1_000).unwrap();
+    assert_eq!(read.entries.len(), 300, "each id once");
+    assert_eq!(read.distinct().len(), 300);
+}
+
+/// The record of shipped ids is bounded (NFR-002): past 2,000 ids the oldest are
+/// forgotten, and an entry with no id is always added.
+#[test]
+fn the_record_of_shipped_ids_is_bounded() {
+    let Some(mut r) = relay("health-bounded") else {
+        return;
+    };
+    let entries: Vec<HookHealthEntry> = (0..2_300).map(health_entry).collect();
+    for chunk in entries.chunks(200) {
+        r.push_hook_health(chunk).unwrap();
+    }
+    let (mut conn, prefix) = raw("health-bounded").unwrap();
+    let kept: usize = redis::cmd("ZCARD")
+        .arg(format!("{prefix}health:hooks-shipped"))
+        .query(&mut conn)
+        .unwrap();
+    assert_eq!(kept, 2_000);
+    let ttl: i64 = redis::cmd("PTTL")
+        .arg(format!("{prefix}health:hooks-shipped"))
+        .query(&mut conn)
+        .unwrap();
+    assert!(ttl > 0 && ttl <= 24 * 60 * 60 * 1000, "{ttl}");
+    let anonymous = HookHealthEntry {
+        id: None,
+        ..health_entry(1)
+    };
+    assert_eq!(
+        r.push_hook_health(&[anonymous.clone(), anonymous]).unwrap(),
+        2
+    );
+}
+
+/// The reader counts an id once: a stream that holds one id twice (it aged out of the
+/// shipped record in between) is one record.
+#[test]
+fn a_reader_counts_a_record_id_once() {
+    let Some((mut conn, prefix)) = raw("health-distinct") else {
+        return;
+    };
+    let mut r = relay("health-distinct").unwrap();
+    for _ in 0..2 {
+        let _id: String = redis::cmd("XADD")
+            .arg(format!("{prefix}health:hooks"))
+            .arg("*")
+            .arg("machine")
+            .arg("hub")
+            .arg("lead")
+            .arg("")
+            .arg("id")
+            .arg("same")
+            .arg("rec")
+            .arg("{}")
+            .query(&mut conn)
+            .unwrap();
+    }
+    let read = r.hook_health(10).unwrap();
+    assert_eq!(read.entries.len(), 2);
+    assert_eq!(read.distinct().len(), 1);
 }
 
 /// The stream is capped: a flood keeps roughly the newest entries, never all.

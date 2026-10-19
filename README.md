@@ -240,9 +240,12 @@ never delivered twice. `agent-msg log` keeps the history. The hook never fails t
 agent: it reads stdin inside its deadline too (a harness whose stdin yields no complete payload costs at most about 300 ms of silence, or 900 ms in all while bytes keep arriving, and the hook then records `decode`/`stdin_timeout`, pops nothing and exits 0; a `UserPromptSubmit` payload that completes after its own 300 ms is recorded as `budget`/`budget_exhausted` instead; the read ends at the first JSON object, so the pipe need not close; input over 8 MiB is a recorded `decode`/`too_large`), and if Redis can't be reached it gives up within its budget (300 ms at `UserPromptSubmit`, 900 ms at `PostToolUse` and `Stop`, which exist to deliver mail) and exits 0. A pop is issued only when twice the measured round trip plus 20 ms is left, so a slow tunnel defers or records a skipped pop instead of losing mail; `UserPromptSubmit` delivers over links up to about 55 ms, `PostToolUse` and `Stop` up to about 290 ms.
 
 Failures it swallows are not silent: each appends one typed record (stage and a
-stable error code, never message text) to `spool/hook.jsonl` beside `config.toml`,
-bounded to 256 KiB, and the next hook that reaches Redis ships them to the capped
-`health:hooks` stream (at least once) and empties the file. A hook with less
+stable error code, never message text, and an id minted when it is appended) to
+`spool/hook.jsonl` beside `config.toml`, bounded to 256 KiB, and the next hook that reaches
+Redis ships them to the capped `health:hooks` stream and removes them from the file by id. Each
+ship is one atomic request that skips ids the bus already recorded as shipped (the last 24 hours,
+at most 2,000), so a record reaches the stream once however flushes overlap or retry, and
+`doctor` and the metrics count an id once. A hook with less
 budget left than twice the round trip it measured plus 20 ms (never under 30 ms)
 skips the pop instead of risking a reply that arrives after the timeout, and a popped batch that cannot be printed is put back at the
 front of the inbox (or left in flight, and kept in the spool record, if even that fails).
@@ -503,9 +506,13 @@ and can change in any release. They are typed in one crate, `crates/claude-wire`
 no I/O, and every format has a drift signal so a change is detected, not silently absorbed:
 
 - Parsing is total. A reply-socket line that is JSON in an unknown shape, one that is not
-  JSON, and a receipt with an unknown status are **counted** per watcher (in
-  `~/.ix/relay/state/socket/socket-<pid>.json`, one log line for the first of each kind) and
-  shown by `agent-msg doctor` as `socket_wire_drift`. Delivery is otherwise unchanged.
+  JSON, and a receipt with an unknown status are **counted against the Claude Code version**
+  they came from, in hourly buckets that age out after 24 hours (in
+  `~/.ix/relay/state/socket/socket-<pid>.json`, one log line for the first of each kind and
+  version), with the last offending line's `type` and `action` (cut to 64 characters, never a
+  body or a path), and shown by `agent-msg doctor` as a `socket_wire_drift` warning per
+  version. Delivery is otherwise unchanged. For each version `doctor` also says whether it is
+  working (acknowledged deliveries, no drift in the window), in drift, or just listed.
 - A transcript line that names a message id without a structured `origin.msg_id` is evidence
   Claude Code received it: the batch is acknowledged as received but unconfirmed (a drift
   note, no herdr fallback, no redelivery) and shows as `socket_transcript_shape_unrecognised`.
@@ -514,8 +521,9 @@ no I/O, and every format has a drift signal so a change is detected, not silentl
   receives a message (it would be counted as drift for every busy lead). Also, a lead that
   reads `socket-<pid>.json` (it lists held message ids) can cause a false drift count.
 - The formats were captured on Claude Code 2.1.283 (`claude_wire::CAPTURED_ON`); `doctor`
-  shows that version and says `wire format captured on 2.1.283; running X: unverified` for
-  another. Contract fixtures in `crates/claude-wire/fixtures/claude-2.1.283/` are marked in
+  prints that version as what the fixtures describe, but whether another version works is
+  told by what the watcher observes of it (the drift above), not by comparing versions.
+  Contract fixtures in `crates/claude-wire/fixtures/claude-2.1.283/` are marked in
   their `MANIFEST` as `captured` (unedited live bytes), `captured-shape` (a live shape or our
   own golden with placeholder values), `derived-from-program-text` (read from the installed
   program, never seen live) or `synthetic` (a drift sample of our own).
@@ -712,8 +720,9 @@ prints the same as one object for a script. It works with Redis down and finishe
 
 Exit 1 means something needs attention now. Each check is one of `ok`; `fail` (exit 1, for
 example a machine that has registered leads and whose watcher ticked in the last 24 hours but
-now has no heartbeat, hook failures in the last 15 minutes, or mail waiting under a wedged or
-missing watcher); `warn` (reported, exit 0, and exit 1 with `--strict`: dead letters, a pane
+now has no heartbeat, 50 or more hook failures under 15 minutes old or one session failing in
+three distinct 15-minute windows of the last hour, or mail waiting under a wedged or missing
+watcher); `warn` (reported, exit 0, and exit 1 with `--strict`: dead letters, a pane
 herdr no longer has after an hour, a watcher older than the heartbeat, an old herdr with a
 readable output, mail waiting while the watcher is fresh); or `unknown` (it could not tell: an
 unreadable service manager, herdr not answering; never fails the exit). A machine whose watcher

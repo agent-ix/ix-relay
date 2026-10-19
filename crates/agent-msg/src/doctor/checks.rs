@@ -20,7 +20,7 @@
 //! - a herdr whose shape ix-relay cannot read fails (the watcher types into no
 //!   pane), an old version with a good shape warns.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use relay_core::ScanCut;
 use relay_core::moves::{MoveEvent, MoveKind};
@@ -52,6 +52,22 @@ const RECENT_LEAD_MS: i64 = HOUR_MS;
 
 /// A hook failure this recent is one that may still be happening.
 const RECENT_FAILURE_MS: i64 = 15 * 60 * 1000;
+
+/// `hook_failures_recorded` fails when this many failures are under
+/// [`RECENT_FAILURE_MS`] old, fleet-wide: more than 15 times the fleet's observed average
+/// of about 3 per 15 minutes, so only an outage reaches it (FR-029).
+const FAIL_RECENT_COUNT: usize = 50;
+
+/// `hook_failures_recorded` fails when one session has failed in this many distinct
+/// 15-minute windows of the last hour, the newest under 15 minutes old: a failure that
+/// persisted over half an hour is not a burst.
+const FAIL_SESSION_WINDOWS: usize = 3;
+
+/// The windows of the last hour, counted back from the time of the check.
+const SESSION_WINDOWS: i64 = 4;
+
+/// How many sessions and machines the hook failure detail names.
+const TOP_HOOK_FAILURES: usize = 3;
 
 /// How long a pane must have been gone (its registration unrefreshed) before it
 /// is reported: a session closed a minute ago is not a finding.
@@ -175,13 +191,13 @@ fn socket(f: &Facts, checks: &mut Vec<Check>) {
                 pid_alive: Some(false),
                 ..
             } if any_live => {}
-            other => socket_state(other, checks),
+            other => socket_state(other, f.now_ms, checks),
         }
     }
 }
 
 /// The check for one watcher's status.
-fn socket_state(state: &SocketState, checks: &mut Vec<Check>) {
+fn socket_state(state: &SocketState, now_ms: i64, checks: &mut Vec<Check>) {
     let fix = "start relay-watcher; it writes its report after each socket delivery";
     let unknown = |why: String| {
         Check::unknown(
@@ -240,19 +256,12 @@ fn socket_state(state: &SocketState, checks: &mut Vec<Check>) {
             .to_owned(),
     );
     let subject = format!("watcher pid {}", status.pid);
-    let mut versions: Vec<&str> = status.leads.iter().map(|l| l.version.as_str()).collect();
-    versions.sort_unstable();
-    versions.dedup();
-    let unverified: Vec<String> = versions
-        .into_iter()
-        .filter(|v| *v != claude_wire::CAPTURED_ON)
-        .map(|v| {
-            format!(
-                "wire format captured on {}; running {v}: unverified",
-                claude_wire::CAPTURED_ON
-            )
-        })
-        .collect();
+    let versions = version_windows(status, now_ms);
+    details.extend(
+        versions
+            .iter()
+            .map(|(version, window)| version_line(version, window)),
+    );
     details.push(format!(
         "wire format captured on Claude Code {} (claude-wire); the version gate is >= {}.{}.{}, \
          peerProtocol {}",
@@ -262,18 +271,13 @@ fn socket_state(state: &SocketState, checks: &mut Vec<Check>) {
         claude_wire::MIN_VERSION.2,
         claude_wire::KNOWN_PEER_PROTOCOL
     ));
-    details.extend(unverified.iter().cloned());
-    let mut summary = format!(
+    let summary = format!(
         "delivery = socket: {} lead(s) resolved, {} held, {} using herdr",
         status.leads.len(),
         status.held.len(),
         status.notes.len()
     );
-    for note in &unverified {
-        summary.push_str("; ");
-        summary.push_str(note);
-    }
-    wire_drift(status, &subject, checks);
+    wire_drift(&versions, now_ms, &subject, checks);
     if !status.dead_lettered.is_empty() {
         // Dead letters are bare messages with no reason: the reasons are only here.
         checks.push(
@@ -337,56 +341,165 @@ fn socket_state(state: &SocketState, checks: &mut Vec<Check>) {
     }
 }
 
-/// The drift signals of the typed Claude Code wire formats (`claude-wire`): warns, never
-/// fails, and never changes how a message is delivered.
-fn wire_drift(
+/// Each Claude Code version the status file names (a drift member, or a resolved lead),
+/// with its drift over the last 24 hours at `now_ms`: what the watcher wrote may be older
+/// than the window by now. Neutralised, since the file is another process's word.
+fn version_windows(
     status: &relay_core::socket_status::SocketStatus,
+    now_ms: i64,
+) -> Vec<(String, relay_core::socket_status::DriftWindow)> {
+    use relay_core::{socket_status::DriftWindow, text::sanitise_line};
+    let mut found: std::collections::BTreeMap<String, DriftWindow> =
+        std::collections::BTreeMap::new();
+    for lead in &status.leads {
+        found
+            .entry(sanitise_line(&lead.version))
+            .or_insert_with(|| DriftWindow {
+                counts: relay_core::socket_status::DriftCounts::default(),
+                last: Vec::new(),
+            });
+    }
+    for v in &status.versions {
+        found.insert(sanitise_line(&v.version), v.window(now_ms));
+    }
+    found.into_iter().collect()
+}
+
+/// A last offending line as `type "t", action "a"`.
+fn shape_text(line: &relay_core::socket_status::LastDriftLine) -> String {
+    use relay_core::text::sanitise_line;
+    let part = |name: &str, value: &Option<String>| {
+        value
+            .as_deref()
+            .map(|v| format!("{name} \"{}\"", sanitise_line(v)))
+    };
+    let parts: Vec<String> = [part("type", &line.line_type), part("action", &line.action)]
+        .into_iter()
+        .flatten()
+        .collect();
+    if parts.is_empty() {
+        "no type or action".to_owned()
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// The one line `doctor` says about a version: working, drift, or listed with no verdict.
+/// None of them is a failure.
+fn version_line(version: &str, window: &relay_core::socket_status::DriftWindow) -> String {
+    let counts = &window.counts;
+    if counts.drift_total() > 0 {
+        format!(
+            "Claude Code {version}: drift in the last 24 h ({} line(s) or receipt(s) in a shape \
+             not known; see the warnings)",
+            counts.drift_total()
+        )
+    } else if counts.acknowledged > 0 {
+        format!(
+            "Claude Code {version}: working ({} socket deliveries acknowledged in the last 24 h, \
+             no drift)",
+            counts.acknowledged
+        )
+    } else {
+        format!(
+            "Claude Code {version}: no acknowledged socket delivery and no drift in the last 24 h"
+        )
+    }
+}
+
+/// The drift signals of the typed Claude Code wire formats (`claude-wire`), one warning per
+/// version and kind: warns, never fails, and never changes how a message is delivered.
+fn wire_drift(
+    versions: &[(String, relay_core::socket_status::DriftWindow)],
+    now_ms: i64,
     subject: &str,
     checks: &mut Vec<Check>,
 ) {
-    let d = &status.drift;
-    if d.control_total() > 0 {
-        checks.push(
-            Check::warn(
+    use relay_core::socket_status::DriftKind;
+    for (version, window) in versions {
+        let d = &window.counts;
+        if d.control_total() > 0 {
+            let control = [
+                DriftKind::UnrecognisedLine,
+                DriftKind::NotJsonLine,
+                DriftKind::UnknownStatusReceipt,
+            ];
+            let lines: Vec<&relay_core::socket_status::LastDriftLine> = window
+                .last
+                .iter()
+                .filter(|l| control.contains(&l.kind))
+                .collect();
+            let newest = lines.iter().max_by_key(|l| l.at_ms);
+            let last = newest.map(|l| {
+                format!(
+                    "last offending line: {}, {} ago",
+                    shape_text(l),
+                    ago(now_ms.saturating_sub(l.at_ms))
+                )
+            });
+            checks.push(
+                Check::warn(
+                    Family::Socket,
+                    Code::SocketWireDrift,
+                    Some(subject),
+                    format!(
+                        "Claude Code {version} sent {} reply-socket line(s) in a shape this build \
+                         does not know in the last 24 h ({} unrecognised, {} not JSON, {} \
+                         receipt(s) with an unknown status)",
+                        d.control_total(),
+                        d.unrecognised_lines,
+                        d.not_json_lines,
+                        d.unknown_status_receipts
+                    ),
+                    "Claude Code's cross-session formats are undocumented and can change in any \
+                     release; this version's lines no longer match the wire format the watcher \
+                     was built against",
+                    "delivery goes on (an unknown receipt leaves the batch in flight); update the \
+                     claude-wire crate's types and fixtures for this Claude Code version. The \
+                     warning ends 24 hours after the last drift",
+                )
+                .with_details(last.into_iter().chain(lines.iter().map(|l| {
+                    format!(
+                        "{:?}: last {}, {} ago",
+                        l.kind,
+                        shape_text(l),
+                        ago(now_ms.saturating_sub(l.at_ms))
+                    )
+                }))),
+            );
+        }
+        if d.transcript_shape_unrecognised > 0 {
+            let last = window
+                .last
+                .iter()
+                .find(|l| l.kind == DriftKind::TranscriptShapeUnrecognised)
+                .map(|l| {
+                    format!(
+                        "last offending transcript line: {}, {} ago",
+                        shape_text(l),
+                        ago(now_ms.saturating_sub(l.at_ms))
+                    )
+                });
+            checks.push(
+                Check::warn(
                 Family::Socket,
-                Code::SocketWireDrift,
+                Code::SocketTranscriptShapeUnrecognised,
                 Some(subject),
                 format!(
-                    "Claude Code sent {} reply-socket line(s) in a shape this build does not \
-                     know ({} unrecognised, {} not JSON, {} receipt(s) with an unknown status)",
-                    d.control_total(),
-                    d.unrecognised_lines,
-                    d.not_json_lines,
-                    d.unknown_status_receipts
+                    "Claude Code {version}: {} transcript look(s) found a message id without a \
+                     structured origin.msg_id in the last 24 h",
+                    d.transcript_shape_unrecognised
                 ),
-                "Claude Code's cross-session formats are undocumented and can change in any \
-                 release; the running version may not be the one the wire format was captured on",
-                "delivery goes on (an unknown receipt leaves the batch in flight); check the \
-                 Claude Code version against the one the wire format was captured on and update \
-                 the claude-wire crate's types and fixtures",
+                "Claude Code's transcript shape may have changed: such a message is acknowledged \
+                 as received but unconfirmed (its transcript names it), with no herdr fallback and \
+                 no redelivery; it can also be a lead that read socket-<pid>.json, which lists \
+                 held message ids",
+                "update the claude-wire crate's transcript type and fixtures for this Claude Code \
+                 version. The warning ends 24 hours after the last drift",
             )
-            .with_details([format!(
-                "wire format captured on Claude Code {}",
-                claude_wire::CAPTURED_ON
-            )]),
-        );
-    }
-    if d.transcript_shape_unrecognised > 0 {
-        checks.push(Check::warn(
-            Family::Socket,
-            Code::SocketTranscriptShapeUnrecognised,
-            Some(subject),
-            format!(
-                "{} transcript look(s) found a message id without a structured origin.msg_id",
-                d.transcript_shape_unrecognised
-            ),
-            "Claude Code's transcript shape may have changed: such a message is acknowledged as \
-             received but unconfirmed (its transcript names it), with no herdr fallback and no \
-             redelivery; it can also be a lead that read socket-<pid>.json, which lists held \
-             message ids",
-            "check the Claude Code version against the one the wire format was captured on and \
-             update the claude-wire crate's transcript type and fixtures",
-        ));
+            .with_details(last),
+            );
+        }
     }
 }
 
@@ -1093,12 +1206,169 @@ fn spool(f: &Facts, checks: &mut Vec<Check>) {
     }
 }
 
+/// Who a failure belongs to: its machine and session id, or, when it has no session id,
+/// its machine and lead.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct FailingSession {
+    machine: MachineName,
+    session_id: Option<String>,
+    lead: Option<String>,
+}
+
+impl FailingSession {
+    fn of(r: &SpoolRecord) -> Self {
+        Self {
+            machine: r.machine.clone(),
+            session_id: r.session_id.clone(),
+            // A record with a session id is that session whatever lead it held.
+            lead: if r.session_id.is_some() {
+                None
+            } else {
+                r.lead.clone()
+            },
+        }
+    }
+}
+
+/// What the failures of the last 24 hours say about their severity.
+struct FailureRules {
+    /// Failures under 15 minutes old, fleet-wide.
+    recent: usize,
+    /// The sessions that failed in at least [`FAIL_SESSION_WINDOWS`] distinct windows of the
+    /// last hour with their newest failure under 15 minutes old.
+    persistent: Vec<FailingSession>,
+}
+
+impl FailureRules {
+    fn of(now_ms: i64, records: &[&SpoolRecord]) -> Self {
+        let age = |r: &SpoolRecord| now_ms.saturating_sub(r.at_ms);
+        let mut windows: BTreeMap<FailingSession, BTreeSet<i64>> = BTreeMap::new();
+        for r in records {
+            let a = age(r);
+            if (0..SESSION_WINDOWS * RECENT_FAILURE_MS).contains(&a) {
+                windows
+                    .entry(FailingSession::of(r))
+                    .or_default()
+                    .insert(a / RECENT_FAILURE_MS);
+            }
+        }
+        Self {
+            recent: records
+                .iter()
+                .filter(|r| age(r) < RECENT_FAILURE_MS)
+                .count(),
+            persistent: windows
+                .into_iter()
+                .filter(|(_, w)| w.len() >= FAIL_SESSION_WINDOWS && w.contains(&0))
+                .map(|(s, _)| s)
+                .collect(),
+        }
+    }
+
+    /// Which rule makes the check a `fail`, if one does.
+    fn failing(&self) -> Option<String> {
+        if self.recent >= FAIL_RECENT_COUNT {
+            Some(format!(
+                "fail by rule (a): {} failures are under 15 minutes old, fleet-wide (threshold {FAIL_RECENT_COUNT})",
+                self.recent
+            ))
+        } else {
+            self.persistent.first().map(|s| {
+                format!(
+                    "fail by rule (b): session {} on {} failed in at least {FAIL_SESSION_WINDOWS} distinct 15-minute windows of the last hour and again in the last 15 minutes",
+                    s.session_id.as_deref().or(s.lead.as_deref()).unwrap_or("?"),
+                    s.machine
+                )
+            })
+        }
+    }
+}
+
+/// The detail lines naming the sessions and machines with the most failures.
+fn top_failure_lines(now_ms: i64, records: &[&SpoolRecord]) -> Vec<String> {
+    /// Failures of one session or machine.
+    struct Tally<'a> {
+        count: usize,
+        newest_ms: i64,
+        lead: Option<&'a str>,
+        kinds: BTreeMap<(String, String), usize>,
+    }
+    fn tally<'a, K: Ord>(
+        records: &[&'a SpoolRecord],
+        key: impl Fn(&SpoolRecord) -> K,
+    ) -> Vec<(K, Tally<'a>)> {
+        let mut by: BTreeMap<K, Tally<'a>> = BTreeMap::new();
+        for r in records {
+            let t = by.entry(key(r)).or_insert_with(|| Tally {
+                count: 0,
+                newest_ms: i64::MIN,
+                lead: None,
+                kinds: BTreeMap::new(),
+            });
+            t.count += 1;
+            if r.at_ms >= t.newest_ms {
+                t.newest_ms = r.at_ms;
+                t.lead = r.lead.as_deref();
+            }
+            *t.kinds
+                .entry((wire_name(&r.stage), wire_name(&r.error_kind)))
+                .or_default() += 1;
+        }
+        let mut out: Vec<_> = by.into_iter().collect();
+        out.sort_by(|a, b| {
+            b.1.count
+                .cmp(&a.1.count)
+                .then(b.1.newest_ms.cmp(&a.1.newest_ms))
+        });
+        out
+    }
+    let repeats = |t: &Tally<'_>| {
+        t.kinds
+            .iter()
+            .max_by_key(|(_, n)| **n)
+            .map_or_else(String::new, |((stage, kind), _)| {
+                format!("{stage} / {kind}")
+            })
+    };
+    let mut lines = Vec::new();
+    for (s, t) in tally(records, FailingSession::of)
+        .into_iter()
+        .take(TOP_HOOK_FAILURES)
+    {
+        lines.push(format!(
+            "session {} on {} (lead {}): {} failure(s), mostly {}, newest {} ago",
+            s.session_id.as_deref().unwrap_or("(none)"),
+            s.machine,
+            t.lead.unwrap_or("?"),
+            t.count,
+            repeats(&t),
+            ago(now_ms.saturating_sub(t.newest_ms))
+        ));
+    }
+    for (machine, t) in tally(records, |r| r.machine.clone())
+        .into_iter()
+        .take(TOP_HOOK_FAILURES)
+    {
+        lines.push(format!(
+            "machine {machine}: {} failure(s), mostly {}, newest {} ago",
+            t.count,
+            repeats(&t),
+            ago(now_ms.saturating_sub(t.newest_ms))
+        ));
+    }
+    lines
+}
+
 fn bus_failures(f: &Facts, up: &RedisUp, checks: &mut Vec<Check>) {
     let Ok(failures) = &up.hook_failures else {
         return;
     };
+    // A failure is counted once per record id: a second stream entry with an id already
+    // counted adds nothing to any count or rule (FR-030).
+    let mut seen = HashSet::new();
     let recent: Vec<&SpoolRecord> = failures
         .iter()
+        .filter(|b| b.id.as_deref().is_none_or(|id| seen.insert(id)))
         .filter_map(|BusFailure { record, .. }| record.as_ref())
         .filter(|r| f.now_ms.saturating_sub(r.at_ms) < DAY_MS)
         .collect();
@@ -1111,23 +1381,24 @@ fn bus_failures(f: &Facts, up: &RedisUp, checks: &mut Vec<Check>) {
         ));
         return;
     }
-    let mut details = group_lines(&recent);
+    let rules = FailureRules::of(f.now_ms, &recent);
+    let failing = rules.failing();
+    let mut details: Vec<String> = failing.iter().cloned().collect();
+    details.extend(top_failure_lines(f.now_ms, &recent));
+    details.extend(group_lines(&recent));
     if undecodable > 0 {
         details.push(format!("{undecodable} record(s) on the bus do not decode"));
     }
-    let now_bad = recent
-        .iter()
-        .filter(|r| f.now_ms.saturating_sub(r.at_ms) < RECENT_FAILURE_MS)
-        .count();
     checks.push(
         Check::severe(
-            now_bad > 0,
+            failing.is_some(),
             Family::HookFailures,
             Code::HookFailuresRecorded,
             None,
             format!(
-                "{} hook failure(s) were recorded in the last 24 hours, {now_bad} in the last 15 minutes",
-                recent.len()
+                "{} hook failure(s) were recorded in the last 24 hours, {} in the last 15 minutes",
+                recent.len(),
+                rules.recent
             ),
             "hooks failed on some machine: Redis unreachable, a budget spent, an output pipe closed",
             "the stage / error_kind lines say where; a repeated `connect` is a link problem (see `redis_unreachable`)",
@@ -1841,6 +2112,7 @@ mod tests {
         at_ms: i64,
     ) -> SpoolRecord {
         SpoolRecord {
+            id: String::new(),
             at_ms,
             machine: machine.parse().unwrap(),
             lead: Some("a".into()),
@@ -1852,6 +2124,19 @@ mod tests {
             candidate: None,
             messages: Vec::new(),
         }
+    }
+
+    /// Bus entries for `records`, each with an id of its own.
+    fn bus_failures_of(records: impl IntoIterator<Item = SpoolRecord>) -> Vec<BusFailure> {
+        records
+            .into_iter()
+            .enumerate()
+            .map(|(n, r)| BusFailure {
+                id: Some(format!("id-{n}")),
+                machine: r.machine.clone(),
+                record: Some(r),
+            })
+            .collect()
     }
 
     fn statuses(f: &Facts) -> Vec<(Code, Status)> {
@@ -2324,13 +2609,14 @@ mod tests {
                 f.spool = SpoolState::Unreadable("denied".into());
             }),
             (Code::HookFailuresRecorded, Fail, |f| {
-                up(f).hook_failures = Ok(vec![BusFailure {
-                    machine: "hub".parse().unwrap(),
-                    record: Some(record(Stage::Pop, K::Timeout, "hub", NOW - 60_000)),
-                }]);
+                up(f).hook_failures =
+                    Ok(bus_failures_of((0..50).map(|n| {
+                        record(Stage::Pop, K::Timeout, "hub", NOW - 60_000 - n)
+                    })));
             }),
             (Code::HookFailuresRecorded, Warn, |f| {
                 up(f).hook_failures = Ok(vec![BusFailure {
+                    id: None,
                     machine: "hub".parse().unwrap(),
                     record: Some(record(Stage::Pop, K::Timeout, "hub", NOW - 5 * HOUR_MS)),
                 }]);
@@ -2543,6 +2829,241 @@ mod tests {
         assert_eq!(inbox.details, ["a: 2 waiting, oldest 4s"]);
     }
 
+    fn hook_check(f: &Facts) -> Check {
+        evaluate(f)
+            .into_iter()
+            .find(|c| c.code == Code::HookFailuresRecorded)
+            .expect("hook_failures_recorded")
+    }
+
+    /// A failure of `session` on `machine`, `ago_ms` before the check.
+    fn failure(machine: &str, session: Option<&str>, ago_ms: i64) -> SpoolRecord {
+        let mut r = record(
+            Stage::Connect,
+            crate::spool::ErrorKind::Connection,
+            machine,
+            NOW - ago_ms,
+        );
+        r.session_id = session.map(str::to_owned);
+        r
+    }
+
+    /// Tracing: TC-029-14
+    /// ACs: FR-029-AC-14
+    ///
+    /// One recent record, 49 failures over several machines within 15 minutes, or a burst of
+    /// 100 from one session 20 to 30 minutes old is a warn; 50 under 15 minutes old, spread
+    /// over machines or from one session, is a fail; 50 stream entries carrying 49 ids are 49
+    /// failures, a warn.
+    #[test]
+    fn tc_029_14_only_fifty_recent_failures_fail_the_check() {
+        let status_of = |records: Vec<BusFailure>| {
+            let mut f = healthy();
+            up(&mut f).hook_failures = Ok(records);
+            hook_check(&f).status
+        };
+        let min = 60_000;
+        assert_eq!(
+            status_of(bus_failures_of([failure("hub", Some("s"), 2 * min)])),
+            Status::Warn
+        );
+        assert_eq!(
+            status_of(bus_failures_of((0..49).map(|n| failure(
+                ["hub", "node-a", "node-b"][n % 3],
+                Some(&format!("s{n}")),
+                min + 10_000 * n as i64
+            )))),
+            Status::Warn,
+            "49 over several machines"
+        );
+        assert_eq!(
+            status_of(bus_failures_of((0..100).map(|n| failure(
+                "hub",
+                Some("burst"),
+                20 * min + 6_000 * n
+            )))),
+            Status::Warn,
+            "a burst of 100 from one session, all 20 to 30 minutes old"
+        );
+        assert_eq!(
+            status_of(bus_failures_of((0..50).map(|n| failure(
+                ["hub", "node-a"][(n % 2) as usize],
+                Some(&format!("s{n}")),
+                min + 1_000 * n
+            )))),
+            Status::Fail,
+            "50 under 15 minutes old over machines"
+        );
+        assert_eq!(
+            status_of(bus_failures_of((0..50).map(|n| failure(
+                "hub",
+                Some("one"),
+                min + 1_000 * n
+            )))),
+            Status::Fail,
+            "50 from one session"
+        );
+        // 50 stream entries that carry only 49 distinct ids.
+        let mut entries =
+            bus_failures_of((0..50).map(|n| failure("hub", Some("x"), min + 1_000 * n)));
+        entries[49].id = entries[48].id.clone();
+        assert_eq!(status_of(entries), Status::Warn, "an id is counted once");
+        // The 49th and 50th windows: exactly 15 minutes old is not under 15 minutes.
+        assert_eq!(
+            status_of(bus_failures_of((0..50).map(|n| failure(
+                "hub",
+                Some("edge"),
+                15 * min + n
+            )))),
+            Status::Warn
+        );
+    }
+
+    /// Tracing: TC-029-15
+    /// ACs: FR-029-AC-15
+    ///
+    /// One session that failed 84 times over the last hour, in at least three distinct
+    /// 15-minute windows (counted back from the check) and most recently three minutes ago,
+    /// is a fail; the same records with the newest 20 minutes old are a warn.
+    #[test]
+    fn tc_029_15_a_session_failing_across_three_windows_fails_the_check() {
+        let min = 60_000;
+        let session = |newest_min: i64| {
+            // 84 failures spread over the hour ending `newest_min` minutes before the check.
+            bus_failures_of(
+                (0..84)
+                    .map(|n| failure("hub", Some("keeps-failing"), newest_min * min + n * 40_000)),
+            )
+        };
+        let mut f = healthy();
+        up(&mut f).hook_failures = Ok(session(3));
+        let check = hook_check(&f);
+        assert_eq!(check.status, Status::Fail);
+        assert!(
+            check.details.iter().any(|d| d.contains("rule (b)")),
+            "{:?}",
+            check.details
+        );
+        up(&mut f).hook_failures = Ok(session(20));
+        assert_eq!(hook_check(&f).status, Status::Warn);
+        // Two windows are not enough, however recent.
+        up(&mut f).hook_failures = Ok(bus_failures_of(
+            (0..60).map(|n| failure("hub", Some("two"), min + n * 20_000)),
+        ));
+        assert_eq!(hook_check(&f).status, Status::Warn, "two windows only");
+        // The windows are counted back from the check, not aligned to the clock: three
+        // failures 1, 16 and 31 minutes old are three windows whenever the check runs.
+        up(&mut f).hook_failures = Ok(bus_failures_of(
+            [1, 16, 31].map(|m| failure("hub", Some("spaced"), m * min)),
+        ));
+        assert_eq!(hook_check(&f).status, Status::Fail);
+        // Records with no session id are grouped by machine and lead.
+        let no_session = |lead: &str| {
+            bus_failures_of([1, 16, 31].map(|m| {
+                let mut r = failure("hub", None, m * min);
+                r.lead = Some(lead.to_owned());
+                r
+            }))
+        };
+        up(&mut f).hook_failures = Ok(no_session("the-lead"));
+        assert_eq!(hook_check(&f).status, Status::Fail);
+        // Three different leads with one failure per window each are not one session.
+        let mixed: Vec<BusFailure> = ["a", "b", "c"]
+            .into_iter()
+            .zip([1, 16, 31])
+            .flat_map(|(lead, m)| {
+                let mut r = failure("hub", None, m * min);
+                r.lead = Some(lead.to_owned());
+                bus_failures_of([r])
+            })
+            .collect();
+        up(&mut f).hook_failures = Ok(mixed);
+        assert_eq!(hook_check(&f).status, Status::Warn);
+    }
+
+    /// Tracing: TC-029-16
+    /// ACs: FR-029-AC-16
+    ///
+    /// The detail names the three sessions and the three machines with the most failures,
+    /// with their counts, the stage and kind that repeat most and the newest time, and no
+    /// text taken from a failure message.
+    #[test]
+    fn tc_029_16_the_detail_names_the_top_sessions_and_machines() {
+        let min = 60_000;
+        let mut records = Vec::new();
+        for (machine, session, count) in [
+            ("hub", "sess-a", 9),
+            ("node-a", "sess-b", 6),
+            ("node-b", "sess-c", 4),
+            ("node-c", "sess-d", 2),
+            ("node-d", "sess-e", 1),
+        ] {
+            for n in 0..count {
+                records.push(failure(machine, Some(session), (n + 1) * min));
+            }
+        }
+        let mut lost = failure("hub", Some("sess-a"), min / 2);
+        lost.stage = Stage::RequeueFailed;
+        lost.messages = vec![Message {
+            from: name("x"),
+            to: "a".parse().unwrap(),
+            text: "SECRET MESSAGE TEXT".into(),
+            sent_at_ms: 1,
+            forwarded: false,
+        }];
+        records.push(lost);
+        let mut f = healthy();
+        up(&mut f).hook_failures = Ok(bus_failures_of(records));
+        let check = hook_check(&f);
+        let sessions: Vec<&String> = check
+            .details
+            .iter()
+            .filter(|d| d.starts_with("session "))
+            .collect();
+        assert_eq!(sessions.len(), 3, "{:?}", check.details);
+        assert!(
+            sessions[0].contains("sess-a")
+                && sessions[0].contains("on hub")
+                && sessions[0].contains("10 failure(s)"),
+            "{}",
+            sessions[0]
+        );
+        assert!(sessions[0].contains("connect / connection") && sessions[0].contains("ago"));
+        assert!(sessions[1].contains("sess-b") && sessions[1].contains("6 failure(s)"));
+        assert!(sessions[2].contains("sess-c") && sessions[2].contains("4 failure(s)"));
+        let machines: Vec<&String> = check
+            .details
+            .iter()
+            .filter(|d| d.starts_with("machine "))
+            .collect();
+        assert_eq!(machines.len(), 3, "{:?}", check.details);
+        assert!(
+            machines[0].starts_with("machine hub: 10 failure(s)"),
+            "{}",
+            machines[0]
+        );
+        assert!(
+            machines[1].starts_with("machine node-a: 6"),
+            "{}",
+            machines[1]
+        );
+        assert!(
+            machines[2].starts_with("machine node-b: 4"),
+            "{}",
+            machines[2]
+        );
+        assert!(
+            !check
+                .details
+                .iter()
+                .filter(|d| d.starts_with("session ") || d.starts_with("machine "))
+                .any(|d| d.contains("sess-d") || d.contains("node-d")),
+            "only the top three"
+        );
+        // The requeue_failed line keeps its own rule (the only copy of the messages).
+        assert!(check.details.iter().any(|d| d.contains("requeue_failed")));
+    }
+
     /// The spool's `dropped` count (records dropped for the bound, lines removed
     /// unreadable) is shown, not only carried on the record.
     #[test]
@@ -2552,6 +3073,7 @@ mod tests {
         let mut flush = record(Stage::Decode, K::Corrupt, "hub", NOW - 1_000);
         flush.dropped = 3;
         up(&mut f).hook_failures = Ok(vec![BusFailure {
+            id: None,
             machine: flush.machine.clone(),
             record: Some(flush),
         }]);
@@ -2716,6 +3238,7 @@ mod tests {
         up(&mut f).hook_failures = Ok(entries
             .into_iter()
             .map(|r| BusFailure {
+                id: None,
                 machine: r.machine.clone(),
                 record: Some(r),
             })
@@ -2948,52 +3471,148 @@ mod tests {
             .collect()
     }
 
+    /// A status whose versions hold the drift `book` was given, as the watcher writes it.
+    fn status_with(
+        leads: &[&str],
+        fill: impl FnOnce(&mut relay_core::socket_status::DriftBook),
+    ) -> relay_core::socket_status::SocketStatus {
+        let mut book = relay_core::socket_status::DriftBook::default();
+        fill(&mut book);
+        let mut status = socket_status(&[], &[], true);
+        status.leads = leads
+            .iter()
+            .map(|v| relay_core::socket_status::LeadSocket {
+                lead: format!("lead-{v}"),
+                pid: 9,
+                socket: "/run/user/1/cc-socks/9.sock".into(),
+                version: (*v).into(),
+            })
+            .collect();
+        status.versions = book.snapshot(NOW);
+        status
+    }
+
+    fn all_text(found: &[Check]) -> String {
+        found
+            .iter()
+            .flat_map(|c| {
+                [
+                    c.message.clone(),
+                    c.cause.clone().unwrap_or_default(),
+                    c.fix.clone().unwrap_or_default(),
+                ]
+                .into_iter()
+                .chain(c.details.clone())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Tracing: TC-046-10
     /// ACs: FR-046-AC-10
     ///
-    /// Doctor shows the version the wire format was captured on, and says so when a
-    /// resolved Claude Code is another version; neither is ever a failure.
+    /// Each version is working, in drift (a warning with its counts, the last line's type and
+    /// action and when) or listed with no verdict; none says `unverified`, none is a failure,
+    /// whatever the captured version.
     #[test]
-    fn tc_046_10_doctor_shows_the_captured_version_and_flags_an_unverified_one() {
-        let found = socket_checks(socket_status(&[], &[], true));
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].status, Status::Ok);
+    fn tc_046_10_doctor_says_working_drift_or_nothing_for_each_version() {
+        use relay_core::socket_status::DriftKind;
+        let status = status_with(&["2.1.302", "2.1.303", "2.1.290"], |book| {
+            book.acknowledged("2.1.302", NOW - 60_000);
+            book.acknowledged("2.1.303", NOW - 120_000);
+            book.record(
+                "2.1.303",
+                DriftKind::NotJsonLine,
+                None,
+                None,
+                NOW - 5 * 60_000,
+            );
+        });
+        let found = socket_checks(status);
+        assert!(found.iter().all(|c| c.status != Status::Fail));
+        let text = all_text(&found);
+        assert!(!text.contains("unverified"), "{text}");
+        assert!(text.contains("Claude Code 2.1.302: working"), "{text}");
         assert!(
-            found[0]
+            text.contains("Claude Code 2.1.290: no acknowledged socket delivery and no drift"),
+            "{text}"
+        );
+        assert!(!text.contains("2.1.290: working") && !text.contains("2.1.290: drift"));
+        let drift = found
+            .iter()
+            .find(|c| c.code == Code::SocketWireDrift)
+            .expect("2.1.303 warns");
+        assert_eq!(drift.status, Status::Warn);
+        assert!(drift.message.contains("2.1.303"), "{}", drift.message);
+        assert!(drift.message.contains("1 not JSON"), "{}", drift.message);
+        assert!(
+            drift
                 .details
                 .iter()
-                .any(|d| d.contains("captured on Claude Code 2.1.283")),
+                .any(|d| d.contains("last offending line") && d.contains("5m ago")),
             "{:?}",
-            found[0].details
+            drift.details
         );
-        assert!(!found[0].message.contains("unverified"));
-        let mut newer = socket_status(&[], &[], true);
-        newer.leads[0].version = "2.1.290".into();
-        let found = socket_checks(newer);
-        assert_eq!(found.len(), 1);
-        assert_ne!(found[0].status, Status::Fail);
-        assert!(
-            found[0]
-                .message
-                .contains("wire format captured on 2.1.283; running 2.1.290: unverified"),
-            "{}",
-            found[0].message
+        assert_eq!(
+            found
+                .iter()
+                .filter(|c| c.code == Code::SocketWireDrift)
+                .count(),
+            1,
+            "one per version"
         );
+        // Whatever the captured version: a version other than it is not a finding.
+        let other = socket_checks(status_with(&["9.9.9"], |_| {}));
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].status, Status::Ok);
+        assert!(!all_text(&other).contains("unverified"));
     }
 
     /// Tracing: TC-046-11
     /// ACs: FR-046-AC-11
     ///
-    /// Drift counts surface as their own warns, with the counts, and never fail.
+    /// Reply-socket drift and transcript drift are their own warnings, one per version,
+    /// naming the version, the counts and the last offending line's type and action; never
+    /// a failure; none when there is none.
     #[test]
-    fn tc_046_11_doctor_warns_on_wire_drift_and_an_unrecognised_transcript_shape() {
-        let mut status = socket_status(&[], &[], true);
-        status.drift = relay_core::socket_status::WireDrift {
-            unrecognised_lines: 2,
-            not_json_lines: 1,
-            unknown_status_receipts: 4,
-            transcript_shape_unrecognised: 3,
-        };
+    fn tc_046_11_doctor_warns_per_version_on_wire_drift_and_transcript_shape() {
+        use relay_core::socket_status::DriftKind;
+        let status = status_with(&[], |book| {
+            for _ in 0..2 {
+                book.record(
+                    "2.1.310",
+                    DriftKind::UnrecognisedLine,
+                    Some("control"),
+                    Some("peer_status"),
+                    NOW - 90_000,
+                );
+            }
+            book.record(
+                "2.1.310",
+                DriftKind::NotJsonLine,
+                None,
+                None,
+                NOW - 3_600_000,
+            );
+            for _ in 0..4 {
+                book.record(
+                    "2.1.310",
+                    DriftKind::UnknownStatusReceipt,
+                    Some("control"),
+                    Some("peer_message_status"),
+                    NOW - 7_200_000,
+                );
+            }
+            for _ in 0..3 {
+                book.record(
+                    "2.1.311",
+                    DriftKind::TranscriptShapeUnrecognised,
+                    Some("queue-operation"),
+                    None,
+                    NOW - 30_000,
+                );
+            }
+        });
         let found = socket_checks(status);
         let codes: Vec<_> = found.iter().map(|c| (c.code, c.status)).collect();
         assert!(
@@ -3009,25 +3628,160 @@ mod tests {
             .iter()
             .find(|c| c.code == Code::SocketWireDrift)
             .unwrap();
+        for needle in [
+            "Claude Code 2.1.310",
+            "7 reply-socket line(s)",
+            "2 unrecognised, 1 not JSON, 4 receipt(s)",
+        ] {
+            assert!(
+                drift.message.contains(needle),
+                "{needle}: {}",
+                drift.message
+            );
+        }
         assert!(
-            drift.message.contains("7 reply-socket line(s)")
-                && drift
-                    .message
-                    .contains("2 unrecognised, 1 not JSON, 4 receipt(s)"),
-            "{}",
-            drift.message
+            drift.details.iter().any(|d| d.contains(
+                "last offending line: type \"control\", action \"peer_status\", 90s ago"
+            )),
+            "{:?}",
+            drift.details
         );
         let shape = found
             .iter()
             .find(|c| c.code == Code::SocketTranscriptShapeUnrecognised)
             .unwrap();
+        for needle in ["2.1.311", "3 transcript look(s)"] {
+            assert!(
+                shape.message.contains(needle),
+                "{needle}: {}",
+                shape.message
+            );
+        }
         assert!(
-            shape.message.contains("3 transcript look(s)"),
-            "{}",
-            shape.message
+            shape
+                .details
+                .iter()
+                .any(|d| d.contains("type \"queue-operation\"")),
+            "{:?}",
+            shape.details
         );
-        // No drift, no extra checks.
-        assert_eq!(socket_checks(socket_status(&[], &[], true)).len(), 1);
+        // No drift, neither warning.
+        let quiet = socket_checks(socket_status(&[], &[], true));
+        assert_eq!(quiet.len(), 1);
+        assert!(!quiet.iter().any(|c| matches!(
+            c.code,
+            Code::SocketWireDrift | Code::SocketTranscriptShapeUnrecognised
+        )));
+    }
+
+    /// Tracing: TC-046-16
+    /// ACs: FR-046-AC-16
+    ///
+    /// Drift the watcher wrote 25 hours ago and nothing since is gone from `doctor`'s
+    /// output, and a version with acknowledged deliveries reads as working; drift 23 hours
+    /// ago is still there. `doctor` windows what it reads by its own clock.
+    #[test]
+    fn tc_046_16_doctor_ignores_drift_older_than_a_day() {
+        use relay_core::socket_status::DriftKind;
+        for (ago_hours, warns) in [(25_i64, false), (23, true)] {
+            let at = NOW - ago_hours * 3_600_000;
+            let mut book = relay_core::socket_status::DriftBook::default();
+            book.acknowledged("2.1.320", NOW - 600_000);
+            book.record("2.1.320", DriftKind::NotJsonLine, Some("x"), None, at);
+            let mut status = socket_status(&[], &[], true);
+            // As written when the drift happened, the acknowledgement added since.
+            status.versions = book.snapshot(NOW - 600_000);
+            let found = socket_checks(status);
+            let text = all_text(&found);
+            assert_eq!(
+                found.iter().any(|c| c.code == Code::SocketWireDrift),
+                warns,
+                "{ago_hours}h: {text}"
+            );
+            assert_eq!(
+                text.contains("2.1.320: working"),
+                !warns,
+                "{ago_hours}h: {text}"
+            );
+        }
+    }
+
+    /// Tracing: TC-046-17
+    /// ACs: FR-046-AC-17
+    ///
+    /// What `doctor` prints of a status file it did not write holds no control character,
+    /// whatever the file says.
+    #[test]
+    fn tc_046_17_doctor_prints_no_control_character_from_the_status_file() {
+        use relay_core::socket_status::{DriftBucket, DriftCounts, LastDriftLine, VersionDrift};
+        let mut status = socket_status(&[], &[], true);
+        status.versions = vec![VersionDrift {
+            version: "2.1.\u{1b}[31m330".into(),
+            buckets: vec![DriftBucket {
+                hour: NOW / 3_600_000,
+                counts: DriftCounts {
+                    not_json_lines: 1,
+                    ..DriftCounts::default()
+                },
+            }],
+            last: vec![LastDriftLine {
+                kind: relay_core::socket_status::DriftKind::NotJsonLine,
+                at_ms: NOW,
+                line_type: Some("ty\u{7}pe".into()),
+                action: Some("ac\u{202e}tion".into()),
+            }],
+        }];
+        let text = all_text(&socket_checks(status));
+        assert!(text.contains("330"), "{text}");
+        assert!(
+            !text
+                .chars()
+                .any(|c| (c.is_control() && c != '\n') || c == '\u{202e}'),
+            "{text:?}"
+        );
+    }
+
+    /// Tracing: TC-054-03
+    /// ACs: FR-054-AC-3
+    ///
+    /// A status file with no entry and no note for the codex and opencode leads (the watcher
+    /// creates none) gives no warning, no using-herdr count and no note; one with a note for a
+    /// `claude` lead warns for that lead only.
+    #[test]
+    fn tc_054_03_doctor_does_not_warn_about_leads_that_do_not_try_the_socket() {
+        let mut quiet = socket_status(&[], &[], true);
+        quiet.leads.clear();
+        let found = socket_checks(quiet);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].status, Status::Ok);
+        assert!(
+            found[0].message.contains("0 using herdr"),
+            "{}",
+            found[0].message
+        );
+        assert!(!found[0].message.contains("codex") && !found[0].message.contains("opencode"));
+
+        let warned = socket_checks(socket_status(
+            &[],
+            &["ea: no Claude Code session record names this session"],
+            true,
+        ));
+        assert_eq!(warned.len(), 1);
+        assert_eq!(warned[0].code, Code::SocketFallback);
+        assert_eq!(warned[0].status, Status::Warn);
+        assert!(
+            warned[0].message.contains("1 using herdr"),
+            "{}",
+            warned[0].message
+        );
+        assert!(
+            warned[0]
+                .details
+                .iter()
+                .any(|d| d.starts_with("ea: no Claude Code session record")),
+            "{:?}",
+            warned[0].details
+        );
     }
 
     /// Tracing: TC-044-09

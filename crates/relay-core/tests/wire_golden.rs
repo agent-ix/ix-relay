@@ -214,6 +214,7 @@ fn what_redis_holds_is_byte_identical_to_main() {
 
     bus.relay
         .push_hook_health(&[relay_core::HookHealthEntry {
+            id: Some("rec-1".into()),
             machine: "node-a".parse().unwrap(),
             lead: Some("qsl-lead".into()),
             record: r#"{"at_ms":1}"#.into(),
@@ -237,6 +238,7 @@ fn what_redis_holds_is_byte_identical_to_main() {
         [
             ("machine".to_owned(), "node-a".to_owned()),
             ("lead".to_owned(), "qsl-lead".to_owned()),
+            ("id".to_owned(), "rec-1".to_owned()),
             ("rec".to_owned(), r#"{"at_ms":1}"#.to_owned()),
         ]
     );
