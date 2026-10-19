@@ -9,6 +9,12 @@
     reason = "test code: a failed unwrap is the failure signal; included by several test binaries that each fire a different subset, so #[expect] would be unfulfilled in some"
 )]
 
+#[allow(
+    dead_code,
+    reason = "shared fixtures used by different integration binaries"
+)]
+pub mod location;
+
 use std::{
     io::Write,
     path::{Path, PathBuf},
@@ -134,6 +140,32 @@ pub fn base_cmd(args: &[&str], name: Option<&str>) -> Command {
     cmd.env_remove("IX_RELAY_WATCHER_INTERVAL_SECS");
     cmd.env("IX_RELAY_CONFIG", nonexistent_config_path());
     cmd.env_remove("HERDR_PANE_ID");
+    cmd.env_remove("CODEX_THREAD_ID");
+    cmd.env_remove("HERDR_ENV");
+    if matches!(name, Some("hub:EA:code" | "hub:EA:sender" | "hub:qsl:code")) {
+        let config = cmd
+            .get_envs()
+            .find(|(key, _)| *key == "IX_RELAY_CONFIG")
+            .and_then(|(_, v)| v)
+            .unwrap();
+        let directory = Path::new(config).parent().unwrap().to_owned();
+        std::fs::create_dir_all(&directory).unwrap();
+        write_transport_herdr(&directory);
+        cmd.env("HERDR_ENV", "1")
+            .env("IX_RELAY_MACHINE", "hub")
+            .env(
+                "CODEX_THREAD_ID",
+                if matches!(name, Some("hub:EA:code" | "hub:qsl:code")) {
+                    "s1"
+                } else {
+                    "sender-session"
+                },
+            )
+            .env(
+                "PATH",
+                format!("{}:{}", directory.display(), std::env::var("PATH").unwrap()),
+            );
+    }
     cmd
 }
 
@@ -401,4 +433,77 @@ pub fn ran_out_of_time(records: &[serde_json::Value]) -> bool {
         );
     }
     hit
+}
+
+/// Genuine two-lead topology for transport tests that operate through a TCP proxy.
+#[allow(dead_code, reason = "shared helper")]
+pub fn transport_topology(cmd: &mut Command) -> Scratch {
+    let dir = Scratch::new("ix-relay-transport-herdr-");
+    let agents = r#"[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle","agent_session":{"kind":"id","value":"s1"}},{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1","agent_status":"idle","agent_session":{"kind":"id","value":"sender-session"}}]"#;
+    let body = format!(
+        r#"#!/usr/bin/env bash
+case "$1 $2" in
+"agent list") printf '%s\n' '{{"result":{{"agents":{agents}}}}}' ;;
+"workspace list") printf '%s\n' '{{"result":{{"workspaces":[{{"workspace_id":"w1","label":"EA"}}]}}}}' ;;
+"tab list") printf '%s\n' '{{"result":{{"tabs":[{{"tab_id":"w1:t1","label":"code"}},{{"tab_id":"w1:t2","label":"sender"}}]}}}}' ;;
+*) exit 1 ;;
+esac
+"#
+    );
+    std::fs::write(dir.join("herdr"), body).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir.join("herdr"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    cmd.env("HERDR_ENV", "1")
+        .env("IX_RELAY_MACHINE", "hub")
+        .env("CODEX_THREAD_ID", "sender-session")
+        .env(
+            "PATH",
+            format!("{}:{}", dir.display(), std::env::var("PATH").unwrap()),
+        );
+    dir
+}
+
+#[allow(dead_code, reason = "shared fixture")]
+fn write_transport_herdr(directory: &Path) {
+    let script = r#"#!/usr/bin/env python3
+import sys,json
+args=sys.argv[1:]
+if '--session' in args:
+ i=args.index('--session'); del args[i:i+2]
+if '--machine' in args:
+ i=args.index('--machine'); del args[i:i+2]
+key=args[0]
+if key=='machine':
+ print(json.dumps([{'label':s,'enabled':True,'target':'fixture-'+s,'session':'default'} for s in ['hub','node-a','terra']]))
+else:
+ data={
+ 'agent': {'agents':[
+  {'pane_id':'w1:p1','tab_id':'w1:t1','workspace_id':'w1','agent_status':'idle','agent_session':{'kind':'id','value':'s1'}},
+  {'pane_id':'w1:p2','tab_id':'w1:t2','workspace_id':'w1','agent_status':'idle','agent_session':{'kind':'id','value':'sender-session'}}]},
+ 'workspace': {'workspaces':[{'workspace_id':'w1','label':'EA'}]},
+ 'tab': {'tabs':[{'tab_id':'w1:t1','label':'code'},{'tab_id':'w1:t2','label':'sender'}]}
+ }
+ print(json.dumps({'result':data[key]}))
+"#;
+    std::fs::write(
+        directory.join("ssh"),
+        r#"#!/usr/bin/env python3
+import os,sys,shlex,subprocess
+args=shlex.split(sys.argv[-1]);i=args.index('herdr');args=args[i+1:]
+raise SystemExit(subprocess.run([os.path.join(os.path.dirname(__file__),'herdr'),*args]).returncode)
+"#,
+    )
+    .unwrap();
+    std::fs::write(directory.join("herdr"), script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(
+        directory.join("ssh"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        directory.join("herdr"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
 }

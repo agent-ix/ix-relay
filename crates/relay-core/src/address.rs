@@ -1,9 +1,5 @@
-//! Human-readable agent addresses: `server:workspace[:tab[:pane]]`, e.g. `hub:EA:1`
-//! or `node-a:research`.
-//!
-//! Addresses follow Herdr's machine/workspace/tab/pane hierarchy. Workspace
-//! and tab labels are used for readable prefixes; the optional pane segment is
-//! Herdr's pane id, with stable Herdr IDs cached underneath the labels.
+//! Public lead locations are `server:workspace:tab`.
+//! Labels are preserved; public parsing rejects missing levels and unsafe text.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -78,13 +74,7 @@ impl Place {
     }
 }
 
-/// `server:workspace[:tab[:pane]]`; omitted tab/pane segments select broader
-/// Herdr containers.
-///
-/// Segments are made safe to type and to print on one line: whitespace,
-/// control characters and `:` become `-`. Both sides of a comparison go
-/// through the same cleaning, so a workspace called `My Work` is addressed as
-/// `hub:My-Work`.
+/// A Herdr location, with exactly three levels in every public address.
 ///
 /// Equality and hashing ignore case — the one definition of "the same
 /// address", so `hub:EA:Code:w1-p1` equals `HUB:ea:code:W1-P1`. Prefix queries
@@ -234,21 +224,7 @@ pub fn duplicated<'a>(addresses: impl IntoIterator<Item = &'a Address>) -> HashS
 /// Replaces whitespace, control characters and `:` with `-`; an empty result
 /// becomes `-` so a segment is never empty.
 fn clean(raw: &str) -> String {
-    let cleaned: String = raw
-        .chars()
-        .map(|c| {
-            if c.is_whitespace() || crate::text::is_unsafe_char(c) || c == ':' {
-                '-'
-            } else {
-                c
-            }
-        })
-        .collect();
-    if cleaned.is_empty() {
-        "-".to_owned()
-    } else {
-        cleaned
-    }
+    raw.to_owned()
 }
 
 impl FromStr for Address {
@@ -259,22 +235,14 @@ impl FromStr for Address {
             input: s.to_owned(),
         };
         let parts: Vec<&str> = s.split(':').collect();
+        if s.len() > MAX_LABEL_BYTES || s.chars().any(char::is_control) {
+            return Err(bad());
+        }
         match parts.as_slice() {
-            [server, workspace] if !server.is_empty() && !workspace.is_empty() => {
-                Ok(Self::new(server, workspace, None))
-            }
             [server, workspace, tab]
                 if !server.is_empty() && !workspace.is_empty() && !tab.is_empty() =>
             {
                 Ok(Self::new(server, workspace, Some(tab)))
-            }
-            [server, workspace, tab, pane]
-                if !server.is_empty()
-                    && !workspace.is_empty()
-                    && !tab.is_empty()
-                    && !pane.is_empty() =>
-            {
-                Ok(Self::with_pane(server, workspace, tab, pane))
             }
             _ => Err(bad()),
         }
@@ -300,25 +268,16 @@ impl Registration {
     #[must_use]
     pub fn full_address(&self) -> Option<Address> {
         let place = self.verified_place()?;
-        let pane = self.herdr_pane.as_ref()?;
-        Some(Address::with_pane(
-            self.machine.as_str(),
-            &place.workspace,
-            &place.tab,
-            pane.as_str(),
-        ))
+        Some(place.tab_address(&self.machine))
     }
 }
 
-/// Longest address (`server:workspace[:tab[:pane]]`) shown in place of a bus name, in
-/// bytes. A workspace or tab label is whatever a person typed, so an address has
-/// no length of its own; a longer one is not shown and the sender's bus name
-/// (at most 32 bytes) is printed instead. This bounds a rendered message, which
-/// is what the hook and watcher byte budgets count (`Message::rendered_len_max`, test-only).
+/// Maximum public address length. Longer or ambiguous placements display as
+/// unverified; enrollment rejects them without inventing a substitute name.
 pub const MAX_LABEL_BYTES: usize = 96;
 
 /// How to name each registered lead when printing: its address when known,
-/// else its bus name. Built once per command from the registry.
+/// else an unverified marker. Built once per command from the registry.
 #[derive(Debug, Default)]
 pub struct AddressBook {
     /// Where each lead with a place sits, tab per the shown-address rule: every
@@ -338,7 +297,7 @@ impl AddressBook {
     /// tab-count snapshot.
     ///
     /// Leads whose address another lead shares (two panes in one tab) are then
-    /// printed by bus name: an address that names two leads cannot say who sent
+    /// printed as unverified: an address that names two leads cannot say who sent
     /// a message, and `send` would refuse it as ambiguous. So are those whose
     /// address is longer than [`MAX_LABEL_BYTES`].
     #[must_use]
@@ -350,24 +309,11 @@ impl AddressBook {
                 Some((r, place))
             })
             .collect();
-        let mut addressed: Vec<(&Registration, Address)> = placed
+        let addressed: Vec<(&Registration, Address)> = placed
             .iter()
             .map(|(r, place)| (*r, place.tab_address(&r.machine)))
             .filter(|(_, address)| address.to_string().len() <= MAX_LABEL_BYTES)
             .collect();
-        let shared_tabs: HashSet<Address> =
-            duplicated(addressed.iter().map(|(_, address)| address))
-                .into_iter()
-                .cloned()
-                .collect();
-        for (registration, address) in &mut addressed {
-            if shared_tabs.contains(address)
-                && let Some(full) = registration.full_address()
-            {
-                *address = full;
-            }
-        }
-        addressed.retain(|(_, address)| address.to_string().len() <= MAX_LABEL_BYTES);
         let shared = duplicated(addressed.iter().map(|(_, address)| address));
         Self {
             placed: addressed
@@ -397,21 +343,28 @@ impl AddressBook {
         self.by_name.get(name)
     }
 
-    /// What to print for `name`: its address, else the bare bus name.
+    /// A canonical location, the reserved human operator actor, or unverified.
     #[must_use]
     pub fn label(&self, name: &AgentName) -> String {
-        self.address(name)
-            .map_or_else(|| name.to_string(), ToString::to_string)
+        self.address(name).map_or_else(
+            || {
+                if name.as_str() == crate::config::DEFAULT_HUMAN
+                    || name.as_str().split(':').count() == 3
+                {
+                    name.to_string()
+                } else {
+                    "unverified".to_owned()
+                }
+            },
+            ToString::to_string,
+        )
     }
 
     /// `name` with its address for a confirmation line: `hub:EA:1 (ea-code)`,
     /// or just the name when it has no address.
     #[must_use]
     pub fn describe(&self, name: &AgentName) -> String {
-        match self.address(name) {
-            Some(address) => format!("{address} ({name})"),
-            None => name.to_string(),
-        }
+        self.label(name)
     }
 
     /// `message` as [`Message::render`] shows it, signed with the sender's
@@ -478,13 +431,8 @@ mod tests {
             ("hub", "EA", Some("1"))
         );
         assert_eq!(a.to_string(), "hub:EA:1");
-        let c = Address::with_pane("hub", "EA", "code", "wA:p1");
-        let parsed: Address = "hub:EA:code:wA-p1".parse().unwrap();
-        assert_eq!(parsed, c);
-        assert_eq!(c.pane(), Some("wA-p1"));
-        let b: Address = "node-a:research".parse().unwrap();
-        assert_eq!(b.tab(), None);
-        assert_eq!(b.to_string(), "node-a:research");
+        assert!("hub:EA".parse::<Address>().is_err());
+        assert!("hub:EA:code:wA-p1".parse::<Address>().is_err());
     }
 
     #[test]
@@ -499,45 +447,32 @@ mod tests {
 
     #[test]
     fn the_server_segment_is_normalized_like_a_machine_name() {
-        let a: Address = "Hub.local:EA".parse().unwrap();
+        let a: Address = "Hub.local:EA:code".parse().unwrap();
         assert_eq!(a.server(), "hub");
     }
 
     #[test]
-    fn whitespace_in_a_label_is_cleaned_so_the_address_stays_one_token() {
-        let a = Address::new("hub", "My Work\nspace", Some("a:b"));
-        assert_eq!(a.to_string(), "hub:My-Work-space:a-b");
-        assert_eq!("hub:My-Work-space:a-b".parse::<Address>().unwrap(), a);
+    fn whitespace_is_preserved_and_unaddressable_labels_are_rejected() {
+        assert_eq!(
+            Address::new("hub", "My Work", Some("code")).to_string(),
+            "hub:My Work:code"
+        );
+        assert!("hub:My Work\nspace:code".parse::<Address>().is_err());
+        assert!("hub:My Work:a:b".parse::<Address>().is_err());
     }
 
     #[test]
-    fn selects_ignores_case_and_missing_tab_or_pane_selects_the_container() {
-        let target: Address = "hub:EA:Code".parse().unwrap();
-        assert!("hub:ea:code".parse::<Address>().unwrap().selects(&target));
-        assert!("HUB:EA".parse::<Address>().unwrap().selects(&target));
-        let pane_target: Address = "hub:EA:code:wA-p1".parse().unwrap();
-        assert!("hub:EA".parse::<Address>().unwrap().selects(&pane_target));
-        assert!(
-            "hub:EA:code"
-                .parse::<Address>()
-                .unwrap()
-                .selects(&pane_target)
-        );
-        assert!(
-            "hub:EA:code:wA-p1"
-                .parse::<Address>()
-                .unwrap()
-                .selects(&pane_target)
-        );
-        assert!(
-            !"hub:EA:code:wA-p2"
-                .parse::<Address>()
-                .unwrap()
-                .selects(&pane_target)
-        );
+    fn selects_only_the_exact_tab_ignoring_case() {
+        let target: Address = "hub:EA:code".parse().unwrap();
+        assert!("HUB:ea:Code".parse::<Address>().unwrap().selects(&target));
         assert!(!"hub:EA:plan".parse::<Address>().unwrap().selects(&target));
-        assert!(!"node-a:EA".parse::<Address>().unwrap().selects(&target));
-        assert!(!"hub:QSL".parse::<Address>().unwrap().selects(&target));
+        assert!(
+            !"node-a:EA:code"
+                .parse::<Address>()
+                .unwrap()
+                .selects(&target)
+        );
+        assert!(!"hub:QSL:code".parse::<Address>().unwrap().selects(&target));
     }
 
     #[test]
@@ -545,10 +480,7 @@ mod tests {
         let a = |regs: &[Registration]| AddressBook::from_registrations(regs).label(&name("a"));
         let one = reg("a", "node-a", Some(place("research", "1", 1)));
         assert_eq!(a(std::slice::from_ref(&one)), "node-a:research:1");
-        assert_eq!(
-            one.full_address().unwrap().to_string(),
-            "node-a:research:1:wB-p1"
-        );
+        assert_eq!(one.full_address().unwrap().to_string(), "node-a:research:1");
         let many = reg("a", "hub", Some(place("EA", "1", 3)));
         assert_eq!(a(&[many]), "hub:EA:1");
     }
@@ -565,18 +497,12 @@ mod tests {
         b.place.as_mut().unwrap().herdr_ids.as_mut().unwrap().pane = "wA:p2".parse().unwrap();
         let registrations = [a, b];
         let book = AddressBook::from_registrations(&registrations);
-        assert_eq!(book.label(&name("a")), "hub:EA:code:wA-p1");
-        assert_eq!(book.label(&name("b")), "hub:EA:code:wA-p2");
-        assert_eq!(
-            crate::resolve_target(
-                "hub:EA:code:wA-p1",
-                &"hub".parse().unwrap(),
-                &registrations,
-                &[]
-            )
-            .unwrap(),
-            Target::Agent(name("a"))
-        );
+        assert_eq!(book.label(&name("a")), "unverified");
+        assert_eq!(book.label(&name("b")), "unverified");
+        assert!(matches!(
+            crate::resolve_target("hub:EA:code", &"hub".parse().unwrap(), &registrations),
+            Err(Error::AmbiguousTarget { .. })
+        ));
     }
 
     fn name(s: &str) -> AgentName {
@@ -636,7 +562,7 @@ mod tests {
             book.place_address(&"long".parse().unwrap()).is_none(),
             "who and whoami use this too"
         );
-        assert_eq!(book.label(&"long".parse().unwrap()), "long");
+        assert_eq!(book.label(&"long".parse().unwrap()), "unverified");
     }
 
     #[test]
@@ -646,8 +572,8 @@ mod tests {
             reg("pane-two", "hub", Some(place("ea", "Code", 2))),
             reg("alone", "hub", Some(place("EA", "plan", 2))),
         ]);
-        assert_eq!(book.label(&"pane-one".parse().unwrap()), "pane-one");
-        assert_eq!(book.label(&"pane-two".parse().unwrap()), "pane-two");
+        assert_eq!(book.label(&"pane-one".parse().unwrap()), "unverified");
+        assert_eq!(book.label(&"pane-two".parse().unwrap()), "unverified");
         assert_eq!(book.label(&"alone".parse().unwrap()), "hub:EA:plan");
     }
 
@@ -666,11 +592,7 @@ mod tests {
         assert_eq!(a, b);
         let state = RandomState::new();
         assert_eq!(state.hash_one(&a), state.hash_one(&b));
-        assert_ne!(
-            a,
-            "hub:EA".parse::<Address>().unwrap(),
-            "a tab is part of identity"
-        );
+        assert!("hub:EA".parse::<Address>().is_err());
         assert_ne!(a, "hub:EA:plan".parse::<Address>().unwrap());
         assert_eq!(duplicated([&a, &b]).len(), 1);
         assert!(duplicated([&a]).is_empty());
@@ -840,7 +762,7 @@ mod tests {
         let mut registration = reg("legacy", "hub", Some(place("EA", "code", 2)));
         registration.place = None;
         let book = AddressBook::from_registrations(&[registration]);
-        assert_eq!(book.label(&name("legacy")), "legacy");
+        assert_eq!(book.label(&name("legacy")), "unverified");
         assert_eq!(book.place_address(&name("legacy")), None);
     }
 
@@ -870,7 +792,7 @@ mod tests {
             sent_at_ms: 0,
         };
         assert_eq!(book.render(&msg("ea-lead")), "[ix-relay] from hub:EA:1: hi");
-        assert_eq!(book.render(&msg("plain")), "[ix-relay] from plain: hi");
-        assert_eq!(book.render(&msg("gone")), "[ix-relay] from gone: hi");
+        assert_eq!(book.render(&msg("plain")), "[ix-relay] from unverified: hi");
+        assert_eq!(book.render(&msg("gone")), "[ix-relay] from unverified: hi");
     }
 }

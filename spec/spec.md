@@ -40,19 +40,25 @@ defined here.
 
 ## 2. Scope
 
+Version 0.3.0 supersedes all earlier alias, slug, rename-precedence, bare-name,
+raw-pane and optional-level routing clauses. FR-001..006, FR-021 and FR-022
+define the current identity contract. Existing `AGENT_MSG_NAME` is preserved
+as environment metadata and ignored for identity. Old namespaces are archived,
+never imported as aliases into `ixr:v3:`.
+
+
 ### 2.1 In Scope
 
 This specification governs:
 
-- Addressing: the `server:workspace[:tab[:pane]]` grammar, bus names, aliases, pane ids,
-  and how `agent-msg send` resolves what a sender typed to one recipient.
+- Addressing: `server:workspace:tab`, `:workspace:tab`, `:tab` and explicit `all`; live session verification and automatic enrollment.
 - The registry: what a registration records and how it is kept current.
 - Delivery: queueing, broadcast, inbox pops, requeueing, and the watcher's
   typing of messages into an idle lead's pane.
 - Text safety of message and escalation text at send, at store and at render.
 - The harness hook handler (`agent-msg hook claude|codex`) and its failure and
   time-budget behaviour.
-- Derived bus names from a pane's herdr location, and name collisions.
+- Session queue identities, canonical public locations and rejection of ambiguous tabs.
 - Escalations: identifiers, status transitions and text safety.
 - Configuration: precedence and malformed-file behaviour.
 - Failure visibility and self-healing (AGE-2033): watcher liveness, `agent-msg

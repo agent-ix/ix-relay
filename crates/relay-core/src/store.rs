@@ -32,7 +32,7 @@ use crate::{
 };
 
 /// Key prefix used in production. Tests use their own so they can share one Redis.
-pub const DEFAULT_PREFIX: &str = "ixr:";
+pub const DEFAULT_PREFIX: &str = "ixr:v3:";
 
 /// Roughly how many entries the history stream keeps (`XADD MAXLEN ~`).
 const LOG_CAP: usize = 10_000;
@@ -45,16 +45,12 @@ const HEALTH_HOOKS_CAP: usize = 1_000;
 /// so entries would otherwise accumulate forever with nothing to clean them up.
 const SESSION_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 
-/// How long a session with no free bus name is left alone before the hook
-/// derives again: 5 minutes, in seconds.
-pub const UNRESOLVED_TTL_SECS: u64 = 300;
-
-/// How long a session's herdr failure, once recorded, is not recorded again:
-/// 5 minutes, in seconds. Unlike [`UNRESOLVED_TTL_SECS`] it never stops the
-/// derivation, only the record.
+/// How long a recorded Herdr failure is deduplicated: five minutes.
+/// This never stops session verification or enrollment.
 pub const HERDR_FAILED_TTL_SECS: u64 = 300;
 
 mod commit;
+mod directory;
 mod health;
 mod inflight;
 #[cfg(test)]
@@ -68,7 +64,8 @@ mod work;
 
 use keys::Keys;
 
-pub use commit::{CommitOutcome, Demotion, IdentityCommit, RefusedDemotion};
+pub use commit::{CommitOutcome, IdentityCommit};
+pub use directory::{DIRECTORY_LEASE, DirectoryRead, DirectoryRecipient};
 pub use health::{
     Heartbeats, InboxOverview, LeadOverview, LeaseState, MAX_HEARTBEAT_KEYS, RecipientProbe,
 };
@@ -85,16 +82,6 @@ pub use scan::ScanCut;
 /// [`Relay::pop_inbox_budget`]) can always deliver at least one message
 /// whole, never split mid-text.
 pub const MAX_MESSAGE_BYTES: usize = 4 * 1024;
-
-/// The replies to [`Relay::probe_session`]'s one pipelined request: the three
-/// reads, then the two expiry renewals (ignored).
-type ProbeReplies = (
-    redis::RedisResult<bool>,
-    redis::RedisResult<Option<String>>,
-    redis::RedisResult<bool>,
-    redis::RedisResult<bool>,
-    redis::RedisResult<bool>,
-);
 
 /// A connection to the bus.
 pub struct Relay {
@@ -161,105 +148,14 @@ impl Relay {
         Ok(())
     }
 
-    /// Adds or refreshes a lead in the registry. Also drops `reg.name` as
-    /// anyone else's alias (AGE-2018): a name always means whoever most
-    /// recently registered *as* it, canonical beats a stale alias pointing
-    /// elsewhere.
+    /// Adds or refreshes a session-bound lead registration.
     pub fn register(&mut self, reg: &Registration) -> Result<()> {
-        let json = encode(reg);
-        let agents_key = self.keys.agents_key();
-        let aliases_key = self.keys.aliases_key();
-        let mut pipe = redis::pipe();
-        pipe.atomic();
-        pipe.hdel(&aliases_key, reg.name.as_str()).ignore();
-        pipe.hset(&agents_key, reg.name.as_str(), &json).ignore();
-        let () = pipe.query(&mut self.conn)?;
+        let (): () = redis::cmd("HSET")
+            .arg(self.keys.agents_key())
+            .arg(reg.name.as_str())
+            .arg(encode(reg))
+            .query(&mut self.conn)?;
         Ok(())
-    }
-
-    /// Points `alias` at `canonical` (AGE-2018): a message sent to `alias`
-    /// resolves to `canonical`'s inbox instead. Used to keep a lead's
-    /// previous name reachable after its bus name changes (e.g. a
-    /// herdr-location-derived name, once a Claude `/rename` title or a
-    /// herdr agent name takes over as canonical) — see
-    /// `agent-msg::identity`'s name-precedence chain. Overwrites any
-    /// previous mapping for `alias`, and is a no-op if `alias == canonical`.
-    ///
-    /// Unconditional: deletes whatever is registered under `alias`
-    /// regardless of who owns it. Only safe when the caller already knows it
-    /// owns that registration (or that there isn't one). Everywhere else —
-    /// in particular the identity-derivation path, which can't always be
-    /// sure — use a [`Demotion`] in [`Relay::commit_identity`] instead
-    /// (AGE-2018 PR review, finding 2).
-    ///
-    /// Also drops `alias`'s own registration from the agents hash, if it had
-    /// one (the mirror image of [`Relay::register`] dropping a name from the
-    /// aliases hash): a name is either a canonical registration or an alias,
-    /// never both, or `who` would list the same lead twice — once under its
-    /// new canonical name, once under the stale registration its old
-    /// location/rename name left behind (caught live on node-a: a lead's
-    /// pre-`/rename` location name kept showing up as its own "registered"
-    /// row after the rename, alongside the real one).
-    pub fn set_alias(&mut self, alias: &AgentName, canonical: &AgentName) -> Result<()> {
-        if alias == canonical {
-            return Ok(());
-        }
-        let aliases_key = self.keys.aliases_key();
-        let agents_key = self.keys.agents_key();
-        let mut pipe = redis::pipe();
-        pipe.atomic();
-        pipe.hdel(&agents_key, alias.as_str()).ignore();
-        pipe.hset(&aliases_key, alias.as_str(), canonical.as_str())
-            .ignore();
-        let () = pipe.query(&mut self.conn)?;
-        Ok(())
-    }
-
-    /// Resolves `name` through the alias table if it's a registered alias;
-    /// returns `name` unchanged otherwise (including when it's already
-    /// canonical, or unknown).
-    pub fn resolve_alias(&mut self, name: &AgentName) -> Result<AgentName> {
-        let key = self.keys.aliases_key();
-        // Bytes throughout the registry and alias reads: a value that is not
-        // UTF-8 is not an alias, never an error (FR-008-AC-4).
-        let raw: Option<Vec<u8>> = self.conn.hget(&key, name.as_str())?;
-        Ok(raw
-            .and_then(|b| String::from_utf8(b).ok()?.parse().ok())
-            .unwrap_or_else(|| name.clone()))
-    }
-
-    /// Every alias currently pointing at `canonical`, sorted, for `who` to
-    /// show alongside a lead's canonical name.
-    pub fn aliases_of(&mut self, canonical: &AgentName) -> Result<Vec<AgentName>> {
-        let key = self.keys.aliases_key();
-        let mut aliases: Vec<AgentName> = self
-            .alias_pairs(&key)?
-            .into_iter()
-            .filter(|(_, c)| c == canonical)
-            .map(|(alias, _)| alias)
-            .collect();
-        aliases.sort();
-        Ok(aliases)
-    }
-
-    /// Every `(alias, canonical)` pair in the alias table, in one round
-    /// trip — for `agent-msg find` (AGE-2018), which joins the whole
-    /// registry against live herdr state and would otherwise need one
-    /// [`Relay::aliases_of`] call per registered lead.
-    pub fn all_aliases(&mut self) -> Result<Vec<(AgentName, AgentName)>> {
-        let key = self.keys.aliases_key();
-        self.alias_pairs(&key)
-    }
-
-    /// The alias table's `(alias, canonical)` pairs that are valid names; a
-    /// pair with a field or value that is not UTF-8 or not a name is skipped.
-    fn alias_pairs(&mut self, key: &str) -> Result<Vec<(AgentName, AgentName)>> {
-        let raw: Vec<(Vec<u8>, Vec<u8>)> = self.conn.hgetall(key)?;
-        let name = |bytes: Vec<u8>| String::from_utf8(bytes).ok()?.parse::<AgentName>().ok();
-        Ok(raw
-            .into_iter()
-            .filter_map(|(alias, canonical)| Some((name(alias)?, name(canonical)?)))
-            .collect())
     }
 
     /// Every registered lead that decodes, sorted by name, plus a report of the
@@ -345,26 +241,14 @@ impl Relay {
         Ok(regs)
     }
 
-    /// Removes `name`'s registration and every alias pointing at it, but only
-    /// if it is still the registration the caller saw: `seen_last_seen_ms` is
-    /// that registration's `last_seen_ms`. Returns the removed aliases, for the
-    /// caller to log, or `None` — having changed nothing — when the
-    /// registration is gone or was re-registered since (a `SessionStart` between
-    /// the caller's registry snapshot and this call must not lose its fresh
-    /// registration).
-    ///
-    /// (AGE-2018 PR review, finding 7: `relay-watcher` prunes abandoned
-    /// registrations so `who`/`find` don't accumulate dead leads forever.)
-    ///
-    /// One script does the check, the alias scan and the deletes, so an alias
-    /// set concurrently cannot be left pointing at a registration that no
-    /// longer exists.
+    /// Remove a registration only when its last-seen value still matches.
+    /// Concurrent session refreshes are preserved.
     pub fn prune(
         &mut self,
         name: &AgentName,
         seen_last_seen_ms: i64,
     ) -> Result<Option<Vec<AgentName>>> {
-        /// Returns `false` when nothing was done, else the removed aliases.
+        // Returns false on a changed record, otherwise an empty success payload.
         const SCRIPT: &str = r"
             local raw = redis.call('HGET', KEYS[1], ARGV[1])
             if not raw then return false end
@@ -373,36 +257,23 @@ impl Relay {
                 or reg.last_seen_ms ~= tonumber(ARGV[2]) then
                 return false
             end
-            local removed = {}
-            local pairs = redis.call('HGETALL', KEYS[2])
-            for i = 1, #pairs, 2 do
-                if pairs[i + 1] == ARGV[1] then
-                    redis.call('HDEL', KEYS[2], pairs[i])
-                    removed[#removed + 1] = pairs[i]
-                end
-            end
             redis.call('HDEL', KEYS[1], ARGV[1])
-            return removed";
+            return {}";
         let removed: Option<Vec<String>> = redis::Script::new(SCRIPT)
             .key(self.keys.agents_key())
-            .key(self.keys.aliases_key())
             .arg(name.as_str())
             .arg(seen_last_seen_ms)
             .invoke(&mut self.conn)?;
         Ok(removed.map(|removed| {
-            let mut aliases: Vec<AgentName> =
+            let mut ids: Vec<AgentName> =
                 removed.into_iter().filter_map(|a| a.parse().ok()).collect();
-            aliases.sort();
-            aliases
+            ids.sort();
+            ids
         }))
     }
 
-    /// Everything a hook reads about a session before it decides who it is, as
-    /// one pipelined request (AGE-2028): whether it is suppressed (an escalation
-    /// fork, marked by [`Relay::commit_identity`]), the name remembered for it
-    /// (`None` when never recorded, expired, or not a bus name), and whether it
-    /// is marked unresolved ([`Relay::mark_session_unresolved`]). The three reads
-    /// are independent, so they share one round trip instead of costing three.
+    /// Read suppression and the session queue in one atomic request/reply.
+    /// A cache miss never adopts a registry record or generates a name.
     ///
     /// Reading a session also renews the expiry of its remembered name and its
     /// suppression mark (30 days from now, in the same round trip): what is in
@@ -412,55 +283,34 @@ impl Relay {
     /// so one corrupt key cannot make every hook of a session fail; only the
     /// connection failing fails the call.
     pub fn probe_session(&mut self, session_id: &SessionId) -> Result<SessionProbe> {
-        let (suppressed, name, unresolved, _, _): ProbeReplies = redis::pipe()
-            .ignore_errors()
-            .cmd("EXISTS")
+        // One Redis reply is essential: a pipeline with five ignored errors
+        // can consume five read timeouts when the peer accepts but never answers.
+        const SCRIPT: &str = r#"
+local cached = redis.pcall('GET', KEYS[2])
+if type(cached) == 'table' and cached.err then cached = false end
+local suppressed = redis.call('EXISTS', KEYS[1])
+redis.call('EXPIRE', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[2], ARGV[1])
+return {suppressed, cached}
+"#;
+        let (suppressed, name): (bool, Option<String>) = redis::cmd("EVAL")
+            .arg(SCRIPT)
+            .arg(2)
             .arg(self.keys.suppressed_key(session_id))
-            .cmd("GET")
-            .arg(self.keys.session_key(session_id))
-            .cmd("EXISTS")
-            .arg(self.keys.unresolved_key(session_id))
-            // A session that is still in use keeps its cache: the expiry counts
-            // from the last use, so a session older than the TTL is not
-            // forgotten mid-way. (`EXPIRE` on an absent key does nothing.)
-            .cmd("EXPIRE")
-            .arg(self.keys.suppressed_key(session_id))
-            .arg(SESSION_TTL_SECS)
-            .cmd("EXPIRE")
             .arg(self.keys.session_key(session_id))
             .arg(SESSION_TTL_SECS)
             .query(&mut self.conn)?;
         Ok(SessionProbe {
-            suppressed: suppressed.unwrap_or(false),
-            name: name.ok().flatten().and_then(|s| s.parse().ok()),
-            unresolved: unresolved.unwrap_or(false),
+            suppressed,
+            name: name.and_then(|s| s.parse().ok()),
         })
-    }
-
-    /// Marks `session_id` as having no free bus name for
-    /// [`UNRESOLVED_TTL_SECS`], unless it is already marked. Returns whether
-    /// this call set the mark: `true` for the first failure, `false` while an
-    /// earlier one is still remembered. The mark lets the hook skip the name
-    /// derivation that would fail the same way, and record the failure once
-    /// instead of on every tool call.
-    pub fn mark_session_unresolved(&mut self, session_id: &SessionId) -> Result<bool> {
-        let key = self.keys.unresolved_key(session_id);
-        let set: Option<String> = redis::cmd("SET")
-            .arg(&key)
-            .arg("1")
-            .arg("NX")
-            .arg("EX")
-            .arg(UNRESOLVED_TTL_SECS)
-            .query(&mut self.conn)?;
-        Ok(set.is_some())
     }
 
     /// Marks `session_id` as having had its herdr failure recorded for
     /// [`HERDR_FAILED_TTL_SECS`], unless it already is. Returns whether this
     /// call set the mark (record the failure) or an earlier one is still
-    /// remembered (do not). A separate key from [`Relay::mark_session_unresolved`]:
-    /// that mark also stops the derivation, and a herdr outage must not leave a
-    /// lead unregistered after herdr is back.
+    /// remembered (do not). Verification continues on every uncached hook, so a
+    /// Herdr outage never prevents enrollment after it recovers.
     pub fn mark_session_herdr_failed(&mut self, session_id: &SessionId) -> Result<bool> {
         let key = self.keys.herdr_failed_key(session_id);
         let set: Option<String> = redis::cmd("SET")
@@ -544,13 +394,11 @@ impl Relay {
     }
 
     /// Queues `msg` for its target and records it in the log, in one transaction.
-    /// Returns who it was queued for — the *canonical* name, once a single-agent
-    /// target that's an alias (AGE-2018) has been resolved. A broadcast skips
-    /// the sender.
+    /// Returns the recipient queue identities. A broadcast skips the sender.
     ///
     /// # Errors
     ///
-    /// [`Error::UnknownAgent`] when a single target (after alias resolution)
+    /// [`Error::UnknownAgent`] when a single queue target
     /// has never registered, so a typo fails loudly instead of filling an
     /// inbox nobody reads.
     ///
@@ -576,10 +424,7 @@ impl Relay {
         let agents_key = self.keys.agents_key();
         let recipients = match &msg.to {
             Target::Agent(name) => {
-                // AGE-2018: a target may be an alias (a lead's previous name,
-                // kept reachable across a rename) — resolve it to its
-                // canonical inbox before checking registration.
-                let canonical = self.resolve_alias(name)?;
+                let canonical = name.clone();
                 let known: bool = self.conn.hexists(&agents_key, canonical.as_str())?;
                 if !known {
                     return Err(Error::UnknownAgent(name.clone()));
@@ -593,12 +438,30 @@ impl Relay {
                     .filter_map(|n| String::from_utf8(n).ok()?.parse::<AgentName>().ok())
                     .filter(|n| *n != msg.from)
                     .collect::<Vec<_>>();
+                let registrations = self.agents()?.registrations;
+                names.retain(|id| {
+                    !registrations.iter().any(|r| {
+                        &r.name == id
+                            && r.full_address().is_some_and(|a| {
+                                a.to_string().eq_ignore_ascii_case(msg.from.as_str())
+                            })
+                    })
+                });
                 names.sort();
                 names
             }
         };
 
-        let json = encode(msg);
+        // Snapshot the public recipient while retaining the immutable queue ID
+        // solely for enqueueing. History must not change when a tab is renamed.
+        let mut stored = msg.clone();
+        if let Target::Agent(id) = &msg.to
+            && id.as_str().starts_with("session/")
+            && let Some(address) = self.agent(id)?.and_then(|r| r.full_address())
+        {
+            stored.to = Target::Agent(address.to_string().parse()?);
+        }
+        let json = encode(&stored);
         let mut pipe = redis::pipe();
         pipe.atomic();
         for name in &recipients {
@@ -1235,8 +1098,6 @@ pub struct SessionProbe {
     pub suppressed: bool,
     /// The bus name remembered for the session, if any.
     pub name: Option<AgentName>,
-    /// Whether the session is marked as having no free name.
-    pub unresolved: bool,
 }
 
 /// The usable entries of a hook health stream reply, in reply order, and how many

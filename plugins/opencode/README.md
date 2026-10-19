@@ -6,10 +6,13 @@ from other leads show up in the model's context automatically.
 This plugin is for **team leads only**. A subagent (task) session should not
 need it installed separately — it already skips any session opencode marks as
 a subagent (`Session.parentID` set) — but there's no reason to pay even the
-plugin's `agent-msg` calls in a session that isn't a lead. It also skips any
-session that resolves to no bus name at all: no explicit `AGENT_MSG_NAME` and
-no herdr location to derive one from (AGE-2018) — see "AGENT_MSG_NAME is
-optional" below.
+plugin's `agent-msg` calls in a session that isn't a lead. It also skips a session without a verified genuine caller identity. Public
+identity is exactly `server:workspace:tab`; `AGENT_MSG_NAME` is preserved and
+ignored. The current adapter's load-time identity gate and destructive inbox
+pop remain limitations: this directory release does not claim fresh OpenCode
+startup or at-least-once delivery has been repaired. See the
+[state model](../../spec/reviews/relay-directory-state-model.md) for its separate
+startup and delivery contract.
 
 ## What was verified, and how (AGE-2016)
 
@@ -116,15 +119,11 @@ under `.opencode/plugin/`.
    cargo install --path crates/agent-msg
    ```
 
-2. **`AGENT_MSG_NAME` is optional (AGE-2018).** A lead running inside a
-   herdr-managed pane gets a bus name derived from where it sits in herdr —
-   see the main [README.md](../../README.md#automatic-bus-names) for the
-   naming rule. Set `AGENT_MSG_NAME` explicitly in the environment the
-   opencode session runs in only to override that (it's never rewritten).
-   Leave it unset for any session that is not a team lead, or one outside
-   herdr; the plugin stays silent either way. It resolves its own identity
-   once, at load, via `agent-msg whoami --json` (see "What was verified"
-   below) — it no longer reads `AGENT_MSG_NAME` directly itself.
+2. **Use a genuine verified root session.** `agent-msg whoami --json` must
+   report its canonical `server:workspace:tab` identity. Names and inherited
+   pane variables cannot establish it. Preserve any existing `AGENT_MSG_NAME`;
+   setting it cannot override identity or repair startup. The current plugin
+   checks identity at load and stays disabled if that proof is unavailable.
 
 3. **Set `~/.ix/relay/config.toml` if this machine needs different settings**
    — Redis isn't reachable at the default address (`redis://127.0.0.1:6379`),
@@ -181,7 +180,7 @@ agent-msg log       # recent bus history
 If `agent-msg who` only shows leads you expect and `agent-msg log` shows sends
 you've made land, the plugin is reaching the same Redis your CLI does.
 
-`scripts/live-test-opencode-plugin.sh` runs a fuller, automated version of
+The retired pre-0.3 alias-based live driver previously ran a fuller version of
 this against a throwaway Redis and a throwaway opencode config dir, including
 the idle-nudge path (against `opencode serve`) and an exchange with a live
 Claude Code lead in both directions.

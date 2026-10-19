@@ -125,7 +125,7 @@ threshold and every run exits 0.
   (`plugins/claude/hooks/hooks.json`), so a longer wait could not leave a record.
   Why 300 ms without bytes: both harnesses write the payload at once and close
   stdin (the former `read_to_string` worked live, and
-  `scripts/live-test-codex-plugin.sh` reads to end of file), so a payload that has
+  the retired pre-0.3 live driver read to end of file), so a payload that has
   not started, or has stalled, for 300 ms is not coming. Why the window restarts
   and a cap of 900 ms (AGE-2063): a total 300 ms limit recorded a large payload
   written slowly on a busy host as a timeout and delayed that turn's mail, although

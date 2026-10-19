@@ -237,11 +237,12 @@ impl SocketConfig {
     }
 
     /// The locations for this user: `$IX_RELAY_CLAUDE_DIR` (else `~/.claude`)
-    /// and `$XDG_RUNTIME_DIR/cc-socks`, with the default timings.
+    /// and `$XDG_RUNTIME_DIR/cc-socks` (default `/tmp/cc-socks` on macOS),
+    /// with the default timings.
     ///
     /// # Errors
     ///
-    /// Why a location cannot be told (no `HOME`, no `XDG_RUNTIME_DIR`).
+    /// Why a location cannot be told (no `HOME`, or no `XDG_RUNTIME_DIR` on Linux).
     pub fn from_env() -> Result<Self, String> {
         let claude = match std::env::var_os("IX_RELAY_CLAUDE_DIR") {
             Some(dir) => PathBuf::from(dir),
@@ -250,11 +251,18 @@ impl SocketConfig {
             )
             .join(".claude"),
         };
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR").ok_or("XDG_RUNTIME_DIR is not set")?;
+        #[cfg(target_os = "macos")]
+        let socket_dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(|runtime| PathBuf::from(runtime).join("cc-socks"))
+            .unwrap_or_else(|| PathBuf::from("/tmp/cc-socks"));
+        #[cfg(not(target_os = "macos"))]
+        let socket_dir =
+            PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").ok_or("XDG_RUNTIME_DIR is not set")?)
+                .join("cc-socks");
         Ok(Self::with_dirs(
             claude.join("sessions"),
             claude.join("projects"),
-            PathBuf::from(runtime).join("cc-socks"),
+            socket_dir,
             relay_core::config::state_dir().map(|d| socket_status::dir_in(&d)),
         ))
     }
@@ -681,6 +689,8 @@ impl SocketDeliverer {
     /// The directories a session's socket may be in.
     fn socket_dirs(&self) -> Vec<PathBuf> {
         let mut dirs = vec![self.config.socket_dir.clone()];
+        #[cfg(target_os = "macos")]
+        dirs.push(PathBuf::from("/tmp/cc-socks"));
         if let Some(uid) = self.procs.uid() {
             dirs.push(PathBuf::from(format!("/tmp/cc-socks-{uid}")));
         }
@@ -1826,8 +1836,17 @@ fn receive(listener: &UnixListener, shared: &Shared) {
             thread::sleep(RECEIVER_IDLE);
             continue;
         };
-        if conn.set_read_timeout(Some(RECEIPT_READ_TIMEOUT)).is_err() {
+        // On macOS accepted sockets inherit O_NONBLOCK; the bounded read
+        // below needs blocking mode for SO_RCVTIMEO to take effect.
+        if conn.set_nonblocking(false).is_err() {
             continue;
+        }
+        if conn.set_read_timeout(Some(RECEIPT_READ_TIMEOUT)).is_err() {
+            // macOS may reject SO_RCVTIMEO when the sender already closed.
+            // Drain queued bytes without ever blocking in that case.
+            if conn.set_nonblocking(true).is_err() {
+                continue;
+            }
         }
         // Bytes, not a `String`: a line that is not UTF-8 is drift to count, not a read
         // error to skip past.

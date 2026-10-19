@@ -45,7 +45,7 @@ pub fn panes_of(
     view: &MachineView,
     regs: &[Registration],
 ) -> Vec<PaneSeries> {
-    let mut panes: Vec<PaneSeries> = join(std::slice::from_ref(view), regs, &[])
+    let mut panes: Vec<PaneSeries> = join(std::slice::from_ref(view), regs)
         .into_iter()
         .filter(|row| row.machine == *machine)
         .map(|row| PaneSeries {
@@ -106,6 +106,7 @@ mod tests {
 
     fn agent(pane: &str, tab: &str, ws: &str, status: &str, session: Option<&str>) -> HerdrAgent {
         HerdrAgent {
+            kind: "unknown".into(),
             pane_id: pane.parse().unwrap(),
             tab_id: tab.parse().unwrap(),
             workspace_id: ws.parse().unwrap(),

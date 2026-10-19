@@ -9,6 +9,7 @@
 //! place. `agent-msg`-only concerns (`send`/`inbox`/`hook`/`who`/`log`, the
 //! hook handler, clap wiring) stay in `agent-msg` itself.
 
+pub mod enrollment;
 pub mod errors;
 pub mod escalate;
 pub mod find;
@@ -16,7 +17,6 @@ pub mod herdr;
 pub mod herdr_check;
 pub mod lenient;
 pub mod linear;
-pub mod naming;
 pub mod work;
 
 pub use errors::{OpsError, Result};

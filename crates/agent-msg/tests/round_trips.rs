@@ -120,16 +120,6 @@ impl CountingProxy {
             .collect()
     }
 
-    /// The bytes of the last request seen.
-    fn last_request_raw(&self) -> Vec<u8> {
-        self.requests
-            .lock()
-            .unwrap()
-            .last()
-            .map(|r| r.raw.clone())
-            .unwrap_or_default()
-    }
-
     /// Whether any request before the pop read the whole registry.
     fn read_whole_registry_before_pop(&self) -> bool {
         self.commands()
@@ -189,7 +179,13 @@ fn upstream_of(url: &str) -> SocketAddr {
 }
 
 fn name(s: &str) -> AgentName {
-    s.parse().unwrap()
+    if s == "receiver" {
+        AgentName::for_session(&"hub".parse().unwrap(), &"s1".parse().unwrap())
+    } else if s == "sender" {
+        "hub:EA:sender".parse().unwrap()
+    } else {
+        s.parse().unwrap()
+    }
 }
 
 const PANE: &str = "w1:p1";
@@ -254,6 +250,7 @@ fn hook(proxy: &CountingProxy, prefix: &str, event: &str, explicit: bool) -> (St
     cmd.env("IX_RELAY_MACHINE", "hub");
     cmd.env("HERDR_PANE_ID", PANE);
     let stdin = format!(r#"{{"hook_event_name":"{event}","session_id":"s1","cwd":"/work"}}"#);
+    let _topology = support::transport_topology(&mut cmd);
     let r = run(cmd, &stdin);
     assert_eq!(r.status, 0, "stderr: {}", r.stderr);
     (r.stdout, r.stderr)
@@ -330,9 +327,9 @@ fn tc_018_06_a_derived_name_user_prompt_submit_reaches_the_pop_in_three_requests
         return;
     };
     assert!(stdout.contains("message 0"), "stdout: {stdout}");
-    assert_eq!(before, 3, "requests before the pop");
+    assert_eq!(before, 1, "cached genuine session lookup before the pop");
     assert_eq!(
-        total, 6,
+        total, 4,
         "requests in all: the pop, the address book and (AGE-2032) the acknowledgement follow"
     );
 }
@@ -348,9 +345,9 @@ fn tc_018_06_an_explicit_name_user_prompt_submit_reaches_the_pop_in_two_requests
         return;
     };
     assert!(stdout.contains("message 0"), "stdout: {stdout}");
-    assert_eq!(before, 2, "requests before the pop");
+    assert_eq!(before, 1, "cached genuine session lookup before the pop");
     assert_eq!(
-        total, 5,
+        total, 4,
         "requests in all: the pop, the address book and (AGE-2032) the acknowledgement follow"
     );
 }
@@ -370,68 +367,9 @@ fn tc_018_07_post_tool_use_costs_one_read_then_the_pop() {
     let Some((before, total, _)) = measure("ptu-explicit", "PostToolUse", true, 0) else {
         return;
     };
-    assert_eq!((before, total), (0, 1), "explicit, empty inbox");
-}
-
-/// Runs `agent-msg send <to> hi` as `sender` through `proxy`; returns stdout.
-fn send_via(proxy: &CountingProxy, prefix: &str, to: &str) -> String {
-    let mut cmd = base_cmd(&["send", to, "hi"], Some("sender"));
-    cmd.env("IX_RELAY_URL", proxy.url());
-    cmd.env("IX_RELAY_PREFIX", prefix);
-    cmd.env("IX_RELAY_MACHINE", "hub");
-    let r = run(cmd, "");
-    assert_eq!(r.status, 0, "stderr: {}", r.stderr);
-    r.stdout
-}
-
-/// Tracing: TC-010-07
-/// ACs: FR-010-AC-7
-/// Tracing: TC-041-02
-/// ACs: FR-041-AC-2
-///
-/// `send` to a bus name or an alias never reads the whole registry and builds
-/// no address book: it reads the alias table and that one lead, then sends. An
-/// address, which needs the registry to resolve, does read it.
-#[test]
-fn tc_010_07_send_by_name_or_alias_reads_only_the_recipient() {
-    let Some(url) = test_url() else { return };
-    let prefix = format!("test:{}:rt-send:", std::process::id());
-    let mut relay = seeded(&url, &prefix, 0);
-    relay
-        .set_alias(&name("receiver-old"), &name("receiver"))
-        .unwrap();
-    let proxy = CountingProxy::start(upstream_of(&url));
-    for to in ["receiver", "receiver-old"] {
-        proxy.reset();
-        let stdout = send_via(&proxy, &prefix, to);
-        assert!(
-            stdout.starts_with("queued for receiver ("),
-            "{to}: {stdout}"
-        );
-        let commands = proxy.commands();
-        assert!(
-            commands.iter().flatten().all(|c| c != "HGETALL"),
-            "{to} read the whole registry: {commands:?}"
-        );
-        // The alias read, the record read, the transaction, and the one request
-        // that reads the recipient's state (FR-041).
-        assert_eq!(commands.len(), 6, "{to}: {commands:?}");
-        // That added request is one read-only script: LLEN of the inbox and GET of
-        // the heartbeat, and nothing that writes.
-        assert_eq!(commands.last().unwrap(), &["EVAL"], "{to}: {commands:?}");
-        let raw = String::from_utf8_lossy(&proxy.last_request_raw()).to_string();
-        assert!(raw.contains("'LLEN'") && raw.contains("'GET'"), "{raw}");
-        for write in [
-            "'SET'", "'DEL'", "'HSET'", "'RPUSH'", "'LPUSH'", "'XADD'", "'EXPIRE'", "'LPOP'",
-        ] {
-            assert!(!raw.contains(write), "the state read writes: {raw}");
-        }
-    }
-    proxy.reset();
-    let stdout = send_via(&proxy, &prefix, "hub:EA:code");
-    assert!(
-        stdout.starts_with("queued for hub:EA:code (receiver) ("),
-        "{stdout}"
+    assert_eq!(
+        (before, total),
+        (1, 2),
+        "environment metadata does not bypass session lookup"
     );
-    assert!(proxy.commands().iter().flatten().any(|c| c == "HGETALL"));
 }

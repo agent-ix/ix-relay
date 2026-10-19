@@ -243,7 +243,11 @@ proptest! {
 fn the_widest_sender_label_is_exactly_the_cap() {
     let book = book();
     assert_eq!(book.label(&name("a")).len(), MAX_LABEL_BYTES);
-    assert_eq!(book.label(&name("c")), "c", "over the cap prints the name");
+    assert_eq!(
+        book.label(&name("c")),
+        "unverified",
+        "over the cap cannot become an alias"
+    );
 }
 
 /// Tracing: TC-018-04

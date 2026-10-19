@@ -120,6 +120,11 @@ pub(crate) fn read_layout(
 
 /// The herdr operations `relay-watcher` needs.
 pub trait Herdr {
+    /// Whether this adapter supplies complete topology for directory publication.
+    /// Delivery-only adapters must not allocate observation fences or renew leases.
+    fn directory_observations(&self) -> bool {
+        false
+    }
     /// Reads a pane's agent state. `Ok(None)` means herdr reports no agent in
     /// that pane (exited, replaced, or never one there).
     fn get(&self, pane: &PaneId) -> Result<Option<AgentGet>, ProcessError>;
@@ -212,6 +217,9 @@ struct AgentInfo {
 const AGENT_NOT_FOUND: &str = "agent_not_found";
 
 impl Herdr for RealHerdr {
+    fn directory_observations(&self) -> bool {
+        true
+    }
     fn get(&self, pane: &PaneId) -> Result<Option<AgentGet>, ProcessError> {
         let result = herdr_cli::call::<GetResult>(
             &herdr_cli::RealProcessRunner,

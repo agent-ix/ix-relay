@@ -375,7 +375,7 @@ const RENAME_EVENT_GAP: Duration = Duration::from_secs(5 * 60);
 fn refresh_places(
     relay: &mut Relay,
     herdr: &impl Herdr,
-    regs: &mut [relay_core::Registration],
+    regs: &mut Vec<relay_core::Registration>,
     machine: &MachineName,
     state: &mut WatcherState,
     log: &mut impl FnMut(String),
@@ -387,6 +387,12 @@ fn refresh_places(
         return Ok(HashSet::new());
     }
     state.last_place_refresh = Some(Instant::now());
+    let directory_revision = if herdr.directory_observations() {
+        relay.take_directory_refresh(machine)?;
+        Some(relay.begin_directory_observation(machine)?)
+    } else {
+        None
+    };
     let layout = match herdr.layout(machine) {
         Ok(layout) => {
             if std::mem::take(&mut state.layout_failed_reported) {
@@ -418,6 +424,41 @@ fn refresh_places(
              they would refresh stay as registered",
             if dropped == 1 { "y" } else { "ies" }
         ));
+    }
+    // Reconcile all genuine Herdr sessions, including leads with no startup record.
+    // Queue identity follows the session; mutable address labels never rename queues.
+    if let Some(view) = &layout.view {
+        match relay_ops::enrollment::registrations(view) {
+            Ok(live) => {
+                for registration in &live {
+                    if view
+                        .agents
+                        .iter()
+                        .filter(|agent| agent.session_id == registration.session_id)
+                        .count()
+                        != 1
+                        || live
+                            .iter()
+                            .filter(|r| {
+                                r.full_address() == registration.full_address()
+                                    || r.name == registration.name
+                            })
+                            .count()
+                            != 1
+                    {
+                        continue;
+                    }
+                    if !regs.iter().any(|r| r.name == registration.name) {
+                        relay_ops::enrollment::enroll(relay, registration)?;
+                        regs.push(registration.clone());
+                    }
+                }
+                if let Some(revision) = directory_revision {
+                    relay.publish_directory(machine, revision, &live)?;
+                }
+            }
+            Err(error) => log(format!("cannot enroll Herdr sessions: {error}")),
+        }
     }
     // A session that moved to another pane is followed first, and the relinked
     // leads are updated in `regs` (which the tick goes on with and caches).
@@ -1181,19 +1222,9 @@ fn prune_stale(
         Ok(None) => {
             eprintln!("relay-watcher: {name}: registration changed since the snapshot; not pruned")
         }
-        Ok(Some(aliases)) => {
-            let aka = if aliases.is_empty() {
-                "none".to_owned()
-            } else {
-                aliases
-                    .iter()
-                    .map(AgentName::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
+        Ok(Some(_)) => {
             eprintln!(
-                "relay-watcher: pruned stale registration for {name} (pane {pane}, empty inbox, \
-                 last seen {}h ago); removed alias(es): {aka}",
+                "relay-watcher: pruned stale registration for {name} (pane {pane}, empty inbox, last seen {}h ago)",
                 age_ms / (60 * 60 * 1000)
             );
         }
@@ -1590,6 +1621,9 @@ mod tests {
     struct ViewHerdr(Option<relay_ops::find::MachineView>);
 
     impl Herdr for ViewHerdr {
+        fn directory_observations(&self) -> bool {
+            true
+        }
         fn get(&self, _pane: &PaneId) -> Result<Option<AgentGet>, ProcessError> {
             Ok(None)
         }
@@ -1660,6 +1694,7 @@ mod tests {
         let view = relay_ops::find::MachineView {
             machine: "here".parse().unwrap(),
             agents: vec![relay_ops::find::HerdrAgent {
+                kind: "codex".into(),
                 pane_id: "wM:p1".parse().unwrap(),
                 tab_id: "wM:t1".parse().unwrap(),
                 workspace_id: "wM".parse().unwrap(),
@@ -1687,12 +1722,21 @@ mod tests {
 
         tick(
             &mut relay,
-            &ViewHerdr(Some(view)),
+            &socket::Routed::herdr_only(ViewHerdr(Some(view))),
             &here,
             &mut state,
             &mut |_| {},
         )
         .unwrap();
+        assert!(
+            matches!(
+                relay
+                    .directory_recipient(&"here:EA:code".parse().unwrap())
+                    .unwrap(),
+                relay_core::DirectoryRead::Unique(_)
+            ),
+            "the actual routed adapter must publish the verified directory"
+        );
         let body = String::from_utf8(bodies.recv().unwrap()).unwrap();
         assert!(
             body.contains("\"workspace_label\",\"value\":{\"stringValue\":\"EA\"}")
@@ -2340,7 +2384,7 @@ mod tests {
         tick_once(&mut relay, &fine);
         assert_eq!(fine.prompts.borrow().len(), 1);
         assert!(
-            fine.prompts.borrow()[0].contains("from sender (redelivered): hi"),
+            fine.prompts.borrow()[0].contains("from unverified (redelivered): hi"),
             "{:?}",
             fine.prompts
         );
@@ -2590,9 +2634,6 @@ mod tests {
             Some("s1"),
             stale_seen,
         );
-        relay
-            .set_alias(&"old-nick".parse().unwrap(), &"old-lead".parse().unwrap())
-            .unwrap();
 
         // herdr reports no agent at all in that pane any more.
         let herdr = PruneStubHerdr { answer: None };
@@ -2609,11 +2650,6 @@ mod tests {
         assert!(
             relay.agent(&"old-lead".parse().unwrap()).unwrap().is_none(),
             "old + abandoned pane => pruned"
-        );
-        assert_eq!(
-            relay.resolve_alias(&"old-nick".parse().unwrap()).unwrap(),
-            "old-nick".parse().unwrap(),
-            "the alias pointing at the pruned name is removed too (resolves to itself, unknown)"
         );
     }
 

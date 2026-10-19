@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 10a98a964122785592aaffd0c9a8f835299333fb9d0908eacfbdd70941aefb4b # shrinks to steps = [Send, Hook { connect_ms: 0, pre_ms: 95, output: Fine }]

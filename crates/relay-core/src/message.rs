@@ -42,8 +42,8 @@ pub(crate) const WEIGHT_SLACK: usize = SIGNATURE_PREFIX.len()
 pub struct Message {
     /// The sending lead.
     pub from: AgentName,
-    /// Who it was addressed to: a bus name, or `all`. `agent-msg send` resolves
-    /// whatever the sender typed (an address, alias or pane id) to this first.
+    /// Enqueue target before sending; canonical public recipient snapshot in
+    /// stored messages, or `all`. Queues are addressed by immutable session IDs.
     pub to: Target,
     /// The body.
     pub text: String,
@@ -216,10 +216,10 @@ pub struct Registration {
     /// `herdr agent prompt`. Absent for a lead not running under herdr.
     pub herdr_pane: Option<PaneId>,
     /// Where the pane sits in Herdr (workspace and tab labels), when known:
-    /// what `server:workspace[:tab[:pane]]` addressing resolves against. A
+    /// what `server:workspace:tab` addressing resolves against. A
     /// place is routable only when its stable Herdr identity is verified against
-    /// this registration's exact session and pane; unverified leads remain
-    /// reachable by bus name or explicit alias.
+    /// this registration's exact session and pane. Unverified records cannot
+    /// supply public identity or routing.
     pub place: Option<Place>,
     /// When the lead last registered or, while its pane is alive in herdr, when
     /// `relay-watcher` last saw it there, Unix milliseconds (FR-042).

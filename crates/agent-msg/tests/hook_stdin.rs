@@ -121,7 +121,7 @@ struct Hook {
 impl Hook {
     fn spawn(redis: &CountingRedis) -> Self {
         let config = nonexistent_config_path();
-        let mut cmd = base_cmd(&["hook", "claude"], Some("receiver"));
+        let mut cmd = base_cmd(&["hook", "claude"], Some("hub:EA:code"));
         cmd.env("IX_RELAY_CONFIG", &config);
         cmd.env("IX_RELAY_URL", &redis.url);
         cmd.env("IX_RELAY_PREFIX", "test:");
@@ -351,9 +351,14 @@ fn tc_n001_m_05_a_silent_stdin_records_within_400ms() {
 fn tc_n001_m_07_a_drip_of_bytes_records_at_the_900ms_cap() {
     let redis = CountingRedis::start();
     let mut hook = Hook::spawn(&redis);
-    for _ in 0..8 {
-        hook.write(b" ");
-        thread::sleep(Duration::from_millis(200));
+    let mut next_byte = Instant::now();
+    while hook.child.try_wait().unwrap().is_none() {
+        assert!(hook.started.elapsed() < WEDGED, "stdin wedged the hook");
+        if Instant::now() >= next_byte {
+            hook.write(b" ");
+            next_byte += Duration::from_millis(200);
+        }
+        thread::sleep(Duration::from_millis(5));
     }
     let (elapsed, records) = hook.finish();
     assert_eq!(records, rec("decode", "stdin_timeout"));

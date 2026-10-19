@@ -25,6 +25,22 @@ impl Keys {
         }
     }
 
+    pub(super) fn directory_key(&self, machine: &MachineName) -> String {
+        format!("{}directory:{machine}", self.prefix)
+    }
+
+    pub(super) fn directory_sequence_key(&self, machine: &MachineName) -> String {
+        format!("{}directory-sequence:{machine}", self.prefix)
+    }
+
+    pub(super) fn directory_committed_key(&self, machine: &MachineName) -> String {
+        format!("{}directory-committed:{machine}", self.prefix)
+    }
+
+    pub(super) fn directory_refresh_key(&self, machine: &MachineName) -> String {
+        format!("{}directory-refresh:{machine}", self.prefix)
+    }
+
     pub(super) fn work_key(
         &self,
         machine: &MachineName,
@@ -40,10 +56,6 @@ impl Keys {
 
     pub(super) fn agents_key(&self) -> String {
         format!("{}agents", self.prefix)
-    }
-
-    pub(super) fn aliases_key(&self) -> String {
-        format!("{}aliases", self.prefix)
     }
 
     pub(super) fn log_key(&self) -> String {
@@ -76,10 +88,6 @@ impl Keys {
 
     pub(super) fn suppressed_key(&self, session_id: &SessionId) -> String {
         format!("{}suppressed:{session_id}", self.prefix)
-    }
-
-    pub(super) fn unresolved_key(&self, session_id: &SessionId) -> String {
-        format!("{}unresolved:{session_id}", self.prefix)
     }
 
     /// The once-per-window mark of a session whose herdr failure was recorded.
@@ -165,10 +173,22 @@ mod tests {
         let sid: SessionId = "sid-1".parse().unwrap();
         let machine: MachineName = "node-a".parse().unwrap();
         vec![
+            (
+                "directory_committed_key",
+                relay.directory_committed_key(&machine),
+            ),
+            ("directory_key", relay.directory_key(&machine)),
+            (
+                "directory_sequence_key",
+                relay.directory_sequence_key(&machine),
+            ),
+            (
+                "directory_refresh_key",
+                relay.directory_refresh_key(&machine),
+            ),
             ("work_key", relay.work_key(&machine, &sid, 42)),
             ("inbox_key", relay.inbox_key(&agent)),
             ("agents_key", relay.agents_key()),
-            ("aliases_key", relay.aliases_key()),
             ("log_key", relay.log_key()),
             ("health_hooks_key", relay.health_hooks_key()),
             ("esc_key", relay.esc_key(&id)),
@@ -177,7 +197,6 @@ mod tests {
             ("esc_index_key", relay.esc_index_key()),
             ("session_key", relay.session_key(&sid)),
             ("suppressed_key", relay.suppressed_key(&sid)),
-            ("unresolved_key", relay.unresolved_key(&sid)),
             ("herdr_failed_key", relay.herdr_failed_key(&sid)),
             ("inflight_key", relay.inflight_key(&agent)),
             ("inflight_stem", relay.inflight_stem()),
@@ -195,10 +214,13 @@ mod tests {
     #[test]
     fn the_keys_are_the_documented_ones() {
         let want = [
+            ("directory_committed_key", "p:directory-committed:node-a"),
+            ("directory_key", "p:directory:node-a"),
+            ("directory_sequence_key", "p:directory-sequence:node-a"),
+            ("directory_refresh_key", "p:directory-refresh:node-a"),
             ("work_key", "p:work:node-a:sid-1:42"),
             ("inbox_key", "p:inbox:lead-a"),
             ("agents_key", "p:agents"),
-            ("aliases_key", "p:aliases"),
             ("log_key", "p:log"),
             ("health_hooks_key", "p:health:hooks"),
             ("esc_key", "p:esc:e1"),
@@ -207,7 +229,6 @@ mod tests {
             ("esc_index_key", "p:esc:index"),
             ("session_key", "p:session:sid-1"),
             ("suppressed_key", "p:suppressed:sid-1"),
-            ("unresolved_key", "p:unresolved:sid-1"),
             ("herdr_failed_key", "p:herdr-failed:sid-1"),
             ("inflight_key", "p:inflight:lead-a"),
             ("inflight_stem", "p:inflight:"),
@@ -250,10 +271,13 @@ mod tests {
         let sid: SessionId = "sid-1".parse().unwrap();
         let machine: MachineName = "node-a".parse().unwrap();
         let moved = [
+            other.directory_committed_key(&machine),
+            other.directory_key(&machine),
+            other.directory_sequence_key(&machine),
+            other.directory_refresh_key(&machine),
             other.work_key(&machine, &sid, 42),
             other.inbox_key(&agent),
             other.agents_key(),
-            other.aliases_key(),
             other.log_key(),
             other.health_hooks_key(),
             other.esc_key(&id),
@@ -262,7 +286,6 @@ mod tests {
             other.esc_index_key(),
             other.session_key(&sid),
             other.suppressed_key(&sid),
-            other.unresolved_key(&sid),
             other.herdr_failed_key(&sid),
             other.inflight_key(&agent),
             other.inflight_stem(),

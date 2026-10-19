@@ -37,10 +37,17 @@ fn blackhole() -> String {
     url
 }
 
-/// How long one hook of `event` takes against the blackhole, as a lead named by
-/// `--as` (`explicit`) or derived from its session.
+/// Hook deadline against a blackhole, with or without preserved name metadata.
 fn hook_wall_time(event: &str, explicit: bool) -> Duration {
-    let mut cmd = base_cmd(&["hook", "claude"], explicit.then_some("receiver"));
+    // Warm executable validation for the freshly compiled debug binary. The
+    // live fresh-startup acceptance covers cold startup separately; this lane
+    // measures the hook's network deadline on an otherwise idle host.
+    let warm = run(base_cmd(&["--version"], None), "");
+    assert_eq!(warm.status, 0);
+    let mut cmd = base_cmd(&["hook", "claude"], explicit.then_some("hub:EA:code"));
+    // Both variants must actually execute a lead hook. Without HERDR_ENV the
+    // derived variant exits at the non-lead gate and never tests Redis at all.
+    cmd.env("HERDR_ENV", "1").env("CODEX_THREAD_ID", "s1");
     cmd.env("IX_RELAY_URL", blackhole());
     let stdin = format!(r#"{{"hook_event_name":"{event}","session_id":"s1","cwd":"/work"}}"#);
     let started = Instant::now();

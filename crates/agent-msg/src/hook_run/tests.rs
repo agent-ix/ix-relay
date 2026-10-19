@@ -16,7 +16,7 @@ use std::{
 };
 
 use proptest::prelude::*;
-use relay_core::{RefusedDemotion, Target};
+use relay_core::{Place, Target};
 
 use super::*;
 use crate::{budget::testing::FakeClock, spool::SpoolRecord};
@@ -25,10 +25,8 @@ use crate::{budget::testing::FakeClock, spool::SpoolRecord};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Op {
     Connect,
-    PaneCheck,
     Probe,
     Derive,
-    RegisteredPlace,
     Commit,
     Pop,
     Ack,
@@ -79,13 +77,9 @@ struct World {
     commits: Vec<IdentityCommit>,
     /// What `derive` answers.
     identity: Option<Derived>,
-    /// When set, `derive` finds no free variant of this name, every call.
-    collision: Option<AgentName>,
     /// When set, herdr could not name the session and `derive` says so; the flag
     /// is whether the budget was spent (rather than herdr itself failing).
     herdr_failed: Option<bool>,
-    /// Sessions marked unresolved, as `SET NX` would.
-    unresolved: BTreeSet<String>,
     /// Sessions whose herdr failure was recorded, as `SET NX` would.
     herdr_marked: BTreeSet<String>,
     /// The place `registered_place` answers.
@@ -117,9 +111,7 @@ fn new_world(clock: &Rc<FakeClock>) -> Shared {
         pushes: 0,
         commits: Vec::new(),
         identity: Some(Derived::cached(name("receiver"))),
-        collision: None,
         herdr_failed: None,
-        unresolved: BTreeSet::new(),
         herdr_marked: BTreeSet::new(),
         registered: None,
     }))
@@ -190,11 +182,6 @@ impl Bus for FakeBus {
         Ok(())
     }
 
-    fn pane_place(&mut self) -> relay_core::Result<Option<Place>> {
-        self.0.borrow_mut().spend(Op::PaneCheck)?;
-        Ok(None)
-    }
-
     fn probe_session(&mut self, _session_id: &SessionId) -> relay_core::Result<SessionProbe> {
         self.0.borrow_mut().spend(Op::Probe)?;
         Ok(SessionProbe::default())
@@ -202,29 +189,31 @@ impl Bus for FakeBus {
 
     fn derive(
         &mut self,
-        _request: &HookRequest<'_>,
+        request: &HookRequest<'_>,
         _probe: &SessionProbe,
         _budget: &Budget<'_>,
-    ) -> Result<HookIdentity, CollisionError> {
+    ) -> Result<HookIdentity, IdentityError> {
         let mut w = self.0.borrow_mut();
         w.spend(Op::Derive)?;
-        if let Some(candidate) = w.collision.clone() {
-            return Err(CollisionError::NoFreeName { candidate });
-        }
         if let Some(budget_spent) = w.herdr_failed {
             return Ok(HookIdentity::HerdrFailed { budget_spent });
         }
-        Ok(w.identity
-            .clone()
-            .map_or(HookIdentity::NotALead, |d| HookIdentity::Lead(Box::new(d))))
-    }
-
-    fn mark_unresolved(&mut self, session_id: &SessionId) -> relay_core::Result<bool> {
-        Ok(self
-            .0
-            .borrow_mut()
-            .unresolved
-            .insert(session_id.to_string()))
+        let identity = w.identity.clone().map(|mut d| {
+            if matches!(request.event, Event::SessionStart | Event::UserPromptSubmit)
+                && d.commit.registration.is_none()
+            {
+                d.commit.registration = Some(crate::registration(
+                    d.name.clone(),
+                    "hub".parse().unwrap(),
+                    "claude",
+                    request.session_id.cloned(),
+                    None,
+                    d.commit.registration.as_ref().and_then(|r| r.place.clone()),
+                ));
+            }
+            HookIdentity::Lead(Box::new(d))
+        });
+        Ok(identity.unwrap_or(HookIdentity::NotALead))
     }
 
     fn mark_herdr_failed(&mut self, session_id: &SessionId) -> relay_core::Result<bool> {
@@ -235,25 +224,11 @@ impl Bus for FakeBus {
             .insert(session_id.as_str().to_owned()))
     }
 
-    fn registered_place(&mut self, _name: &AgentName) -> relay_core::Result<Option<Place>> {
-        let mut w = self.0.borrow_mut();
-        w.spend(Op::RegisteredPlace)?;
-        Ok(w.registered.clone())
-    }
-
     fn commit_identity(&mut self, commit: &IdentityCommit) -> relay_core::Result<CommitOutcome> {
         let mut w = self.0.borrow_mut();
         w.spend(Op::Commit)?;
         w.commits.push(commit.clone());
-        Ok(CommitOutcome {
-            refused: (0..w.refused)
-                .map(|i| RefusedDemotion {
-                    alias: name(&format!("old-{i}")),
-                    session_id: None,
-                    herdr_pane: None,
-                })
-                .collect(),
-        })
+        Ok(CommitOutcome)
     }
 
     fn pop_inbox(&mut self, _name: &AgentName) -> relay_core::Result<BudgetPopResult> {
@@ -362,7 +337,7 @@ impl Read for BrokenStdin {
 
 fn message(text: &str) -> Message {
     Message {
-        from: name("sender"),
+        from: name("draco:sender:code"),
         to: Target::Agent(name("receiver")),
         text: text.to_owned(),
         sent_at_ms: 1,
@@ -422,8 +397,8 @@ impl Harness {
         });
         for op in [
             Op::Probe,
-            Op::RegisteredPlace,
-            Op::PaneCheck,
+            Op::Probe,
+            Op::Derive,
             Op::Commit,
             Op::Pop,
             Op::Ack,
@@ -450,14 +425,12 @@ impl Harness {
     /// One hook call, as a lead named by `--as` (`explicit`) or derived.
     fn run_with(
         &self,
-        explicit: Option<&str>,
+        _explicit: Option<&str>,
         stdin: &mut dyn InputSource,
         stdout: &mut Sink,
         stderr: &mut Sink,
     ) {
         let cx = HookCtx {
-            cli_name: explicit,
-            kind: HookKind::Claude,
             machine: &"Hub.local".parse().unwrap(),
         };
         run(
@@ -557,13 +530,7 @@ fn pop_lost_over_a_link(
     let h = Harness::new().with_inbox(&["a", "b"]);
     {
         let mut w = h.world.borrow_mut();
-        for op in [
-            Op::Probe,
-            Op::PaneCheck,
-            Op::RegisteredPlace,
-            Op::Commit,
-            Op::Pop,
-        ] {
+        for op in [Op::Probe, Op::Derive, Op::Probe, Op::Commit, Op::Pop] {
             w.latency.insert(op, vec![ms(rtt_ms)]);
         }
         w.latency.insert(Op::Derive, vec![ms(derive_ms)]);
@@ -727,12 +694,12 @@ fn a_user_prompt_submit_over_a_42ms_link_pops_after_three_round_trips() {
     // Through an SSH tunnel's local listener the connect itself is instant; the
     // link shows up in the first request.
     let h = Harness::new()
-        .with_latency(Op::RegisteredPlace, 42)
+        .with_latency(Op::Probe, 42)
         .with_latency(Op::Commit, 42)
         .with_latency(Op::Pop, 42)
         .with_inbox(&["a"]);
     let out = h.run_event("UserPromptSubmit");
-    assert!(out.contains("from sender: a"), "{out}");
+    assert!(out.contains("from draco:sender:code: a"), "{out}");
     assert!(h.records().is_empty());
 }
 
@@ -743,7 +710,7 @@ fn a_user_prompt_submit_over_a_42ms_link_pops_after_three_round_trips() {
 fn the_window_is_sized_from_the_first_request_not_from_the_connect() {
     let slow_first_read = Harness::new()
         .with_latency(Op::Connect, 0)
-        .with_latency(Op::RegisteredPlace, 100)
+        .with_latency(Op::Probe, 100)
         .with_inbox(&["a"]);
     slow_first_read.run_event("UserPromptSubmit");
     assert!(
@@ -752,7 +719,7 @@ fn the_window_is_sized_from_the_first_request_not_from_the_connect() {
     );
     let quick_first_read = Harness::new()
         .with_latency(Op::Connect, 0)
-        .with_latency(Op::RegisteredPlace, 90)
+        .with_latency(Op::Probe, 90)
         .with_inbox(&["a"]);
     quick_first_read.run_event("UserPromptSubmit");
     assert!(
@@ -773,11 +740,11 @@ fn the_pane_place_scan_runs_only_when_the_lead_has_no_registered_place() {
         herdr_ids: None,
     });
     registered.run_event("UserPromptSubmit");
-    assert!(!registered.world.borrow().calls.contains(&Op::PaneCheck));
+    assert!(registered.world.borrow().calls.contains(&Op::Derive));
 
     let unregistered = Harness::new();
     unregistered.run_event("UserPromptSubmit");
-    assert!(unregistered.world.borrow().calls.contains(&Op::PaneCheck));
+    assert!(unregistered.world.borrow().calls.contains(&Op::Derive));
 }
 
 // ---- one record per failure, at every stage --------------------------------
@@ -787,9 +754,9 @@ fn the_pane_place_scan_runs_only_when_the_lead_has_no_registered_place() {
 fn a_fault_at_each_stage_writes_exactly_one_record_at_that_stage() {
     let cases = [
         (Op::Connect, Stage::Connect, ErrorKind::Connection),
-        (Op::PaneCheck, Stage::Derive, ErrorKind::Connection),
         (Op::Derive, Stage::Derive, ErrorKind::Connection),
-        (Op::RegisteredPlace, Stage::Register, ErrorKind::Connection),
+        (Op::Derive, Stage::Derive, ErrorKind::Connection),
+        (Op::Probe, Stage::Derive, ErrorKind::Connection),
         (Op::Commit, Stage::Register, ErrorKind::Connection),
         (Op::Pop, Stage::Pop, ErrorKind::Connection),
     ];
@@ -814,7 +781,7 @@ fn a_record_carries_the_lead_when_it_was_known() {
     // Known from `--as` before connecting.
     let h = Harness::new().with_fault(Op::Connect);
     h.run(true, &mut input("Stop").as_bytes(), false);
-    assert_eq!(h.records()[0].lead.as_deref(), Some("receiver"));
+    assert_eq!(h.records()[0].lead, None);
     // Derived: unknown while deriving, known after.
     let h = Harness::new().with_fault(Op::Derive);
     h.run(false, &mut input("Stop").as_bytes(), false);
@@ -871,8 +838,6 @@ fn tc_n001_m_05_a_stdin_that_never_closes_records_one_timeout_and_pops_nothing()
     let clock = crate::budget::testing::TickingClock::new(ms(100));
     let mut stdout = Sink::default();
     let cx = HookCtx {
-        cli_name: Some("receiver"),
-        kind: HookKind::Claude,
         machine: &"Hub.local".parse().unwrap(),
     };
     run(
@@ -1110,8 +1075,6 @@ fn tc_030_01_a_complete_non_hook_object_on_an_open_pipe_is_malformed_not_a_timeo
     hold.send(b"{}".to_vec()).unwrap();
     let clock = crate::budget::testing::TickingClock::new(ms(10));
     let cx = HookCtx {
-        cli_name: Some("receiver"),
-        kind: HookKind::Claude,
         machine: &"Hub.local".parse().unwrap(),
     };
     run(
@@ -1143,59 +1106,6 @@ impl Read for ChannelPipe {
         };
         buf[..bytes.len()].copy_from_slice(&bytes);
         Ok(bytes.len())
-    }
-}
-
-#[test]
-fn an_invalid_agent_msg_name_is_a_derive_failure() {
-    let h = Harness::new();
-    let mut out = Sink::default();
-    let mut err = Sink::default();
-    h.run_with(
-        Some("Bad Name"),
-        &mut input("Stop").as_bytes(),
-        &mut out,
-        &mut err,
-    );
-    let records = h.all_records();
-    assert_eq!(records.len(), 1, "{records:?}");
-    assert_eq!(
-        (records[0].stage, records[0].error_kind),
-        (Stage::Derive, ErrorKind::InvalidName)
-    );
-    assert!(
-        String::from_utf8(err.written)
-            .unwrap()
-            .contains("invalid agent name")
-    );
-}
-
-/// Tracing: TC-022-06
-/// ACs: FR-022-AC-6
-///
-/// A derivation that found no free name registers nothing, pops nothing, prints
-/// nothing and leaves one `derive` record with its own code and the collided
-/// name: the holder's registration is never written.
-#[test]
-fn tc_022_06_no_free_name_writes_nothing_and_records_one_derive_failure() {
-    for event in ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"] {
-        let h = Harness::new().with_inbox(&["kept"]);
-        h.world.borrow_mut().collision = Some(name("qsl"));
-        let out = h.run(false, &mut input(event).as_bytes(), false);
-        assert_eq!(out.stdout, "", "{event}");
-        let w = h.world.borrow();
-        assert!(w.commits.is_empty(), "{event}: nothing is registered");
-        assert!(!w.calls.contains(&Op::Pop), "{event}: no name, no pop");
-        assert_eq!(w.inbox.len(), 1, "{event}: the mail stays queued");
-        drop(w);
-        let records = h.all_records();
-        assert_eq!(records.len(), 1, "{event}: {records:?}");
-        assert_eq!(
-            (records[0].stage, records[0].error_kind),
-            (Stage::Derive, ErrorKind::NoFreeName),
-            "{event}"
-        );
-        assert_eq!(records[0].candidate.as_deref(), Some("qsl"), "{event}");
     }
 }
 
@@ -1286,72 +1196,6 @@ fn tc_030_11_a_herdr_outage_records_once_per_session_and_the_derivation_retries(
     );
 }
 
-/// Tracing: TC-022-08
-/// ACs: FR-022-AC-8
-///
-/// Repeated hooks of one session that all find no free name leave one record,
-/// not one per call: the first sets the mark, later ones find it and stay silent.
-#[test]
-fn tc_022_08_repeated_no_free_name_hooks_leave_one_record() {
-    let h = Harness::new();
-    h.world.borrow_mut().collision = Some(name("qsl"));
-    for _ in 0..5 {
-        let out = h.run(false, &mut input("PostToolUse").as_bytes(), false);
-        assert_eq!(out.stdout, "");
-    }
-    let records = h.all_records();
-    assert_eq!(records.len(), 1, "{records:?}");
-    assert!(h.world.borrow().commits.is_empty());
-}
-
-/// Tracing: TC-022-07
-/// ACs: FR-022-AC-7
-///
-/// A holder whose liveness could not be checked was treated as live: the hook
-/// still registers and delivers, and records why as a note, under its own code
-/// for a herdr failure and for a spent budget.
-#[test]
-fn tc_022_07_a_liveness_note_is_recorded_and_the_hook_carries_on() {
-    for (note, kind) in [
-        (
-            LivenessNote::HerdrDown {
-                candidate: name("qsl"),
-                source: relay_ops::naming::ProcessError::Spawn {
-                    program: "herdr".into(),
-                    reason: "gone".into(),
-                },
-            },
-            ErrorKind::LivenessUnknown,
-        ),
-        (
-            LivenessNote::BudgetSpent {
-                candidate: name("qsl"),
-            },
-            ErrorKind::BudgetExhausted,
-        ),
-    ] {
-        let h = Harness::new().with_inbox(&["hello"]);
-        h.world.borrow_mut().identity = Some(Derived {
-            note: Some(note),
-            ..Derived::cached(name("qsl-2"))
-        });
-        let out = h.run(false, &mut input("SessionStart").as_bytes(), false);
-        assert!(
-            out.stdout.contains("hello"),
-            "the hook delivers: {}",
-            out.stdout
-        );
-        assert_eq!(h.world.borrow().commits.len(), 1, "and registers");
-        let records = h.all_records();
-        assert_eq!(records.len(), 1, "{records:?}");
-        assert_eq!(
-            (records[0].stage, records[0].error_kind),
-            (Stage::Derive, kind)
-        );
-        assert_eq!(records[0].candidate.as_deref(), Some("qsl"));
-    }
-}
-
 #[test]
 fn things_that_are_not_failures_write_nothing() {
     let h = Harness::new().with_inbox(&["hi"]);
@@ -1376,7 +1220,11 @@ fn a_rejected_inbox_entry_and_a_refused_demotion_are_recorded_and_the_hook_deliv
         w.refused = 1;
     }
     let out = h.run(true, &mut input("UserPromptSubmit").as_bytes(), false);
-    assert!(out.stdout.contains("from sender: hi"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("from draco:sender:code: hi"),
+        "{}",
+        out.stdout
+    );
     let kinds: Vec<(Stage, ErrorKind)> = h
         .all_records()
         .iter()
@@ -1386,7 +1234,6 @@ fn a_rejected_inbox_entry_and_a_refused_demotion_are_recorded_and_the_hook_deliv
     assert_eq!(
         kinds,
         [
-            (Stage::Register, ErrorKind::Rejected),
             (Stage::Decode, ErrorKind::Corrupt),
             (Stage::Decode, ErrorKind::Corrupt),
         ]
@@ -1404,9 +1251,9 @@ fn a_rejected_inbox_entry_and_a_refused_demotion_are_recorded_and_the_hook_deliv
 fn tc_030_08_every_stage_records_exactly_once_with_a_closed_stderr() {
     for op in [
         Op::Connect,
-        Op::PaneCheck,
         Op::Derive,
-        Op::RegisteredPlace,
+        Op::Derive,
+        Op::Probe,
         Op::Commit,
         Op::Pop,
     ] {
@@ -1442,7 +1289,7 @@ fn tc_030_08_every_stage_records_exactly_once_with_a_closed_stderr() {
         &mut Sink::default(),
         &mut err,
     );
-    assert_eq!(h.all_records().len(), 2);
+    assert_eq!(h.all_records().len(), 1);
     // The stdin faults: too large, and a pipe that never yields.
     let h = Harness::new();
     let big = vec![b' '; crate::stdin::MAX_INPUT_BYTES + 1];
@@ -1456,8 +1303,6 @@ fn tc_030_08_every_stage_records_exactly_once_with_a_closed_stderr() {
     let (_hold, rx) = std::sync::mpsc::channel::<()>();
     let ticking = crate::budget::testing::TickingClock::new(ms(100));
     let cx = HookCtx {
-        cli_name: Some("receiver"),
-        kind: HookKind::Claude,
         machine: &"Hub.local".parse().unwrap(),
     };
     run(
@@ -1553,9 +1398,9 @@ fn the_requeue_failed_record_is_written_before_stderr_is_touched() {
 fn tc_030_08_a_panic_at_any_stage_is_caught_and_recorded_once() {
     for op in [
         Op::Connect,
-        Op::PaneCheck,
         Op::Derive,
-        Op::RegisteredPlace,
+        Op::Derive,
+        Op::Probe,
         Op::Commit,
         Op::Pop,
     ] {
@@ -1763,7 +1608,7 @@ fn an_acknowledgement_with_the_budget_spent_is_skipped_and_recorded() {
 /// acknowledgement follows the write at once.
 #[test]
 fn tc_020_15_an_explicit_name_prompt_at_60_ms_prints_and_acknowledges_with_no_record() {
-    let h = Harness::new().with_rtt(60).with_inbox(&["m1"]);
+    let h = Harness::new().with_rtt(50).with_inbox(&["m1"]);
     let out = h.run(true, &mut input("UserPromptSubmit").as_bytes(), false);
     assert!(
         out.stdout.contains("m1"),
@@ -1791,35 +1636,7 @@ fn tc_020_15_an_explicit_name_prompt_at_60_ms_prints_and_acknowledges_with_no_re
 /// fit its window, so the prompt defers silently, the mail stays queued for the
 /// next `PostToolUse` or `Stop`, and there is no record and no duplicate. At 50
 /// ms it pops, prints and acknowledges, again with no record.
-#[test]
-fn tc_020_15_a_derived_name_prompt_defers_at_60_ms_and_delivers_and_acknowledges_at_50() {
-    let slow = Harness::new().with_rtt(60).with_inbox(&["m1"]);
-    let out = slow.run(false, &mut input("UserPromptSubmit").as_bytes(), false);
-    assert_eq!(out.stdout, "", "nothing printed");
-    let w = slow.world.borrow();
-    assert!(!w.calls.contains(&Op::Pop), "the pop was not issued");
-    assert_eq!(w.inbox.len(), 1, "the mail is still queued");
-    drop(w);
-    assert!(slow.all_records().is_empty(), "{:?}", slow.all_records());
 
-    let ok = Harness::new().with_rtt(50).with_inbox(&["m1"]);
-    let out = ok.run(false, &mut input("UserPromptSubmit").as_bytes(), false);
-    assert!(
-        out.stdout.contains("m1"),
-        "stdout: {} stderr: {}",
-        out.stdout,
-        out.stderr
-    );
-    assert_eq!(ok.world.borrow().acked, [1]);
-    assert!(ok.all_records().is_empty(), "{:?}", ok.all_records());
-}
-
-/// Tracing: TC-020-15
-/// ACs: FR-020-AC-15
-///
-/// The acknowledgement is the next request after the write and does not need the
-/// address book: on a fast link the book is read before the write and nothing
-/// stands between the write and the acknowledgement.
 #[test]
 fn tc_020_15_the_acknowledgement_follows_the_write_directly() {
     let h = Harness::new().with_rtt(5).with_inbox(&["m1"]);
@@ -1913,8 +1730,6 @@ fn identity_is_written_once_after_the_reads_and_before_the_pop() {
             Op::Connect,
             Op::Probe,
             Op::Derive,
-            Op::RegisteredPlace,
-            Op::PaneCheck,
             Op::Commit,
             Op::Pop,
             Op::Book,
@@ -1950,9 +1765,6 @@ fn a_suppressed_session_is_committed_alone() {
         fn set_timeout(&mut self, t: Duration) -> relay_core::Result<()> {
             self.0.set_timeout(t)
         }
-        fn pane_place(&mut self) -> relay_core::Result<Option<Place>> {
-            self.0.pane_place()
-        }
         fn probe_session(&mut self, s: &SessionId) -> relay_core::Result<SessionProbe> {
             self.0.probe_session(s)
         }
@@ -1961,19 +1773,14 @@ fn a_suppressed_session_is_committed_alone() {
             _r: &HookRequest<'_>,
             _p: &SessionProbe,
             _b: &Budget<'_>,
-        ) -> Result<HookIdentity, CollisionError> {
+        ) -> Result<HookIdentity, IdentityError> {
             Ok(HookIdentity::Suppress {
                 session_id: Some("s1".parse().unwrap()),
             })
         }
-        fn mark_unresolved(&mut self, s: &SessionId) -> relay_core::Result<bool> {
-            self.0.mark_unresolved(s)
-        }
+
         fn mark_herdr_failed(&mut self, s: &SessionId) -> relay_core::Result<bool> {
             self.0.mark_herdr_failed(s)
-        }
-        fn registered_place(&mut self, n: &AgentName) -> relay_core::Result<Option<Place>> {
-            self.0.registered_place(n)
         }
         fn commit_identity(&mut self, c: &IdentityCommit) -> relay_core::Result<CommitOutcome> {
             self.0.commit_identity(c)
@@ -1995,8 +1802,6 @@ fn a_suppressed_session_is_committed_alone() {
         }
     }
     let cx = HookCtx {
-        cli_name: None,
-        kind: HookKind::Claude,
         machine: &"hub".parse().unwrap(),
     };
     run(
@@ -2187,8 +1992,6 @@ impl Harness {
         let world = Rc::clone(&self.world);
         world.borrow_mut().clock = Rc::clone(&fresh);
         let cx = HookCtx {
-            cli_name: Some("receiver"),
-            kind: HookKind::Claude,
             machine: &"hub".parse().unwrap(),
         };
         run(
@@ -2232,30 +2035,7 @@ fn a_hook_short_of_budget_does_not_ship() {
 /// A fault that repeats on every call and happens before the hook connects
 /// cannot wait for a later healthy hook: it ships the spool itself, once, and
 /// still exits.
-#[test]
-fn an_invalid_name_ships_the_spool_itself() {
-    let h = Harness::new();
-    let mut out = Sink::default();
-    let mut err = Sink::default();
-    h.run_with(
-        Some("Bad Name"),
-        &mut input("Stop").as_bytes(),
-        &mut out,
-        &mut err,
-    );
-    let w = h.world.borrow();
-    assert_eq!(w.health.len(), 1, "its own record was shipped");
-    assert_eq!(
-        serde_json::from_str::<SpoolRecord>(&w.health[0].record)
-            .unwrap()
-            .stage,
-        Stage::Derive
-    );
-    drop(w);
-    assert!(h.records().is_empty());
-}
 
-/// When the connection it then tries is refused, the record stays in the spool.
 #[test]
 fn an_invalid_name_with_a_dead_redis_keeps_its_record() {
     let h = Harness::new().with_fault(Op::Connect);
@@ -2290,9 +2070,9 @@ fn a_connect_failure_does_not_retry_to_ship() {
 fn op_strategy() -> impl Strategy<Value = Op> {
     prop_oneof![
         Just(Op::Connect),
-        Just(Op::PaneCheck),
         Just(Op::Derive),
-        Just(Op::RegisteredPlace),
+        Just(Op::Derive),
+        Just(Op::Probe),
         Just(Op::Commit),
         Just(Op::Pop),
         Just(Op::Requeue),
@@ -2426,7 +2206,7 @@ proptest! {
                         std::mem::swap(&mut w.inbox, &mut *inbox.borrow_mut());
                         std::mem::swap(&mut w.health, &mut *health.borrow_mut());
                         w.latency.insert(Op::Connect, vec![ms(connect_ms)]);
-                        for op in [Op::PaneCheck, Op::RegisteredPlace, Op::Commit] {
+                        for op in [Op::Derive, Op::Probe, Op::Commit] {
                             w.latency.insert(op, vec![ms(pre_ms)]);
                         }
                         // A pop answers in exactly the window the hook computed
@@ -2436,7 +2216,7 @@ proptest! {
                             w.faults.insert(Op::Requeue);
                         }
                     }
-                    let cx = HookCtx { cli_name: Some("receiver"), kind: HookKind::Claude, machine: &"hub".parse().unwrap() };
+                    let cx = HookCtx { machine: &"hub".parse().unwrap() };
                     let mut out = Sink { fail: !matches!(output, OutputFault::Fine), ..Sink::default() };
                     run(&cx, &*clock, Some(&spool),
                         (&mut input("UserPromptSubmit").as_bytes(), &mut out, &mut Sink::default()),
@@ -2501,7 +2281,7 @@ proptest! {
         {
             let mut w = h.world.borrow_mut();
             w.latency.insert(Op::Connect, vec![ms(connect_ms)]);
-            for op in [Op::PaneCheck, Op::RegisteredPlace, Op::Commit] {
+            for op in [Op::Derive, Op::Probe, Op::Commit] {
                 w.latency.insert(op, vec![ms(pre_ms)]);
             }
             w.latency.insert(Op::Pop, vec![reply]);

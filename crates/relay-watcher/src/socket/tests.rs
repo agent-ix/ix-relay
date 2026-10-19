@@ -182,6 +182,8 @@ impl FakeClaude {
                     thread::sleep(Duration::from_micros(100));
                     continue;
                 };
+                // macOS inherits the listener's nonblocking flag on accept.
+                conn.set_nonblocking(false).unwrap();
                 let mut line = String::new();
                 if BufReader::new(conn).read_line(&mut line).is_err() || line.is_empty() {
                     continue;
@@ -289,7 +291,7 @@ impl Rig {
 }
 
 /// `session::resolve` over `home`'s directories.
-fn resolve(home: &Home, session: &str, procs: &FakeProcs) -> Result<session::Resolved, Unresolved> {
+fn resolve(home: &Home, session: &str, procs: &dyn Procs) -> Result<session::Resolved, Unresolved> {
     session::resolve(
         &home.sessions(),
         session,
@@ -1928,7 +1930,7 @@ impl Watching {
     fn send(&mut self, text: &str) {
         self.relay
             .send(&relay_core::Message {
-                from: "sender".parse().unwrap(),
+                from: "hub:sender:code".parse().unwrap(),
                 to: relay_core::Target::Agent(self.lead.clone()),
                 text: text.into(),
                 sent_at_ms: 0,
@@ -2156,7 +2158,7 @@ fn tc_044_10_a_late_refusal_requeues_and_herdr_types_it_and_a_reaped_batch_is_le
     assert_eq!(w.dead(), 0);
     assert_eq!(
         *herdr.typed.lock().unwrap(),
-        ["[ix-relay] from sender: first"],
+        ["[ix-relay] from hub:sender:code: first"],
         "{:?}",
         w.log
     );
@@ -3579,7 +3581,7 @@ fn tc_044_14_a_healthy_lead_behind_twenty_wedged_ones_is_served_within_one_round
         sessions.insert(pane, session);
         w.relay
             .send(&relay_core::Message {
-                from: "sender".parse().unwrap(),
+                from: "hub:sender:code".parse().unwrap(),
                 to: relay_core::Target::Agent(lead.parse().unwrap()),
                 text: "hello".into(),
                 sent_at_ms: 0,
@@ -4010,6 +4012,16 @@ fn tc_044_15_an_untrusted_status_directory_is_alerted_once_and_delivery_goes_on(
         );
         assert_eq!(got, Ok(()), "delivery goes on");
     }
+    // A successful socket write can precede the receiver thread parsing it.
+    // Observe all three arrivals rather than racing an immediate snapshot.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while claude.received().len() < 3 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "receiver did not observe all three posts"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
     assert_eq!(claude.received().len(), 3);
     let alerts = d.alerts();
     assert_eq!(alerts.len(), 1, "once per episode: {alerts:?}");
@@ -4279,4 +4291,38 @@ fn tc_046_15_the_rest_of_a_skipped_over_long_line_is_not_scanned() {
         "{seen:?}"
     );
     assert_eq!(seen.last(), Some(&TranscriptMatch::Acked), "{seen:?}");
+}
+
+/// Tracing: TC-044-02
+/// ACs: FR-044-AC-2
+/// A native macOS process resolves only with its exact Claude process identity.
+#[cfg(target_os = "macos")]
+#[test]
+fn tc_044_02_macos_native_process_identity_rejects_a_reused_pid() {
+    let home = Home::new();
+    let pid = std::process::id();
+    let _listener = listen(home.socket(pid)).unwrap();
+    let start = session::ProcFs.start_time(pid).unwrap();
+    home.record(pid, SESSION, |r| {
+        r["procStart"] = json!(start);
+        r["pidDomain"] = json!("darwin");
+    });
+    assert_eq!(resolve(&home, SESSION, &session::ProcFs).unwrap().pid, pid);
+    home.record(pid, SESSION, |r| {
+        r["procStart"] = json!("Fri Oct  2 00:00:00 2026");
+        r["pidDomain"] = json!("darwin");
+    });
+    assert_eq!(
+        resolve(&home, SESSION, &session::ProcFs),
+        Err(Unresolved::Stale(1))
+    );
+}
+
+#[test]
+fn both_delivery_routes_preserve_local_directory_observation_authority() {
+    use crate::herdr::{Herdr, RealHerdr};
+    assert!(Routed::herdr_only(RealHerdr::default()).directory_observations());
+    let rig = Rig::new(Act::Silent);
+    assert!(Routed::socket_first(RealHerdr::default(), rig.deliverer).directory_observations());
+    assert!(!Routed::herdr_only(FakeHerdr::default()).directory_observations());
 }

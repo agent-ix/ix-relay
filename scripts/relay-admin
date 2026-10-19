@@ -7,7 +7,7 @@
 #   relay-admin remove-peer <machine>       drop the peer and its ACL user
 #   relay-admin add-user <machine>          ACL user only (the hub itself); prints URL
 #   relay-admin remove-user <machine>
-#   relay-admin migrate                     copy ixr:* keys from platform/redis
+#   relay-admin migrate                     copy ixr:v3:* keys from platform/redis
 #   relay-admin status                      wg0, forwarder, relay-redis
 #
 # See README.md "Transport". relay-redis is the `ix-relay` chart in helm/
@@ -22,7 +22,7 @@ WG_PORT=51820
 BUS_PORT=6380
 NS=relay
 DEPLOY=deploy/ix-relay
-PREFIX='ixr:'
+PREFIX='ixr:v3:'
 # The commands the relay uses, on its own keys, and nothing that can change
 # the server (CONFIG, FLUSHALL, KEYS, ACL, ...).
 ACL_RULES="~${PREFIX}* resetchannels +@all -@admin -@dangerous"

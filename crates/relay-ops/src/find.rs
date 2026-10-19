@@ -1,10 +1,5 @@
-//! `agent-msg find`: joins the bus registry (canonical names, aliases,
-//! machine, herdr pane, session id, last seen) against live herdr state
-//! across every machine, so a lead can look another one up by name, alias,
-//! workspace/tab label, session name or pane id before messaging it
-//! (AGE-2018, the operator's priority call: "agents must have a way of querying
-//! herdr and then resolving a name" ranks this above the rest of that
-//! ticket's polish).
+//! Live lead discovery joins session queues against Herdr locations.
+//! Public identities are server:workspace:tab; display names are metadata.
 //!
 //! [`join`] and [`matches_query`] are pure — no herdr or Redis calls —
 //! so the join logic is unit-testable over fake data with no process or
@@ -14,7 +9,8 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    time::Duration,
+    sync::Mutex,
+    time::{Duration, Instant},
 };
 
 pub use herdr_cli::ProcessError;
@@ -31,6 +27,8 @@ pub use crate::lenient::Lenient;
 /// the bus registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HerdrAgent {
+    /// Harness kind reported by local Herdr, or unknown if unavailable.
+    pub kind: String,
     /// The pane hosting it, e.g. `wE:p1`.
     pub pane_id: PaneId,
     /// The tab it's in.
@@ -42,7 +40,7 @@ pub struct HerdrAgent {
     pub status: String,
     /// A best-effort session/agent name herdr shows for this pane
     /// (`terminal_title_stripped` — see
-    /// [`crate::naming::LocationHerdr::agent`]'s own doc comment on
+    /// the live agent snapshot's own doc comment on
     /// why this is an approximation).
     pub session_name: Option<String>,
     /// The harness session id herdr reports for the pane (`agent_session.value`),
@@ -101,8 +99,6 @@ pub struct MachineView {
 pub struct FoundAgent {
     /// The lead's canonical bus name, if this pane is registered.
     pub bus_name: Option<AgentName>,
-    /// Any alias names also pointing at `bus_name`, sorted.
-    pub aliases: Vec<AgentName>,
     /// The machine this agent runs on.
     pub machine: MachineName,
     /// Its `server:workspace[:tab[:pane]]` address, when the workspace label is known.
@@ -130,8 +126,7 @@ pub struct FoundAgent {
 }
 
 /// Joins every machine's live herdr agents against the bus registry
-/// (`registrations`, `aliases` as `(alias, canonical)` pairs — see
-/// [`relay_core::Relay::all_aliases`]).
+/// using session-bound registrations.
 ///
 /// Iterates live herdr agents, not bus registrations: a registration whose
 /// pane isn't live on its machine right now doesn't produce a row (its
@@ -141,19 +136,7 @@ pub struct FoundAgent {
 /// `on_bus: false` and `bus_name: None`, so a sender can see why a message
 /// to it wouldn't be picked up.
 #[must_use]
-pub fn join(
-    machines: &[MachineView],
-    registrations: &[Registration],
-    aliases: &[(AgentName, AgentName)],
-) -> Vec<FoundAgent> {
-    let mut aliases_of: HashMap<&str, Vec<&AgentName>> = HashMap::new();
-    for (alias, canonical) in aliases {
-        aliases_of
-            .entry(canonical.as_str())
-            .or_default()
-            .push(alias);
-    }
-
+pub fn join(machines: &[MachineView], registrations: &[Registration]) -> Vec<FoundAgent> {
     let mut rows = Vec::new();
     for view in machines {
         let places = place_map(view);
@@ -174,46 +157,18 @@ pub fn join(
                 None => None,
             };
             let bus_name = reg.map(|r| r.name.clone());
-            let alias_names = bus_name
-                .as_ref()
-                .and_then(|n| aliases_of.get(n.as_str()))
-                .map(|v| v.iter().map(|a| (*a).clone()).collect())
-                .unwrap_or_default();
-
             let place = places.get(&agent.pane_id);
-            // A Herdr location becomes a send address only when this row joins
-            // one registered lead by exact session id.
-            let address = reg.and_then(|_| {
-                place.map(|p| {
-                    let tab_address = p.tab_address(&view.machine);
-                    let shared = registrations
-                        .iter()
-                        .filter_map(|r| {
-                            let verified = r.verified_place()?;
-                            (r.machine == view.machine).then(|| verified.tab_address(&r.machine))
-                        })
-                        .filter(|candidate| candidate == &tab_address)
-                        .count()
-                        > 1;
-                    if shared {
-                        Address::with_pane(
-                            view.machine.as_str(),
-                            &p.workspace,
-                            &p.tab,
-                            agent.pane_id.as_str(),
-                        )
-                    } else {
-                        tab_address
-                    }
-                })
-            });
+            let address = agent
+                .session_id
+                .as_ref()
+                .and(place)
+                .map(|p| p.tab_address(&view.machine));
             let workspace_label = workspace_label(view, agent);
             let tab_label = tab_label(view, agent);
 
             rows.push(FoundAgent {
                 bus_name,
                 address,
-                aliases: alias_names,
                 machine: view.machine.clone(),
                 workspace_label: workspace_label.map(str::to_owned),
                 tab_label: tab_label.map(str::to_owned),
@@ -307,7 +262,7 @@ pub fn sessions(view: &MachineView) -> HashMap<PaneId, Option<SessionId>> {
 }
 
 /// Whether `row` matches `query`, case-insensitively, against any of: its
-/// bus name, any alias, workspace or tab label, session name, or pane id.
+/// address, workspace or tab label, session name, or pane id.
 /// An empty `query` matches everything.
 #[must_use]
 pub fn matches_query(row: &FoundAgent, query: &str) -> bool {
@@ -324,15 +279,10 @@ pub fn matches_query(row: &FoundAgent, query: &str) -> bool {
         Some(row.pane_id.as_str()),
         address.as_deref(),
     ];
-    let alias_hit = row
-        .aliases
-        .iter()
-        .any(|a| a.as_str().to_lowercase().contains(&query));
-    alias_hit
-        || fields
-            .into_iter()
-            .flatten()
-            .any(|f| f.to_lowercase().contains(&query))
+    fields
+        .into_iter()
+        .flatten()
+        .any(|f| f.to_lowercase().contains(&query))
 }
 
 // ============================================================================
@@ -354,6 +304,12 @@ pub struct MachineProfile {
     /// querying it, same as herdr's own commands would refuse `--machine`
     /// against a disabled profile.
     pub enabled: bool,
+    /// Exact SSH target saved by Herdr; never inferred from a lead name.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Exact remote Herdr session saved by Herdr.
+    #[serde(default)]
+    pub session: Option<String>,
 }
 
 /// One entry from `herdr agent list`'s `agents` array — the fields `find`
@@ -361,6 +317,9 @@ pub struct MachineProfile {
 /// for a different slice of the same command).
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentListEntry {
+    /// Harness executable kind reported by Herdr.
+    #[serde(default)]
+    pub agent: Option<String>,
     /// The pane hosting it.
     pub pane_id: PaneId,
     /// The tab it's in.
@@ -439,6 +398,7 @@ pub trait FindHerdr {
 /// Shells out to the real `herdr` binary on `PATH`.
 pub struct RealFindHerdr<R: ProcessRunner = herdr_cli::RealProcessRunner> {
     runner: R,
+    profiles: Mutex<Option<Vec<MachineProfile>>>,
 }
 
 impl RealFindHerdr<herdr_cli::RealProcessRunner> {
@@ -447,6 +407,7 @@ impl RealFindHerdr<herdr_cli::RealProcessRunner> {
     pub fn new() -> Self {
         Self {
             runner: herdr_cli::RealProcessRunner,
+            profiles: Mutex::new(None),
         }
     }
 }
@@ -456,7 +417,85 @@ impl<R: ProcessRunner> RealFindHerdr<R> {
     /// uses to replay herdr's real output without a herdr.
     #[must_use]
     pub fn with_runner(runner: R) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            profiles: Mutex::new(None),
+        }
+    }
+}
+
+impl<R: ProcessRunner> RealFindHerdr<R> {
+    fn listing<T: serde::de::DeserializeOwned>(
+        &self,
+        machine: Option<&str>,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<T, ProcessError> {
+        let Some(machine) = machine else {
+            return herdr_cli::call(&self.runner, "herdr", args, timeout);
+        };
+        let cached = self
+            .profiles
+            .lock()
+            .map_err(|_| ProcessError::BadOutput {
+                program: "herdr".into(),
+                reason: "profile cache lock poisoned".into(),
+            })?
+            .clone();
+        let profiles = match cached {
+            Some(profiles) => profiles,
+            None => self.machine_list(timeout)?,
+        };
+        let matches: Vec<_> = profiles
+            .iter()
+            .filter(|p| p.enabled && p.label.eq_ignore_ascii_case(machine))
+            .collect();
+        let [profile] = matches.as_slice() else {
+            return Err(ProcessError::BadOutput {
+                program: "herdr".into(),
+                reason: format!("expected one enabled machine profile for {machine}"),
+            });
+        };
+        let target = profile
+            .target
+            .as_deref()
+            .filter(|s| !s.is_empty() && !s.starts_with('-') && !s.chars().any(char::is_control));
+        let session = profile
+            .session
+            .as_deref()
+            .filter(|s| !s.is_empty() && !s.chars().any(char::is_control));
+        let (Some(target), Some(session)) = (target, session) else {
+            return Err(ProcessError::BadOutput {
+                program: "herdr".into(),
+                reason: format!("profile {machine} must specify its SSH target and Herdr session"),
+            });
+        };
+        // Invoke the installed CLI in that exact saved session. Herdr's machine
+        // bootstrap currently delays completed reads; no pane or caller env is
+        // forwarded across machines, and no transport is guessed or retried.
+        let quote = |s: &str| format!("'{}'", s.replace('\'', "'\"'\"'"));
+        let command = format!(
+            "HERDR_ENV=1 PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\" herdr --session {} {}",
+            quote(session),
+            args.iter()
+                .map(|arg| quote(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        herdr_cli::call(
+            &self.runner,
+            "ssh",
+            &[
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "--",
+                target,
+                &command,
+            ],
+            timeout,
+        )
     }
 }
 
@@ -476,8 +515,7 @@ impl<R: ProcessRunner> FindHerdr for RealFindHerdr<R> {
         struct Listing {
             agents: Lenient<AgentListEntry>,
         }
-        let args = herdr_cli::with_machine(machine, &["agent", "list"]);
-        let listing: Listing = herdr_cli::call(&self.runner, "herdr", &args, timeout)?;
+        let listing: Listing = self.listing(machine, &["agent", "list"], timeout)?;
         Ok(listing.agents)
     }
 
@@ -490,8 +528,7 @@ impl<R: ProcessRunner> FindHerdr for RealFindHerdr<R> {
         struct Listing {
             workspaces: Lenient<HerdrWorkspace>,
         }
-        let args = herdr_cli::with_machine(machine, &["workspace", "list"]);
-        let listing: Listing = herdr_cli::call(&self.runner, "herdr", &args, timeout)?;
+        let listing: Listing = self.listing(machine, &["workspace", "list"], timeout)?;
         Ok(listing.workspaces)
     }
 
@@ -504,8 +541,7 @@ impl<R: ProcessRunner> FindHerdr for RealFindHerdr<R> {
         struct Listing {
             tabs: Lenient<HerdrTab>,
         }
-        let args = herdr_cli::with_machine(machine, &["tab", "list"]);
-        let listing: Listing = herdr_cli::call(&self.runner, "herdr", &args, timeout)?;
+        let listing: Listing = self.listing(machine, &["tab", "list"], timeout)?;
         Ok(listing.tabs)
     }
 
@@ -520,10 +556,16 @@ impl<R: ProcessRunner> FindHerdr for RealFindHerdr<R> {
                 stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
             });
         }
-        serde_json::from_slice(&out.stdout).map_err(|e| ProcessError::BadOutput {
-            program: "herdr".to_owned(),
-            reason: e.to_string(),
-        })
+        let profiles: Vec<MachineProfile> =
+            serde_json::from_slice(&out.stdout).map_err(|e| ProcessError::BadOutput {
+                program: "herdr".to_owned(),
+                reason: e.to_string(),
+            })?;
+        *self.profiles.lock().map_err(|_| ProcessError::BadOutput {
+            program: "herdr".into(),
+            reason: "profile cache lock poisoned".into(),
+        })? = Some(profiles.clone());
+        Ok(profiles)
     }
 }
 
@@ -531,7 +573,7 @@ impl<R: ProcessRunner> FindHerdr for RealFindHerdr<R> {
 /// workspace/tab labels for whichever workspaces and tabs those agents are
 /// actually in (never every workspace/tab on the machine, even though both
 /// listings themselves come back unfiltered — filtering happens locally) —
-/// bounded to exactly one `agent list` call, one `workspace list` call, and
+/// bounded to at most one `agent list` call, one `workspace list` call, and
 /// one `tab list` call, full stop, regardless of how many workspaces or
 /// tabs the machine has (AGE-2018 PR review, finding 3: a previous version
 /// made one extra `tab list` call per distinct workspace referenced, which
@@ -549,13 +591,25 @@ pub fn gather_machine_view(
     machine_name: &MachineName,
     timeout: Duration,
 ) -> Result<MachineView, ProcessError> {
-    let listed = herdr.agent_list(machine_flag, timeout)?;
+    let started = Instant::now();
+    let remaining = || {
+        let left = timeout.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            Err(ProcessError::Timeout {
+                program: "herdr".into(),
+                secs: timeout.as_secs(),
+            })
+        } else {
+            Ok(left)
+        }
+    };
+    let listed = herdr.agent_list(machine_flag, remaining()?)?;
     let mut dropped = listed.dropped;
     let entries = listed.entries;
     let tab_ids: HashSet<&TabId> = entries.iter().map(|a| &a.tab_id).collect();
     let workspace_ids: HashSet<&WorkspaceId> = entries.iter().map(|a| &a.workspace_id).collect();
 
-    let listed = herdr.workspace_list(machine_flag, timeout)?;
+    let listed = herdr.workspace_list(machine_flag, remaining()?)?;
     dropped += listed.dropped;
     let workspaces: Vec<HerdrWorkspace> = listed
         .entries
@@ -563,7 +617,7 @@ pub fn gather_machine_view(
         .filter(|w| workspace_ids.contains(&w.workspace_id))
         .collect();
 
-    let listed = herdr.tab_list(machine_flag, timeout)?;
+    let listed = herdr.tab_list(machine_flag, remaining()?)?;
     dropped += listed.dropped;
     let tabs: Vec<HerdrTab> = listed
         .entries
@@ -574,6 +628,7 @@ pub fn gather_machine_view(
     let agents = entries
         .into_iter()
         .map(|a| HerdrAgent {
+            kind: a.agent.unwrap_or_else(|| "unknown".into()),
             pane_id: a.pane_id,
             tab_id: a.tab_id,
             workspace_id: a.workspace_id,
@@ -596,6 +651,151 @@ pub fn gather_machine_view(
 mod tests {
     use super::*;
 
+    struct OverrunHerdr;
+    impl FindHerdr for OverrunHerdr {
+        fn agent_list(
+            &self,
+            _machine: Option<&str>,
+            _timeout: Duration,
+        ) -> Result<Lenient<AgentListEntry>, ProcessError> {
+            std::thread::sleep(Duration::from_millis(10));
+            Ok(Lenient {
+                entries: vec![],
+                dropped: 0,
+            })
+        }
+        fn workspace_list(
+            &self,
+            _machine: Option<&str>,
+            _timeout: Duration,
+        ) -> Result<Lenient<HerdrWorkspace>, ProcessError> {
+            panic!("must not start a workspace call after the shared deadline");
+        }
+        fn tab_list(
+            &self,
+            _machine: Option<&str>,
+            _timeout: Duration,
+        ) -> Result<Lenient<HerdrTab>, ProcessError> {
+            panic!("must not start a tab call after the shared deadline");
+        }
+        fn machine_list(&self, _timeout: Duration) -> Result<Vec<MachineProfile>, ProcessError> {
+            panic!("gather does not load machine profiles");
+        }
+    }
+
+    #[test]
+    fn topology_gather_does_not_start_more_calls_after_the_shared_deadline() {
+        let result = gather_machine_view(
+            &OverrunHerdr,
+            None,
+            &"draco".parse().unwrap(),
+            Duration::from_millis(5),
+        );
+        assert!(matches!(result, Err(ProcessError::Timeout { .. })));
+    }
+
+    struct ProfileRunner {
+        profiles: serde_json::Value,
+        calls: Mutex<Vec<(String, Vec<String>)>>,
+    }
+    impl ProcessRunner for ProfileRunner {
+        fn run(
+            &self,
+            program: &str,
+            args: &[&str],
+            _timeout: Duration,
+        ) -> Result<herdr_cli::Output, ProcessError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((program.into(), args.iter().map(|s| (*s).into()).collect()));
+            let value = if args == ["machine", "list", "--json"] {
+                self.profiles.clone()
+            } else {
+                serde_json::json!({"result":{"agents":[],"workspaces":[],"tabs":[]}})
+            };
+            Ok(herdr_cli::Output {
+                status_code: 0,
+                success: true,
+                stdout: serde_json::to_vec(&value).unwrap(),
+                stderr: vec![],
+            })
+        }
+    }
+
+    #[test]
+    fn remote_reads_use_the_exact_saved_target_session_and_cached_profiles() {
+        let herdr = RealFindHerdr::with_runner(ProfileRunner {
+            profiles: serde_json::json!([{"label":"terra","enabled":true,"target":"cave","session":"default' ; printf bad"}]),
+            calls: Mutex::new(vec![]),
+        });
+        herdr
+            .agent_list(Some("TERRA"), Duration::from_secs(1))
+            .unwrap();
+        herdr
+            .workspace_list(Some("terra"), Duration::from_secs(1))
+            .unwrap();
+        herdr
+            .tab_list(Some("terra"), Duration::from_secs(1))
+            .unwrap();
+        let calls = herdr.runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 4, "one profile read plus three remote reads");
+        assert_eq!(calls[0].0, "herdr");
+        for (program, args) in &calls[1..] {
+            assert_eq!(program, "ssh");
+            assert_eq!(args[args.len() - 2], "cave");
+            assert!(
+                args.last()
+                    .unwrap()
+                    .contains("--session 'default'\"'\"' ; printf bad'")
+            );
+            assert!(!args.last().unwrap().contains("--machine"));
+        }
+    }
+
+    #[test]
+    fn missing_disabled_ambiguous_or_option_like_profiles_never_start_ssh() {
+        for profiles in [
+            serde_json::json!([{ "label":"terra","enabled":true }]),
+            serde_json::json!([{ "label":"terra","enabled":false,"target":"cave","session":"default" }]),
+            serde_json::json!([{ "label":"terra","enabled":true,"target":"-oProxyCommand=bad","session":"default" }]),
+            serde_json::json!([{ "label":"terra","enabled":true,"target":"cave","session":"default" },{ "label":"TERRA","enabled":true,"target":"other","session":"default" }]),
+        ] {
+            let herdr = RealFindHerdr::with_runner(ProfileRunner {
+                profiles,
+                calls: Mutex::new(vec![]),
+            });
+            assert!(
+                herdr
+                    .agent_list(Some("terra"), Duration::from_secs(1))
+                    .is_err()
+            );
+            assert!(
+                herdr
+                    .runner
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|(program, _)| program != "ssh")
+            );
+        }
+    }
+
+    #[test]
+    fn local_reads_do_not_load_profiles_or_invoke_ssh() {
+        let herdr = RealFindHerdr::with_runner(ProfileRunner {
+            profiles: serde_json::json!([]),
+            calls: Mutex::new(vec![]),
+        });
+        herdr.agent_list(None, Duration::from_secs(1)).unwrap();
+        let calls = herdr.runner.calls.lock().unwrap();
+        assert_eq!(
+            *calls,
+            vec![("herdr".into(), vec!["agent".into(), "list".into()])]
+        );
+    }
+
     fn name(s: &str) -> AgentName {
         s.parse().unwrap()
     }
@@ -615,6 +815,7 @@ mod tests {
 
     fn agent(pane: &str, tab: &str, workspace: &str, status: &str) -> HerdrAgent {
         HerdrAgent {
+            kind: "unknown".into(),
             pane_id: pane.parse().unwrap(),
             tab_id: tab.parse().unwrap(),
             workspace_id: workspace.parse().unwrap(),
@@ -652,7 +853,7 @@ mod tests {
         live.session_id = Some("sid-qsl-review".parse().unwrap());
         let machines = vec![machine_view("node-a", vec![live], "QSL", "review")];
         let regs = vec![reg("qsl-review", "node-a", "wQ:p1")];
-        let rows = join(&machines, &regs, &[]);
+        let rows = join(&machines, &regs);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].bus_name.as_ref().unwrap(), &name("qsl-review"));
         assert_eq!(rows[0].workspace_label.as_deref(), Some("QSL"));
@@ -668,7 +869,7 @@ mod tests {
         let mut stale = reg("stale-lead", "node-a", "wQ:p1");
         stale.session_id = Some("old-session".parse().unwrap());
         let machines = vec![machine_view("node-a", vec![live], "QSL", "review")];
-        let rows = join(&machines, &[stale], &[]);
+        let rows = join(&machines, &[stale]);
         assert_eq!(rows[0].bus_name, None);
         assert!(!rows[0].on_bus);
     }
@@ -682,7 +883,7 @@ mod tests {
             "review",
         )];
         let regs = vec![reg("claimed-lead", "node-a", "wQ:p1")];
-        let rows = join(&machines, &regs, &[]);
+        let rows = join(&machines, &regs);
         assert_eq!(rows[0].bus_name, None);
         assert!(!rows[0].on_bus);
         assert!(
@@ -701,7 +902,7 @@ mod tests {
         let mut live = agent("wQ:p1", "wQ:t1", "wQ", "idle");
         live.session_id = Some("sess-1".parse().unwrap());
         let machines = vec![machine_view("node-a", vec![live], "QSL", "review")];
-        let rows = join(&machines, &[], &[]);
+        let rows = join(&machines, &[]);
         assert_eq!(rows[0].pane_id.as_str(), "wQ:p1");
         assert_eq!(rows[0].tab_id.as_str(), "wQ:t1");
         assert_eq!(rows[0].workspace_id.as_str(), "wQ");
@@ -719,7 +920,7 @@ mod tests {
             "QSL",
             "1",
         )];
-        let rows = join(&machines, &[], &[]);
+        let rows = join(&machines, &[]);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].bus_name, None);
         assert!(!rows[0].on_bus);
@@ -747,16 +948,16 @@ mod tests {
                 verified_at_ms: 1,
             }),
         });
-        let rows = join(&[view.clone()], &[registered.clone()], &[]);
+        let rows = join(&[view.clone()], &[registered.clone()]);
         assert_eq!(rows[0].address.as_ref().unwrap().to_string(), "hub:EA:code");
 
         view.workspaces[0].tab_count = 1;
-        let rows = join(&[view.clone()], &[registered.clone()], &[]);
+        let rows = join(&[view.clone()], &[registered.clone()]);
         assert_eq!(rows[0].address.as_ref().unwrap().to_string(), "hub:EA:code");
 
         // Unknown count (0): conservative, the tab stays.
         view.workspaces[0].tab_count = 0;
-        let rows = join(&[view], &[registered], &[]);
+        let rows = join(&[view], &[registered]);
         assert_eq!(rows[0].address.as_ref().unwrap().to_string(), "hub:EA:code");
     }
 
@@ -794,15 +995,9 @@ mod tests {
         };
         first_reg.place = proof("sid-first");
         second_reg.place = proof("sid-second");
-        let rows = join(&[view], &[first_reg, second_reg], &[]);
-        assert_eq!(
-            rows[0].address.as_ref().unwrap().to_string(),
-            "hub:EA:code:wQ-p1"
-        );
-        assert_eq!(
-            rows[1].address.as_ref().unwrap().to_string(),
-            "hub:EA:code:wQ-p2"
-        );
+        let rows = join(&[view], &[first_reg, second_reg]);
+        assert_eq!(rows[0].address.as_ref().unwrap().to_string(), "hub:EA:code");
+        assert_eq!(rows[1].address.as_ref().unwrap().to_string(), "hub:EA:code");
     }
 
     #[test]
@@ -845,7 +1040,7 @@ mod tests {
     fn a_registration_with_no_live_herdr_agent_produces_no_row() {
         let machines = vec![machine_view("node-a", vec![], "QSL", "1")];
         let regs = vec![reg("qsl", "node-a", "wQ:p1")];
-        assert!(join(&machines, &regs, &[]).is_empty());
+        assert!(join(&machines, &regs).is_empty());
     }
 
     #[test]
@@ -859,23 +1054,10 @@ mod tests {
             "1",
         )];
         let regs = vec![reg("hub-lead", "hub", "wQ:p1")];
-        let rows = join(&machines, &regs, &[]);
+        let rows = join(&machines, &regs);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].bus_name, None, "must not match hub's registration");
     }
-
-    #[test]
-    fn aliases_are_attached_to_their_canonicals_row() {
-        let mut live = agent("wQ:p1", "wQ:t1", "wQ", "idle");
-        live.session_id = Some("sid-custom-herdr-name".parse().unwrap());
-        let machines = vec![machine_view("node-a", vec![live], "QSL", "1")];
-        let regs = vec![reg("custom-herdr-name", "node-a", "wQ:p1")];
-        let aliases = vec![(name("qsl"), name("custom-herdr-name"))];
-        let rows = join(&machines, &regs, &aliases);
-        assert_eq!(rows[0].aliases, vec![name("qsl")]);
-    }
-
-    // ---- gather_machine_view ------------------------------------------
 
     struct FakeFindHerdr {
         agents: Vec<AgentListEntry>,
@@ -935,6 +1117,7 @@ mod tests {
         let herdr = FakeFindHerdr {
             agents: vec![
                 AgentListEntry {
+                    agent: None,
                     pane_id: "wQ:p1".parse().unwrap(),
                     tab_id: "wQ:t1".parse().unwrap(),
                     workspace_id: "wQ".parse().unwrap(),
@@ -943,6 +1126,7 @@ mod tests {
                     agent_session: None,
                 },
                 AgentListEntry {
+                    agent: None,
                     pane_id: "wR:p1".parse().unwrap(),
                     tab_id: "wR:t1".parse().unwrap(),
                     workspace_id: "wR".parse().unwrap(),
@@ -1011,11 +1195,11 @@ mod tests {
     }
 
     #[test]
-    fn matches_query_checks_name_alias_labels_session_name_and_pane_id_case_insensitively() {
+    fn matches_query_checks_location_labels_session_name_and_pane_id_case_insensitively() {
         let row = FoundAgent {
             bus_name: Some(name("qsl-review")),
             address: Some(Address::new("node-a", "QSL", Some("Review"))),
-            aliases: vec![name("qsl-old")],
+
             machine: "node-a".parse().unwrap(),
             workspace_label: Some("QSL".into()),
             tab_label: Some("Review".into()),
@@ -1029,7 +1213,6 @@ mod tests {
         };
         for query in [
             "QSL-REVIEW",
-            "qsl-old",
             "review",
             "agent-d",
             "wQ:p1",
@@ -1064,6 +1247,7 @@ mod tests {
     #[test]
     fn a_find_list_drops_and_counts_a_bad_entry_but_fails_when_every_entry_is_bad() {
         let herdr = RealFindHerdr {
+            profiles: Mutex::new(None),
             runner: BodyRunner(
                 r#"{"result":{"agents":[
                     {"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle"},
@@ -1073,6 +1257,7 @@ mod tests {
         let listed = herdr.agent_list(None, Duration::from_secs(1)).unwrap();
         assert_eq!((listed.entries.len(), listed.dropped), (1, 1));
         let all_bad = RealFindHerdr {
+            profiles: Mutex::new(None),
             runner: BodyRunner(r#"{"result":{"agents":[{"id":"w1"},{"id":"w2"}]}}"#),
         };
         assert!(all_bad.agent_list(None, Duration::from_secs(1)).is_err());

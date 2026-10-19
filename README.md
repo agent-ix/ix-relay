@@ -89,7 +89,10 @@ the machine it belongs to: a key made elsewhere means copying a private key.
 Lost the printed URL? `scripts/relay-admin add-user <machine>` on the hub issues a
 new password and prints the URL again (the old one stops working).
 
-### Moving from the old bus
+### Moving the v3 namespace between Redis servers
+
+This transports an existing v3 deployment only. For a pre-0.3 identity upgrade,
+use the coordinated namespace cutover below; never import old identities.
 
 Until every machine has joined, the old bus (`platform/redis`, reached through
 SSH tunnels and the hub's `redis-port-forward.service`) keeps working. The move:
@@ -98,13 +101,13 @@ SSH tunnels and the hub's `redis-port-forward.service`) keeps working. The move:
 2. Each machine does step 5, one after another. A message sent between a
    machine that has moved and one that has not yet lands on the other bus.
 3. On the hub, once all have moved: `scripts/relay-admin migrate` copies the old
-   bus's `ixr:*` keys (queued mail, registrations, aliases, escalations) with
+   bus's `ixr:v3:*` keys (queued mail, session registrations, escalations) with
    their TTLs. A key relay-redis already has is kept, not overwritten; the old
    copies are left in place.
 4. Retire the old path: the SSH tunnel units on the other machines, and on the hub
    `systemctl --user disable --now redis-port-forward.service` once nothing
    else uses `127.0.0.1:6379` (`ss -tn state established '( dport = :6379 )'`).
-   Then delete the old `ixr:*` keys from `platform/redis`.
+   Then delete the old `ixr:v3:*` keys from `platform/redis`.
 
 ## Configuration
 
@@ -136,95 +139,92 @@ naming the file, line and column (`agent-msg hook` reports it on stderr and
 still exits 0, so a typo in the file never breaks a lead's turn — every other
 command exits 1). `IX_RELAY_CONFIG` overrides the file's path, for tests.
 
-`AGENT_MSG_NAME` is **not** a config-file key — it stays environment-only,
-set per session, because one machine can run several leads at once and the
-config file is shared by all of them. It's also optional (AGE-2018): see
-"Automatic bus names" below.
+`AGENT_MSG_NAME` is preserved as session environment metadata and does not
+participate in identity or routing.
 
 ## agent-msg
 
 ```
-agent-msg send <lead|all> "<text>"   # signed as you (see "Automatic bus names"); prints who it queued for and the recipient's state
+agent-msg send <address|all> "<text>"   # signed as you (see "Automatic bus names"); prints who it queued for and the recipient's state
 agent-msg inbox                      # print and remove your pending messages
 agent-msg who                        # registered leads
-agent-msg find [<query>]             # look up a lead by name, alias, label, session or pane
+agent-msg find [<query>]             # discover live leads by address, label, session or pane
 agent-msg log [--since 1h]           # history
 agent-msg doctor [--json] [--strict] # is the relay healthy? read-only; exits 1 on a failure (--strict: on a warning too)
 agent-msg register [--kind manual]   # register by hand; hooks do this on session start
-agent-msg whoami [--json]            # print this session's bus name, its source, and its alias
+agent-msg whoami [--json]            # print this session's verified address
 agent-msg hook <claude|codex>        # hook handler, reads hook JSON on stdin
 ```
 
 | Env | Meaning | Default |
 |---|---|---|
-| `AGENT_MSG_NAME` | this lead's bus name; outranks every other source, never rewritten. Unset and not running inside herdr means "not a lead", and hooks stay silent | — |
+| `AGENT_MSG_NAME` | preserved environment metadata; ignored for identity and routing | — |
 | `IX_RELAY_URL` | Redis URL; see "Configuration" | `redis://127.0.0.1:6379` |
-| `IX_RELAY_PREFIX` | Redis key prefix; see "Configuration" | `ixr:` |
+| `IX_RELAY_PREFIX` | Redis key prefix; see "Configuration" | `ixr:v3:` |
 | `IX_RELAY_MACHINE` | machine name recorded at registration; see "Configuration" | hostname |
 
 A send to one lead prints its state after `queued for`, for you only (nothing is added to
-the recipient's inbox or context): `queued for hub:EA:code (ea-code) (watcher heartbeat from hub (last
+the recipient's inbox or context): `queued for hub:EA:code (watcher heartbeat from hub (last
 tick 3s ago), 1 waiting)`, or `(no watcher heartbeat from hub, 1 waiting)` when no heartbeat is
 live for that machine (a watcher older than the heartbeat has none). The state is one extra request with one reply, bounded at a quarter of a second
-in all; when Redis is slow you get the plain `queued for <name>`. A machine name that is not
+in all; when Redis is slow you get the plain `queued for <address>`. A machine name that is not
 hostname-shaped (letters, digits, `.`, `-`, `_`, at most 32) is never printed.
 
-### Automatic bus names
+### Location identities and automatic enrollment
 
-`AGENT_MSG_NAME` is optional: a lead running inside a herdr-managed pane with
-no `AGENT_MSG_NAME` set gets a name automatically instead of staying off the
-bus (AGE-2018). Highest priority wins:
+Recipient resolution uses ix-relay's leased Redis directory first. Each watcher
+publishes a complete verified observation from its own local Herdr, including
+empty and ambiguous states. A sender needs no outbound SSH or remote Herdr
+machine profiles. Cold remote resolution requests a destination-watcher
+refresh through Redis and waits up to 60 seconds; local Herdr is a fallback
+for cold local recovery. Enqueue atomically checks the publication lease and
+fence again. Stale durable registrations do not establish address ownership.
 
-1. **`AGENT_MSG_NAME`**, if set. Never rewritten by anything below.
-2. **The Claude session's own name**, if it's ever been changed with `/rename`
-   — Claude writes a `custom-title` line into the session transcript, and the
-   last one wins. Codex and opencode leads don't have this source.
-3. **A herdr agent name**, if one was set for this pane (`herdr agent rename`
-   or `agent start <name>`). Best-effort: herdr doesn't expose this as a
-   dedicated field yet, so it's read from the pane's stripped terminal title.
-4. **The herdr location name** — where the pane sits in herdr:
+Successful topology observations receive ordered Redis fences before reading
+Herdr and publish with a 90-second Redis-clock lease, normally refreshed every
+30 seconds. Failed or incomplete reads cannot renew that lease. Delayed or
+replayed observations cannot restore superseded ownership. Session queues
+survive renames, moves, closure, and address reuse; routing never transfers old
+mail to the new session occupying a pane. These guarantees and their limits
+are modeled in [the directory state model](spec/reviews/relay-directory-state-model.md).
 
-   | Location | Name |
-   |---|---|
-   | first tab (lowest tab id) of workspace `QSL` | `qsl` |
-   | tab labelled `review` in `QSL` | `qsl-review` |
-   | an unlabelled tab that isn't the first, herdr tab id `t3` | `qsl-t3` |
-   | a 2nd (or later) pane in a tab, herdr pane id `p5` | `qsl-t3-p5` (a 2nd pane in the first tab is `qsl-p5`) |
-   | same name already registered and live on another machine | `qsl-<machine>` |
+Every lead is identified by `server:workspace:tab`. The tab is always included.
+Send a full address, `:workspace:tab` on your verified server, or `:tab` in your
+verified workspace. The owning watcher checks live Herdr session associations and
+registers an absent recipient automatically, publishing current ownership
+through the relay. A stale registry record never supplies caller identity.
 
-   The `t<N>`/`p<N>` suffixes are herdr's own tab/pane ids, which it never
-   reuses — not herdr's display numbers, which renumber when a sibling tab or
-   pane closes. A lone pane in a tab gets no `-pN` suffix at all.
+Renames and moves change the visible address while the genuine session keeps
+its immutable queue identity. Agent nicknames, `/rename` titles, old aliases,
+bare names, raw pane IDs, omitted tabs, and pane suffixes do not route messages.
+Multiple live sessions sharing a tab are rejected. Label text is preserved,
+with case-insensitive matching; quote addresses containing spaces.
 
-Whichever tier wins becomes the lead's canonical bus name. If the herdr
-location name differs from it, the location name is kept working as an
-**alias**: `agent-msg send` resolves an alias to its canonical inbox, and
-`agent-msg who` lists each lead's aliases. So a `/rename` or a herdr agent
-rename never breaks a message sent to the name someone already knows a lead
-by. When another lead later claims that name as its own canonical name, it
-stops working as anyone else's alias.
+`AGENT_MSG_NAME` is preserved but ignored for identity. `whoami`, `who`,
+`find`, and message signatures show addresses. Hooks require the genuine
+harness session to match Herdr. Interactive Codex starts/resumes use
+`scripts/codex-herdr-launcher.py`, installed as `~/.local/bin/codex`, which
+adds `--no-daemon` in Herdr. This prevents the shared daemon's inherited pane
+from replacing the terminal's real startup context. Herdr's SessionStart
+helper runs before relay registration. Existing sessions need a genuine
+startup/resume event; never invent a session ID or guess a nearby pane.
 
-A tab labelled `esc-*` (an escalation's investigation fork, see
-"Escalations" below) is skipped entirely: no derived name, no registration,
-no delivery. Outside herdr with no `AGENT_MSG_NAME` set, a session stays off
-the bus exactly as it always has.
+Version 0.3 uses the `ixr:v3:` namespace. Stage matching binaries, launcher,
+and plugin guidance on every server before changing the configured prefix.
+Pause watchers during the coordinated cutover, archive the prior namespace,
+then start the new watchers with socket delivery enabled. Keep the prior keys
+until their owning sessions are verified; never assign backlog by nickname.
 
-Derivation happens at `SessionStart` and at `UserPromptSubmit` (so a
-`/rename` takes effect on the next prompt, not just the next session); a
-small Redis-backed cache (`<prefix>session:<session_id>` -> name, keyed by
-the harness's own session id) lets `PostToolUse` and `Stop` — which run far
-more often — skip straight to a lookup instead of re-deriving through herdr.
-`agent-msg whoami` prints the resolved name, which tier it came from, and its
-alias if it has one.
+Archive the old namespace without deleting any source keys:
 
-Don't already know a lead's bus name? `agent-msg find [<query>]` looks one up
-by joining the bus registry against live herdr state — on this machine and
-every other machine saved in herdr (`herdr machine list`), queried with a
-bounded per-machine timeout. `<query>` matches a bus name, an alias, a
-workspace or tab label, a Claude session name, or a pane id, case-insensitively;
-each result line ends with the exact name to pass to `send`. A live herdr pane
-that was never registered on the bus still shows up, marked "not on bus", so
-a sender can see why a message to it wouldn't be delivered.
+```bash
+python3 scripts/archive-relay-namespace.py --prefix ixr: --output /private/tmp/ix-relay-v2-archive.jsonl
+```
+
+The archive contains binary-safe Redis DUMP payloads, keys, capture times and
+remaining TTLs, stored with mode 0600. It excludes `ixr:v3:` and never imports
+aliases. Pause old writers first for a stable cutover snapshot; a SCAN archive
+made while writers are active is explicitly marked as non-atomic.
 
 ### How a message reaches a lead
 
@@ -284,22 +284,16 @@ Over a network link a hook costs its number of sequential Redis requests times t
 round trip. A pipeline counts as one. Counted with a proxy between the real binary
 and a real Redis (`crates/agent-msg/tests/round_trips.rs` pins the "after" column):
 
-| Hook path (one queued message, in a herdr pane) | Before | After |
-|---|---|---|
-| `UserPromptSubmit`, derived name | 8 | 6 (3 before the pop) |
-| `UserPromptSubmit`, `--as` name | 6 | 5 (2 before the pop) |
-| `PostToolUse` / `Stop`, derived name, empty inbox | 4 | 2 |
-| `PostToolUse` / `Stop`, `--as` name, empty inbox | 2 | 1 |
+| Hook path | Sequential Redis requests |
+|---|---|
+| Cached prompt or tool hook, empty inbox | 2 |
+| Cached prompt or tool hook, one delivered batch | 4 |
 
-Connecting sends no `CLIENT SETINFO`, the suppressed mark, session cache and
-unresolved mark are read in one pipeline, and a lead's place comes from a point
-read of its own registration rather than a scan of the whole registry (the scan
-remains only for a lead that has no registered place yet, such as the first prompt
-after a `/rename`). When something was popped the pop is followed by one read of
-the registry for sender addresses and one acknowledgement (AGE-2032: the popped
-batch stays in flight until the hook has written it; an empty pop costs neither).
-The pop itself also returns the lead's expired in-flight batches to the inbox, in
-the same request.
+The session probe and inbox pop each cost one request. A nonempty pop adds the
+address read and acknowledgement. Startup verifies the genuine session through
+Herdr and atomically registers its queue and session cache. Cached hooks never
+replace verified placement with an empty registration. Expired in-flight batches
+return to the inbox in the pop request.
 
 ## Escalations
 
@@ -313,7 +307,7 @@ Redis, separately from the message inbox, with a status (`waiting` →
 ```
 agent-msg escalate <ticket> --context <text> --option <text>... --recommend <text>
                                       # file one; prints its id (e.g. e7). Refused if
-                                      # you (AGENT_MSG_NAME) aren't registered, or have
+                                      # your genuine session is not registered, or has
                                       # no recorded session id. Also notifies the
                                       # configured human with a short pointer, never
                                       # the context/options/recommendation themselves
@@ -392,7 +386,10 @@ How it behaves:
   (`~/.claude/sessions`, read only), every time, and only trusts a record whose process
   is alive, has the recorded start time and pid namespace, and reports `peerProtocol`
   1 and version 2.1.224 or later. The socket is Claude Code's own; the watcher only
-  binds its reply socket at `$XDG_RUNTIME_DIR/cc-socks/<pid>.sock`.
+  binds its reply socket at `$XDG_RUNTIME_DIR/cc-socks/<pid>.sock` on Linux, or
+  `/tmp/cc-socks/<pid>.sock` on macOS (an explicit `XDG_RUNTIME_DIR` overrides
+  the reply directory). On macOS process identity matches Claude
+  Code’s UTC `ps -o lstart=` timestamp and `darwin` pid domain; Linux uses `/proc`.
 - herdr stays the fallback: no session id, no live record, a refused connection, a reply
   socket that is not bound yet (it is bound later, with backoff), or a receipt saying the
   message was refused or dropped all fall back to `herdr agent prompt` for that batch, so
@@ -472,7 +469,7 @@ relay-watcher --once                   # one sweep, then exit (manual checks, te
 | Env | Meaning | Default |
 |---|---|---|
 | `IX_RELAY_URL` | Redis URL; see "Configuration" | `redis://127.0.0.1:6379` |
-| `IX_RELAY_PREFIX` | Redis key prefix; see "Configuration" | `ixr:` |
+| `IX_RELAY_PREFIX` | Redis key prefix; see "Configuration" | `ixr:v3:` |
 | `IX_RELAY_MACHINE` | which machine's leads to watch; see "Configuration" | hostname |
 | `IX_RELAY_WATCHER_INTERVAL_SECS` | how soon a lead with mail is retried; see "Configuration" | `2` |
 | `IX_RELAY_WATCHER_OTLP_ENDPOINT` | OTLP collector base URL (`http://` only); see "Metrics" | unset: nothing is sent |

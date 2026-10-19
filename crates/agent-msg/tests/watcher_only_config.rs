@@ -58,12 +58,12 @@ fn a_bad_watcher_only_key_never_makes_the_file_malformed_for_agent_msg() {
         let dir = tempfile::tempdir().unwrap();
         let config = config_in(dir.path(), text);
         let hook = run(
-            command(&["hook", "claude"], Some("qsl-lead"), &config, None),
+            command(&["hook", "claude"], Some("hub:qsl:code"), &config, None),
             SESSION_START,
         );
         assert_eq!(hook.status, 0, "{text:?}: {}", hook.stderr);
         assert!(!hook.stderr.contains("otlp"), "{text:?}: {}", hook.stderr);
-        let who = run(command(&["who"], Some("qsl-lead"), &config, None), "");
+        let who = run(command(&["who"], Some("hub:qsl:code"), &config, None), "");
         assert!(
             !who.stderr.contains("config.toml"),
             "{text:?}: {}",
@@ -90,14 +90,14 @@ fn delivery_and_who_work_with_a_bad_watcher_only_key() {
         let config = config_in(dir.path(), text);
         let redis = Some((url.as_str(), prefix.as_str()));
         let first = run(
-            command(&["hook", "claude"], Some("receiver"), &config, redis),
+            command(&["hook", "claude"], Some("hub:EA:code"), &config, redis),
             SESSION_START,
         );
         assert_eq!(first.status, 0, "{text:?}: {}", first.stderr);
         let sent = run(
             command(
-                &["send", "receiver", "hi", "there"],
-                Some("sender"),
+                &["send", "hub:EA:code", "hi", "there"],
+                Some("hub:EA:sender"),
                 &config,
                 redis,
             ),
@@ -105,7 +105,7 @@ fn delivery_and_who_work_with_a_bad_watcher_only_key() {
         );
         assert_eq!(sent.status, 0, "{text:?}: {}", sent.stderr);
         let delivered = run(
-            command(&["hook", "claude"], Some("receiver"), &config, redis),
+            command(&["hook", "claude"], Some("hub:EA:code"), &config, redis),
             SESSION_START,
         );
         assert_eq!(delivered.status, 0, "{text:?}: {}", delivered.stderr);
@@ -114,7 +114,7 @@ fn delivery_and_who_work_with_a_bad_watcher_only_key() {
             "{text:?}: {}",
             delivered.stdout
         );
-        let who = run(command(&["who"], Some("receiver"), &config, redis), "");
+        let who = run(command(&["who"], Some("hub:EA:code"), &config, redis), "");
         assert_eq!(who.status, 0, "{text:?}: {}", who.stderr);
     }
 }

@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.2"
 edition = "2024"
 # ix-cli-kit's own rust-version is 1.98.1 (see relay-core's dependency below);
 # cargo refuses to build a dependency newer than the active toolchain, so this
@@ -33,6 +33,7 @@ serde_json = "1"
 # code of its own — the "flag" module is signal-safe by construction.
 signal-hook = "0.3"
 tempfile = "3"
+rustix = { version = "1.1", features = ["fs"] }
 thiserror = "2"
 toml = "1.1.6"
 # Shared CLI foundation: the flag > env > file > default precedence chain and

@@ -10,7 +10,7 @@ relationships:
 
 ## Description
 
-When the store reads the registry or the alias table, the store shall ignore fields of a stored
+When the store reads the registry, the store shall ignore fields of a stored
 registration or place that it does not recognise, and shall skip and report any
 record that still fails to decode, returning every other registration.
 
@@ -23,8 +23,6 @@ record that still fails to decode, returning every other registration.
 - When the store reads one registration (a single-record read), and that record
   is undecodable, then the store shall return a decode error naming the record's
   key, not an absent registration and not a storage error.
-- When the store reads the alias table, the store shall skip a pair that is not
-  two valid bus names, and shall return the others.
 - The watcher shall continue its tick when the registry contains an undecodable
   record.
 - If a stored record's session id, herdr pane id or machine name breaks the rule
@@ -32,7 +30,8 @@ record that still fails to decode, returning every other registration.
   no control, bidirectional or invisible character), then every reader shall skip
   and report the record under the rules above.
 - When the record of a name a message is addressed to is undecodable for that
-  reason, `agent-msg send` shall queue the message to that name.
+  reason, public send shall refresh genuine live Herdr evidence and replace the
+  verified session record before queueing, or reject delivery without a guessed identity.
 - When the name a hook derived is held by an undecodable record, the hook shall
   hold the name and shall not register over it.
 - If a stale registration's record is undecodable, then the watcher shall prune it
