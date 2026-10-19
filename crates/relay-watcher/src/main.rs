@@ -822,6 +822,16 @@ fn tick<H: Herdr + Deliverer>(
         }
     };
     apply_settlements(relay, herdr, log)?;
+    herdr.registry_read(
+        &regs
+            .iter()
+            .map(|r| deliver::RegisteredLead {
+                name: r.name.as_str(),
+                kind: &r.kind,
+                here: r.pane_on(machine).is_some(),
+            })
+            .collect::<Vec<_>>(),
+    );
     // A lead relinked by this refresh is left out of the rest of the tick (delivery,
     // refresh, prune) and looked at from the next one, from `regs` as updated: the
     // tick never works from the pane the lead just left.

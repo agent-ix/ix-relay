@@ -4467,3 +4467,288 @@ fn tc_054_01_a_lead_that_stopped_being_claude_loses_its_status_entry() {
     route_as(&routed, "codex", &session, "two");
     assert!(SocketStatus::read(&home.status()).unwrap().leads.is_empty());
 }
+
+// ---- FR-055: the status file lists only registered leads whose process is alive ----
+
+/// A process table a test can change after the deliverer has taken it.
+#[derive(Clone)]
+struct SharedProcs(Arc<Mutex<HashMap<u32, String>>>);
+
+impl SharedProcs {
+    fn with(pids: &[u32]) -> Self {
+        Self(Arc::new(Mutex::new(
+            pids.iter().map(|p| (*p, START.to_owned())).collect(),
+        )))
+    }
+    fn set(&self, pid: u32, start: Option<&str>) {
+        let mut table = self.0.lock().unwrap();
+        match start {
+            Some(start) => table.insert(pid, start.to_owned()),
+            None => table.remove(&pid),
+        };
+    }
+}
+
+impl Procs for SharedProcs {
+    fn start_time(&self, pid: u32) -> Option<String> {
+        self.0.lock().unwrap().get(&pid).cloned()
+    }
+    fn domain(&self) -> Option<String> {
+        Some(DOMAIN.to_owned())
+    }
+    fn uid(&self) -> Option<u32> {
+        Some(nix::unistd::Uid::current().as_raw())
+    }
+}
+
+/// A rig whose process table the test can change.
+fn rig_with_procs(act: Act) -> (Rig, SharedProcs) {
+    let home = Home::new();
+    let pid = 4242;
+    home.record(pid, SESSION, |_| {});
+    let claude = FakeClaude::start(&home.socket(pid), home.transcript(SESSION), act);
+    let procs = SharedProcs::with(&[pid]);
+    let deliverer = SocketDeliverer::start(home.config(), Box::new(procs.clone()));
+    let rig = Rig {
+        home,
+        claude,
+        deliverer,
+        session: SESSION.parse().unwrap(),
+    };
+    (rig, procs)
+}
+
+fn registered<'a>(name: &'a str, kind: &'a str, here: bool) -> crate::deliver::RegisteredLead<'a> {
+    crate::deliver::RegisteredLead { name, kind, here }
+}
+
+fn resolved_leads(rig: &Rig) -> Vec<String> {
+    SocketStatus::read(&rig.home.status())
+        .unwrap()
+        .leads
+        .into_iter()
+        .map(|l| l.lead)
+        .collect()
+}
+
+/// Tracing: TC-055-01
+/// ACs: FR-055-AC-1
+///
+/// A lead that is unregistered or pruned (no registration in the registry the tick read),
+/// registered on another machine, or registered as another harness leaves the resolved
+/// leads at the next tick.
+#[test]
+fn tc_055_01_an_unregistered_lead_leaves_the_resolved_leads() {
+    for (name, case) in [
+        ("unregistered", None),
+        ("other machine", Some(registered("ea", "claude", false))),
+        ("other harness", Some(registered("ea", "codex", true))),
+        (
+            "other lead",
+            Some(registered("someone-else", "claude", true)),
+        ),
+    ] {
+        let rig = Rig::new(Act::Consume);
+        assert_eq!(rig.send("one"), Ok(()));
+        assert_eq!(resolved_leads(&rig), ["ea"], "{name}");
+        // Registered and here: kept.
+        rig.deliverer
+            .registry_read(&[registered("ea", "claude", true)]);
+        assert_eq!(
+            resolved_leads(&rig),
+            ["ea"],
+            "{name}: kept while registered"
+        );
+        rig.deliverer
+            .registry_read(&case.into_iter().collect::<Vec<_>>());
+        assert!(resolved_leads(&rig).is_empty(), "{name}");
+    }
+}
+
+/// Tracing: TC-055-02
+/// ACs: FR-055-AC-2
+#[test]
+fn tc_055_02_a_lead_whose_process_exited_or_whose_pid_was_reused_is_dropped() {
+    let here = [registered("ea", "claude", true)];
+    let (rig, procs) = rig_with_procs(Act::Consume);
+    assert_eq!(rig.send("one"), Ok(()));
+    procs.set(4242, None);
+    rig.deliverer.registry_read(&here);
+    assert!(resolved_leads(&rig).is_empty(), "the process exited");
+
+    let (rig, procs) = rig_with_procs(Act::Consume);
+    assert_eq!(rig.send("one"), Ok(()));
+    procs.set(4242, Some("9999"));
+    rig.deliverer.registry_read(&here);
+    assert!(
+        resolved_leads(&rig).is_empty(),
+        "the pid is another process that started at another time"
+    );
+}
+
+/// Tracing: TC-055-03
+/// ACs: FR-055-AC-3
+#[test]
+fn tc_055_03_a_registered_live_lead_is_kept() {
+    let (rig, _procs) = rig_with_procs(Act::Consume);
+    assert_eq!(rig.send("one"), Ok(()));
+    let before = SocketStatus::read(&rig.home.status()).unwrap();
+    for _ in 0..3 {
+        rig.deliverer
+            .registry_read(&[registered("ea", "claude", true)]);
+    }
+    assert_eq!(
+        SocketStatus::read(&rig.home.status()).unwrap().leads,
+        before.leads
+    );
+}
+
+/// Tracing: TC-055-04
+/// ACs: FR-055-AC-4
+///
+/// Dropping an entry keeps a held batch, a decision still owed a write and a dead-letter
+/// reason.
+#[test]
+fn tc_055_04_dropping_an_entry_keeps_held_batches_decisions_and_dead_letter_reasons() {
+    // A held batch.
+    let rig = Rig::new(Act::Receipt("held", None));
+    assert!(matches!(rig.send("one"), Err(SocketError::Held(_))));
+    rig.deliverer.registry_read(&[]);
+    let status = SocketStatus::read(&rig.home.status()).unwrap();
+    assert!(status.leads.is_empty());
+    assert_eq!(status.held, ["ea"]);
+    assert_eq!(status.held_batches.len(), 1);
+
+    // A decision owed a write, and then the dead-letter reason once it is written.
+    let rig = Rig::new(Act::Receipt("denied", None));
+    assert!(matches!(rig.send("one"), Err(SocketError::Denied(_))));
+    rig.deliverer.registry_read(&[]);
+    let status = SocketStatus::read(&rig.home.status()).unwrap();
+    assert!(status.leads.is_empty());
+    assert_eq!(status.owed.len(), 1, "{:?}", status.owed);
+    let s = only(settled(&rig.deliverer));
+    rig.deliverer.applied(&s, &Ok(1));
+    rig.deliverer.registry_read(&[]);
+    let status = SocketStatus::read(&rig.home.status()).unwrap();
+    assert_eq!(status.dead_lettered.len(), 1);
+    assert_eq!(status.dead_lettered[0].reason, "denied");
+}
+
+/// A herdr whose one pane holds an idle agent of `session`.
+#[derive(Clone)]
+struct IdleAgentHerdr;
+
+impl crate::herdr::Herdr for IdleAgentHerdr {
+    fn get(
+        &self,
+        _pane: &PaneId,
+    ) -> Result<Option<crate::herdr::AgentGet>, crate::herdr::ProcessError> {
+        Ok(Some(crate::herdr::AgentGet {
+            status: crate::herdr::AgentStatus::Idle,
+            state_change_seq: 1,
+            session_id: Some(SESSION.parse().unwrap()),
+        }))
+    }
+    fn notify(&self, _t: &str, _b: &str) -> Result<(), crate::herdr::ProcessError> {
+        Ok(())
+    }
+}
+
+impl Deliverer for IdleAgentHerdr {
+    fn deliver(&self, _pane: &PaneId, _text: &str) -> Result<(), DeliverError> {
+        panic!("the batch goes by socket")
+    }
+}
+
+/// Tracing: TC-055-01
+/// ACs: FR-055-AC-1
+///
+/// Through the watcher's tick: a lead delivered to by socket is in the status file, and
+/// the tick after it is pruned from the registry leaves no entry for it (Redis lane).
+#[test]
+fn tc_055_01_a_tick_after_the_lead_is_pruned_leaves_no_entry() {
+    let Ok(url) = std::env::var("IX_RELAY_TEST_URL") else {
+        eprintln!("skipping: IX_RELAY_TEST_URL unset (run `make test-redis`)");
+        return;
+    };
+    let mut relay = relay_core::Relay::connect(&url, Duration::from_secs(2))
+        .unwrap()
+        .with_prefix(format!("test:{}:tc055tick:", std::process::id()));
+    let name: relay_core::AgentName = "ea".parse().unwrap();
+    relay
+        .register(&relay_core::Registration {
+            name: name.clone(),
+            machine: "node-a".parse().unwrap(),
+            kind: "claude".into(),
+            session_id: Some(SESSION.parse().unwrap()),
+            cwd: None,
+            herdr_pane: Some("w1:p1".parse().unwrap()),
+            place: None,
+            last_seen_ms: 1,
+        })
+        .unwrap();
+    relay
+        .send(&relay_core::Message {
+            from: "sender".parse().unwrap(),
+            to: relay_core::Target::Agent(name.clone()),
+            text: "hi".into(),
+            sent_at_ms: 0,
+        })
+        .unwrap();
+    let Rig {
+        home,
+        claude: _claude,
+        deliverer,
+        session: _,
+    } = Rig::new(Act::Consume);
+    let routed = Routed::socket_first(IdleAgentHerdr, deliverer);
+    let machine = "node-a".parse().unwrap();
+    let mut state = crate::WatcherState::default();
+    crate::tick(&mut relay, &routed, &machine, &mut state, &mut |_| {}).unwrap();
+    assert_eq!(
+        SocketStatus::read(&home.status()).unwrap().leads.len(),
+        1,
+        "delivered by socket"
+    );
+    relay.prune(&name, 1).unwrap();
+    crate::tick(&mut relay, &routed, &machine, &mut state, &mut |_| {}).unwrap();
+    assert!(SocketStatus::read(&home.status()).unwrap().leads.is_empty());
+}
+
+/// Tracing: TC-055-03
+/// ACs: FR-055-AC-3
+///
+/// A registry read that fails ends the tick before any entry is judged: none is dropped.
+#[test]
+fn tc_055_03_a_registry_read_that_fails_drops_no_entry() {
+    use std::io::Read;
+    let rig = Rig::new(Act::Consume);
+    assert_eq!(rig.send("one"), Ok(()));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("redis://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0_u8; 4096];
+        while stream.read(&mut buf).is_ok_and(|n| n > 0) {}
+    });
+    let Rig {
+        home,
+        claude: _claude,
+        deliverer,
+        session: _,
+    } = rig;
+    let routed = Routed::socket_first(IdleAgentHerdr, deliverer);
+    let mut relay = relay_core::Relay::connect(&url, Duration::from_millis(300)).unwrap();
+    let mut state = crate::WatcherState::default();
+    let failed = crate::tick(
+        &mut relay,
+        &routed,
+        &"node-a".parse().unwrap(),
+        &mut state,
+        &mut |_| {},
+    );
+    assert!(failed.is_err());
+    assert_eq!(SocketStatus::read(&home.status()).unwrap().leads.len(), 1);
+    drop(relay);
+    server.join().unwrap();
+}

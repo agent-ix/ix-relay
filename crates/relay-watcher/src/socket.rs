@@ -30,7 +30,7 @@ use std::sync::Arc;
 use relay_core::PaneId;
 
 use crate::{
-    deliver::{BatchTarget, DeliverError, Deliverer, Settlement},
+    deliver::{BatchTarget, DeliverError, Deliverer, RegisteredLead, Settlement},
     herdr::{AgentGet, CheckJob, Herdr, Layout, ProcessError},
 };
 use deliverer::SocketDeliverer;
@@ -126,6 +126,12 @@ impl<H: Deliverer> Deliverer for Routed<H> {
                 self.herdr.deliver_to(target, pane, text)
             }
             Err(other) => Err(other.into()),
+        }
+    }
+
+    fn registry_read(&self, registered: &[RegisteredLead<'_>]) {
+        if let Some(socket) = &self.socket {
+            socket.registry_read(registered);
         }
     }
 

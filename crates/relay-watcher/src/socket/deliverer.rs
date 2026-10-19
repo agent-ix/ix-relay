@@ -54,7 +54,7 @@ use super::{
     session::{self, Procs},
     transcript::{self, Watch},
 };
-use crate::deliver::{BatchTarget, DeliverError, SettleAction, Settlement};
+use crate::deliver::{BatchTarget, DeliverError, RegisteredLead, SettleAction, Settlement};
 
 /// How long a delivery waits, after posting, for a receipt or the transcript to
 /// show the message. An idle session records it within a second or two; what it
@@ -394,6 +394,15 @@ struct Pending {
     alerted: bool,
 }
 
+/// What the watcher knows of a lead's resolved Claude Code process.
+struct ResolvedLead {
+    /// What the status file shows.
+    socket: LeadSocket,
+    /// The process's start time when it was resolved; a pid that now starts at another
+    /// time is another process (FR-055).
+    started: String,
+}
+
 /// A lead whose mail is held.
 struct Held {
     session: String,
@@ -416,8 +425,8 @@ struct State {
     suspect: HashMap<String, Suspect>,
     /// Sends whose outcome is open, by message id.
     pending: HashMap<String, Pending>,
-    /// The socket each lead last resolved to.
-    leads: BTreeMap<String, LeadSocket>,
+    /// The socket each lead last resolved to, with the start time of its process then.
+    leads: BTreeMap<String, ResolvedLead>,
     /// Why a lead cannot use the socket, or what happened to it.
     notes: BTreeMap<String, String>,
     /// One flag per socket path with a connect helper thread: set while it runs.
@@ -753,6 +762,28 @@ impl SocketDeliverer {
         }
     }
 
+    /// Starts a tick's view of the registry: drops every resolved-lead entry whose lead has
+    /// no registration in `registered`, is registered on another machine, is not a Claude
+    /// Code lead, or whose process is gone or was replaced by one that started at another
+    /// time (FR-055). Nothing else is touched (a held batch, a pending decision, a
+    /// dead-letter reason, the drift counts have their own rules), and nothing waits: this
+    /// is a few table lookups. The status file is written when an entry was dropped.
+    pub fn registry_read(&self, registered: &[RegisteredLead<'_>]) {
+        let mut state = self.lock();
+        let before = state.leads.len();
+        state.leads.retain(|lead, resolved| {
+            let registration_ok = registered
+                .iter()
+                .any(|r| r.name == lead && r.here && relay_core::tries_socket(r.kind));
+            registration_ok
+                && self.procs.start_time(resolved.socket.pid).as_deref()
+                    == Some(resolved.started.as_str())
+        });
+        if state.leads.len() != before {
+            self.publish(&mut state);
+        }
+    }
+
     /// Forgets what the status file said about `lead`'s socket (its resolved entry, its note
     /// and its suspicion) because the lead does not try the socket: a lead whose
     /// registration changed `kind` is judged by the registration the tick read (FR-054).
@@ -854,11 +885,14 @@ impl SocketDeliverer {
             .map_err(|unresolved| SocketError::NotSent(unresolved.to_string()))?;
             state.leads.insert(
                 lead.to_owned(),
-                LeadSocket {
-                    lead: lead.to_owned(),
-                    pid: resolved.pid,
-                    socket: resolved.socket.display().to_string(),
-                    version: resolved.version.clone(),
+                ResolvedLead {
+                    socket: LeadSocket {
+                        lead: lead.to_owned(),
+                        pid: resolved.pid,
+                        socket: resolved.socket.display().to_string(),
+                        version: resolved.version.clone(),
+                    },
+                    started: resolved.proc_start.clone(),
                 },
             );
             if let Some(held) = state.held.get(lead) {
@@ -1598,7 +1632,7 @@ impl SocketDeliverer {
             start_time: self.procs.start_time(std::process::id()),
             updated_at_ms: now,
             reply_socket,
-            leads: state.leads.values().cloned().collect(),
+            leads: state.leads.values().map(|l| l.socket.clone()).collect(),
             held,
             held_batches,
             owed: state
