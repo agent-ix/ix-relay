@@ -4656,6 +4656,82 @@ fn tc_055_04_dropping_an_entry_keeps_held_batches_decisions_and_dead_letter_reas
     assert_eq!(status.dead_lettered[0].reason, "denied");
 }
 
+/// A process table that counts its lookups and says whether the deliverer's state lock was
+/// free during each.
+#[derive(Clone)]
+struct ProbedProcs {
+    table: SharedProcs,
+    lookups: Arc<Mutex<Vec<bool>>>,
+    deliverer: Arc<std::sync::OnceLock<Arc<SocketDeliverer>>>,
+}
+
+impl Procs for ProbedProcs {
+    fn start_time(&self, pid: u32) -> Option<String> {
+        let free = self.deliverer.get().is_none_or(|d| d.state_is_free());
+        self.lookups.lock().unwrap().push(free);
+        self.table.start_time(pid)
+    }
+    fn domain(&self) -> Option<String> {
+        self.table.domain()
+    }
+    fn uid(&self) -> Option<u32> {
+        self.table.uid()
+    }
+}
+
+/// Tracing: TC-055-05
+/// ACs: FR-055-AC-5
+///
+/// The process lookup (which can fork `ps`) runs with the deliverer's state lock released,
+/// and at most once per place-refresh period however many ticks read the registry; the
+/// registration half is still judged on every tick.
+#[test]
+fn tc_055_05_the_process_lookup_runs_unlocked_and_at_most_once_per_period() {
+    let here = [registered("ea", "claude", true)];
+    let home = Home::new();
+    home.record(4242, SESSION, |_| {});
+    let _claude = FakeClaude::start(&home.socket(4242), home.transcript(SESSION), Act::Consume);
+    let table = SharedProcs::with(&[4242]);
+    let probe = ProbedProcs {
+        table: table.clone(),
+        lookups: Arc::default(),
+        deliverer: Arc::default(),
+    };
+    let deliverer = Arc::new(SocketDeliverer::start(
+        home.config(),
+        Box::new(probe.clone()),
+    ));
+    probe.deliverer.set(deliverer.clone()).ok().unwrap();
+    let session: SessionId = SESSION.parse().unwrap();
+    let target = BatchTarget {
+        kind: "claude",
+        batch: BatchId::new(1),
+        lead: "ea",
+        session: Some(&session),
+        senders: "hub:EA:1",
+    };
+    assert_eq!(deliverer.deliver(&target, "one"), Ok(()));
+    probe.lookups.lock().unwrap().clear();
+
+    for _ in 0..5 {
+        deliverer.registry_read(&here);
+    }
+    assert_eq!(
+        *probe.lookups.lock().unwrap(),
+        [true],
+        "one lookup for five ticks, made with the state lock free"
+    );
+
+    // Within the period a dead process is not yet looked for, but a lead that is no
+    // longer registered goes at once.
+    table.set(4242, None);
+    deliverer.registry_read(&here);
+    assert_eq!(probe.lookups.lock().unwrap().len(), 1);
+    assert_eq!(SocketStatus::read(&home.status()).unwrap().leads.len(), 1);
+    deliverer.registry_read(&[]);
+    assert!(SocketStatus::read(&home.status()).unwrap().leads.is_empty());
+}
+
 /// A herdr whose one pane holds an idle agent of `session`.
 #[derive(Clone)]
 struct IdleAgentHerdr;

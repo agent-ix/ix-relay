@@ -540,6 +540,9 @@ struct State {
     dead_notes: VecDeque<DeadLetterNote>,
     /// Time spent waiting on sockets since the last settlement (the tick's start).
     tick_spent: Duration,
+    /// When the leads' processes were last looked at ([`SocketDeliverer::registry_read`]):
+    /// looking at a process can fork `ps`, so it happens once per place-refresh period.
+    procs_checked: Option<Instant>,
     /// Where the next settlement's round of transcript checks starts.
     settle_cursor: usize,
     /// See [`SocketConfig::max_hold`].
@@ -623,6 +626,7 @@ impl SocketDeliverer {
             dead_notes: adopted.dead_lettered.into(),
             max_hold: config.max_hold,
             tick_spent: Duration::ZERO,
+            procs_checked: None,
             settle_cursor: 0,
             alerts: Vec::new(),
             failed_notes: BTreeMap::new(),
@@ -770,6 +774,12 @@ impl SocketDeliverer {
         }
     }
 
+    /// Whether no one holds the state lock right now (tests of what runs outside it).
+    #[cfg(test)]
+    pub(super) fn state_is_free(&self) -> bool {
+        self.state.try_lock().is_ok()
+    }
+
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -845,20 +855,58 @@ impl SocketDeliverer {
     /// no registration in `registered`, is registered on another machine, is not a Claude
     /// Code lead, or whose process is gone or was replaced by one that started at another
     /// time (FR-055). Nothing else is touched (a held batch, a pending decision, a
-    /// dead-letter reason, the drift counts have their own rules), and nothing waits: this
-    /// is a few table lookups. The status file is written when an entry was dropped.
+    /// dead-letter reason, the drift counts have their own rules). The status file is
+    /// written when an entry was dropped.
+    ///
+    /// The registration half is a table lookup and runs every tick. The process half can
+    /// fork `ps` per lead, so it runs at most once per [`crate::PLACE_REFRESH_EVERY`], and
+    /// with the state lock released: a delivery never waits behind it. A process that
+    /// exited is therefore dropped within that period, and a delivery to it fails and
+    /// drops the entry sooner.
     pub fn registry_read(&self, registered: &[RegisteredLead<'_>]) {
-        let mut state = self.lock();
-        let before = state.leads.len();
-        state.leads.retain(|lead, resolved| {
-            let registration_ok = registered
-                .iter()
-                .any(|r| r.name == lead && r.here && relay_core::tries_socket(r.kind));
-            registration_ok
-                && self.procs.start_time(resolved.socket.pid).as_deref()
-                    == Some(resolved.started.as_str())
-        });
-        if state.leads.len() != before {
+        let (mut changed, to_check) = {
+            let mut state = self.lock();
+            let before = state.leads.len();
+            state.leads.retain(|lead, _| {
+                registered
+                    .iter()
+                    .any(|r| r.name == lead && r.here && relay_core::tries_socket(r.kind))
+            });
+            let due = state
+                .procs_checked
+                .is_none_or(|at| at.elapsed() >= crate::PLACE_REFRESH_EVERY);
+            let to_check: Vec<(String, u32, String)> = if due {
+                state.procs_checked = Some(Instant::now());
+                state
+                    .leads
+                    .iter()
+                    .map(|(lead, r)| (lead.clone(), r.socket.pid, r.started.clone()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            (state.leads.len() != before, to_check)
+        };
+        let gone: Vec<(String, u32, String)> = to_check
+            .into_iter()
+            .filter(|(_, pid, started)| self.procs.start_time(*pid).as_deref() != Some(started))
+            .collect();
+        if !gone.is_empty() {
+            let mut state = self.lock();
+            for (lead, pid, started) in gone {
+                // Only the entry that was looked at: the lead may have resolved again.
+                if state
+                    .leads
+                    .get(&lead)
+                    .is_some_and(|r| r.socket.pid == pid && r.started == started)
+                {
+                    state.leads.remove(&lead);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            let mut state = self.lock();
             self.publish(&mut state);
         }
     }

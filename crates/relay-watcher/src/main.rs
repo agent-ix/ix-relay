@@ -602,6 +602,13 @@ fn main() -> ExitCode {
     }
     let sweep = Duration::from_secs(sweep_secs.max(1));
     let mut state = WatcherState::new(Duration::from_secs(interval_secs.max(1)), sweep);
+    // The addresses stranded mail was written to survive a restart (FR-053); `--once`
+    // keeps none, like the state file.
+    if !cli.once
+        && let Some(dir) = relay_core::config::state_dir()
+    {
+        state.stranded = stranded::Stranded::persisted(dir.join(stranded::FILE_NAME));
+    }
     // The OTLP push (FR-045): started, and announced, by the module. `--once` sends
     // nothing.
     state.otlp = otlp::Publisher::from_settings(

@@ -21,7 +21,11 @@
 //! compare-and-sets against the registrations the pass read, so a lead pruned or
 //! registered again meanwhile stays as it is.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::PathBuf,
+};
 
 use relay_core::{Address, AgentName, Buried, MachineName, Registration, Relay};
 
@@ -31,13 +35,22 @@ use crate::{
     relink::{Verdict, judge, pane_has_current_location},
 };
 
+/// File name, inside [`relay_core::config::state_dir`], of the addresses the pass keeps
+/// across a restart.
+pub const FILE_NAME: &str = "stranded-addresses.json";
+
 /// What the pass remembers between place refreshes.
 #[derive(Debug, Default)]
 pub struct Stranded {
     /// Where each local lead last verifiably sat. A registration whose session left
     /// its pane loses its recorded place in the same refresh that finds it gone, so
-    /// this is the only record of the address its mail was written to.
+    /// this is the only record of the address its mail was written to when the
+    /// session is gone (when it was replaced, herdr's layout names the address).
+    /// One entry per registered lead at most.
     addresses: HashMap<AgentName, Address>,
+    /// Where `addresses` is kept so a restart does not forget them: a lead name to its
+    /// address, rewritten whenever they change. `None` keeps them in memory only.
+    file: Option<PathBuf>,
     /// Leads whose last move failed for a lasting reason, reported once.
     trouble: HashSet<AgentName>,
 }
@@ -104,9 +117,29 @@ fn holder<'a>(
 }
 
 impl Stranded {
+    /// A pass that keeps its remembered addresses in `file`, starting from what the file
+    /// holds (nothing, when it is missing or unreadable).
+    #[must_use]
+    pub fn persisted(file: PathBuf) -> Self {
+        let saved: HashMap<String, String> = fs::read(&file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        let addresses = saved
+            .into_iter()
+            .filter_map(|(lead, address)| Some((lead.parse().ok()?, address.parse().ok()?)))
+            .collect();
+        Self {
+            addresses,
+            file: Some(file),
+            trouble: HashSet::new(),
+        }
+    }
+
     /// Remembers the address of each lead on `machine` that has one now: called by
     /// the refresh before it drops the places of registrations whose session left.
     pub fn observe(&mut self, regs: &[Registration], machine: &MachineName) {
+        let before = self.addresses.clone();
         for reg in regs.iter().filter(|r| r.machine == *machine) {
             if let Some(address) = reg.full_address() {
                 self.addresses.insert(reg.name.clone(), address);
@@ -116,6 +149,54 @@ impl Stranded {
             .retain(|name, _| regs.iter().any(|r| r.name == *name));
         self.trouble
             .retain(|name| regs.iter().any(|r| r.name == *name));
+        if self.addresses != before {
+            self.save();
+        }
+    }
+
+    /// Writes the addresses to the file, atomically. A failure is not fatal: the
+    /// addresses stay in memory and the next change tries again.
+    fn save(&self) {
+        let Some(file) = &self.file else { return };
+        let saved: std::collections::BTreeMap<&str, String> = self
+            .addresses
+            .iter()
+            .map(|(lead, address)| (lead.as_str(), address.to_string()))
+            .collect();
+        let write = || -> std::io::Result<()> {
+            if let Some(dir) = file.parent() {
+                fs::create_dir_all(dir)?;
+            }
+            let mut tmp = file.clone().into_os_string();
+            tmp.push(format!(".{}.tmp", std::process::id()));
+            fs::write(
+                &tmp,
+                serde_json::to_vec(&saved).map_err(std::io::Error::other)?,
+            )?;
+            fs::rename(&tmp, file)
+        };
+        if let Err(e) = write() {
+            eprintln!("relay-watcher: could not keep stranded-mail addresses: {e}");
+        }
+    }
+}
+
+/// The address `reg`'s mail was written to. When its session was replaced the pane now
+/// hosts another session whose place herdr just listed, and that is the address; else
+/// the last one remembered.
+fn address_of(
+    reg: &Registration,
+    how: Left,
+    layout: &Layout,
+    remembered: &HashMap<AgentName, Address>,
+) -> Option<Address> {
+    let current = || {
+        let place = layout.places.get(reg.herdr_pane.as_ref()?)?;
+        Some(place.tab_address(&reg.machine))
+    };
+    match how {
+        Left::Replaced => current().or_else(|| remembered.get(&reg.name).cloned()),
+        Left::Gone => remembered.get(&reg.name).cloned(),
     }
 }
 
@@ -153,8 +234,8 @@ pub fn pass(
         if !matches!(len, Ok(n) if n > 0) {
             continue;
         }
-        let address = state.addresses.get(&reg.name);
-        let verdict = match address.map(|a| holder(reg, a, regs, layout)) {
+        let address = address_of(reg, *how, layout, &state.addresses);
+        let verdict = match address.map(|a| holder(reg, &a, regs, layout)) {
             Some(Holder::Verified(to)) => Move::Forward(to),
             Some(Holder::Unresolved) => continue,
             // Nobody has the address, or it is no longer known: the mail waits only
@@ -448,6 +529,157 @@ mod tests {
         assert!(again.is_empty(), "{again:?}");
     }
 
+    /// Runs one pass with `state` as it is (a restarted watcher has none of the addresses
+    /// it saw before), over registrations as the refresh left them.
+    fn pass_with(
+        state: &mut Stranded,
+        bus: &mut Bus,
+        regs: &mut Vec<Registration>,
+        layout: &Layout,
+    ) -> Vec<String> {
+        let mut log = Vec::new();
+        pass(state, &mut bus.relay, layout, regs, &hub(), &mut |l| {
+            log.push(l);
+        })
+        .unwrap();
+        log
+    }
+
+    /// Tracing: TC-053-14
+    /// ACs: FR-053-AC-14
+    ///
+    /// A session that is gone from its pane, with exactly one verified registration
+    /// holding its address, has its mail forwarded in order; with two holders, or one
+    /// herdr does not verify, nothing moves.
+    #[test]
+    fn tc_053_14_a_gone_session_with_one_verified_holder_is_forwarded() {
+        let Some(mut bus) = Bus::connect("stranded-gone-holder") else {
+            return;
+        };
+        let (old, new, listed) = gone_world();
+        put(&mut bus, &[&old, &new]);
+        send(&mut bus, "old-lead", &["one", "two"]);
+        // Two registrations hold the address: ambiguous, nothing moves.
+        let twin = reg("twin-lead", "s3", "w1:p3", "code", 0);
+        put(&mut bus, &[&twin]);
+        let mut regs = vec![old.clone(), new.clone(), twin];
+        let log = pass_after(&mut bus, &[&old, &new], &mut regs, &listed);
+        assert!(log.is_empty(), "{log:?}");
+        assert_eq!(queued(&mut bus, "old-lead"), ["one", "two"]);
+        // One holder, but herdr does not list its session in its pane: nothing moves.
+        let mut regs = vec![old.clone(), new.clone()];
+        let wrong = layout(&[("w1:p2", Some("s9"), "code")]);
+        let log = pass_after(&mut bus, &[&old, &new], &mut regs, &wrong);
+        assert!(log.is_empty(), "{log:?}");
+        assert_eq!(queued(&mut bus, "old-lead"), ["one", "two"]);
+        // One verified holder: forwarded, the old registration left in place.
+        let log = pass_after(&mut bus, &[&old, &new], &mut regs, &listed);
+        assert!(log.iter().any(|l| l.contains("forwarded 2")), "{log:?}");
+        assert!(queued(&mut bus, "old-lead").is_empty());
+        assert_eq!(queued(&mut bus, "new-lead"), ["one", "two"]);
+        assert!(registered(&mut bus, "old-lead"));
+    }
+
+    /// Tracing: TC-053-15
+    /// ACs: FR-053-AC-15
+    ///
+    /// A watcher that restarted after the registration lost its place (or one that never
+    /// saw the address, as on the deploy of this requirement) still forwards when the
+    /// session was replaced: the address is the one herdr lists for the pane now.
+    #[test]
+    fn tc_053_15_a_restarted_watcher_forwards_for_a_replaced_session() {
+        let Some(mut bus) = Bus::connect("stranded-restart-replaced") else {
+            return;
+        };
+        let (old, new, listed) = replaced_world();
+        let mut dropped = old.clone();
+        dropped.place = None;
+        put(&mut bus, &[&dropped, &new]);
+        send(&mut bus, "old-lead", &["one", "two"]);
+        let mut regs = vec![dropped, new];
+        let mut restarted = Stranded::default();
+        let log = pass_with(&mut restarted, &mut bus, &mut regs, &listed);
+        assert!(log.iter().any(|l| l.contains("forwarded 2")), "{log:?}");
+        assert!(queued(&mut bus, "old-lead").is_empty());
+        assert_eq!(queued(&mut bus, "new-lead"), ["one", "two"]);
+    }
+
+    /// The registration of a session that left its pane for good (`w1:p1` lists nothing
+    /// now) and one that took over its address in `w1:p2`.
+    fn gone_world() -> (Registration, Registration, Layout) {
+        (
+            reg("old-lead", "s1", "w1:p1", "code", HOUR_MS),
+            reg("new-lead", "s2", "w1:p2", "code", 0),
+            layout(&[("w1:p2", Some("s2"), "code")]),
+        )
+    }
+
+    /// Tracing: TC-053-16
+    /// ACs: FR-053-AC-15
+    ///
+    /// A session that is gone from its pane, with exactly one verified registration
+    /// holding its address, has its mail forwarded; a watcher restarted after the place
+    /// was dropped does the same because it kept the last verified address in its file.
+    #[test]
+    fn tc_053_16_a_gone_session_with_one_verified_holder_is_forwarded_across_a_restart() {
+        let Some(mut bus) = Bus::connect("stranded-restart-gone") else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE_NAME);
+        let (old, new, listed) = gone_world();
+        assert_eq!(left(&old, &listed), Some(Left::Gone));
+        put(&mut bus, &[&old, &new]);
+        send(&mut bus, "old-lead", &["one", "two"]);
+
+        // While the session was home the watcher saw the address and kept it.
+        let mut before = Stranded::persisted(file.clone());
+        before.observe(&[old.clone(), new.clone()], &hub());
+        drop(before);
+
+        // The refresh dropped the place; the watcher restarted.
+        let mut dropped = old.clone();
+        dropped.place = None;
+        put(&mut bus, &[&dropped]);
+        let mut regs = vec![dropped.clone(), new.clone()];
+
+        // Without the file the address is unknown and nothing moves yet.
+        let mut forgetful = Stranded::default();
+        let log = pass_with(&mut forgetful, &mut bus, &mut regs, &listed);
+        assert!(log.is_empty(), "{log:?}");
+        assert_eq!(queued(&mut bus, "old-lead"), ["one", "two"]);
+
+        let mut restarted = Stranded::persisted(file);
+        let log = pass_with(&mut restarted, &mut bus, &mut regs, &listed);
+        assert!(log.iter().any(|l| l.contains("forwarded 2")), "{log:?}");
+        assert!(log.iter().any(|l| l.contains("is gone from")), "{log:?}");
+        assert!(queued(&mut bus, "old-lead").is_empty());
+        assert_eq!(queued(&mut bus, "new-lead"), ["one", "two"]);
+        assert!(registered(&mut bus, "old-lead"), "left in place");
+    }
+
+    /// Tracing: TC-053-17
+    /// ACs: FR-053-AC-15
+    ///
+    /// The file holds at most one address per registered lead: a lead that is no longer
+    /// registered is forgotten, and an unreadable file is the same as none.
+    #[test]
+    fn tc_053_17_the_kept_addresses_are_bounded_by_the_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE_NAME);
+        let (old, new, _) = gone_world();
+        let mut state = Stranded::persisted(file.clone());
+        state.observe(&[old.clone(), new.clone()], &hub());
+        let kept = |file: &PathBuf| -> HashMap<String, String> {
+            serde_json::from_slice(&fs::read(file).unwrap()).unwrap()
+        };
+        assert_eq!(kept(&file).len(), 2);
+        state.observe(&[new], &hub());
+        assert_eq!(kept(&file).keys().collect::<Vec<_>>(), ["new-lead"]);
+        fs::write(&file, b"not json").unwrap();
+        assert!(Stranded::persisted(file).addresses.is_empty());
+    }
+
     /// Tracing: TC-053-04
     /// ACs: FR-053-AC-4
     #[test]
@@ -458,9 +690,12 @@ mod tests {
         let (old, new, _) = replaced_world();
         put(&mut bus, &[&old, &new]);
         send(&mut bus, "old-lead", &["one", "two"]);
-        // Years old, its pane hosts its session (and so does another pane).
+        // Years old, its pane hosts its session (and so does another pane). The stored
+        // record is this one, so a pass that wrongly acted would not be turned away by
+        // the compare-and-set.
         let mut ancient = old.clone();
         ancient.last_seen_ms = 1;
+        put(&mut bus, &[&ancient]);
         let alive = layout(&[("w1:p1", Some("s1"), "code"), ("w1:p2", Some("s2"), "code")]);
         // Anything herdr could answer that is not positive: nothing listed, no
         // session named for the pane, a different pane elsewhere.
@@ -470,6 +705,7 @@ mod tests {
             layout(&[("w1:p1", None, "code"), ("w1:p5", Some("s1"), "code")]),
         ];
         for listed in std::iter::once(&alive).chain(&unknown) {
+            assert_eq!(left(&ancient, listed), None);
             let mut regs = vec![ancient.clone(), new.clone()];
             let log = pass_after(&mut bus, &[&ancient, &new], &mut regs, listed);
             assert!(log.is_empty(), "{log:?}");
@@ -503,7 +739,14 @@ mod tests {
         put(&mut bus, &[&new, &twin]);
         let mut ancient = old.clone();
         ancient.last_seen_ms = now_ms() - 30 * HOUR_MS;
+        put(&mut bus, &[&ancient]);
+        assert_eq!(left(&ancient, &listed), Some(Left::Replaced));
+        let address = ancient.full_address().unwrap();
         let mut regs = vec![ancient.clone(), new.clone(), twin.clone()];
+        assert!(matches!(
+            holder(&ancient, &address, &regs, &listed),
+            Holder::Unresolved
+        ));
         let log = pass_after(&mut bus, &[&ancient, &new, &twin], &mut regs, &listed);
         assert!(log.is_empty(), "{log:?}");
         assert_eq!(queued(&mut bus, "old-lead"), ["one"]);
