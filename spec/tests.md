@@ -24,9 +24,9 @@ to fail until the named ticket lands; the ticket is given on each such row.
 
 | Stakeholder Req | Trace to US/FR | Test/Validation | Status |
 |-----------------|----------------|-----------------|--------|
-| StR-001 | US-001, US-002, US-003, FR-001..FR-022, FR-040, FR-044, FR-046..FR-047 | Demonstration (StR-001-VC-1..3) | 🚧 pending |
+| StR-001 | US-001, US-002, US-003, FR-001..FR-022, FR-040, FR-044, FR-046..FR-047, FR-053..FR-054 | Demonstration (StR-001-VC-1..3) | 🚧 pending |
 | StR-002 | US-004, US-005, FR-023..FR-027 | Demonstration (StR-002-VC-1..2) | 🚧 pending |
-| StR-003 | US-006, US-007, FR-028..FR-037, FR-043, FR-045 | Demonstration (StR-003-VC-1..3) | 🚧 pending (red on main, AGE-2033) |
+| StR-003 | US-006, US-007, FR-028..FR-037, FR-043, FR-045, FR-055 | Demonstration (StR-003-VC-1..3) | 🚧 pending (red on main, AGE-2033) |
 
 ### Functional Requirement Coverage
 
@@ -178,10 +178,13 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-029 | FR-029-AC-11 | TC-029-11 | ✅ written (`a_stuck_inbox_is_a_warning_under_a_fresh_watcher_and_a_failure_without_one`, `an_undecodable_spool_is_a_failure_only_while_it_is_being_written`) |
 | FR-029 | FR-029-AC-12 | TC-029-12 | ✅ written (`a_dead_watchers_alarm_holds_for_the_prune_horizon_then_becomes_a_warning`, an injected clock over the non-expiring last-tick marker; `tc_028_04` checks the marker outlives the key in Redis) |
 | FR-029 | FR-029-AC-13 | TC-029-13 | ✅ written (`tc_029_13_a_link_fault_is_told_apart_by_what_the_connect_hit` classifies real `RedisError`s, `tc_029_13_real_auth_replies_and_a_dropped_connection_are_told_apart` against a fake server (NOAUTH, WRONGPASS, accept-then-close), `a_real_refused_connect_is_refused` on a released port, `tc_029_03_with_redis_down_doctor_fails_fast_and_still_reports_herdr` through the binary; `tc_029_13_an_unreachable_bus_names_the_layer_that_failed` checks each fault's cause and fix) |
+| FR-029 | FR-029-AC-14 | TC-029-14 | 🚧 not written |
+| FR-029 | FR-029-AC-15 | TC-029-15 | 🚧 not written |
+| FR-029 | FR-029-AC-16 | TC-029-16 | 🚧 not written |
 | FR-030 | FR-030-AC-1 | TC-030-01 | ✅ written (`tc_030_01_three_failed_post_tool_use_hooks_leave_three_records`) |
 | FR-030 | FR-030-AC-2 | TC-030-02 | ✅ written (`tc_030_02_the_next_healthy_hook_ships_three_records_once`) |
 | FR-030 | FR-030-AC-3 | TC-030-03 | ✅ written (`tc_030_03_after_n_failures_the_spool_holds_what_fits_and_counts_the_rest`) |
-| FR-030 | FR-030-AC-4 | TC-030-04 | ✅ written (`tc_030_04_shipped_plus_remaining_plus_dropped_is_everything_appended`, `tc_030_04_a_flush_that_runs_out_of_budget_keeps_the_unshipped_rest`) |
+| FR-030 | FR-030-AC-4 | TC-030-04 | 🚧 criterion changed (each record shipped once), earlier named tests predate it; formerly ✅ written
 | FR-030 | FR-030-AC-5 | TC-030-05 | ✅ written (`tc_030_05_records_are_typed_and_carry_no_error_text`; the record has no message field) |
 | FR-030 | FR-030-AC-6 | TC-030-06 | ✅ written (`tc_030_06_a_post_tool_use_or_stop_with_too_little_budget_records_a_budget_failure`) |
 | FR-030 | FR-030-AC-7 | TC-030-07 | ✅ written (`tc_030_07_a_user_prompt_submit_with_too_little_budget_defers_the_pop_and_records_nothing`, `tc_030_07_a_slow_link_makes_a_user_prompt_hook_defer_its_pop_without_a_record`) |
@@ -189,6 +192,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-030 | FR-030-AC-9 | TC-030-09 | ✅ written (`tc_030_09_a_relative_config_path_never_writes_a_spool_into_the_working_directory`) |
 | FR-030 | FR-030-AC-10 | TC-030-10 | 🚧 0.3.0 evidence remapping required; earlier named test was retired |
 | FR-030 | FR-030-AC-11 | TC-030-11 | 🚧 0.3.0 evidence remapping required; earlier named test was retired |
+| FR-030 | FR-030-AC-12 | TC-030-12 | 🚧 not written |
 | FR-031 | FR-031-AC-1 | TC-031-01 | 🚧 pending (red on main, AGE-2033) |
 | FR-031 | FR-031-AC-2 | TC-031-02 | 🚧 pending (red on main, AGE-2033) |
 | FR-031 | FR-031-AC-3 | TC-031-03 | 🚧 pending (red on main, AGE-2033) |
@@ -309,24 +313,46 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-045 | FR-045-AC-28 | TC-045-28 | ✅ written (`tc_045_28_health_snapshot_read_failures_are_bounded_cumulative_and_reset`, `tc_045_28_whole_health_source_failures_count_once`; Redis lane; a fresh publisher verifies process-local reset) |
 | FR-046 | FR-046-AC-1 | TC-046-01 | ✅ written (`the_crate_depends_on_serde_and_serde_json_only` (in `claude-wire`; source inspection of the manifest)) |
 | FR-046 | FR-046-AC-2 | TC-046-02 | ✅ written (`parse_control_line_never_panics`, `parse_control_line_is_total_over_bytes`, `parse_control_line_is_total_over_shaped_json`, `classify_is_exhaustive`, `scan_is_total_over_bytes`, `parsing_is_total` (proptest, in `claude-wire`); also `every_verdict_is_reached_by_its_exact_strings`, `each_line_class_is_exact`; mutation-checked: a substring status match, a tolerated missing `status`, a tolerated unknown `action` or a non-JSON line read as a liveness ping, each fails a test) |
-| FR-046 | FR-046-AC-3 | TC-046-03 | ✅ written (`tc_046_03_unrecognised_and_non_json_reply_lines_are_counted_and_change_nothing` (now including a receipt for another message, not counted), `tc_046_03_a_reply_line_of_invalid_utf8_is_counted`; mutation-checked: dropping either counter fails a test) |
-| FR-046 | FR-046-AC-4 | TC-046-04 | ✅ written (`tc_046_04_an_unknown_receipt_status_is_ambiguous_and_counted`; mutation-checked: dropping the count fails it) |
-| FR-046 | FR-046-AC-5 | TC-046-05 | ✅ written (`tc_046_05_a_renamed_transcript_origin_is_acked_counted_and_never_falls_back`; mutation-checked: a shape that is not acknowledged fails two tests) |
+| FR-046 | FR-046-AC-3 | TC-046-03 | 🚧 criterion changed (per-version, windowed drift), earlier named tests predate it and are not evidence; formerly ✅ written
+| FR-046 | FR-046-AC-4 | TC-046-04 | 🚧 criterion changed (per-version, windowed drift), earlier named tests predate it and are not evidence; formerly ✅ written
+| FR-046 | FR-046-AC-5 | TC-046-05 | 🚧 criterion changed (per-version, windowed drift), earlier named tests predate it and are not evidence; formerly ✅ written
 | FR-046 | FR-046-AC-6 | TC-046-06 | ✅ written (`tc_046_06_a_clean_transcript_is_absent_not_drift`, `a_structured_origin_is_the_only_ack`, `a_line_with_our_id_and_no_structured_origin_is_shape_unrecognised`, `an_ack_anywhere_beats_an_unrecognised_line`, `an_empty_id_matches_nothing`; mutation-checked: `ShapeUnrecognised` read as `Absent` or as `Acked` fails a test) |
 | FR-046 | FR-046-AC-7 | TC-046-07 | ✅ written (`the_verdict_is_typed_for_each_way_to_be_unsupported`, `a_record_decodes_camel_case_and_ignores_unknown_fields`, `versions_parse_and_compare` (in `claude-wire`); mutation-checked: dropping the protocol gate or the version gate fails a test) |
 | FR-046 | FR-046-AC-8 | TC-046-08 | ✅ written (`every_fixture_parses_to_its_exact_typed_result`, `the_manifest_the_directory_and_the_expectations_agree`, `the_captured_session_record_decodes_its_fields` (in `claude-wire/tests/contract.rs`)) |
 | FR-046 | FR-046-AC-9 | TC-046-09 | ✅ written (`the_envelope_line_is_byte_exact`, `hostile_ids_stay_on_one_line`, `a_line_over_a_mebibyte_is_refused`, `the_wrapper_is_byte_exact`, `hostile_bodies_lose_every_less_than`, `no_closing_tag_survives`, `spliced_tags_are_escaped` (in `claude-wire`); mutation-checked: dropping the `<` escape fails four of them) |
-| FR-046 | FR-046-AC-10 | TC-046-10 | ✅ written (`tc_046_10_doctor_shows_the_captured_version_and_flags_an_unverified_one`) |
-| FR-046 | FR-046-AC-11 | TC-046-11 | ✅ written (`tc_046_11_doctor_warns_on_wire_drift_and_an_unrecognised_transcript_shape`, the two codes pinned in `tc_029_06_every_code_serialises_to_its_pinned_name`) |
+| FR-046 | FR-046-AC-10 | TC-046-10 | 🚧 criterion changed (per-version, windowed drift), earlier named tests predate it and are not evidence; formerly ✅ written
+| FR-046 | FR-046-AC-11 | TC-046-11 | 🚧 criterion changed (per-version, windowed drift), earlier named tests predate it and are not evidence; formerly ✅ written
 | FR-046 | FR-046-AC-12 | TC-046-12 | ✅ written (`tc_046_12_settle_acks_an_unrecognised_shape_with_a_note`; mutation-checked: a `settle` that leaves it in flight fails it) |
 | FR-046 | FR-046-AC-13 | TC-046-13 | ✅ written (`tc_046_13_an_unrecognised_shape_is_never_redelivered_or_dead_lettered` (Redis lane; mutation-checked: an ambiguous outcome instead of the acknowledgement fails it)) |
 | FR-046 | FR-046-AC-14 | TC-046-14 | ✅ written (`the_library_does_no_io` (in `claude-wire`; source inspection; mutation-checked: `use std::{fs, ..}` fails it)) |
 | FR-046 | FR-046-AC-15 | TC-046-15 | ✅ written (`tc_046_15_a_window_starting_at_any_offset_around_the_origin_line_is_read_exactly`, `tc_046_15_the_rest_of_a_skipped_over_long_line_is_not_scanned`) |
+| FR-046 | FR-046-AC-16 | TC-046-16 | 🚧 not written |
+| FR-046 | FR-046-AC-17 | TC-046-17 | 🚧 not written |
+| FR-046 | FR-046-AC-18 | TC-046-18 | 🚧 not written |
 | FR-047 | FR-047-AC-1 | TC-047-01 | ✅ written (`placement_state_requires_pane_session_and_herdr_identity`; `address_location_requires_a_matching_herdr_session_id`) |
 | FR-047 | FR-047-AC-2 | TC-047-02 | ✅ written (`placement_state_requires_pane_session_and_herdr_identity`; `legacy_label_only_registration_is_not_routable_by_address`) |
 | FR-047 | FR-047-AC-3 | TC-047-03 | ✅ written (`address_location_requires_a_matching_herdr_session_id`, mismatch and absent-session cases) |
 | FR-047 | FR-047-AC-4 | TC-047-04 | ✅ written (`registration_and_place_with_unknown_fields_still_decode`; legacy Redis registration fixtures decode with no verified Herdr IDs) |
 | FR-047 | FR-047-AC-5 | TC-047-05 | ✅ written (`invalidate_place_clears_only_the_registration_snapshot_that_lost_proof`, Redis lane; compare-and-set prevents a stale refresh from invalidating a new session) |
+| FR-053 | FR-053-AC-1 | TC-053-01 | 🚧 not written |
+| FR-053 | FR-053-AC-2 | TC-053-02 | 🚧 not written |
+| FR-053 | FR-053-AC-3 | TC-053-03 | 🚧 not written |
+| FR-053 | FR-053-AC-4 | TC-053-04 | 🚧 not written |
+| FR-053 | FR-053-AC-5 | TC-053-05 | 🚧 not written |
+| FR-053 | FR-053-AC-6 | TC-053-06 | 🚧 not written |
+| FR-053 | FR-053-AC-7 | TC-053-07 | 🚧 not written |
+| FR-053 | FR-053-AC-8 | TC-053-08 | 🚧 not written |
+| FR-053 | FR-053-AC-9 | TC-053-09 | 🚧 not written |
+| FR-053 | FR-053-AC-10 | TC-053-10 | 🚧 not written |
+| FR-053 | FR-053-AC-11 | TC-053-11 | 🚧 not written |
+| FR-054 | FR-054-AC-1 | TC-054-01 | 🚧 not written |
+| FR-054 | FR-054-AC-2 | TC-054-02 | 🚧 not written |
+| FR-054 | FR-054-AC-3 | TC-054-03 | 🚧 not written |
+| FR-054 | FR-054-AC-4 | TC-054-04 | 🚧 not written |
+| FR-055 | FR-055-AC-1 | TC-055-01 | 🚧 not written |
+| FR-055 | FR-055-AC-2 | TC-055-02 | 🚧 not written |
+| FR-055 | FR-055-AC-3 | TC-055-03 | 🚧 not written |
+| FR-055 | FR-055-AC-4 | TC-055-04 | 🚧 not written |
 
 ### Non-Functional Requirement Coverage
 
@@ -383,6 +409,25 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-047-03 | Herdr session and pane mismatches or absent session proof make a placement unverifiable. | Unit | FR-047-AC-3 | ✅ written (`address_location_requires_a_matching_herdr_session_id`) |
 | TC-047-04 | Existing serialized registrations with unknown or absent proof fields decode without inventing verified identity. | Unit | FR-047-AC-4 | ✅ written (`registration_and_place_with_unknown_fields_still_decode`) |
 | TC-047-05 | Invalidating a stale placement clears only the exact registration snapshot that lost proof. | Integration | FR-047-AC-5 | ✅ written (`invalidate_place_clears_only_the_registration_snapshot_that_lost_proof`; Redis lane) |
+| TC-053-01 | Queued mail of a replaced session moves, in order, to the single registration now holding its address. | Integration | FR-053-AC-1 | 🚧 not written |
+| TC-053-02 | Every moved message carries, on every rendering path, a notice naming the prior session of the address, the original send time and sender. | Integration | FR-053-AC-2 | 🚧 not written |
+| TC-053-03 | Hostile text and sender names in a moved message are neutralised and cannot forge the notice. | Unit | FR-053-AC-3 | 🚧 not written |
+| TC-053-04 | The mail of a registration whose pane hosts its session never moves. | Integration | FR-053-AC-4 | 🚧 not written |
+| TC-053-05 | A herdr failure, an unreadable answer, an unnamed session, or an address held by none or by two, moves nothing. | Integration | FR-053-AC-5 | 🚧 not written |
+| TC-053-06 | Under any interleaving and injected bus failure, every message ends in exactly one of the old inbox, the new inbox or the dead-letter list. | Property | FR-053-AC-6 | 🚧 not written |
+| TC-053-07 | A registration pruned or re-registered between read and move makes the move do nothing. | Integration | FR-053-AC-7 | 🚧 not written |
+| TC-053-08 | A message moved twice names its first send time and original sender. | Integration | FR-053-AC-8 | 🚧 not written |
+| TC-053-09 | Another machine's registration is never moved, forwarded or pruned. | Integration | FR-053-AC-9 | 🚧 not written |
+| TC-053-10 | A gone, old-enough registration with mail is dead-lettered as `recipient-pruned` byte for byte and then pruned; failures prune nothing. | Integration | FR-053-AC-10 | 🚧 not written |
+| TC-053-11 | An in-flight batch is not moved until its lease expires. | Integration | FR-053-AC-11 | 🚧 not written |
+| TC-054-01 | Codex and opencode leads go straight to herdr with no status entry or note. | Integration | FR-054-AC-1 | 🚧 not written |
+| TC-054-02 | A claude lead with no record still goes to herdr with the note. | Integration | FR-054-AC-2 | 🚧 not written |
+| TC-054-03 | Doctor does not warn about non-claude leads and still warns for a claude lead without a record. | Integration | FR-054-AC-3 | 🚧 not written |
+| TC-054-04 | A claude lead with a record is delivered as before; an empty or unknown kind goes to herdr with no note. | Integration | FR-054-AC-4 | 🚧 not written |
+| TC-055-01 | An unregistered or pruned lead leaves the resolved leads on the next tick. | Integration | FR-055-AC-1 | 🚧 not written |
+| TC-055-02 | A lead whose Claude Code process exited, or whose pid was reused, is dropped. | Integration | FR-055-AC-2 | 🚧 not written |
+| TC-055-03 | A registered live lead is kept and a failed registry read drops nothing. | Integration | FR-055-AC-3 | 🚧 not written |
+| TC-055-04 | Dropping an entry keeps held batches, decisions, dead-letter reasons and drift counts. | Integration | FR-055-AC-4 | 🚧 not written |
 | TC-010-01 | Every send from any registered sender to any registered lead X increases X's inbox length by exactly one … | Property | FR-010-AC-1 | ✅ written |
 | TC-010-02 | Given alias `old` pointing at registered `new`, sending to `old` queues the message in `new`'s inbox and … | Unit | FR-010-AC-2 | ✅ written |
 | TC-010-03 | Given an unregistered target name, the send returns an unknown-agent error and no inbox or log entry is added. | Unit | FR-010-AC-3 | ✅ written |
@@ -493,10 +538,13 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-029-11 | Given a stuck inbox, the code is a `warn` under a fresh heartbeat and a `fail` under a wedged or missing one; given a spool with only undecodable lines, `hook_spool_pending` is a `fail` while the file is being written and a `warn` after 15 min. | Unit | FR-029-AC-11 | ✅ written (`a_stuck_inbox_is_a_warning_under_a_fresh_watcher_and_a_failure_without_one`, `an_undecodable_spool_is_a_failure_only_while_it_is_being_written`) |
 | TC-029-12 | Given `node-a`'s watcher died and its leads' stamps stopped moving, `watcher_heartbeat_missing` for `node-a` is a `fail` half an hour, three hours and 23 hours after its last tick, and a `warn` after 25 hours. | Unit | FR-029-AC-12 | ✅ written (`a_dead_watchers_alarm_holds_for_the_prune_horizon_then_becomes_a_warning`, an injected clock over the non-expiring last-tick marker; `tc_028_04` checks the marker outlives the key in Redis) |
 | TC-029-13 | A refused password (`NOAUTH` and `WRONGPASS` included), a refused connection, one accepted and then dropped, a timeout and no route each give `redis_unreachable` its own cause and fix naming the layer to check (the ACL user, hub's forwarder, relay-redis behind it, the WireGuard handshake, WireGuard not up here), and none names an SSH tunnel. | Unit | FR-029-AC-13 | ✅ written (`tc_029_13_a_link_fault_is_told_apart_by_what_the_connect_hit` classifies real `RedisError`s, `tc_029_13_real_auth_replies_and_a_dropped_connection_are_told_apart` against a fake server (NOAUTH, WRONGPASS, accept-then-close), `a_real_refused_connect_is_refused` on a released port, `tc_029_03_with_redis_down_doctor_fails_fast_and_still_reports_herdr` through the binary; `tc_029_13_an_unreachable_bus_names_the_layer_that_failed` checks each fault's cause and fix) |
+| TC-029-14 | `hook_failures_recorded` is a `warn` for one recent record or a burst and a `fail` at 50 recent failures. | Unit | FR-029-AC-14 | 🚧 not written |
+| TC-029-15 | One session failing across three 15-minute windows with a failure under 15 minutes old is a `fail`. | Unit | FR-029-AC-15 | 🚧 not written |
+| TC-029-16 | The detail names the top three sessions and machines with counts and no message text. | Unit | FR-029-AC-16 | 🚧 not written |
 | TC-030-01 | Given Redis is unreachable, three `PostToolUse` hook calls each exit 0 with empty stdout and leave three … | Integration | FR-030-AC-1 | ✅ written |
 | TC-030-02 | Given three spooled records and Redis reachable again, the next hook call leaves the spool empty and the hook-failure stream holds those three records, each with its machine and lead. | Integration | FR-030-AC-2 | ✅ written |
 | TC-030-03 | Given more failures than fit the bound while Redis is unreachable, the spool never exceeds 256 KiB plus one record, and the records kept plus their `dropped` counts equal the failures recorded. | Integration | FR-030-AC-3 | ✅ written |
-| TC-030-04 | After a flush that ships some of the spooled records and then fails, the unshipped records stay in the spool, and after the next successful flush every record has been shipped at least once and the spool is empty. | Integration | FR-030-AC-4 | ✅ written |
+| TC-030-04 | After a flush that ships some of the spooled records and then fails, the unshipped records stay in the spool, and after the next successful flush every record has been shipped at least once and the spool is empty. | Integration | FR-030-AC-4 | 🚧 criterion changed (each record shipped once), earlier named tests predate it; formerly ✅ written
 | TC-030-05 | Every spooled record's fields are timestamps, identifiers and stable codes: for any failure it contains no text taken from the failure's message. | Property | FR-030-AC-5 | ✅ written |
 | TC-030-06 | Given a `PostToolUse` hook with less than the pop window remaining, the hook does not pop, every message stays queued, and one `budget` record is spooled. | Unit | FR-030-AC-6 | ✅ written |
 | TC-030-07 | Given a `UserPromptSubmit` hook with less than the pop window remaining, the hook does not pop, every message stays queued, and no record is spooled. | Integration | FR-030-AC-7 | ✅ written |
@@ -504,6 +552,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-030-09 | Given a relative `IX_RELAY_CONFIG`, a failing hook exits 0 and creates no spool in its working directory. | Integration | FR-030-AC-9 | ✅ written |
 | TC-030-10 | Given a hook in a herdr pane whose herdr fails or times out and no other name for the session, the hook registers and pops nothing and leaves one `derive`/`herdr_failed` record, or one `budget`/`budget_exhausted` record when a herdr call was refused because the time budget was spent. | Integration | FR-030-AC-10 | ✅ written |
 | TC-030-11 | Given herdr failing for five uncached `PostToolUse` calls of one session, the spool holds one record and every call attempted the derivation; given herdr answering on the sixth call, the lead is registered by it. | Integration | FR-030-AC-11 | ✅ written |
+| TC-030-12 | Each spooled record reaches the stream exactly once under overlapping flushes, partial ships and a crash after shipping. | Integration | FR-030-AC-12 | 🚧 not written |
 | TC-031-01 | Given an inbox whose second entry is not valid message JSON, after the pop the dead-letter list holds that … | Integration | FR-031-AC-1 | 🚧 not written; red on main (AGE-2033) |
 | TC-031-02 | Given herdr times out on a watcher prompt, the dead-letter list holds each message of the batch with … | Integration | FR-031-AC-2 | 🚧 not written; red on main (AGE-2033) |
 | TC-031-03 | Given the requeue after an `agent_blocked` prompt fails, the dead-letter list holds each message of the … | Integration | FR-031-AC-3 | 🚧 not written; red on main (AGE-2033) |
@@ -624,19 +673,22 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-045-28 | A Redis-backed OTLP integration test proves that per-lead and whole-read failures increment only their bounded source series, successful sibling reads still export, malformed hook entries are not read failures, counts accumulate through recovery, both zero points are emitted, attributes contain no host/lead/key/error/secret values, and a fresh publisher starts its process-local totals at zero. | Integration | FR-045-AC-28 | ✅ written (`tc_045_28_health_snapshot_read_failures_are_bounded_cumulative_and_reset`, `tc_045_28_whole_health_source_failures_count_once`; Redis lane) |
 | TC-046-01 | The crate depends on `serde` and `serde_json` only. | Unit | FR-046-AC-1 | ✅ written (`the_crate_depends_on_serde_and_serde_json_only` (in `claude-wire`; source inspection of the manifest)) |
 | TC-046-02 | `parse_control_line`, `scan`, `SessionRecord::parse` and `parse_version` are total over arbitrary strings, bytes and JSON-shaped input; `classify` is exhaustive and only the six known status words leave `Unknown`. | Property | FR-046-AC-2 | ✅ written (`parse_control_line_never_panics`, `parse_control_line_is_total_over_bytes`, `parse_control_line_is_total_over_shaped_json`, `classify_is_exhaustive`, `scan_is_total_over_bytes`, `parsing_is_total` (proptest, in `claude-wire`); also `every_verdict_is_reached_by_its_exact_strings`, `each_line_class_is_exact`; mutation-checked: a substring status match, a tolerated missing `status`, a tolerated unknown `action` or a non-JSON line read as a liveness ping, each fails a test) |
-| TC-046-03 | A renamed-shape, non-JSON and non-UTF-8 reply-socket line are counted in the status file and change nothing else; a liveness connection is not counted. | Integration | FR-046-AC-3 | ✅ written (`tc_046_03_unrecognised_and_non_json_reply_lines_are_counted_and_change_nothing` (now including a receipt for another message, not counted), `tc_046_03_a_reply_line_of_invalid_utf8_is_counted`; mutation-checked: dropping either counter fails a test) |
-| TC-046-04 | An unknown receipt status is ambiguous as before and counted; a known status is not. | Integration | FR-046-AC-4 | ✅ written (`tc_046_04_an_unknown_receipt_status_is_ambiguous_and_counted`; mutation-checked: dropping the count fails it) |
-| TC-046-05 | A transcript line naming the id under a renamed field is acknowledged as received, counted, and the lead is not sent to herdr. | Integration | FR-046-AC-5 | ✅ written (`tc_046_05_a_renamed_transcript_origin_is_acked_counted_and_never_falls_back`; mutation-checked: a shape that is not acknowledged fails two tests) |
+| TC-046-03 | A renamed-shape, non-JSON and non-UTF-8 reply-socket line are counted in the status file and change nothing else; a liveness connection is not counted. | Integration | FR-046-AC-3 | 🚧 criterion changed (per-version, windowed drift), earlier named tests predate it and are not evidence; formerly ✅ written
+| TC-046-04 | An unknown receipt status is ambiguous as before and counted; a known status is not. | Integration | FR-046-AC-4 | 🚧 criterion changed (per-version, windowed drift), earlier named tests predate it and are not evidence; formerly ✅ written
+| TC-046-05 | A transcript line naming the id under a renamed field is acknowledged as received, counted, and the lead is not sent to herdr. | Integration | FR-046-AC-5 | 🚧 criterion changed (per-version, windowed drift), earlier named tests predate it and are not evidence; formerly ✅ written
 | TC-046-06 | A transcript with no line naming the id is `Absent` and not drift; a line naming it with no structured origin is `ShapeUnrecognised`; an acknowledgement anywhere wins. | Unit | FR-046-AC-6 | ✅ written (`tc_046_06_a_clean_transcript_is_absent_not_drift`, `a_structured_origin_is_the_only_ack`, `a_line_with_our_id_and_no_structured_origin_is_shape_unrecognised`, `an_ack_anywhere_beats_an_unrecognised_line`, `an_empty_id_matches_nothing`; mutation-checked: `ShapeUnrecognised` read as `Absent` or as `Acked` fails a test) |
 | TC-046-07 | A session record is `Supported`, `UnsupportedProtocol`, `UnsupportedVersion` or `Malformed`, or does not decode, each with its fields. | Unit | FR-046-AC-7 | ✅ written (`the_verdict_is_typed_for_each_way_to_be_unsupported`, `a_record_decodes_camel_case_and_ignores_unknown_fields`, `versions_parse_and_compare` (in `claude-wire`); mutation-checked: dropping the protocol gate or the version gate fails a test) |
 | TC-046-08 | Every fixture of the captured version parses to its exact typed result and the manifest, the directory and the expectations list the same files, each with a provenance. | Unit | FR-046-AC-8 | ✅ written (`every_fixture_parses_to_its_exact_typed_result`, `the_manifest_the_directory_and_the_expectations_agree`, `the_captured_session_record_decodes_its_fields` (in `claude-wire/tests/contract.rs`)) |
 | TC-046-09 | The envelope line and the wrapper are golden bytes for plain and hostile input, and no `<` survives in a wrapped body for any text. | Property | FR-046-AC-9 | ✅ written (`the_envelope_line_is_byte_exact`, `hostile_ids_stay_on_one_line`, `a_line_over_a_mebibyte_is_refused`, `the_wrapper_is_byte_exact`, `hostile_bodies_lose_every_less_than`, `no_closing_tag_survives`, `spliced_tags_are_escaped` (in `claude-wire`); mutation-checked: dropping the `<` escape fails four of them) |
-| TC-046-10 | Doctor shows the captured version and, for another resolved version, says `wire format captured on 2.1.283; running X: unverified` without failing. | Unit | FR-046-AC-10 | ✅ written (`tc_046_10_doctor_shows_the_captured_version_and_flags_an_unverified_one`) |
-| TC-046-11 | Doctor warns `socket_wire_drift` and `socket_transcript_shape_unrecognised` with their counts, never a failure, and adds nothing when there is none. | Unit | FR-046-AC-11 | ✅ written (`tc_046_11_doctor_warns_on_wire_drift_and_an_unrecognised_transcript_shape`, the two codes pinned in `tc_029_06_every_code_serialises_to_its_pinned_name`) |
+| TC-046-10 | Doctor shows the captured version and, for another resolved version, says `wire format captured on 2.1.283; running X: unverified` without failing. | Unit | FR-046-AC-10 | 🚧 criterion changed (per-version, windowed drift), earlier named tests predate it and are not evidence; formerly ✅ written
+| TC-046-11 | Doctor warns `socket_wire_drift` and `socket_transcript_shape_unrecognised` with their counts, never a failure, and adds nothing when there is none. | Unit | FR-046-AC-11 | 🚧 criterion changed (per-version, windowed drift), earlier named tests predate it and are not evidence; formerly ✅ written
 | TC-046-12 | The settle path acknowledges an unrecognised transcript line arriving after the wait, once, with a drift note. | Integration | FR-046-AC-12 | ✅ written (`tc_046_12_settle_acks_an_unrecognised_shape_with_a_note`; mutation-checked: a `settle` that leaves it in flight fails it) |
 | TC-046-13 | After the lease, an acknowledged unrecognised-shape batch is never posted again, typed by herdr, redelivered or dead-lettered (Redis lane). | Integration | FR-046-AC-13 | ✅ written (`tc_046_13_an_unrecognised_shape_is_never_redelivered_or_dead_lettered` (Redis lane; mutation-checked: an ambiguous outcome instead of the acknowledgement fails it)) |
 | TC-046-14 | No identifier of a file, socket, process, environment or thread API appears in the library sources, in any import form. | Unit | FR-046-AC-14 | ✅ written (`the_library_does_no_io` (in `claude-wire`; source inspection; mutation-checked: `use std::{fs, ..}` fails it)) |
 | TC-046-15 | A tail read starting at every offset around the origin line reads it exactly, and the rest of a skipped over-long line is not scanned. | Unit | FR-046-AC-15 | ✅ written (`tc_046_15_a_window_starting_at_any_offset_around_the_origin_line_is_read_exactly`, `tc_046_15_the_rest_of_a_skipped_over_long_line_is_not_scanned`) |
+| TC-046-16 | Per-version drift and its last-line members age out after 24 hours. | Unit | FR-046-AC-16 | 🚧 not written |
+| TC-046-17 | Only bounded, neutralised `type` and `action` of an offending line are kept, never a body or path. | Unit | FR-046-AC-17 | 🚧 not written |
+| TC-046-18 | A lead leaving the resolved leads leaves its version's counts for the window. | Integration | FR-046-AC-18 | 🚧 not written |
 | TC-N001-M-01 | `UserPromptSubmit` wall time, Redis blackholed: target 300 ms, threshold 400 ms | Benchmark | NFR-001-M-1 | ✅ written |
 | TC-N001-M-02 | `PostToolUse` and `Stop` wall time, Redis blackholed: target 900 ms, threshold 1000 ms | Benchmark | NFR-001-M-2 | ✅ written |
 | TC-N001-M-03 | `SessionStart` wall time, Redis and herdr blackholed: target 3300 ms, threshold 3400 ms | Benchmark | NFR-001-M-3 | 🚧 not written |
@@ -685,7 +737,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 
 | Gap ID | Description | Risk Level | Mitigation |
 |--------|-------------|------------|------------|
-| GAP-001 | 241 of 318 rows have a written test; changed 0.3.0 obligations have replacement evidence above. Retired alias tests are not evidence for the new contract. Remaining pending/partial rows require their stated evidence. | High | Complete remaining evidence without claiming full coverage. |
+| GAP-001 | 235 of 344 rows have a written test; changed 0.3.0 obligations have replacement evidence above. Retired alias tests are not evidence for the new contract. Remaining pending/partial rows require their stated evidence. | High | Complete remaining evidence without claiming full coverage. |
 | GAP-002 | 15 rows still say `red on main`: obligations of requirements `main` does not yet meet, red when written (FR-031, FR-033-AC-2, FR-034-AC-4, FR-035, FR-037). The rest of FR-032..FR-034 are written or partial since the relink work (FR-043). | High | AGE-2033 (AGE-2032 landed; the NFR-001 stdin row landed under AGE-2033). |
 | GAP-003 | No `herdr` stub or blackholed-Redis harness exists yet for the fault-injection and benchmark rows. | Medium | Build with the NFR-001..003 suites. |
 
@@ -696,10 +748,10 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | Benchmark | 8 | 5 | 0 | 0 | 0 | 0 | 62% |
 | Fuzz | 3 | 0 | 3 | 0 | 0 | 0 | 0% |
 | Inspection | 3 | 0 | 0 | 0 | 0 | 0 | 0% |
-| Integration | 154 | 120 | 0 | 10 | 0 | 0 | 78% |
-| Property | 37 | 28 | 0 | 5 | 0 | 0 | 76% |
+| Integration | 173 | 116 | 0 | 10 | 0 | 0 | 67% |
+| Property | 38 | 28 | 0 | 5 | 0 | 0 | 74% |
 | Static | 2 | 0 | 2 | 0 | 0 | 0 | 0% |
-| Unit | 111 | 83 | 0 | 3 | 0 | 0 | 75% |
+| Unit | 117 | 81 | 0 | 3 | 0 | 0 | 69% |
 
 "Written, named method" counts rows whose status names a written test that uses the method the row names. It records that the test exists, not a run: the last recorded run is the `make ci` output in the PR comment for the head commit, and Redis-backed tests skip without `IX_RELAY_TEST_URL`. Fuzz and Static rows are counted separately: the Fuzz rows are property-based fuzz lanes (see `fuzz/README.md`), not recorded `cargo-fuzz` campaigns, and the Static rows are exhaustive checks over a bound, not Kani proofs. Rows marked red (`#[ignore]` with a ticket) are not counted.
 

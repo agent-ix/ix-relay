@@ -60,9 +60,13 @@ hook-failure stream.
   time budget, to the one stream `<prefix>health:hooks` (capped at about 1000
   entries), each entry carrying the record, its machine and its lead, and shall
   remove from the spool exactly the records shipped. A flush that fails leaves the
-  records it did not ship in the spool and is not itself recorded. A crash after
-  shipping and before the removal ships those records again: delivery is at least
-  once.
+  records it did not ship in the spool and is not itself recorded.
+- Each spooled record shall reach the stream at most once: a flush that overlaps
+  another, a flush that retries after a failed or partly applied ship, and a crash
+  after shipping and before the removal shall not put a record on the stream a second
+  time. Records that look alike (the same stage, error kind and session over and over
+  again) are distinct records, each shipped once. A record the bounded spool discarded
+  is never shipped, and is counted in a `dropped` field as before.
 - If a hook fails before it can connect for a reason that repeats on every call
   (an invalid `--as` name, unreadable hook input), then the handler shall connect
   once and flush. A configuration or command-line failure has no Redis address
@@ -87,7 +91,7 @@ hook-failure stream.
 | FR-030-AC-1 | Given Redis is unreachable, three `PostToolUse` hook calls each exit 0 with empty stdout and leave three failure records in the local spool. | Test |
 | FR-030-AC-2 | Given three spooled records and Redis reachable again, the next hook call leaves the spool empty and the hook-failure stream holds those three records, each with its machine and lead. | Test |
 | FR-030-AC-3 | Given more failures than fit the bound while Redis is unreachable, the spool never exceeds 256 KiB plus one record, and the records kept plus their `dropped` counts equal the failures recorded. | Test |
-| FR-030-AC-4 | After a flush that ships some of the spooled records and then fails, the unshipped records stay in the spool, and after the next successful flush every record has been shipped at least once and the spool is empty. | Test |
+| FR-030-AC-4 | After a flush that ships some of the spooled records and then fails, the unshipped records stay in the spool, and after the next successful flush every record has been shipped, once, and the spool is empty. | Test |
 | FR-030-AC-5 | Every spooled record's fields are timestamps, identifiers and stable codes: for any failure it contains no text taken from the failure's message. | Test |
 | FR-030-AC-6 | Given a `PostToolUse` hook with less than the pop window remaining, the hook does not pop, every message stays queued, and one `budget` record is spooled. | Test |
 | FR-030-AC-7 | Given a `UserPromptSubmit` hook with less than the pop window remaining, the hook does not pop, every message stays queued, and no record is spooled. | Test |
@@ -95,6 +99,7 @@ hook-failure stream.
 | FR-030-AC-9 | Given a relative `IX_RELAY_CONFIG`, a failing hook exits 0 and creates no spool in its working directory. | Test |
 | FR-030-AC-10 | Given a hook in a herdr pane whose herdr fails or times out and no other name for the session, the hook registers and pops nothing and leaves one `derive` record with code `herdr_failed`; given that a herdr call was refused because the time budget was spent, it leaves one `budget` record with code `budget_exhausted` instead. | Test |
 | FR-030-AC-11 | Given herdr failing for five uncached `PostToolUse` calls of one session, the spool holds one record and every call attempted the derivation; given herdr answering on the sixth call, the lead is registered by it and no further record is left. | Test |
+| FR-030-AC-12 | Given 1,000 spooled records, including runs of identical ones, and two flushes started at the same time, a flush whose ship fails after the server applied part of it and is then retried, and a process killed after shipping and before removing, the stream afterwards holds each record exactly once and the spool holds none of them. | Test |
 
 ## Dependencies
 

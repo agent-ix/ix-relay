@@ -58,6 +58,20 @@ and shall exit 0 unless a check failed.
   `SCAN` calls, the prefix glob-escaped) and shall report a cut scan as
   `backlog_scan_truncated`; it shall read this machine's heartbeat and every
   machine with a registered lead by name, and scan for the rest.
+- The doctor command shall give `hook_failures_recorded` the severity `fail` only when, among
+  the failures recorded in the last 24 hours, either (a) at least 50 are under 15 minutes old,
+  fleet-wide, or (b) one session has failed in each of at least three distinct 15-minute
+  windows of the last hour and its newest failure is under 15 minutes old. Otherwise it shall
+  give the code `warn`. A single recent record, or a short burst on one machine, is a `warn`.
+  The thresholds are the doctor's own: 50 in 15 minutes is more than 15 times the fleet's
+  observed average of about 3 per 15 minutes (about 300 a day), so only an outage reaches it;
+  a connect-timeout burst ends within one window, so failures in three windows mean the
+  failure persisted for over half an hour and is not a burst. The session in (b) is identified
+  by its machine and session id (records with no session id are grouped by machine and lead).
+- The `hook_failures_recorded` detail shall name, whatever the severity, the three sessions
+  with the most failures in the 24 hours (machine, lead, session id as the record cut it, the
+  count, the stage and error kind that repeat most, and the newest time) and the three machines
+  with the most failures, and shall say which rule made it a `fail`.
 - The doctor command shall show text from the bus, a binary or a file, and message
   text of a failed requeue (the only copy), as one neutralised line free of
   control characters.
@@ -84,7 +98,7 @@ and shall exit 0 unless a check failed.
 | hook spool | `hook_spool_pending` | fail while the newest record (the file's last write, when none decodes) is under 15 min old, else warn |
 | | `hook_spool_unreadable` | warn |
 | | `hook_spool_unlocated` | unknown |
-| hook failures on the bus, 24 h, by stage and error kind | `hook_failures_recorded` | fail if any record is under 15 min old, else warn |
+| hook failures on the bus, 24 h, by stage and error kind | `hook_failures_recorded` | fail while the recent failures reach the volume threshold or a session keeps failing (below), else warn |
 | herdr | `herdr_missing`, `herdr_shape_mismatch` | fail |
 | | `herdr_unsupported_version`, `herdr_version_unreadable` | warn |
 | | `herdr_unchecked` | unknown |
@@ -116,6 +130,9 @@ and shall exit 0 unless a check failed.
 | FR-029-AC-11 | Given a stuck inbox, the code is a `warn` under a fresh heartbeat and a `fail` under a wedged or missing one; given a spool with only undecodable lines, `hook_spool_pending` is a `fail` while the file is being written and a `warn` after 15 min. | Test |
 | FR-029-AC-12 | Given `node-a`'s watcher died and its leads' stamps stopped moving, `watcher_heartbeat_missing` for `node-a` is a `fail` half an hour, three hours and 23 hours after its last tick, and a `warn` after 25 hours. | Test |
 | FR-029-AC-13 | Given the bus refuses the password (including `NOAUTH` and `WRONGPASS`), refuses the connection, accepts and then drops it, does not answer, or has no route, `redis_unreachable`'s cause and fix name, respectively, the machine's ACL user, hub's forwarder, relay-redis behind the forwarder, the WireGuard link, and WireGuard not being up on this machine. | Test |
+| FR-029-AC-14 | Given one hook failure two minutes old, or 49 failures spread over several machines within 15 minutes, or a burst of 100 failures from one session within a single 15-minute window, `hook_failures_recorded` is a `warn`; given 50 failures under 15 minutes old, it is a `fail`. | Test |
+| FR-029-AC-15 | Given one session that failed 84 times with the same stage and error kind over the last hour, in at least three distinct 15-minute windows and most recently three minutes ago, `hook_failures_recorded` is a `fail`; given the same records with the newest 20 minutes old it is a `warn`. | Test |
+| FR-029-AC-16 | Given failures of several sessions on several machines, the check's detail names the three sessions and the three machines with the most failures, with their counts, repeating stage and error kind and newest time, and no text taken from a failure message. | Test |
 
 ## Dependencies
 
