@@ -62,7 +62,8 @@ the sender wrote it to a session whose context the new holder does not share.
   then the watcher shall move every queued message of the replaced registration to the
   inbox of that registration, and shall leave the replaced registration in place.
 - If no registration, or more than one, qualifies, then the watcher shall move nothing:
-  the mail stays queued until the new session registers, and an ambiguous address is
+  the mail stays queued until the new session registers or the replaced registration
+  reaches the pruning age (see "Nothing holds the address"), and an ambiguous address is
   never resolved by guessing ([FR-004](./FR-004-resolution-never-guesses.md)).
 - The move shall be one atomic bus operation per batch of messages: each message shall
   be in exactly one of the two inboxes at every instant a reader can observe, and a
@@ -111,8 +112,9 @@ the sender wrote it to a session whose context the new holder does not share.
 
 ### Nothing holds the address
 
-- When a registration's session is gone, no registration holds its address, and the
-  registration is old enough for the pruning rule (a `last_seen_ms` of 24 hours or more),
+- When a registration's session is gone or replaced, no registration holds its address,
+  and the registration is old enough for the pruning rule (a `last_seen_ms` of 24 hours
+  or more), so that mail never waits forever on a new occupant that never registers,
   then the watcher shall move every queued message of it to the dead-letter list with
   reason `recipient-pruned`, byte for byte ([FR-031](./FR-031-dead-letters-instead-of-drops.md)),
   and then prune the registration, as one compare-and-set against the registration it
@@ -148,6 +150,7 @@ the sender wrote it to a session whose context the new holder does not share.
 | FR-053-AC-9 | Given a registration of another machine in the same state, the watcher moves, forwards and prunes nothing for it. | Test |
 | FR-053-AC-10 | Given a registration 25 hours old whose pane herdr lists no agent in, holding two queued messages and no registration holding its address, one pass leaves both in the dead-letter list byte for byte with reason `recipient-pruned` and the registration pruned; given it is 23 hours old, nothing moves; given the dead-lettering fails, the registration is not pruned and the mail stays. | Test |
 | FR-053-AC-11 | Given a leased in-flight batch of a replaced registration, the pass does not move it, and after the lease expires the next pass does. | Test |
+| FR-053-AC-13 | Given a registration 25 hours old whose pane herdr says now hosts another session, holding two queued messages and no registration holding its address, one pass leaves both in the dead-letter list byte for byte with reason `recipient-pruned` and the registration pruned; given it is 23 hours old, nothing moves. | Test |
 
 ## Dependencies
 

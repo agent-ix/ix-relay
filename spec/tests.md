@@ -347,6 +347,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-053 | FR-053-AC-10 | TC-053-10 | 🚧 not written |
 | FR-053 | FR-053-AC-11 | TC-053-11 | 🚧 not written |
 | FR-053 | FR-053-AC-12 | TC-053-12 | 🚧 not written |
+| FR-053 | FR-053-AC-13 | TC-053-13 | 🚧 not written |
 | FR-054 | FR-054-AC-1 | TC-054-01 | 🚧 not written |
 | FR-054 | FR-054-AC-2 | TC-054-02 | 🚧 not written |
 | FR-054 | FR-054-AC-3 | TC-054-03 | 🚧 not written |
@@ -423,6 +424,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-053-10 | A gone, old-enough registration with mail is dead-lettered as `recipient-pruned` byte for byte and then pruned; failures prune nothing. | Integration | FR-053-AC-10 | 🚧 not written |
 | TC-053-11 | An in-flight batch is not moved until its lease expires. | Integration | FR-053-AC-11 | 🚧 not written |
 | TC-053-12 | Moved messages carry the notice on their one signed first line and a batch of them stays within the hook-output bound. | Integration | FR-053-AC-12 | 🚧 not written |
+| TC-053-13 | A registration whose pane now hosts an unregistered session, and that reaches the pruning age, has its mail dead-lettered as `recipient-pruned` and is pruned. | Integration | FR-053-AC-13 | 🚧 not written |
 | TC-054-01 | Codex and opencode leads go straight to herdr with no status entry or note. | Integration | FR-054-AC-1 | 🚧 not written |
 | TC-054-02 | A claude lead with no record still goes to herdr with the note. | Integration | FR-054-AC-2 | 🚧 not written |
 | TC-054-03 | Doctor does not warn about non-claude leads and still warns for a claude lead without a record. | Integration | FR-054-AC-3 | 🚧 not written |
@@ -741,7 +743,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 
 | Gap ID | Description | Risk Level | Mitigation |
 |--------|-------------|------------|------------|
-| GAP-001 | 235 of 346 rows have a written test; changed 0.3.0 obligations have replacement evidence above. Retired alias tests are not evidence for the new contract. Remaining pending/partial rows require their stated evidence. | High | Complete remaining evidence without claiming full coverage. |
+| GAP-001 | 235 of 347 rows have a written test; changed 0.3.0 obligations have replacement evidence above. Retired alias tests are not evidence for the new contract. Remaining pending/partial rows require their stated evidence. | High | Complete remaining evidence without claiming full coverage. |
 | GAP-002 | 15 rows still say `red on main`: obligations of requirements `main` does not yet meet, red when written (FR-031, FR-033-AC-2, FR-034-AC-4, FR-035, FR-037). The rest of FR-032..FR-034 are written or partial since the relink work (FR-043). | High | AGE-2033 (AGE-2032 landed; the NFR-001 stdin row landed under AGE-2033). |
 | GAP-003 | No `herdr` stub or blackholed-Redis harness exists yet for the fault-injection and benchmark rows. | Medium | Build with the NFR-001..003 suites. |
 
@@ -752,7 +754,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | Benchmark | 8 | 5 | 0 | 0 | 0 | 0 | 62% |
 | Fuzz | 3 | 0 | 3 | 0 | 0 | 0 | 0% |
 | Inspection | 3 | 0 | 0 | 0 | 0 | 0 | 0% |
-| Integration | 174 | 116 | 0 | 10 | 0 | 0 | 67% |
+| Integration | 175 | 116 | 0 | 10 | 0 | 0 | 67% |
 | Property | 38 | 28 | 0 | 5 | 0 | 0 | 74% |
 | Static | 2 | 0 | 2 | 0 | 0 | 0 | 0% |
 | Unit | 118 | 81 | 0 | 3 | 0 | 0 | 69% |
