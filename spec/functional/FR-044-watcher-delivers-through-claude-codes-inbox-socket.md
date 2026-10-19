@@ -203,6 +203,10 @@ operator's decision; this requirement only makes the watcher notice.
   silently.
 - The watcher shall never write to a Claude Code session, registry or settings file and never
   connect to a socket that is not a resolved, live session's.
+- The watcher shall try the socket only for leads whose registration kind is `claude`
+  ([FR-054](./FR-054-socket-delivery-is-for-claude-leads.md)), and shall keep the resolved
+  leads of its status file to registered leads with a live process
+  ([FR-055](./FR-055-socket-status-keeps-only-live-leads.md)).
 - The watcher shall write `state/socket/socket-<watcher pid>.json` (its pid and start time, its
   reply socket, the sockets it resolved, the leads held, the held batches, the dead-letter reasons
   and why a lead's batches went to herdr) after each socket delivery, so two watchers on one

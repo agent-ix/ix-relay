@@ -182,6 +182,7 @@ fn tc_039_02_read_only_commands_retry_a_timed_out_read_on_a_fresh_connection() {
             to: Target::Agent(name("receiver")),
             text: "hello".into(),
             sent_at_ms: 1,
+            forwarded: false,
         })
         .unwrap();
 

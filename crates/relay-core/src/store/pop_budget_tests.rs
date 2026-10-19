@@ -125,13 +125,18 @@ fn message() -> impl Strategy<Value = Message> {
         0..SENDERS.len(),
         prop_oneof![Just(Target::All), Just(Target::Agent(name("r")))],
         text(),
-        0i64..10,
+        // Mostly small, so a forwarded message's time is short; sometimes any
+        // clock at all, so it is as long (or as unprintable) as it can be.
+        prop_oneof![4 => 0i64..10, 1 => any::<i64>()],
+        // A moved message (FR-053) carries a notice on its first line.
+        any::<bool>(),
     )
-        .prop_map(|(from, to, text, sent_at_ms)| Message {
+        .prop_map(|(from, to, text, sent_at_ms, forwarded)| Message {
             from: name(SENDERS[from].0),
             to,
             text,
             sent_at_ms,
+            forwarded,
         })
 }
 
@@ -221,8 +226,8 @@ proptest! {
         prop_assert_eq!(takes_exactly_one_of(&mut r, &first, &second), Ok(()));
     }
 
-    /// Tracing: TC-N002-M-03, TC-020-09, TC-040-05
-    /// ACs: FR-018-AC-4, FR-020-AC-9, FR-040-AC-5
+    /// Tracing: TC-N002-M-03, TC-020-09, TC-040-05, TC-053-12
+    /// ACs: FR-018-AC-4, FR-020-AC-9, FR-040-AC-5, FR-053-AC-12
     ///
     /// The Rust size of a message is never below what it prints to, under any
     /// address book, with the byte that joins it to the next counted.
@@ -234,7 +239,12 @@ proptest! {
         let marked = book().render_marked(&m, true);
         prop_assert!(marked.len() < m.rendered_len_max(), "{marked:?}");
         let widest = m.render_from_marked(&"x".repeat(MAX_LABEL_BYTES), true);
-        prop_assert_eq!(widest.len() + 1, m.rendered_len_max());
+        if m.forwarded {
+            // The notice is at its longest for the widest time only: still bounded.
+            prop_assert!(widest.len() < m.rendered_len_max(), "{widest:?}");
+        } else {
+            prop_assert_eq!(widest.len() + 1, m.rendered_len_max());
+        }
     }
 }
 
@@ -269,6 +279,7 @@ fn tc_018_04_each_expanding_character_class_is_weighed_at_its_printed_size() {
             to: Target::Agent(name("r")),
             text: c.repeat(1000),
             sent_at_ms: 0,
+            forwarded: false,
         };
         assert_eq!(takes_exactly_one_of(&mut r, &m, &m), Ok(()), "{c:?}");
         // What was not taken is still queued: drain for the next class.
@@ -292,6 +303,7 @@ fn tc_018_04_newline_heavy_messages_are_counted_as_printed() {
         to: Target::Agent(name("r")),
         text: "\n".repeat(1000),
         sent_at_ms: 1,
+        forwarded: false,
     };
     let popped = pop_once(&mut r, &vec![heavy; 3], HOOK_BUDGET);
     assert_eq!(popped.messages.len(), 1, "5,000 printed bytes each");

@@ -394,6 +394,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 to: resolved.target.clone(),
                 text: text.join(" "),
                 sent_at_ms: now_ms(),
+                forwarded: false,
             };
             let recipients = enqueue_resolved(&mut relay, &mut resolved, &mut msg)?;
             let recipient = recipient_registration(
@@ -512,11 +513,21 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
             }
         }
         Cmd::Who => {
-            let (list, replaced) = retry::read(&mut relay, &redial, |r| {
+            let (list, replaced, holding) = retry::read(&mut relay, &redial, |r| {
                 let list = r.agents()?;
                 let names: Vec<&AgentName> = list.registrations.iter().map(|x| &x.name).collect();
                 let replaced = r.panes_replaced(&names);
-                Ok((list, replaced))
+                // Mail left for a replaced session is forwarded or dead-lettered by the
+                // watcher (FR-053): only a lead that still holds some is undeliverable. A
+                // failed read of an inbox leaves the lead marked.
+                let lens = r.inbox_lens(&names)?;
+                let holding: std::collections::BTreeSet<AgentName> = names
+                    .iter()
+                    .zip(lens)
+                    .filter(|(_, len)| !matches!(len, Ok(0)))
+                    .map(|(name, _)| (*name).clone())
+                    .collect();
+                Ok((list, replaced, holding))
             })?;
             // Whether a pane now hosts another session is extra: a failed read of
             // it is said, and the listing is still printed.
@@ -557,7 +568,10 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 )?;
                 // FR-032: the watcher found this lead's pane hosting another
                 // session, so what is listed for it is stale, not live.
-                if let Some(found) = replaced.get(&r.name).filter(|f| f.describes(&r)) {
+                if let Some(found) = replaced
+                    .get(&r.name)
+                    .filter(|f| f.describes(&r) && holding.contains(&r.name))
+                {
                     write!(
                         out,
                         "  UNDELIVERABLE: pane {pane} now hosts another session (since {})",

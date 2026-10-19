@@ -17,6 +17,7 @@ fn message(text: &str) -> Message {
         to: Target::Agent(name("r")),
         text: text.into(),
         sent_at_ms: 1,
+        forwarded: false,
     }
 }
 

@@ -26,7 +26,10 @@ reason from a fixed set, instead of dropping it.
 - The dead-letter list shall keep at least the most recent 10,000 entries and
   every entry younger than 30 days, whichever is more.
 - The watcher shall not prune a registration whose inbox holds messages without
-  first dead-lettering them with reason `recipient-pruned`.
+  first dead-lettering them with reason `recipient-pruned`, or, when a new session
+  holds the registration's address, handing them to that session
+  ([FR-053](./FR-053-stranded-mail-is-forwarded-or-dead-lettered.md), which also
+  states when the watcher does either).
 
 ## Acceptance Criteria
 

@@ -790,6 +790,7 @@ mod tests {
             to: "x".parse().unwrap(),
             text: "hi".into(),
             sent_at_ms: 0,
+            forwarded: false,
         };
         assert_eq!(book.render(&msg("ea-lead")), "[ix-relay] from hub:EA:1: hi");
         assert_eq!(book.render(&msg("plain")), "[ix-relay] from unverified: hi");

@@ -14,6 +14,15 @@ const SIGNATURE_PREFIX: &str = "[ix-relay] from ";
 const BROADCAST_MARK: &str = " (to all)";
 /// What a redelivered message adds after the sender (FR-040).
 const REDELIVERED_MARK: &str = " (redelivered)";
+/// Before the send time in the notice of a forwarded message (FR-053).
+const FORWARDED_BEFORE: &str = " (sent ";
+/// After the send time in the notice of a forwarded message (FR-053).
+const FORWARDED_AFTER: &str = " to a prior session of this address)";
+/// The longest send time the notice prints: `-009999-12-31T23:59:59Z`.
+const FORWARDED_TIME_MAX: usize = 23;
+/// The most bytes the notice of a forwarded message adds to its signature.
+pub(crate) const FORWARDED_NOTICE_MAX: usize =
+    FORWARDED_BEFORE.len() + FORWARDED_TIME_MAX + FORWARDED_AFTER.len();
 /// What separates the signature from the text.
 const SIGNATURE_END: &str = ": ";
 /// What joins one rendered message to the next.
@@ -49,6 +58,11 @@ pub struct Message {
     pub text: String,
     /// Sender's clock, Unix milliseconds.
     pub sent_at_ms: i64,
+    /// Set by the watcher's move of a stranded inbox (FR-053): the message was
+    /// sent to a prior session of the recipient's address. Never set by a
+    /// sender; absent from the stored JSON unless true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forwarded: bool,
 }
 
 impl Message {
@@ -87,6 +101,11 @@ impl Message {
             + MAX_LABEL_BYTES
             + broadcast
             + REDELIVERED_MARK.len()
+            + if self.forwarded {
+                FORWARDED_NOTICE_MAX
+            } else {
+                0
+            }
             + SIGNATURE_END.len()
             + crate::text::neutralise(&self.text).len()
             + MESSAGE_SEPARATOR
@@ -103,6 +122,10 @@ impl Message {
     /// [`Message::render_from`], with ` (redelivered)` after the sender when
     /// `redelivered` (FR-040): the message was popped before and never
     /// acknowledged, so the recipient may have seen it already.
+    ///
+    /// A forwarded message (FR-053) also carries, on that same signed first
+    /// line, ` (sent <UTC time> to a prior session of this address)`: written
+    /// here, never part of the sender's text.
     pub fn render_from_marked(&self, sender: &str, redelivered: bool) -> String {
         let text = crate::text::neutralise(&self.text);
         let all = match self.to {
@@ -110,8 +133,25 @@ impl Message {
             Target::Agent(_) => "",
         };
         let again = if redelivered { REDELIVERED_MARK } else { "" };
-        format!("{SIGNATURE_PREFIX}{sender}{all}{again}{SIGNATURE_END}{text}")
+        let notice = if self.forwarded {
+            format!(
+                "{FORWARDED_BEFORE}{}{FORWARDED_AFTER}",
+                forwarded_time(self.sent_at_ms)
+            )
+        } else {
+            String::new()
+        };
+        format!("{SIGNATURE_PREFIX}{sender}{all}{again}{notice}{SIGNATURE_END}{text}")
     }
+}
+
+/// The send time a forwarded message's notice shows: UTC, to the second, at most
+/// [`FORWARDED_TIME_MAX`] bytes. A clock outside the calendar prints as `?`.
+fn forwarded_time(sent_at_ms: i64) -> String {
+    jiff::Timestamp::from_millisecond(sent_at_ms).map_or_else(
+        |_| "?".to_owned(),
+        |t| t.strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    )
 }
 
 impl Registration {
@@ -190,6 +230,17 @@ pub enum PlacementState<'a> {
         /// The conflicting verified Herdr location.
         verified: &'a Place,
     },
+}
+
+/// The harness kind of a Claude Code lead: the only kind whose inbox socket the watcher
+/// tries (FR-054).
+pub const CLAUDE_KIND: &str = "claude";
+
+/// Whether the watcher tries Claude Code's inbox socket for a lead of harness `kind`
+/// (FR-054): `claude` does; any other value, an unknown or empty one included, does not.
+#[must_use]
+pub fn tries_socket(kind: &str) -> bool {
+    kind == CLAUDE_KIND
 }
 
 /// A lead's entry in the registry: where it runs and what session it is.
@@ -309,6 +360,7 @@ mod tests {
             to: to.parse().unwrap(),
             text: "IR merged #412".into(),
             sent_at_ms: 0,
+            forwarded: false,
         }
     }
 
@@ -331,6 +383,7 @@ mod tests {
             to: "b".parse().unwrap(),
             text: String::new(),
             sent_at_ms: 0,
+            forwarded: false,
         };
         assert_eq!(
             serde_json::to_string(&smallest).unwrap().len(),

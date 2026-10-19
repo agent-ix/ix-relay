@@ -97,6 +97,9 @@ pub struct Resolved {
     pub socket: PathBuf,
     /// Its version.
     pub version: String,
+    /// The process's start time when it was resolved (`procStart`): with the pid, it says
+    /// later whether the process is still the one resolved (FR-055).
+    pub proc_start: String,
 }
 
 /// Why no socket could be used; every one of them means nothing was sent.
@@ -282,6 +285,7 @@ pub fn resolve(
         pid: record.pid,
         socket,
         version: record.version.unwrap_or_default(),
+        proc_start: record.proc_start.unwrap_or_default(),
     })
 }
 

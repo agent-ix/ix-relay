@@ -494,15 +494,7 @@ fn gather_redis(env: &Env) -> RedisFacts {
         .map(|(moves, more)| MovesRead { moves, more });
     let health = reader.run(&mut relay, |r| r.hook_health(MAX_HOOK_RECORDS));
     let hook_unreadable = health.as_ref().map_or(0, |h| h.unreadable);
-    let hook_failures = health.map(|h| {
-        h.entries
-            .into_iter()
-            .map(|e| BusFailure {
-                machine: e.machine,
-                record: serde_json::from_str(&e.record).ok(),
-            })
-            .collect()
-    });
+    let hook_failures = health.map(|h| bus_failures_of(&h));
     RedisFacts::Up(Box::new(RedisUp {
         rtt,
         registrations,
@@ -514,6 +506,19 @@ fn gather_redis(env: &Env) -> RedisFacts {
         hook_unreadable,
         moves,
     }))
+}
+
+/// The hook failures on the bus, each record id counted once: the one rule
+/// ([`relay_core::HookHealth::distinct`], FR-030) the watcher's gauge counts by too.
+fn bus_failures_of(health: &relay_core::HookHealth) -> Vec<BusFailure> {
+    health
+        .distinct()
+        .into_iter()
+        .map(|e| BusFailure {
+            machine: e.machine.clone(),
+            record: serde_json::from_str(&e.record).ok(),
+        })
+        .collect()
 }
 
 /// One Redis read: armed with what is left of the budget, its error scrubbed of
@@ -737,6 +742,23 @@ mod tests {
                 }),
             }
         }
+    }
+
+    /// Tracing: TC-030-12
+    /// ACs: FR-030-AC-12
+    #[test]
+    fn tc_030_12_bus_failures_count_each_record_id_once() {
+        let entry = |id: Option<&str>| relay_core::HookHealthEntry {
+            id: id.map(str::to_owned),
+            machine: "hub".parse().unwrap(),
+            lead: None,
+            record: "{}".to_owned(),
+        };
+        let health = relay_core::HookHealth {
+            entries: vec![entry(Some("a")), entry(Some("a")), entry(None), entry(None)],
+            unreadable: 0,
+        };
+        assert_eq!(bus_failures_of(&health).len(), 3);
     }
 
     const IS_ACTIVE: &str = "systemctl --user is-active relay-watcher.service";

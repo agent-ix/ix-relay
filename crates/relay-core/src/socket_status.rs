@@ -200,17 +200,47 @@ pub fn start_time_from_stat(stat: &str) -> Option<String> {
     after.split_whitespace().nth(19).map(str::to_owned)
 }
 
-/// How many times Claude Code sent something this watcher's typed wire formats
-/// (`claude-wire`) do not know, since its reply socket was bound. A drift signal:
-/// Claude Code's cross-session formats are undocumented and can change in any
-/// release. Counts saturate; nothing here fails a delivery.
+/// The window drift is counted over (FR-046): long enough to span a working day of a lead
+/// that runs rarely, short enough that a Claude Code upgrade that fixed the format stops
+/// showing as drift the next day.
+pub const DRIFT_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// The width of one drift bucket.
+const BUCKET_MS: i64 = 60 * 60 * 1000;
+
+/// The most Claude Code versions the drift members are kept for (NFR-002).
+pub const MAX_DRIFT_VERSIONS: usize = 16;
+
+/// The most characters kept of a version string, a line's `type` or its `action`.
+pub const MAX_DRIFT_TEXT_CHARS: usize = 64;
+
+/// The version a count is kept under when the lead had none resolved.
+pub const UNKNOWN_VERSION: &str = "unknown";
+
+/// What Claude Code sent that the typed wire formats (`claude-wire`) do not know. A drift
+/// signal: Claude Code's cross-session formats are undocumented and can change in any
+/// release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DriftKind {
+    /// A reply-socket line that is JSON in a shape not known.
+    UnrecognisedLine,
+    /// A reply-socket line that is not JSON at all.
+    NotJsonLine,
+    /// A receipt whose status is not one known.
+    UnknownStatusReceipt,
+    /// A transcript look that found a message id without a structured `origin.msg_id`.
+    TranscriptShapeUnrecognised,
+}
+
+/// Counts over some period, all saturating. Nothing here fails a delivery.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireDrift {
-    /// Reply-socket lines that are valid JSON in a shape not known (renamed `type` or
-    /// `action`, missing `status`, wrong field types).
+pub struct DriftCounts {
+    /// Reply-socket lines that were JSON in a shape not known (renamed `type` or `action`,
+    /// missing `status`, wrong field types).
     #[serde(default)]
     pub unrecognised_lines: u64,
-    /// Reply-socket lines that are not JSON at all.
+    /// Reply-socket lines that were not JSON at all.
     #[serde(default)]
     pub not_json_lines: u64,
     /// Receipts whose `status` (with its detail) is not one known.
@@ -220,16 +250,264 @@ pub struct WireDrift {
     /// `origin.msg_id`.
     #[serde(default)]
     pub transcript_shape_unrecognised: u64,
+    /// Socket deliveries acknowledged by the transcript or by a `delivered` receipt.
+    #[serde(default)]
+    pub acknowledged: u64,
 }
 
-impl WireDrift {
-    /// The drift on the reply socket: unrecognised or non-JSON lines and unknown
-    /// receipt statuses.
+impl DriftCounts {
+    /// The drift on the reply socket: unrecognised or non-JSON lines and unknown receipt
+    /// statuses.
     #[must_use]
     pub fn control_total(&self) -> u64 {
         self.unrecognised_lines
             .saturating_add(self.not_json_lines)
             .saturating_add(self.unknown_status_receipts)
+    }
+
+    /// Drift of any kind.
+    #[must_use]
+    pub fn drift_total(&self) -> u64 {
+        self.control_total()
+            .saturating_add(self.transcript_shape_unrecognised)
+    }
+
+    fn add(&mut self, other: &Self) {
+        self.unrecognised_lines = self
+            .unrecognised_lines
+            .saturating_add(other.unrecognised_lines);
+        self.not_json_lines = self.not_json_lines.saturating_add(other.not_json_lines);
+        self.unknown_status_receipts = self
+            .unknown_status_receipts
+            .saturating_add(other.unknown_status_receipts);
+        self.transcript_shape_unrecognised = self
+            .transcript_shape_unrecognised
+            .saturating_add(other.transcript_shape_unrecognised);
+        self.acknowledged = self.acknowledged.saturating_add(other.acknowledged);
+    }
+
+    fn bump(&mut self, kind: DriftKind) {
+        let counter = match kind {
+            DriftKind::UnrecognisedLine => &mut self.unrecognised_lines,
+            DriftKind::NotJsonLine => &mut self.not_json_lines,
+            DriftKind::UnknownStatusReceipt => &mut self.unknown_status_receipts,
+            DriftKind::TranscriptShapeUnrecognised => &mut self.transcript_shape_unrecognised,
+        };
+        *counter = counter.saturating_add(1);
+    }
+}
+
+/// One hour's counts for one version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DriftBucket {
+    /// The hour: Unix milliseconds divided by an hour.
+    pub hour: i64,
+    /// What was counted in it.
+    #[serde(flatten)]
+    pub counts: DriftCounts,
+}
+
+impl DriftBucket {
+    /// Whether the bucket is more than the window old at `now_ms`.
+    fn expired(&self, now_ms: i64) -> bool {
+        now_ms.saturating_sub(self.hour.saturating_mul(BUCKET_MS)) > DRIFT_WINDOW_MS
+    }
+}
+
+/// The last line of one kind that drifted: its shape only, never a body, a message id or a
+/// path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastDriftLine {
+    /// Which kind of drift it was.
+    pub kind: DriftKind,
+    /// When, Unix milliseconds.
+    pub at_ms: i64,
+    /// The line's `type` string (a transcript line's `type`), when it had one.
+    #[serde(default)]
+    pub line_type: Option<String>,
+    /// The line's `action` string, when it had one (a reply-socket line).
+    #[serde(default)]
+    pub action: Option<String>,
+}
+
+/// What is known of one Claude Code version: hourly counts and the last offending line of
+/// each kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionDrift {
+    /// The version, neutralised and cut.
+    pub version: String,
+    /// Hourly counts, oldest first.
+    #[serde(default)]
+    pub buckets: Vec<DriftBucket>,
+    /// The last offending line of each kind that has one.
+    #[serde(default)]
+    pub last: Vec<LastDriftLine>,
+}
+
+/// A version's drift over the window ending at some moment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriftWindow {
+    /// The counts of every bucket still inside the window.
+    pub counts: DriftCounts,
+    /// The last offending lines still inside the window.
+    pub last: Vec<LastDriftLine>,
+}
+
+impl VersionDrift {
+    /// The counts and last lines at `now_ms`, with what is more than 24 hours old left out.
+    /// A reader applies this itself: a watcher that has seen no drift writes nothing new.
+    #[must_use]
+    pub fn window(&self, now_ms: i64) -> DriftWindow {
+        let mut counts = DriftCounts::default();
+        for bucket in self.buckets.iter().filter(|b| !b.expired(now_ms)) {
+            counts.add(&bucket.counts);
+        }
+        DriftWindow {
+            counts,
+            last: self
+                .last
+                .iter()
+                .filter(|l| now_ms.saturating_sub(l.at_ms) <= DRIFT_WINDOW_MS)
+                .cloned()
+                .collect(),
+        }
+    }
+
+    fn newest_hour(&self) -> i64 {
+        self.buckets
+            .iter()
+            .map(|b| b.hour)
+            .max()
+            .unwrap_or(i64::MIN)
+    }
+}
+
+/// `text` made safe to keep and show: control and invisible characters replaced, at most
+/// [`MAX_DRIFT_TEXT_CHARS`] characters.
+fn kept_text(text: &str) -> String {
+    crate::text::sanitise_line(text)
+        .chars()
+        .take(MAX_DRIFT_TEXT_CHARS)
+        .collect()
+}
+
+/// The drift counts of every Claude Code version a watcher has delivered to or read a line
+/// from, in hourly buckets that age out after 24 hours (FR-046). Bounded to
+/// [`MAX_DRIFT_VERSIONS`] versions. Kept apart from the resolved leads (FR-055), so a lead
+/// that left the status file leaves its version's counts for the window.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DriftBook {
+    versions: Vec<VersionDrift>,
+}
+
+impl DriftBook {
+    /// The entry for `version` at `now_ms`, made if it is new (an empty bucket for the hour
+    /// is kept), after dropping what has aged out. When a further version would pass the
+    /// bound, the version whose newest bucket is oldest goes first.
+    fn entry(&mut self, version: &str, now_ms: i64) -> &mut VersionDrift {
+        self.prune(now_ms);
+        let version = match kept_text(version) {
+            v if v.is_empty() => UNKNOWN_VERSION.to_owned(),
+            v => v,
+        };
+        let at = match self.versions.iter().position(|v| v.version == version) {
+            Some(at) => at,
+            None => {
+                if self.versions.len() >= MAX_DRIFT_VERSIONS
+                    && let Some(oldest) = self
+                        .versions
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, v)| v.newest_hour())
+                        .map(|(i, _)| i)
+                {
+                    self.versions.remove(oldest);
+                }
+                self.versions.push(VersionDrift {
+                    version,
+                    buckets: Vec::new(),
+                    last: Vec::new(),
+                });
+                self.versions.len() - 1
+            }
+        };
+        &mut self.versions[at]
+    }
+
+    fn bucket(entry: &mut VersionDrift, now_ms: i64) -> &mut DriftBucket {
+        let hour = now_ms.div_euclid(BUCKET_MS);
+        match entry.buckets.iter().position(|b| b.hour == hour) {
+            Some(at) => &mut entry.buckets[at],
+            None => {
+                entry.buckets.push(DriftBucket {
+                    hour,
+                    counts: DriftCounts::default(),
+                });
+                entry.buckets.sort_by_key(|b| b.hour);
+                let at = entry
+                    .buckets
+                    .iter()
+                    .position(|b| b.hour == hour)
+                    .unwrap_or(0);
+                &mut entry.buckets[at]
+            }
+        }
+    }
+
+    /// Notes that `version` was delivered to or heard from at `now_ms`, so it is listed.
+    pub fn seen(&mut self, version: &str, now_ms: i64) {
+        let entry = self.entry(version, now_ms);
+        Self::bucket(entry, now_ms);
+    }
+
+    /// Counts one drift of `kind` against `version`, and keeps the line's shape as the last
+    /// offending line of that kind. `line_type` and `action` are cut and neutralised here.
+    pub fn record(
+        &mut self,
+        version: &str,
+        kind: DriftKind,
+        line_type: Option<&str>,
+        action: Option<&str>,
+        now_ms: i64,
+    ) {
+        let entry = self.entry(version, now_ms);
+        Self::bucket(entry, now_ms).counts.bump(kind);
+        let last = LastDriftLine {
+            kind,
+            at_ms: now_ms,
+            line_type: line_type.map(kept_text),
+            action: action.map(kept_text),
+        };
+        match entry.last.iter_mut().find(|l| l.kind == kind) {
+            Some(slot) => *slot = last,
+            None => entry.last.push(last),
+        }
+    }
+
+    /// Counts one socket delivery acknowledged by the transcript or a `delivered` receipt.
+    pub fn acknowledged(&mut self, version: &str, now_ms: i64) {
+        let entry = self.entry(version, now_ms);
+        let counts = &mut Self::bucket(entry, now_ms).counts;
+        counts.acknowledged = counts.acknowledged.saturating_add(1);
+    }
+
+    /// Drops every bucket and last line more than 24 hours old, and every version left with
+    /// neither.
+    pub fn prune(&mut self, now_ms: i64) {
+        for v in &mut self.versions {
+            v.buckets.retain(|b| !b.expired(now_ms));
+            v.last
+                .retain(|l| now_ms.saturating_sub(l.at_ms) <= DRIFT_WINDOW_MS);
+        }
+        self.versions
+            .retain(|v| !v.buckets.is_empty() || !v.last.is_empty());
+    }
+
+    /// What the status file holds, pruned to `now_ms`.
+    #[must_use]
+    pub fn snapshot(&mut self, now_ms: i64) -> Vec<VersionDrift> {
+        self.prune(now_ms);
+        self.versions.clone()
     }
 }
 
@@ -261,9 +539,11 @@ pub struct SocketStatus {
     /// Batches dead-lettered by the watcher, and why, newest last.
     #[serde(default)]
     pub dead_lettered: Vec<DeadLetterNote>,
-    /// What Claude Code sent that the typed wire formats do not know.
+    /// Drift and acknowledgements per Claude Code version, over the last 24 hours (FR-046).
+    /// A status written before this shape had a cumulative `drift` object that names no
+    /// version; it reads as having none (NFR-004).
     #[serde(default)]
-    pub drift: WireDrift,
+    pub versions: Vec<VersionDrift>,
     /// One line per lead the socket cannot be used for (no record, unsupported
     /// version, ambiguous), and why; these batches go to herdr.
     pub notes: Vec<String>,
@@ -376,11 +656,11 @@ mod tests {
                 reason: "denied".into(),
                 at_ms: 6,
             }],
-            drift: WireDrift {
-                unrecognised_lines: 1,
-                not_json_lines: 2,
-                unknown_status_receipts: 3,
-                transcript_shape_unrecognised: 4,
+            versions: {
+                let mut book = DriftBook::default();
+                book.record("2.1.300", DriftKind::NotJsonLine, None, None, 5_000);
+                book.acknowledged("2.1.300", 6_000);
+                book.snapshot(7_000)
             },
             notes: vec!["c: no record".into()],
         };
@@ -525,5 +805,101 @@ mod tests {
             .collect();
         assert_eq!(pids, [20, 3], "sorted by file name, nothing else read");
         assert!(read_all(&dir.join("absent")).is_empty());
+    }
+
+    const HOUR: i64 = 60 * 60 * 1000;
+
+    /// Tracing: TC-046-16
+    /// ACs: FR-046-AC-16
+    ///
+    /// Drift 25 hours ago and none since is gone from the counts, the last-line members and
+    /// the version; drift 23 hours ago is still there. A reader applies the window itself.
+    #[test]
+    fn drift_ages_out_after_twenty_four_hours() {
+        let now = 1_000 * HOUR;
+        for (ago_hours, kept) in [(25, false), (23, true)] {
+            let mut book = DriftBook::default();
+            book.record(
+                "2.1.303",
+                DriftKind::NotJsonLine,
+                Some("x"),
+                None,
+                now - ago_hours * HOUR,
+            );
+            book.acknowledged("2.1.303", now - ago_hours * HOUR);
+            let written = book.snapshot(now - ago_hours * HOUR);
+            // A reader at `now`, the watcher having written nothing since.
+            let window = written[0].window(now);
+            assert_eq!(
+                window.counts.not_json_lines,
+                u64::from(kept),
+                "{ago_hours}h"
+            );
+            assert_eq!(window.counts.acknowledged, u64::from(kept), "{ago_hours}h");
+            assert_eq!(window.last.len(), usize::from(kept), "{ago_hours}h");
+            // The watcher's own prune at `now`.
+            assert_eq!(book.snapshot(now).len(), usize::from(kept), "{ago_hours}h");
+        }
+    }
+
+    /// Tracing: TC-046-19
+    /// ACs: FR-046-AC-19
+    #[test]
+    fn at_most_sixteen_versions_are_kept_and_the_oldest_newest_bucket_goes_first() {
+        let mut book = DriftBook::default();
+        for n in 0..20_i64 {
+            book.record(
+                &format!("2.1.{}", 300 + n),
+                DriftKind::UnrecognisedLine,
+                None,
+                None,
+                (500 + n) * HOUR,
+            );
+        }
+        let long = format!("2.1.999-\u{7}{}", "z".repeat(1_000));
+        book.record(&long, DriftKind::NotJsonLine, None, None, 520 * HOUR);
+        let kept = book.snapshot(520 * HOUR);
+        assert_eq!(kept.len(), MAX_DRIFT_VERSIONS);
+        let names: Vec<&str> = kept.iter().map(|v| v.version.as_str()).collect();
+        assert!(names.iter().any(|n| n.starts_with("2.1.999")), "{names:?}");
+        assert!(names.contains(&"2.1.319"));
+        assert!(!names.contains(&"2.1.300") && !names.contains(&"2.1.304"));
+        assert!(
+            kept.iter()
+                .all(|v| v.version.chars().count() <= MAX_DRIFT_TEXT_CHARS
+                    && !v.version.chars().any(char::is_control))
+        );
+    }
+
+    /// Tracing: TC-046-17
+    /// ACs: FR-046-AC-17
+    #[test]
+    fn a_last_line_is_cut_and_neutralised() {
+        let mut book = DriftBook::default();
+        let long = "q".repeat(500);
+        book.record(
+            "2.1.300",
+            DriftKind::UnrecognisedLine,
+            Some(&format!("a\u{1b}[0m{long}")),
+            Some("b\nc"),
+            1,
+        );
+        let last = &book.snapshot(1)[0].last[0];
+        let (t, a) = (
+            last.line_type.as_deref().unwrap(),
+            last.action.as_deref().unwrap(),
+        );
+        assert_eq!(t.chars().count(), MAX_DRIFT_TEXT_CHARS);
+        assert!(!t.contains('\u{1b}') && !a.contains('\n'), "{t:?} {a:?}");
+    }
+
+    /// A status file in the old shape (a cumulative `drift` object naming no version) reads
+    /// as having no versions (NFR-004: no compatibility layer).
+    #[test]
+    fn an_old_status_reads_as_having_no_versions() {
+        let old = r#"{"pid":1,"updated_at_ms":2,"reply_socket":null,"leads":[],"held":[],
+            "drift":{"unrecognised_lines":4,"not_json_lines":1},"notes":[]}"#;
+        let status: SocketStatus = serde_json::from_str(old).unwrap();
+        assert!(status.versions.is_empty());
     }
 }

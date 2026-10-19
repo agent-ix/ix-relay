@@ -38,11 +38,13 @@
 //! # Flush
 //!
 //! [`Spool::begin_flush`] reads every record; the caller ships them in chunks
-//! and calls [`Flush::finish`] with how many it shipped. Exactly those are
-//! removed; the rest, and anything appended meanwhile, stay for the next
-//! flush. So a flush that fails partway loses nothing, and one that crashes
-//! after shipping but before `finish` ships the same records again
-//! (at-least-once).
+//! and calls [`Flush::finish`] with the ids it shipped. Exactly those records
+//! are removed, by id; the rest, and anything appended meanwhile, stay for the
+//! next flush. Every record carries an id minted when it is appended (FR-030)
+//! and the bus ships an id once however often it is offered, so a flush that
+//! fails partway loses nothing, and one that crashes after shipping but before
+//! `finish` costs nothing: the next flush offers the same ids and the bus skips
+//! them.
 //!
 //! # Concurrency, and the windows that lose an append
 //!
@@ -57,10 +59,12 @@
 //! that lock, which a spool that can never block cannot do.
 
 use std::{
+    collections::HashSet,
     fs::{self, DirBuilder, File, OpenOptions, TryLockError},
     io::{self, Read, Seek, SeekFrom, Write},
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use relay_core::{MachineName, Message, SessionId};
@@ -224,6 +228,11 @@ impl ErrorKind {
 /// neutralise it first ([`relay_core::text::neutralise`], FR-016).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SpoolRecord {
+    /// The record's id, minted by [`Spool::record`] when it is appended and unique to the
+    /// record: records that look alike are distinct records with distinct ids. Empty until
+    /// appended; a line with none is not a record the flush can ship.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) id: String,
     /// When it failed, Unix milliseconds.
     pub(crate) at_ms: i64,
     /// The machine it happened on, normalised.
@@ -287,6 +296,7 @@ impl SpoolRecord {
     /// bounded length.
     pub(crate) fn new(at_ms: i64, subject: &Subject, stage: Stage, error_kind: ErrorKind) -> Self {
         Self {
+            id: String::new(),
             at_ms,
             machine: subject.machine.clone(),
             lead: subject.lead.clone(),
@@ -339,7 +349,9 @@ impl Spool {
     /// Any I/O failure, or a spool path that is a symlink. The caller logs it
     /// and carries on: a spool that cannot be written must not fail the hook.
     pub(crate) fn record(&self, record: &SpoolRecord) -> io::Result<()> {
-        let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
+        let mut record = record.clone();
+        record.id = mint_id();
+        let mut line = serde_json::to_vec(&record).map_err(io::Error::other)?;
         line.push(b'\n');
         self.refuse_symlink()?;
         let mut file = self.open_append()?;
@@ -460,7 +472,12 @@ impl Spool {
         for line in bytes[skipped..].split_inclusive(|&b| b == b'\n') {
             offset += u64::try_from(line.len()).unwrap_or(0);
             let json = line.strip_suffix(b"\n").unwrap_or(line);
-            let Ok(record) = serde_json::from_slice::<SpoolRecord>(json) else {
+            // A line without an id cannot be removed by id or deduplicated: it is not a
+            // record this binary can ship (the older format, or bytes no binary wrote).
+            let Some(record) = serde_json::from_slice::<SpoolRecord>(json)
+                .ok()
+                .filter(|r| !r.id.is_empty())
+            else {
                 refused.push(offset);
                 continue;
             };
@@ -470,6 +487,7 @@ impl Spool {
             };
             entries.push(FlushEntry {
                 json: text,
+                id: record.id,
                 machine: record.machine,
                 lead: record.lead,
                 end: offset,
@@ -477,6 +495,7 @@ impl Spool {
         }
         Ok(Some(Flush {
             file,
+            window_start: start + u64::try_from(skipped).unwrap_or(0),
             read_len,
             entries,
             refused,
@@ -489,6 +508,8 @@ impl Spool {
 pub(crate) struct FlushEntry {
     /// The record, as its JSON line.
     pub(crate) json: String,
+    /// The record's id: what the bus deduplicates by, and what the flush removes by.
+    pub(crate) id: String,
     /// The machine it came from.
     pub(crate) machine: MachineName,
     /// The lead's bus name, when known.
@@ -501,6 +522,8 @@ pub(crate) struct FlushEntry {
 #[derive(Debug)]
 pub(crate) struct Flush {
     file: File,
+    /// Where the first whole line read starts: what lies before it is not kept.
+    window_start: u64,
     read_len: u64,
     entries: Vec<FlushEntry>,
     /// The end offset of each line that is not a record this binary can decode
@@ -515,39 +538,86 @@ impl Flush {
         &self.entries
     }
 
-    /// Removes the first `shipped` records from the file, now that they are
-    /// shipped. Everything after them, including anything a hook appended in the
-    /// meantime, stays for the next flush.
+    /// Removes the records whose ids are in `shipped` from the file, now that they are
+    /// shipped. Everything else, including anything a hook appended in the meantime, stays
+    /// for the next flush. Lines that are not records ([`Flush`]'s `refused`) go with the
+    /// shipped records before them, as they always did.
     ///
     /// # Errors
     ///
     /// Any I/O failure. The file is then left as it was, or with the shipped
-    /// records still in it: they are shipped again (at-least-once).
+    /// records still in it: the next flush offers them again and the bus skips
+    /// their ids.
     ///
     /// Returns how many lines it removed that were not records (never silently:
     /// the caller records them as dropped).
-    pub(crate) fn finish(mut self, shipped: usize) -> io::Result<usize> {
-        if shipped == 0 && !self.entries.is_empty() {
+    pub(crate) fn finish(mut self, shipped: &HashSet<String>) -> io::Result<usize> {
+        if shipped.is_empty() && !self.entries.is_empty() {
             return Ok(0);
         }
-        let cut = match shipped.checked_sub(1).and_then(|i| self.entries.get(i)) {
-            Some(last) if shipped < self.entries.len() => last.end,
-            // Everything read is shipped, junk lines after the last record too.
-            _ => self.read_len,
+        // The junk lines read are removed up to the last record shipped, or all of them
+        // when every record read was.
+        let cut = if self.entries.iter().all(|e| shipped.contains(&e.id)) {
+            self.read_len
+        } else {
+            self.entries
+                .iter()
+                .filter(|e| shipped.contains(&e.id))
+                .map(|e| e.end)
+                .max()
+                .unwrap_or(0)
         };
         let removed = self.refused.iter().filter(|end| **end <= cut).count();
-        let len = self.file.metadata()?.len();
-        if cut >= len {
-            self.file.set_len(0)?;
-            return Ok(removed);
+        self.file.seek(SeekFrom::Start(self.window_start))?;
+        let mut bytes = Vec::new();
+        self.file.read_to_end(&mut bytes)?;
+        let mut kept = Vec::with_capacity(bytes.len());
+        let mut offset = self.window_start;
+        for line in bytes.split_inclusive(|&b| b == b'\n') {
+            offset += u64::try_from(line.len()).unwrap_or(0);
+            let whole = line.ends_with(b"\n");
+            let json = line.strip_suffix(b"\n").unwrap_or(line);
+            let drop_it = whole
+                && match serde_json::from_slice::<SpoolRecord>(json) {
+                    Ok(r) if !r.id.is_empty() => shipped.contains(&r.id),
+                    // Not a record: removed if it was read and lies before the cut.
+                    _ => self.refused.contains(&offset) && offset <= cut,
+                };
+            if !drop_it {
+                kept.extend_from_slice(line);
+            }
         }
-        self.file.seek(SeekFrom::Start(cut))?;
-        let mut rest = Vec::new();
-        self.file.read_to_end(&mut rest)?;
         self.file.set_len(0)?;
-        self.file.write_all(&rest)?;
+        self.file.write_all(&kept)?;
         Ok(removed)
     }
+}
+
+/// The id of the next record: 128 random bits in hex, so that no two records of any
+/// machine share one. Without a source of randomness, the time, the process and a counter.
+fn mint_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut bytes = [0_u8; 16];
+    if File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .is_err()
+    {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        bytes[..8].copy_from_slice(
+            &u64::try_from(nanos & u128::from(u64::MAX))
+                .unwrap_or(0)
+                .to_le_bytes(),
+        );
+        bytes[8..12].copy_from_slice(&std::process::id().to_le_bytes());
+        bytes[12..].copy_from_slice(
+            &u32::try_from(COUNTER.fetch_add(1, Ordering::Relaxed) & u64::from(u32::MAX))
+                .unwrap_or(0)
+                .to_le_bytes(),
+        );
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// `bytes` (a whole spool file) cut to its newest records totalling at most
@@ -618,7 +688,10 @@ mod tests {
     /// (`dropped`, `candidate`, `messages`) are absent until set.
     #[test]
     fn a_spool_record_pins_its_field_list() {
-        let value = serde_json::to_value(record(3)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let spool = spool(&dir, DEFAULT_MAX_BYTES);
+        spool.record(&record(3)).unwrap();
+        let value = serde_json::to_value(&read(&spool)[0]).unwrap();
         let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
         keys.sort();
         assert_eq!(
@@ -627,6 +700,7 @@ mod tests {
                 "at_ms",
                 "error_kind",
                 "event",
+                "id",
                 "lead",
                 "machine",
                 "session_id",
@@ -666,8 +740,14 @@ mod tests {
             .iter()
             .map(|e| serde_json::from_str(&e.json).unwrap())
             .collect();
-        flush.finish(n).unwrap();
+        let ids = ids_of(&flush, n);
+        flush.finish(&ids).unwrap();
         shipped
+    }
+
+    /// The ids of the first `n` records of `flush`.
+    fn ids_of(flush: &Flush, n: usize) -> HashSet<String> {
+        flush.entries()[..n].iter().map(|e| e.id.clone()).collect()
     }
 
     #[test]
@@ -676,10 +756,16 @@ mod tests {
         let spool = spool(&dir, DEFAULT_MAX_BYTES);
         spool.record(&record(7)).unwrap();
         let text = std::fs::read_to_string(&spool.path).unwrap();
+        let id = read(&spool)[0].id.clone();
+        assert_eq!(id.len(), 32, "128 bits in hex: {id}");
+        assert!(id.bytes().all(|b| b.is_ascii_hexdigit()));
         assert_eq!(
             text,
-            "{\"at_ms\":7,\"machine\":\"hub\",\"lead\":\"qsl-lead\",\"event\":\"Stop\",\
-             \"session_id\":\"s1\",\"stage\":\"pop\",\"error_kind\":\"timeout\"}\n"
+            format!(
+                "{{\"id\":\"{id}\",\"at_ms\":7,\"machine\":\"hub\",\"lead\":\"qsl-lead\",\
+                 \"event\":\"Stop\",\"session_id\":\"s1\",\"stage\":\"pop\",\
+                 \"error_kind\":\"timeout\"}}\n"
+            )
         );
     }
 
@@ -841,7 +927,8 @@ mod tests {
         spool.record(&record(1)).unwrap();
         let flush = spool.begin_flush().unwrap().unwrap();
         spool.record(&record(2)).unwrap();
-        flush.finish(1).unwrap();
+        let ids = ids_of(&flush, 1);
+        flush.finish(&ids).unwrap();
         // Exactly the shipped record is gone; the newcomer is not lost.
         assert_eq!(
             read(&spool).iter().map(|r| r.at_ms).collect::<Vec<_>>(),
@@ -869,8 +956,54 @@ mod tests {
         file.write_all(b"{half a record\n").unwrap();
         let flush = spool.begin_flush().unwrap().unwrap();
         assert_eq!(flush.entries().len(), 1);
-        flush.finish(1).unwrap();
+        let ids = ids_of(&flush, 1);
+        flush.finish(&ids).unwrap();
         assert!(!spool.has_records(), "the junk went with what was shipped");
+    }
+
+    /// Tracing: TC-030-12
+    /// ACs: FR-030-AC-12
+    ///
+    /// A record gets its id when it is appended, and records that look alike are distinct
+    /// records with distinct ids, even the same value appended twice; a line with no id is
+    /// not a record the flush ships.
+    #[test]
+    fn tc_030_12_every_appended_record_gets_its_own_id_and_removal_is_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = spool(&dir, DEFAULT_MAX_BYTES);
+        let alike = record(5);
+        for _ in 0..4 {
+            spool.record(&alike).unwrap();
+        }
+        let mut file = OpenOptions::new().append(true).open(&spool.path).unwrap();
+        writeln!(
+            file,
+            r#"{{"at_ms":9,"machine":"hub","stage":"pop","error_kind":"timeout"}}"#
+        )
+        .unwrap();
+        let flush = spool.begin_flush().unwrap().unwrap();
+        let ids: Vec<String> = flush.entries().iter().map(|e| e.id.clone()).collect();
+        assert_eq!(ids.len(), 4, "the line with no id is not a record to ship");
+        assert_eq!(ids.iter().collect::<HashSet<_>>().len(), 4, "distinct ids");
+        // Removal is by id, not by position: ship the second and fourth only.
+        let shipped: HashSet<String> = [ids[1].clone(), ids[3].clone()].into();
+        let removed_junk = flush.finish(&shipped).unwrap();
+        assert_eq!(
+            removed_junk, 0,
+            "the junk line lies after the last shipped record"
+        );
+        let left: Vec<String> = read_ids(&spool);
+        assert_eq!(left, [ids[0].clone(), ids[2].clone()]);
+    }
+
+    fn read_ids(spool: &Spool) -> Vec<String> {
+        std::fs::read_to_string(&spool.path)
+            .unwrap()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<SpoolRecord>(l).ok())
+            .filter(|r| !r.id.is_empty())
+            .map(|r| r.id)
+            .collect()
     }
 
     /// A record whose stage and code a newer binary invented still decodes,
@@ -882,7 +1015,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let spool = spool(&dir, DEFAULT_MAX_BYTES);
         spool.record(&record(1)).unwrap();
-        let future = r#"{"at_ms":2,"machine":"m","lead":null,"event":null,"session_id":null,"stage":"from_the_future","error_kind":"also_new","extra":1}"#;
+        let future = r#"{"id":"future-1","at_ms":2,"machine":"m","lead":null,"event":null,"session_id":null,"stage":"from_the_future","error_kind":"also_new","extra":1}"#;
         let mut file = OpenOptions::new().append(true).open(&spool.path).unwrap();
         writeln!(file, "{future}").unwrap();
         spool.record(&record(3)).unwrap();
@@ -1035,6 +1168,7 @@ mod tests {
             to: "b".parse().unwrap(),
             text: "t".into(),
             sent_at_ms: 1,
+            forwarded: false,
         }];
         assert_eq!(
             serde_json::to_string(&full).unwrap(),

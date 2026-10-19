@@ -318,6 +318,7 @@ fn tc_029_05_doctor_changes_nothing() {
                 to: "hub-lead".parse().unwrap(),
                 text: "queued".into(),
                 sent_at_ms: at,
+                forwarded: false,
             })
             .unwrap();
     }

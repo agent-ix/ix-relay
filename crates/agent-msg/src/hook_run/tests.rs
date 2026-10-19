@@ -341,6 +341,7 @@ fn message(text: &str) -> Message {
         to: Target::Agent(name("receiver")),
         text: text.to_owned(),
         sent_at_ms: 1,
+        forwarded: false,
     }
 }
 
@@ -2299,4 +2300,181 @@ proptest! {
             prop_assert_eq!(left, inbox, "a skipped pop touches nothing");
         }
     }
+}
+
+// ---- each spooled record reaches the stream at most once (FR-030) -------------
+
+/// A bus on the test Redis under `test`'s prefix, and a reader of the same keys.
+fn redis_for(test: &str) -> Option<(String, String, relay_core::Relay)> {
+    let url = std::env::var("IX_RELAY_TEST_URL").ok().or_else(|| {
+        eprintln!("skipping {test}: IX_RELAY_TEST_URL unset (run `make test-redis`)");
+        None
+    })?;
+    let prefix = format!("test:{}:{test}:", std::process::id());
+    let reader = relay_core::Relay::connect(&url, Duration::from_secs(5))
+        .unwrap()
+        .with_prefix(&prefix);
+    Some((url, prefix, reader))
+}
+
+/// A spool of `n` records, runs of them identical but for their ids.
+fn spool_of(dir: &std::path::Path, n: i64) -> Spool {
+    let spool = Spool::new(dir.join("spool").join("hook.jsonl"), 4 * 1024 * 1024);
+    let subject = crate::spool::Subject::on("hub".parse().unwrap());
+    for i in 0..n {
+        spool
+            .record(&SpoolRecord::new(
+                i / 25,
+                &subject,
+                Stage::Pop,
+                ErrorKind::Timeout,
+            ))
+            .unwrap();
+    }
+    spool
+}
+
+/// One flush of `spool` through a real bus.
+fn flush_through(url: &str, prefix: &str, spool: &Spool) {
+    let clock = FakeClock::default();
+    let budget = Budget::new(&clock, Duration::from_secs(60));
+    let mut err = Sink::default();
+    let mut rec = Recorder {
+        spool: Some(spool),
+        clock: &clock,
+        subject: crate::spool::Subject::on("hub".parse().unwrap()),
+        err: &mut err,
+    };
+    let mut bus = RelayBus::connect(url, prefix, &"hub".parse().unwrap(), Duration::from_secs(5))
+        .expect("connect to the test redis");
+    flush_health(&mut bus, &budget, &mut rec);
+}
+
+fn stream_ids(reader: &mut relay_core::Relay) -> Vec<String> {
+    reader
+        .hook_health(10_000)
+        .unwrap()
+        .entries
+        .into_iter()
+        .filter_map(|e| e.id)
+        .collect()
+}
+
+/// Tracing: TC-030-12
+/// ACs: FR-030-AC-12
+///
+/// 1,000 spooled records, runs of them identical, and two flushes started at the same time:
+/// the stream holds each record id exactly once and the spool holds none of them.
+#[test]
+fn tc_030_12_two_simultaneous_flushes_ship_each_record_once() {
+    let Some((url, prefix, mut reader)) = redis_for("flush-race") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let spool = spool_of(dir.path(), 1_000);
+    let ids: std::collections::HashSet<String> = std::fs::read_to_string(spool.path())
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<SpoolRecord>(l).unwrap().id)
+        .collect();
+    assert_eq!(
+        ids.len(),
+        1_000,
+        "identical-looking records have distinct ids"
+    );
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let (url, prefix, spool) = (url.clone(), prefix.clone(), spool.clone());
+            std::thread::spawn(move || flush_through(&url, &prefix, &spool))
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    flush_through(&url, &prefix, &spool);
+    let shipped = stream_ids(&mut reader);
+    assert_eq!(shipped.len(), 1_000, "each record once");
+    assert_eq!(
+        shipped
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>(),
+        ids
+    );
+    assert!(!spool.has_records(), "and none is left in the spool");
+}
+
+/// Tracing: TC-030-12
+/// ACs: FR-030-AC-12
+///
+/// A ship the server applied in part and then failed (nothing was removed from the spool) is
+/// retried: the records already on the stream are skipped by id.
+#[test]
+fn tc_030_12_a_retry_after_a_partly_applied_ship_adds_only_the_rest() {
+    let Some((url, prefix, mut reader)) = redis_for("flush-partial") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let spool = spool_of(dir.path(), 1_000);
+    // The first two chunks reached the bus; the caller never heard.
+    let flush = spool.begin_flush().unwrap().unwrap();
+    let applied: Vec<HookHealthEntry> = flush.entries()[..400]
+        .iter()
+        .map(|e| HookHealthEntry {
+            id: Some(e.id.clone()),
+            machine: e.machine.clone(),
+            lead: e.lead.clone(),
+            record: e.json.clone(),
+        })
+        .collect();
+    let mut direct = relay_core::Relay::connect(&url, Duration::from_secs(5))
+        .unwrap()
+        .with_prefix(&prefix);
+    assert_eq!(direct.push_hook_health(&applied[..200]).unwrap(), 200);
+    assert_eq!(direct.push_hook_health(&applied[200..]).unwrap(), 200);
+    drop(flush);
+    assert_eq!(spool.begin_flush().unwrap().unwrap().entries().len(), 1_000);
+    flush_through(&url, &prefix, &spool);
+    assert_eq!(stream_ids(&mut reader).len(), 1_000);
+    assert!(!spool.has_records());
+}
+
+/// Tracing: TC-030-12
+/// ACs: FR-030-AC-12
+///
+/// A process killed after shipping and before removing: everything is on the stream and the
+/// spool still holds it all; the next flush adds nothing and clears the spool.
+#[test]
+fn tc_030_12_a_crash_after_shipping_and_before_removing_ships_nothing_twice() {
+    let Some((url, prefix, mut reader)) = redis_for("flush-crash") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let spool = spool_of(dir.path(), 1_000);
+    let flush = spool.begin_flush().unwrap().unwrap();
+    let entries: Vec<HookHealthEntry> = flush
+        .entries()
+        .iter()
+        .map(|e| HookHealthEntry {
+            id: Some(e.id.clone()),
+            machine: e.machine.clone(),
+            lead: e.lead.clone(),
+            record: e.json.clone(),
+        })
+        .collect();
+    let mut direct = relay_core::Relay::connect(&url, Duration::from_secs(5))
+        .unwrap()
+        .with_prefix(&prefix);
+    for chunk in entries.chunks(FLUSH_CHUNK) {
+        direct.push_hook_health(chunk).unwrap();
+    }
+    drop(flush); // killed before `finish`
+    assert!(spool.has_records());
+    flush_through(&url, &prefix, &spool);
+    assert_eq!(
+        stream_ids(&mut reader).len(),
+        1_000,
+        "nothing added a second time"
+    );
+    assert!(!spool.has_records(), "and the spool is clear");
 }
