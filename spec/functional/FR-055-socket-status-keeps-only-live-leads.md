@@ -49,7 +49,7 @@ counting leads that no longer existed.
 | ID | Criteria | Verification |
 |----|----------|--------------|
 | FR-055-AC-1 | Given a resolved lead that is then unregistered or pruned, the next tick leaves no entry for it and `doctor` does not count it. | Test |
-| FR-055-AC-2 | Given a resolved lead whose Claude Code process exits (and one whose pid is reused by a process started at another time), the next tick drops its entry. | Test |
+| FR-055-AC-2 | Given a resolved lead whose Claude Code process exits (and one whose pid is reused by a process started at another time), its entry is dropped by the first process check after the exit, which runs at most one place-refresh period later. | Test |
 | FR-055-AC-3 | Given a resolved lead that is registered and whose process is alive, a tick keeps its entry; given a registry read that fails, no entry is dropped. | Test |
 | FR-055-AC-4 | Given an entry dropped for a lead that has a held batch, a pending decision, a dead-letter reason or a drift count, those remain. | Test |
 | FR-055-AC-5 | Given several resolved leads and several ticks within one place-refresh period, the watcher looks at each lead's process once for the period, with the delivery lock released; a lead that is no longer registered still leaves at the next tick. | Test |
