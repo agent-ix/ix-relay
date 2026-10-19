@@ -466,6 +466,7 @@ mod tests {
                 to: "a-lead".parse().unwrap(),
                 text: format!("m{n}"),
                 sent_at_ms: 1_000,
+                forwarded: false,
             };
             relay.send(&msg).unwrap();
         }

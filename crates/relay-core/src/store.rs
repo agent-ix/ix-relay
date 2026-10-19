@@ -60,6 +60,9 @@ mod moves;
 #[cfg(test)]
 mod pop_budget_tests;
 mod scan;
+mod stranded;
+#[cfg(test)]
+mod stranded_fault_tests;
 mod work;
 
 use keys::Keys;
@@ -76,6 +79,7 @@ pub use inflight::{
 };
 pub use moves::{Moves, PanesReplaced, PlaceRefresh};
 pub use scan::ScanCut;
+pub use stranded::Buried;
 
 /// Largest `text` a single [`Message`] may carry, in bytes. Enforced by
 /// [`Relay::send`]. Keeps one message small enough that a budgeted pop (see
@@ -815,6 +819,7 @@ return {suppressed, cached}
             to: Target::Agent(human.clone()),
             text: text.to_owned(),
             sent_at_ms,
+            forwarded: false,
         };
         let json = encode(&msg);
         let mut pipe = redis::pipe();

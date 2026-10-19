@@ -372,6 +372,22 @@ Typing a batch in goes through a small `Deliverer` trait; `herdr agent prompt` i
 default implementation, and Claude Code's inbox socket is an opt-in second one (next
 section).
 
+### Mail stranded in a session's inbox
+
+A queue belongs to a session, and an address names a place. When a session ends or is
+replaced in its pane, mail sent to the address before the change waits in an inbox nobody
+will pop. Once per place refresh, from the `agent list` it already reads, the watcher looks
+at each local registration with queued mail whose pane no longer hosts its session. If
+exactly one other registration holds the same `server:workspace:tab` address and herdr
+verifies its session in its pane, the queued mail moves to that registration, in order and
+before its own mail, and each moved message tells its reader, on its signed first line, that
+it was sent to a prior session of the address (`[ix-relay] from <sender> (sent <UTC time> to
+a prior session of this address): ...`). If no registration holds the address and the
+registration is a day old, the mail is moved to the dead-letter list and the registration is
+pruned, so mail never waits forever for a session that never registers. Anything uncertain
+(herdr silent or unreadable, two registrations at the address, a pane that still hosts its
+session) moves nothing.
+
 ### Delivery through Claude Code's inbox socket
 
 **Opt-in, off by default.** With `[watcher] delivery = "socket"` the watcher posts a

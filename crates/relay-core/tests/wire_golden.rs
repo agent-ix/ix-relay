@@ -99,12 +99,14 @@ fn a_message_is_byte_identical_to_main() {
         to: "all".parse().unwrap(),
         text: "hi \"q\"\n \u{e9}".into(),
         sent_at_ms: 5,
+        forwarded: false,
     };
     let direct = Message {
         from: "qsl-lead".parse().unwrap(),
         to: "tl-lead".parse().unwrap(),
         text: "x".into(),
         sent_at_ms: -1,
+        forwarded: false,
     };
     assert_wire(&broadcast, MESSAGE_BROADCAST);
     assert_wire(&direct, MESSAGE_DIRECT);

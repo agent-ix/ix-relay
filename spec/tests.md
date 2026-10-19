@@ -335,19 +335,19 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-047 | FR-047-AC-3 | TC-047-03 | ✅ written (`address_location_requires_a_matching_herdr_session_id`, mismatch and absent-session cases) |
 | FR-047 | FR-047-AC-4 | TC-047-04 | ✅ written (`registration_and_place_with_unknown_fields_still_decode`; legacy Redis registration fixtures decode with no verified Herdr IDs) |
 | FR-047 | FR-047-AC-5 | TC-047-05 | ✅ written (`invalidate_place_clears_only_the_registration_snapshot_that_lost_proof`, Redis lane; compare-and-set prevents a stale refresh from invalidating a new session) |
-| FR-053 | FR-053-AC-1 | TC-053-01 | 🚧 not written |
-| FR-053 | FR-053-AC-2 | TC-053-02 | 🚧 not written |
-| FR-053 | FR-053-AC-3 | TC-053-03 | 🚧 not written |
-| FR-053 | FR-053-AC-4 | TC-053-04 | 🚧 not written |
-| FR-053 | FR-053-AC-5 | TC-053-05 | 🚧 not written |
-| FR-053 | FR-053-AC-6 | TC-053-06 | 🚧 not written |
-| FR-053 | FR-053-AC-7 | TC-053-07 | 🚧 not written |
-| FR-053 | FR-053-AC-8 | TC-053-08 | 🚧 not written |
-| FR-053 | FR-053-AC-9 | TC-053-09 | 🚧 not written |
-| FR-053 | FR-053-AC-10 | TC-053-10 | 🚧 not written |
-| FR-053 | FR-053-AC-11 | TC-053-11 | 🚧 not written |
-| FR-053 | FR-053-AC-12 | TC-053-12 | 🚧 not written |
-| FR-053 | FR-053-AC-13 | TC-053-13 | 🚧 not written |
+| FR-053 | FR-053-AC-1 | TC-053-01 | ✅ written (`tc_053_01_queued_mail_moves_in_order_before_the_new_sessions_own` for the store move and the entry bytes, `tc_053_01_a_pass_hands_the_old_inbox_to_the_one_session_holding_the_address` for the watcher pass; Redis lane) |
+| FR-053 | FR-053-AC-2 | TC-053-02 | ✅ written (`tc_053_02_the_hook_prints_the_notice_for_each_moved_message`, `tc_053_02_the_inbox_listing_prints_the_notice_in_text_and_json` and `tc_053_02_the_watcher_prompt_carries_the_notice` through the binary and a whole tick (the socket posts the same `PoppedBatch::rendered`), `tc_053_02_the_notice_names_the_original_send_time_and_sender` for the renderer; Redis lane) |
+| FR-053 | FR-053-AC-3 | TC-053-03 | ✅ written (`tc_053_03_hostile_text_and_sender_cannot_forge_the_notice`, `tc_053_03_whatever_the_text_the_notice_is_on_the_first_line_only`) |
+| FR-053 | FR-053-AC-4 | TC-053-04 | ✅ written (`tc_053_04_a_pane_that_hosts_its_session_never_loses_mail_whatever_the_age`; Redis lane) |
+| FR-053 | FR-053-AC-5 | TC-053-05 | ✅ written (`tc_053_05_an_address_held_by_none_or_by_two_forwards_nothing`, `tc_053_05_a_herdr_that_fails_moves_nothing`, and the unknown answers in `tc_053_04_a_pane_that_hosts_its_session_never_loses_mail_whatever_the_age`; Redis lane) |
+| FR-053 | FR-053-AC-6 | TC-053-06 | ✅ written (`tc_053_06_no_message_is_ever_in_none_of_the_inboxes_and_the_dead_letters`, a model over sends, reads, passes, a second pass, prunes and registrations with a script failed before its source is deleted; Redis lane) |
+| FR-053 | FR-053-AC-7 | TC-053-07 | ✅ written (`tc_053_07_a_registration_pruned_or_registered_again_since_the_read_moves_nothing`, `tc_053_07_a_registration_changed_in_the_window_between_read_and_move_moves_nothing` (the script's own guard), `tc_053_07_a_registration_changed_since_the_pass_read_it_is_left_alone`; Redis lane) |
+| FR-053 | FR-053-AC-8 | TC-053-08 | ✅ written (`tc_053_08_a_message_moved_twice_names_its_first_send_time_and_original_sender`; Redis lane) |
+| FR-053 | FR-053-AC-9 | TC-053-09 | ✅ written (`tc_053_09_another_machines_registration_is_never_touched`; Redis lane) |
+| FR-053 | FR-053-AC-10 | TC-053-10 | 🚧 partial (`tc_053_10_dead_lettering_keeps_every_entry_byte_for_byte_and_prunes_with_it`, `tc_053_10_a_dead_letter_list_that_cannot_take_the_mail_prunes_nothing`, `tc_053_10_a_gone_registration_old_enough_is_dead_lettered_then_pruned`, `tc_053_10_when_dead_lettering_fails_nothing_is_pruned_and_the_mail_stays` cover bytes, age, prune and failure; the dead-letter list has no reason field until FR-031 lands (AGE-2033), so `recipient-pruned` is in the watcher's log line only) |
+| FR-053 | FR-053-AC-11 | TC-053-11 | ✅ written (`tc_053_11_a_leased_batch_is_not_moved_until_its_lease_expires` and `tc_053_11_a_leased_batch_waits_for_its_lease_and_the_next_pass_moves_it` for the move, `tc_053_11_a_registration_with_a_batch_in_flight_is_not_pruned_with_its_mail` for the dead-letter path; Redis lane) |
+| FR-053 | FR-053-AC-12 | TC-053-12 | ✅ written (`tc_053_12_a_batch_of_moved_messages_stays_within_the_hook_output_bound` through the binary, `tc_018_04_the_pop_weight_is_never_below_the_rendered_size` and `rendered_len_max_bounds_what_render_prints` (moved messages included), `tc_053_03_whatever_the_text_the_notice_is_on_the_first_line_only`; Redis lane) |
+| FR-053 | FR-053-AC-13 | TC-053-13 | 🚧 partial (`tc_053_13_a_replaced_pane_whose_new_occupant_never_registers_is_dead_lettered_at_the_prune_age` covers age, bytes and prune; the dead-letter list has no reason field until FR-031 lands (AGE-2033), so `recipient-pruned` is in the watcher's log line only) |
 | FR-054 | FR-054-AC-1 | TC-054-01 | 🚧 not written |
 | FR-054 | FR-054-AC-2 | TC-054-02 | 🚧 not written |
 | FR-054 | FR-054-AC-3 | TC-054-03 | 🚧 not written |
@@ -412,19 +412,19 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-047-03 | Herdr session and pane mismatches or absent session proof make a placement unverifiable. | Unit | FR-047-AC-3 | ✅ written (`address_location_requires_a_matching_herdr_session_id`) |
 | TC-047-04 | Existing serialized registrations with unknown or absent proof fields decode without inventing verified identity. | Unit | FR-047-AC-4 | ✅ written (`registration_and_place_with_unknown_fields_still_decode`) |
 | TC-047-05 | Invalidating a stale placement clears only the exact registration snapshot that lost proof. | Integration | FR-047-AC-5 | ✅ written (`invalidate_place_clears_only_the_registration_snapshot_that_lost_proof`; Redis lane) |
-| TC-053-01 | Queued mail of a replaced session moves, in order, to the single registration now holding its address. | Integration | FR-053-AC-1 | 🚧 not written |
-| TC-053-02 | Every moved message carries, on every rendering path, a notice naming the prior session of the address, the original send time and sender. | Integration | FR-053-AC-2 | 🚧 not written |
-| TC-053-03 | Hostile text and sender names in a moved message are neutralised and cannot forge the notice. | Unit | FR-053-AC-3 | 🚧 not written |
-| TC-053-04 | The mail of a registration whose pane hosts its session never moves. | Integration | FR-053-AC-4 | 🚧 not written |
-| TC-053-05 | A herdr failure, an unreadable answer, an unnamed session, or an address held by none or by two, moves nothing. | Integration | FR-053-AC-5 | 🚧 not written |
-| TC-053-06 | Under any interleaving and injected bus failure, every message ends in the old inbox, the new inbox or the dead-letter list, never in none, and in exactly one unless a script failed part-way. | Property | FR-053-AC-6 | 🚧 not written |
-| TC-053-07 | A registration pruned or re-registered between read and move makes the move do nothing. | Integration | FR-053-AC-7 | 🚧 not written |
-| TC-053-08 | A message moved twice names its first send time and original sender. | Integration | FR-053-AC-8 | 🚧 not written |
-| TC-053-09 | Another machine's registration is never moved, forwarded or pruned. | Integration | FR-053-AC-9 | 🚧 not written |
-| TC-053-10 | A gone, old-enough registration with mail is dead-lettered as `recipient-pruned` byte for byte and then pruned; failures prune nothing. | Integration | FR-053-AC-10 | 🚧 not written |
-| TC-053-11 | An in-flight batch is not moved until its lease expires. | Integration | FR-053-AC-11 | 🚧 not written |
-| TC-053-12 | Moved messages carry the notice on their one signed first line and a batch of them stays within the hook-output bound. | Integration | FR-053-AC-12 | 🚧 not written |
-| TC-053-13 | A registration whose pane now hosts an unregistered session, and that reaches the pruning age, has its mail dead-lettered as `recipient-pruned` and is pruned. | Integration | FR-053-AC-13 | 🚧 not written |
+| TC-053-01 | Queued mail of a replaced session moves, in order, to the single registration now holding its address. | Integration | FR-053-AC-1 | ✅ written (`tc_053_01_queued_mail_moves_in_order_before_the_new_sessions_own` for the store move and the entry bytes, `tc_053_01_a_pass_hands_the_old_inbox_to_the_one_session_holding_the_address` for the watcher pass; Redis lane) |
+| TC-053-02 | Every moved message carries, on every rendering path, a notice naming the prior session of the address, the original send time and sender. | Integration | FR-053-AC-2 | ✅ written (`tc_053_02_the_hook_prints_the_notice_for_each_moved_message`, `tc_053_02_the_inbox_listing_prints_the_notice_in_text_and_json` and `tc_053_02_the_watcher_prompt_carries_the_notice` through the binary and a whole tick (the socket posts the same `PoppedBatch::rendered`), `tc_053_02_the_notice_names_the_original_send_time_and_sender` for the renderer; Redis lane) |
+| TC-053-03 | Hostile text and sender names in a moved message are neutralised and cannot forge the notice. | Unit | FR-053-AC-3 | ✅ written (`tc_053_03_hostile_text_and_sender_cannot_forge_the_notice`, `tc_053_03_whatever_the_text_the_notice_is_on_the_first_line_only`) |
+| TC-053-04 | The mail of a registration whose pane hosts its session never moves. | Integration | FR-053-AC-4 | ✅ written (`tc_053_04_a_pane_that_hosts_its_session_never_loses_mail_whatever_the_age`; Redis lane) |
+| TC-053-05 | A herdr failure, an unreadable answer, an unnamed session, or an address held by none or by two, moves nothing. | Integration | FR-053-AC-5 | ✅ written (`tc_053_05_an_address_held_by_none_or_by_two_forwards_nothing`, `tc_053_05_a_herdr_that_fails_moves_nothing`, and the unknown answers in `tc_053_04_a_pane_that_hosts_its_session_never_loses_mail_whatever_the_age`; Redis lane) |
+| TC-053-06 | Under any interleaving and injected bus failure, every message ends in the old inbox, the new inbox or the dead-letter list, never in none, and in exactly one unless a script failed part-way. | Property | FR-053-AC-6 | ✅ written (`tc_053_06_no_message_is_ever_in_none_of_the_inboxes_and_the_dead_letters`, a model over sends, reads, passes, a second pass, prunes and registrations with a script failed before its source is deleted; Redis lane) |
+| TC-053-07 | A registration pruned or re-registered between read and move makes the move do nothing. | Integration | FR-053-AC-7 | ✅ written (`tc_053_07_a_registration_pruned_or_registered_again_since_the_read_moves_nothing`, `tc_053_07_a_registration_changed_in_the_window_between_read_and_move_moves_nothing` (the script's own guard), `tc_053_07_a_registration_changed_since_the_pass_read_it_is_left_alone`; Redis lane) |
+| TC-053-08 | A message moved twice names its first send time and original sender. | Integration | FR-053-AC-8 | ✅ written (`tc_053_08_a_message_moved_twice_names_its_first_send_time_and_original_sender`; Redis lane) |
+| TC-053-09 | Another machine's registration is never moved, forwarded or pruned. | Integration | FR-053-AC-9 | ✅ written (`tc_053_09_another_machines_registration_is_never_touched`; Redis lane) |
+| TC-053-10 | A gone, old-enough registration with mail is dead-lettered as `recipient-pruned` byte for byte and then pruned; failures prune nothing. | Integration | FR-053-AC-10 | 🚧 partial (`tc_053_10_dead_lettering_keeps_every_entry_byte_for_byte_and_prunes_with_it`, `tc_053_10_a_dead_letter_list_that_cannot_take_the_mail_prunes_nothing`, `tc_053_10_a_gone_registration_old_enough_is_dead_lettered_then_pruned`, `tc_053_10_when_dead_lettering_fails_nothing_is_pruned_and_the_mail_stays` cover bytes, age, prune and failure; the dead-letter list has no reason field until FR-031 lands (AGE-2033), so `recipient-pruned` is in the watcher's log line only) |
+| TC-053-11 | An in-flight batch is not moved until its lease expires. | Integration | FR-053-AC-11 | ✅ written (`tc_053_11_a_leased_batch_is_not_moved_until_its_lease_expires` and `tc_053_11_a_leased_batch_waits_for_its_lease_and_the_next_pass_moves_it` for the move, `tc_053_11_a_registration_with_a_batch_in_flight_is_not_pruned_with_its_mail` for the dead-letter path; Redis lane) |
+| TC-053-12 | Moved messages carry the notice on their one signed first line and a batch of them stays within the hook-output bound. | Integration | FR-053-AC-12 | ✅ written (`tc_053_12_a_batch_of_moved_messages_stays_within_the_hook_output_bound` through the binary, `tc_018_04_the_pop_weight_is_never_below_the_rendered_size` and `rendered_len_max_bounds_what_render_prints` (moved messages included), `tc_053_03_whatever_the_text_the_notice_is_on_the_first_line_only`; Redis lane) |
+| TC-053-13 | A registration whose pane now hosts an unregistered session, and that reaches the pruning age, has its mail dead-lettered as `recipient-pruned` and is pruned. | Integration | FR-053-AC-13 | 🚧 partial (`tc_053_13_a_replaced_pane_whose_new_occupant_never_registers_is_dead_lettered_at_the_prune_age` covers age, bytes and prune; the dead-letter list has no reason field until FR-031 lands (AGE-2033), so `recipient-pruned` is in the watcher's log line only) |
 | TC-054-01 | Codex and opencode leads go straight to herdr with no status entry or note. | Integration | FR-054-AC-1 | 🚧 not written |
 | TC-054-02 | A claude lead with no record still goes to herdr with the note. | Integration | FR-054-AC-2 | 🚧 not written |
 | TC-054-03 | Doctor does not warn about non-claude leads and still warns for a claude lead without a record. | Integration | FR-054-AC-3 | 🚧 not written |
@@ -743,7 +743,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 
 | Gap ID | Description | Risk Level | Mitigation |
 |--------|-------------|------------|------------|
-| GAP-001 | 235 of 347 rows have a written test; changed 0.3.0 obligations have replacement evidence above. Retired alias tests are not evidence for the new contract. Remaining pending/partial rows require their stated evidence. | High | Complete remaining evidence without claiming full coverage. |
+| GAP-001 | 246 of 347 rows have a written test; changed 0.3.0 obligations have replacement evidence above. Retired alias tests are not evidence for the new contract. Remaining pending/partial rows require their stated evidence. | High | Complete remaining evidence without claiming full coverage. |
 | GAP-002 | 15 rows still say `red on main`: obligations of requirements `main` does not yet meet, red when written (FR-031, FR-033-AC-2, FR-034-AC-4, FR-035, FR-037). The rest of FR-032..FR-034 are written or partial since the relink work (FR-043). | High | AGE-2033 (AGE-2032 landed; the NFR-001 stdin row landed under AGE-2033). |
 | GAP-003 | No `herdr` stub or blackholed-Redis harness exists yet for the fault-injection and benchmark rows. | Medium | Build with the NFR-001..003 suites. |
 
@@ -754,10 +754,10 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | Benchmark | 8 | 5 | 0 | 0 | 0 | 0 | 62% |
 | Fuzz | 3 | 0 | 3 | 0 | 0 | 0 | 0% |
 | Inspection | 3 | 0 | 0 | 0 | 0 | 0 | 0% |
-| Integration | 175 | 116 | 0 | 10 | 0 | 0 | 67% |
-| Property | 38 | 28 | 0 | 5 | 0 | 0 | 74% |
+| Integration | 175 | 125 | 0 | 12 | 0 | 0 | 71% |
+| Property | 38 | 29 | 0 | 5 | 0 | 0 | 76% |
 | Static | 2 | 0 | 2 | 0 | 0 | 0 | 0% |
-| Unit | 118 | 81 | 0 | 3 | 0 | 0 | 69% |
+| Unit | 118 | 82 | 0 | 3 | 0 | 0 | 69% |
 
 "Written, named method" counts rows whose status names a written test that uses the method the row names. It records that the test exists, not a run: the last recorded run is the `make ci` output in the PR comment for the head commit, and Redis-backed tests skip without `IX_RELAY_TEST_URL`. Fuzz and Static rows are counted separately: the Fuzz rows are property-based fuzz lanes (see `fuzz/README.md`), not recorded `cargo-fuzz` campaigns, and the Static rows are exhaustive checks over a bound, not Kani proofs. Rows marked red (`#[ignore]` with a ticket) are not counted.
 

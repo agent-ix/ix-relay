@@ -503,6 +503,7 @@ pub fn run_resolve(
         to: Target::Agent(esc.filing.lead.clone()),
         text: notify_text,
         sent_at_ms: now_ms,
+        forwarded: false,
     };
     let lead_notified = relay.send(&notify).is_ok();
 

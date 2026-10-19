@@ -58,6 +58,7 @@ fn msg(from: &str, to: &str, text: &str, at: i64) -> Message {
         to: to.parse().unwrap(),
         text: text.into(),
         sent_at_ms: at,
+        forwarded: false,
     }
 }
 

@@ -39,6 +39,7 @@ mod otlp;
 mod relink;
 mod socket;
 mod state_file;
+mod stranded;
 mod supervise;
 #[cfg(test)]
 mod test_support;
@@ -174,6 +175,8 @@ struct WatcherState {
     /// Leads whose relink is refused for a lasting reason, reported once (see
     /// [`relink::Reported`]).
     relink_reported: relink::Reported,
+    /// What the stranded-mail pass remembers between refreshes (FR-053).
+    stranded: stranded::Stranded,
     /// When each lead's last rename event was recorded, so a flapping label is one
     /// event per [`RENAME_EVENT_GAP`], not one per refresh.
     last_rename_event: HashMap<AgentName, Instant>,
@@ -237,6 +240,7 @@ impl WatcherState {
             dropped_reported: false,
             layout_failed_reported: false,
             relink_reported: relink::Reported::default(),
+            stranded: stranded::Stranded::default(),
             last_rename_event: HashMap::new(),
             rename_gap_reported: HashSet::new(),
             last_place_refresh: None,
@@ -476,6 +480,9 @@ fn refresh_places(
     if let Some(view) = &layout.view {
         state.otlp.set_panes(Instant::now(), view, regs);
     }
+    // Before the loop below drops the place of a registration whose session left:
+    // the address its queued mail was written to (FR-053).
+    state.stranded.observe(regs, machine);
     for reg in regs.iter_mut() {
         if reg.machine != *machine {
             continue;
@@ -539,6 +546,9 @@ fn refresh_places(
     state
         .rename_gap_reported
         .retain(|name| regs.iter().any(|r| r.name == *name));
+    // Last, with the places as just refreshed: a new holder of an address has its
+    // own by now.
+    stranded::pass(&mut state.stranded, relay, &layout, regs, machine, log)?;
     Ok(relinked)
 }
 
@@ -1173,8 +1183,11 @@ fn positively_replaced(registered: Option<&SessionId>, live: Option<&SessionId>)
 /// [`try_deliver`] already tells a genuinely stale registration apart from a
 /// live one. Only ever called with an empty inbox (`tick`'s own caller
 /// already checked): a registration whose inbox still has something queued
-/// is kept regardless of age, so a message queued for a lead that's been
-/// away for a while still has somewhere to land when it comes back.
+/// is not pruned here, so a message queued for a lead that's been away for a
+/// while still has somewhere to land when it comes back. Mail queued for a
+/// session that has left its pane is the [`stranded`] pass's: forwarded to the
+/// session that holds the address now, or dead-lettered with the registration
+/// (FR-053).
 ///
 /// A herdr failure here is logged and treated as "not stale" — the same
 /// fail-safe default every other herdr call in this process uses: an
@@ -1934,6 +1947,7 @@ mod tests {
                 to: Target::Agent(lead(name)),
                 text: "hi".into(),
                 sent_at_ms: 0,
+                forwarded: false,
             })
             .unwrap();
     }
@@ -1994,6 +2008,7 @@ mod tests {
                 to: Target::Agent("here-lead".parse().unwrap()),
                 text: "for here".into(),
                 sent_at_ms: 0,
+                forwarded: false,
             })
             .unwrap();
         relay
@@ -2002,6 +2017,7 @@ mod tests {
                 to: Target::Agent("there-lead".parse().unwrap()),
                 text: "for there".into(),
                 sent_at_ms: 0,
+                forwarded: false,
             })
             .unwrap();
 
@@ -2059,6 +2075,7 @@ mod tests {
                 to: Target::Agent("node-b-lead".parse().unwrap()),
                 text: "for node-b".into(),
                 sent_at_ms: 0,
+                forwarded: false,
             })
             .unwrap();
 
@@ -2099,6 +2116,7 @@ mod tests {
                 to: Target::Agent("no-pane-lead".parse().unwrap()),
                 text: "hi".into(),
                 sent_at_ms: 0,
+                forwarded: false,
             })
             .unwrap();
 
@@ -2137,6 +2155,7 @@ mod tests {
                 to: Target::Agent("tl-lead".parse().unwrap()),
                 text: "hi".into(),
                 sent_at_ms: 0,
+                forwarded: false,
             })
             .unwrap();
 
@@ -2212,6 +2231,7 @@ mod tests {
                 to: Target::Agent("tl-lead".parse().unwrap()),
                 text: "hi".into(),
                 sent_at_ms: 0,
+                forwarded: false,
             })
             .unwrap();
 
@@ -2254,6 +2274,7 @@ mod tests {
                     to: Target::Agent(lead.clone()),
                     text: format!("{i}{}", "x".repeat(3000)),
                     sent_at_ms: i,
+                    forwarded: false,
                 })
                 .unwrap();
         }
@@ -2906,6 +2927,7 @@ mod tests {
                 to: Target::Agent("queued-lead".parse().unwrap()),
                 text: "still waiting".into(),
                 sent_at_ms: 0,
+                forwarded: false,
             })
             .unwrap();
 
@@ -3252,6 +3274,7 @@ mod tests {
                     to: Target::Agent(lead(name)),
                     text: "hi".into(),
                     sent_at_ms: 0,
+                    forwarded: false,
                 })
                 .unwrap();
         }

@@ -200,6 +200,7 @@ impl Model {
             },
             text: text.to_owned(),
             sent_at_ms: 1,
+            forwarded: false,
         };
         for r in &recipients {
             self.inbox
@@ -374,6 +375,7 @@ fn apply(bus: &mut Bus, model: &mut Model, op: &Op, n: u64) -> Result<(), String
                 },
                 text,
                 sent_at_ms: 1,
+                forwarded: false,
             };
             let got = bus.relay.send(&message);
             match (expected, got) {
@@ -707,6 +709,7 @@ fn tc_012_05_a_non_utf8_entry_is_rejected_and_the_neighbouring_messages_survive(
             to: Target::Agent(lead(1)),
             text: format!("m{n}"),
             sent_at_ms: 1,
+            forwarded: false,
         };
         bus.relay
             .register(&Registration {
@@ -783,6 +786,7 @@ fn tc_012_02_the_byte_budget_takes_the_longest_run_that_fits_and_at_least_one() 
             to: Target::Agent(lead(1)),
             text: format!("line {n}\nsecond line"),
             sent_at_ms: 1,
+            forwarded: false,
         };
         for n in 0..3 {
             bus.relay.send(&message(n)).expect("send");

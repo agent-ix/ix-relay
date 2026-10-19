@@ -394,6 +394,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 to: resolved.target.clone(),
                 text: text.join(" "),
                 sent_at_ms: now_ms(),
+                forwarded: false,
             };
             let recipients = enqueue_resolved(&mut relay, &mut resolved, &mut msg)?;
             let recipient = recipient_registration(

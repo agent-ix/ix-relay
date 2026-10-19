@@ -104,7 +104,7 @@ pub const BACKLOG_SCAN_BOUND: usize = 1_000;
 /// A script body as sent: the shared helpers and the script's own text, with the
 /// comments, indentation and blank lines removed (a hook sends the pop's body on
 /// every call, so the bytes are worth saving; Lua does not care).
-fn script(common: &str, own: &str) -> String {
+pub(super) fn script(common: &str, own: &str) -> String {
     common
         .lines()
         .chain(own.lines())
@@ -379,6 +379,7 @@ impl Relay {
             .arg(MAX_INFLIGHT_BATCHES)
             .arg(MAX_INFLIGHT_BYTES)
             .arg(INFLIGHT_ROW_OVERHEAD)
+            .arg(crate::message::FORWARDED_NOTICE_MAX)
             .query(&mut self.conn)?;
         if status < 0 {
             return Err(Error::InflightUnreadable {

@@ -2011,6 +2011,7 @@ version = "0.3.2"
 dependencies = [
  "gethostname",
  "ix-cli-kit",
+ "jiff",
  "nix",
  "proptest",
  "redis",

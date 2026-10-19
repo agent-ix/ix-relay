@@ -326,6 +326,7 @@ fn seed_two(url: &str, prefix: &str) -> Relay {
                 )),
                 text: text.into(),
                 sent_at_ms: 1,
+                forwarded: false,
             })
             .unwrap();
     }

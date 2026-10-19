@@ -1035,6 +1035,7 @@ mod tests {
             to: "b".parse().unwrap(),
             text: "t".into(),
             sent_at_ms: 1,
+            forwarded: false,
         }];
         assert_eq!(
             serde_json::to_string(&full).unwrap(),

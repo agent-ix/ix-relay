@@ -523,6 +523,7 @@ mod tests {
                 to: "tl-lead".parse().unwrap(),
                 text: text.into(),
                 sent_at_ms: 0,
+                forwarded: false,
             }],
             rendered: format!("[ix-relay] from qsl-lead: {text}"),
             senders: "qsl-lead".into(),

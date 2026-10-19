@@ -1039,6 +1039,7 @@ fn tc_044_07_the_redelivery_marker_makes_the_body_differ() {
         to: "ea".parse().unwrap(),
         text: "hello".into(),
         sent_at_ms: 0,
+        forwarded: false,
     };
     let first = message.render_from_marked("hub:QSL:1", false);
     let again = message.render_from_marked("hub:QSL:1", true);
@@ -1934,6 +1935,7 @@ impl Watching {
                 to: relay_core::Target::Agent(self.lead.clone()),
                 text: text.into(),
                 sent_at_ms: 0,
+                forwarded: false,
             })
             .unwrap();
     }
@@ -3585,6 +3587,7 @@ fn tc_044_14_a_healthy_lead_behind_twenty_wedged_ones_is_served_within_one_round
                 to: relay_core::Target::Agent(lead.parse().unwrap()),
                 text: "hello".into(),
                 sent_at_ms: 0,
+                forwarded: false,
             })
             .unwrap();
     }

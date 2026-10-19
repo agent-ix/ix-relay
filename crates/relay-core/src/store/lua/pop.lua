@@ -1,7 +1,7 @@
 -- KEYS: inbox, inflight, dead letters, batch id counter
 -- ARGV: max count, max bytes, weight slack, popper letter, lease ms, now override,
 --       max redeliveries, dead letter cap, max in-flight batches, max in-flight bytes,
---       in-flight row overhead
+--       in-flight row overhead, forwarded notice bytes
 -- Returns {status, pending, batch id (0 for none), {entries}, {redelivery counts},
 --          stuck, evicted}. Status 0 took what it returned (maybe nothing: an empty
 -- inbox), 1 took nothing because the in-flight caps would be exceeded, -1 took
@@ -52,6 +52,7 @@ for i, v in ipairs(items) do
         + 2 * count(v, '[%z\1-\31\127]')
         + count(v, '\194[\128-\159]')
         + count(v, '\216\156')
+        + (string.find(v, ',"forwarded":true', 1, true) and tonumber(ARGV[12]) or 0)
     if i > 1 and total + w > budget then break end
     total = total + w
     stored = stored + #v + tonumber(ARGV[11])

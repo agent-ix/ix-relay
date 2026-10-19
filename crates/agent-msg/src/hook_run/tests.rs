@@ -341,6 +341,7 @@ fn message(text: &str) -> Message {
         to: Target::Agent(name("receiver")),
         text: text.to_owned(),
         sent_at_ms: 1,
+        forwarded: false,
     }
 }
 

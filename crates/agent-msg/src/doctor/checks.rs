@@ -2704,6 +2704,7 @@ mod tests {
             to: "a".parse().unwrap(),
             text: "line one\n\u{1b}[31mred".into(),
             sent_at_ms: 1,
+            forwarded: false,
         }];
         let entries = [
             record(Stage::Pop, K::Timeout, "hub", NOW - 1_000),

@@ -36,7 +36,7 @@ pub use message::{Message, Registration};
 pub use name::{AgentName, Target};
 pub use resolve::{resolve_target, resolve_target_scoped};
 pub use store::{
-    AgentList, AgentSlot, BACKLOG_SCAN_BOUND, Backlog, BatchId, BudgetPopResult, Claim,
+    AgentList, AgentSlot, BACKLOG_SCAN_BOUND, Backlog, BatchId, BudgetPopResult, Buried, Claim,
     CommitOutcome, DEAD_LETTER_CAP, DEFAULT_PREFIX, DIRECTORY_LEASE, DirectoryRead,
     DirectoryRecipient, HERDR_FAILED_TTL_SECS, HOOK_LEASE, Heartbeats, HookHealth, HookHealthEntry,
     INFLIGHT_ROW_OVERHEAD, IdentityCommit, InboxOverview, LeadBacklog, LeadOverview, LeaseState,
