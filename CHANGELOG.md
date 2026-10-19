@@ -1,5 +1,15 @@
 # Release notes
 
+## 0.3.3
+
+- Deliver stranded mail. When a lead's session is replaced or gone and exactly one verified session holds the same `server:workspace:tab` address, its queued mail moves there, each message marked as sent to a prior session with its original time and sender. With no holder, the mail is dead-lettered and the registration pruned at the 24-hour prune age.
+- Try the Claude inbox socket only for Claude leads. Codex and opencode leads go straight to herdr, and doctor no longer warns about them.
+- Keep only live, registered Claude leads in the socket status; check processes outside the delivery lock, at most once per place-refresh period.
+- Count wire drift per Claude Code version over a 24-hour window, with the last offending line type. Doctor reports each version as working, drifting or listed, replacing the single "captured on 2.1.283: unverified" note.
+- Doctor's hook-failure check fails only for a fleet-wide burst (50 or more distinct failures in 15 minutes) or one session failing repeatedly, and names the top sessions and machines. Otherwise it warns.
+- Ship each spooled hook-failure record to the bus once, by id. Records spooled by an older binary have no id and are dropped on upgrade.
+- Upgrade all machines together: an older `agent-msg` rejects a forwarded message instead of showing it.
+
 ## 0.3.2
 
 - Resolve lead addresses through a fenced relay directory in Redis instead of the sender's SSH access to the destination machine's Herdr.
