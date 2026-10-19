@@ -83,3 +83,44 @@ timing flake under load, not a regression on this branch.
 3. bury.lua refusing while a batch is in flight: **keep**. The lease returns the batch and the next pass buries it, so the pass converges. Burying in-flight rows would race the hook's ack.
 4. Forwarding when the old pane is gone and exactly one verified holder exists: **keep the code** and amend FR-053's "A new session holds the address" bullet, which says "replaced" only (see SR-067).
 5. `recipient-pruned` reason not stored: **keep as partial** with a tracking ticket against FR-031's reason field. TC-053-10/13 assert only the log line (see SR-067).
+
+## Round 2
+
+Re-review of the fixes in `02691bd..89a4905` (commits ecb24e8, fc232ee, 89a4905; the
+merge fd27e57 is excluded). The review looked only at that diff.
+
+| Round 1 finding | Status | Evidence |
+| --------------- | ------ | -------- |
+| SR-066 FND-001 | fixed | `hook_health_of` falls back to the record's own `id` (store.rs `record_id`). Doctor's `bus_failures_of` (facts.rs) maps `HookHealth::distinct()`. The `HashSet` copy and `BusFailure::id` are gone, so only one rule remains. TC-030-12 (wire_golden.rs, Redis lane) fails on the old read. |
+| SR-066 FND-002 / SR-067 FND-005 | fixed | `registry_read` copies (lead, pid, started) out under the lock and runs `start_time` with the lock released. It runs at most once per `PLACE_REFRESH_EVERY` and re-locks to remove only the entry it checked (pid and start time compared). A failed delivery still drops the entry at once (deliverer.rs:942). TC-055-05 records whether the lock was free at each lookup and counts the lookups, so it fails on the old code both ways. |
+| SR-066 FND-003 / SR-067 FND-002 | fixed | `address_of`: for a replaced session the address comes from herdr's current place for the pane, and from the remembered address otherwise. For a gone session it is the remembered address, kept in `<state_dir>/stranded-addresses.json`. The file is written atomically (a temp file named with the pid, then rename), only when the addresses change, and holds at most one entry per registered lead. An unreadable file counts as empty. `--once` keeps no file. TC-053-15/16/17. TC-053-16 also shows that a pass without the file forwards nothing. |
+| SR-066 FND-004 | fixed | TC-053-04/05 now `put` the `ancient` record before the pass and assert `left()`/`holder()` directly. |
+| SR-066 FND-005 | fixed (spec) | The FR-053 Dependencies section now says an older `agent-msg` rejects the whole forwarded entry. |
+| SR-066 FND-006 | fixed | FR-046 states the approximation, and the `socket_wire_drift` detail line says it. TC-046-11 asserts that line. |
+| SR-067 FND-001 | fixed | `who` prints `UNDELIVERABLE` only while `inbox_lens` is non-zero or unreadable. `registration_pane_gone` claims waiting mail only while the inbox holds some. FR-032 and FR-053 are amended. TC-053-18 tests both the binary (Redis lane) and doctor. |
+| SR-067 FND-003 | fixed | The FR-053 bullet now reads "replaced or gone". New AC-14 is covered by TC-053-14. |
+| SR-067 FND-004 | tracked | AC-10 and AC-13 stay 🚧 partial in spec/tests.md against AGE-2033 (the FR-031 reason field). No change was expected. |
+
+### New issues
+
+No new major defects.
+
+- Lock discipline: no lock is held across `start_time`. The two short re-locks (remove, then publish) leave nothing inconsistent, and a lead re-resolved in between is left alone.
+- Persistence: the file is bounded by the registry and replaced atomically. A failed write is logged and retried on the next change. Persistence adds no new failure mode to `pass`.
+
+Low-severity notes (none blocks the merge):
+
+1. FR-055-AC-2 still says "the next tick drops its entry". The body now says "within the place-refresh period". TC-055-02 passes only because a new deliverer's first check is due. No test covers the check running again after the period, because there is no injectable clock.
+2. `who` reads the inbox with LLEN, so a lead whose batch is leased in flight shows no `UNDELIVERABLE` until the lease returns the batch.
+3. The address file is not fsynced before the rename. After a crash it may read as empty, which only puts things back to the pre-fix behaviour (no holder known for a gone session).
+
+### Gates (at 89a4905)
+
+`cargo fmt --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+both pass. Focused tests `tc_053 tc_055 tc_030_12 tc_032` against a throwaway redis:7
+(`scripts/test-with-redis.sh`): all pass.
+
+### Round 2 verdict
+
+**PASS — merge.** All eight round 1 findings are fixed or tracked as intended, and the
+fixes add no major defect.
