@@ -66,6 +66,11 @@ impl Keys {
         format!("{}health:hooks", self.prefix)
     }
 
+    /// The ids of the hook failure records already shipped to `health:hooks`.
+    pub(super) fn health_hooks_shipped_key(&self) -> String {
+        format!("{}health:hooks-shipped", self.prefix)
+    }
+
     pub(super) fn esc_key(&self, id: &EscalationId) -> String {
         format!("{}esc:{id}", self.prefix)
     }
@@ -191,6 +196,7 @@ mod tests {
             ("agents_key", relay.agents_key()),
             ("log_key", relay.log_key()),
             ("health_hooks_key", relay.health_hooks_key()),
+            ("health_hooks_shipped_key", relay.health_hooks_shipped_key()),
             ("esc_key", relay.esc_key(&id)),
             ("esc_attempts_key", relay.esc_attempts_key(&id)),
             ("esc_seq_key", relay.esc_seq_key()),
@@ -223,6 +229,7 @@ mod tests {
             ("agents_key", "p:agents"),
             ("log_key", "p:log"),
             ("health_hooks_key", "p:health:hooks"),
+            ("health_hooks_shipped_key", "p:health:hooks-shipped"),
             ("esc_key", "p:esc:e1"),
             ("esc_attempts_key", "p:esc:e1:attempts"),
             ("esc_seq_key", "p:esc:seq"),
@@ -280,6 +287,7 @@ mod tests {
             other.agents_key(),
             other.log_key(),
             other.health_hooks_key(),
+            other.health_hooks_shipped_key(),
             other.esc_key(&id),
             other.esc_attempts_key(&id),
             other.esc_seq_key(),

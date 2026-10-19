@@ -20,7 +20,7 @@
 //! - a herdr whose shape ix-relay cannot read fails (the watcher types into no
 //!   pane), an old version with a good shape warns.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use relay_core::ScanCut;
 use relay_core::moves::{MoveEvent, MoveKind};
@@ -52,6 +52,22 @@ const RECENT_LEAD_MS: i64 = HOUR_MS;
 
 /// A hook failure this recent is one that may still be happening.
 const RECENT_FAILURE_MS: i64 = 15 * 60 * 1000;
+
+/// `hook_failures_recorded` fails when this many failures are under
+/// [`RECENT_FAILURE_MS`] old, fleet-wide: more than 15 times the fleet's observed average
+/// of about 3 per 15 minutes, so only an outage reaches it (FR-029).
+const FAIL_RECENT_COUNT: usize = 50;
+
+/// `hook_failures_recorded` fails when one session has failed in this many distinct
+/// 15-minute windows of the last hour, the newest under 15 minutes old: a failure that
+/// persisted over half an hour is not a burst.
+const FAIL_SESSION_WINDOWS: usize = 3;
+
+/// The windows of the last hour, counted back from the time of the check.
+const SESSION_WINDOWS: i64 = 4;
+
+/// How many sessions and machines the hook failure detail names.
+const TOP_HOOK_FAILURES: usize = 3;
 
 /// How long a pane must have been gone (its registration unrefreshed) before it
 /// is reported: a session closed a minute ago is not a finding.
@@ -1190,12 +1206,169 @@ fn spool(f: &Facts, checks: &mut Vec<Check>) {
     }
 }
 
+/// Who a failure belongs to: its machine and session id, or, when it has no session id,
+/// its machine and lead.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct FailingSession {
+    machine: MachineName,
+    session_id: Option<String>,
+    lead: Option<String>,
+}
+
+impl FailingSession {
+    fn of(r: &SpoolRecord) -> Self {
+        Self {
+            machine: r.machine.clone(),
+            session_id: r.session_id.clone(),
+            // A record with a session id is that session whatever lead it held.
+            lead: if r.session_id.is_some() {
+                None
+            } else {
+                r.lead.clone()
+            },
+        }
+    }
+}
+
+/// What the failures of the last 24 hours say about their severity.
+struct FailureRules {
+    /// Failures under 15 minutes old, fleet-wide.
+    recent: usize,
+    /// The sessions that failed in at least [`FAIL_SESSION_WINDOWS`] distinct windows of the
+    /// last hour with their newest failure under 15 minutes old.
+    persistent: Vec<FailingSession>,
+}
+
+impl FailureRules {
+    fn of(now_ms: i64, records: &[&SpoolRecord]) -> Self {
+        let age = |r: &SpoolRecord| now_ms.saturating_sub(r.at_ms);
+        let mut windows: BTreeMap<FailingSession, BTreeSet<i64>> = BTreeMap::new();
+        for r in records {
+            let a = age(r);
+            if (0..SESSION_WINDOWS * RECENT_FAILURE_MS).contains(&a) {
+                windows
+                    .entry(FailingSession::of(r))
+                    .or_default()
+                    .insert(a / RECENT_FAILURE_MS);
+            }
+        }
+        Self {
+            recent: records
+                .iter()
+                .filter(|r| age(r) < RECENT_FAILURE_MS)
+                .count(),
+            persistent: windows
+                .into_iter()
+                .filter(|(_, w)| w.len() >= FAIL_SESSION_WINDOWS && w.contains(&0))
+                .map(|(s, _)| s)
+                .collect(),
+        }
+    }
+
+    /// Which rule makes the check a `fail`, if one does.
+    fn failing(&self) -> Option<String> {
+        if self.recent >= FAIL_RECENT_COUNT {
+            Some(format!(
+                "fail by rule (a): {} failures are under 15 minutes old, fleet-wide (threshold {FAIL_RECENT_COUNT})",
+                self.recent
+            ))
+        } else {
+            self.persistent.first().map(|s| {
+                format!(
+                    "fail by rule (b): session {} on {} failed in at least {FAIL_SESSION_WINDOWS} distinct 15-minute windows of the last hour and again in the last 15 minutes",
+                    s.session_id.as_deref().or(s.lead.as_deref()).unwrap_or("?"),
+                    s.machine
+                )
+            })
+        }
+    }
+}
+
+/// The detail lines naming the sessions and machines with the most failures.
+fn top_failure_lines(now_ms: i64, records: &[&SpoolRecord]) -> Vec<String> {
+    /// Failures of one session or machine.
+    struct Tally<'a> {
+        count: usize,
+        newest_ms: i64,
+        lead: Option<&'a str>,
+        kinds: BTreeMap<(String, String), usize>,
+    }
+    fn tally<'a, K: Ord>(
+        records: &[&'a SpoolRecord],
+        key: impl Fn(&SpoolRecord) -> K,
+    ) -> Vec<(K, Tally<'a>)> {
+        let mut by: BTreeMap<K, Tally<'a>> = BTreeMap::new();
+        for r in records {
+            let t = by.entry(key(r)).or_insert_with(|| Tally {
+                count: 0,
+                newest_ms: i64::MIN,
+                lead: None,
+                kinds: BTreeMap::new(),
+            });
+            t.count += 1;
+            if r.at_ms >= t.newest_ms {
+                t.newest_ms = r.at_ms;
+                t.lead = r.lead.as_deref();
+            }
+            *t.kinds
+                .entry((wire_name(&r.stage), wire_name(&r.error_kind)))
+                .or_default() += 1;
+        }
+        let mut out: Vec<_> = by.into_iter().collect();
+        out.sort_by(|a, b| {
+            b.1.count
+                .cmp(&a.1.count)
+                .then(b.1.newest_ms.cmp(&a.1.newest_ms))
+        });
+        out
+    }
+    let repeats = |t: &Tally<'_>| {
+        t.kinds
+            .iter()
+            .max_by_key(|(_, n)| **n)
+            .map_or_else(String::new, |((stage, kind), _)| {
+                format!("{stage} / {kind}")
+            })
+    };
+    let mut lines = Vec::new();
+    for (s, t) in tally(records, FailingSession::of)
+        .into_iter()
+        .take(TOP_HOOK_FAILURES)
+    {
+        lines.push(format!(
+            "session {} on {} (lead {}): {} failure(s), mostly {}, newest {} ago",
+            s.session_id.as_deref().unwrap_or("(none)"),
+            s.machine,
+            t.lead.unwrap_or("?"),
+            t.count,
+            repeats(&t),
+            ago(now_ms.saturating_sub(t.newest_ms))
+        ));
+    }
+    for (machine, t) in tally(records, |r| r.machine.clone())
+        .into_iter()
+        .take(TOP_HOOK_FAILURES)
+    {
+        lines.push(format!(
+            "machine {machine}: {} failure(s), mostly {}, newest {} ago",
+            t.count,
+            repeats(&t),
+            ago(now_ms.saturating_sub(t.newest_ms))
+        ));
+    }
+    lines
+}
+
 fn bus_failures(f: &Facts, up: &RedisUp, checks: &mut Vec<Check>) {
     let Ok(failures) = &up.hook_failures else {
         return;
     };
+    // A failure is counted once per record id: a second stream entry with an id already
+    // counted adds nothing to any count or rule (FR-030).
+    let mut seen = HashSet::new();
     let recent: Vec<&SpoolRecord> = failures
         .iter()
+        .filter(|b| b.id.as_deref().is_none_or(|id| seen.insert(id)))
         .filter_map(|BusFailure { record, .. }| record.as_ref())
         .filter(|r| f.now_ms.saturating_sub(r.at_ms) < DAY_MS)
         .collect();
@@ -1208,23 +1381,24 @@ fn bus_failures(f: &Facts, up: &RedisUp, checks: &mut Vec<Check>) {
         ));
         return;
     }
-    let mut details = group_lines(&recent);
+    let rules = FailureRules::of(f.now_ms, &recent);
+    let failing = rules.failing();
+    let mut details: Vec<String> = failing.iter().cloned().collect();
+    details.extend(top_failure_lines(f.now_ms, &recent));
+    details.extend(group_lines(&recent));
     if undecodable > 0 {
         details.push(format!("{undecodable} record(s) on the bus do not decode"));
     }
-    let now_bad = recent
-        .iter()
-        .filter(|r| f.now_ms.saturating_sub(r.at_ms) < RECENT_FAILURE_MS)
-        .count();
     checks.push(
         Check::severe(
-            now_bad > 0,
+            failing.is_some(),
             Family::HookFailures,
             Code::HookFailuresRecorded,
             None,
             format!(
-                "{} hook failure(s) were recorded in the last 24 hours, {now_bad} in the last 15 minutes",
-                recent.len()
+                "{} hook failure(s) were recorded in the last 24 hours, {} in the last 15 minutes",
+                recent.len(),
+                rules.recent
             ),
             "hooks failed on some machine: Redis unreachable, a budget spent, an output pipe closed",
             "the stage / error_kind lines say where; a repeated `connect` is a link problem (see `redis_unreachable`)",
@@ -1938,6 +2112,7 @@ mod tests {
         at_ms: i64,
     ) -> SpoolRecord {
         SpoolRecord {
+            id: String::new(),
             at_ms,
             machine: machine.parse().unwrap(),
             lead: Some("a".into()),
@@ -1949,6 +2124,19 @@ mod tests {
             candidate: None,
             messages: Vec::new(),
         }
+    }
+
+    /// Bus entries for `records`, each with an id of its own.
+    fn bus_failures_of(records: impl IntoIterator<Item = SpoolRecord>) -> Vec<BusFailure> {
+        records
+            .into_iter()
+            .enumerate()
+            .map(|(n, r)| BusFailure {
+                id: Some(format!("id-{n}")),
+                machine: r.machine.clone(),
+                record: Some(r),
+            })
+            .collect()
     }
 
     fn statuses(f: &Facts) -> Vec<(Code, Status)> {
@@ -2421,13 +2609,14 @@ mod tests {
                 f.spool = SpoolState::Unreadable("denied".into());
             }),
             (Code::HookFailuresRecorded, Fail, |f| {
-                up(f).hook_failures = Ok(vec![BusFailure {
-                    machine: "hub".parse().unwrap(),
-                    record: Some(record(Stage::Pop, K::Timeout, "hub", NOW - 60_000)),
-                }]);
+                up(f).hook_failures =
+                    Ok(bus_failures_of((0..50).map(|n| {
+                        record(Stage::Pop, K::Timeout, "hub", NOW - 60_000 - n)
+                    })));
             }),
             (Code::HookFailuresRecorded, Warn, |f| {
                 up(f).hook_failures = Ok(vec![BusFailure {
+                    id: None,
                     machine: "hub".parse().unwrap(),
                     record: Some(record(Stage::Pop, K::Timeout, "hub", NOW - 5 * HOUR_MS)),
                 }]);
@@ -2640,6 +2829,240 @@ mod tests {
         assert_eq!(inbox.details, ["a: 2 waiting, oldest 4s"]);
     }
 
+    fn hook_check(f: &Facts) -> Check {
+        evaluate(f)
+            .into_iter()
+            .find(|c| c.code == Code::HookFailuresRecorded)
+            .expect("hook_failures_recorded")
+    }
+
+    /// A failure of `session` on `machine`, `ago_ms` before the check.
+    fn failure(machine: &str, session: Option<&str>, ago_ms: i64) -> SpoolRecord {
+        let mut r = record(
+            Stage::Connect,
+            crate::spool::ErrorKind::Connection,
+            machine,
+            NOW - ago_ms,
+        );
+        r.session_id = session.map(str::to_owned);
+        r
+    }
+
+    /// Tracing: TC-029-14
+    /// ACs: FR-029-AC-14
+    ///
+    /// One recent record, 49 failures over several machines within 15 minutes, or a burst of
+    /// 100 from one session 20 to 30 minutes old is a warn; 50 under 15 minutes old, spread
+    /// over machines or from one session, is a fail; 50 stream entries carrying 49 ids are 49
+    /// failures, a warn.
+    #[test]
+    fn tc_029_14_only_fifty_recent_failures_fail_the_check() {
+        let status_of = |records: Vec<BusFailure>| {
+            let mut f = healthy();
+            up(&mut f).hook_failures = Ok(records);
+            hook_check(&f).status
+        };
+        let min = 60_000;
+        assert_eq!(
+            status_of(bus_failures_of([failure("hub", Some("s"), 2 * min)])),
+            Status::Warn
+        );
+        assert_eq!(
+            status_of(bus_failures_of((0..49).map(|n| failure(
+                ["hub", "node-a", "node-b"][n % 3],
+                Some(&format!("s{n}")),
+                min + 10_000 * n as i64
+            )))),
+            Status::Warn,
+            "49 over several machines"
+        );
+        assert_eq!(
+            status_of(bus_failures_of((0..100).map(|n| failure(
+                "hub",
+                Some("burst"),
+                20 * min + 6_000 * n
+            )))),
+            Status::Warn,
+            "a burst of 100 from one session, all 20 to 30 minutes old"
+        );
+        assert_eq!(
+            status_of(bus_failures_of((0..50).map(|n| failure(
+                ["hub", "node-a"][(n % 2) as usize],
+                Some(&format!("s{n}")),
+                min + 1_000 * n
+            )))),
+            Status::Fail,
+            "50 under 15 minutes old over machines"
+        );
+        assert_eq!(
+            status_of(bus_failures_of((0..50).map(|n| failure(
+                "hub",
+                Some("one"),
+                min + 1_000 * n
+            )))),
+            Status::Fail,
+            "50 from one session"
+        );
+        // 50 stream entries that carry only 49 distinct ids.
+        let mut entries =
+            bus_failures_of((0..50).map(|n| failure("hub", Some("x"), min + 1_000 * n)));
+        entries[49].id = entries[48].id.clone();
+        assert_eq!(status_of(entries), Status::Warn, "an id is counted once");
+        // The 49th and 50th windows: exactly 15 minutes old is not under 15 minutes.
+        assert_eq!(
+            status_of(bus_failures_of((0..50).map(|n| failure(
+                "hub",
+                Some("edge"),
+                15 * min + n
+            )))),
+            Status::Warn
+        );
+    }
+
+    /// Tracing: TC-029-15
+    /// ACs: FR-029-AC-15
+    ///
+    /// One session that failed 84 times over the last hour, in at least three distinct
+    /// 15-minute windows (counted back from the check) and most recently three minutes ago,
+    /// is a fail; the same records with the newest 20 minutes old are a warn.
+    #[test]
+    fn tc_029_15_a_session_failing_across_three_windows_fails_the_check() {
+        let min = 60_000;
+        let session = |newest_min: i64| {
+            // 84 failures spread over the hour ending `newest_min` minutes before the check.
+            bus_failures_of(
+                (0..84)
+                    .map(|n| failure("hub", Some("keeps-failing"), newest_min * min + n * 40_000)),
+            )
+        };
+        let mut f = healthy();
+        up(&mut f).hook_failures = Ok(session(3));
+        let check = hook_check(&f);
+        assert_eq!(check.status, Status::Fail);
+        assert!(
+            check.details.iter().any(|d| d.contains("rule (b)")),
+            "{:?}",
+            check.details
+        );
+        up(&mut f).hook_failures = Ok(session(20));
+        assert_eq!(hook_check(&f).status, Status::Warn);
+        // Two windows are not enough, however recent.
+        up(&mut f).hook_failures = Ok(bus_failures_of(
+            (0..60).map(|n| failure("hub", Some("two"), min + n * 20_000)),
+        ));
+        assert_eq!(hook_check(&f).status, Status::Warn, "two windows only");
+        // The windows are counted back from the check, not aligned to the clock: three
+        // failures 1, 16 and 31 minutes old are three windows whenever the check runs.
+        up(&mut f).hook_failures = Ok(bus_failures_of(
+            [1, 16, 31].map(|m| failure("hub", Some("spaced"), m * min)),
+        ));
+        assert_eq!(hook_check(&f).status, Status::Fail);
+        // Records with no session id are grouped by machine and lead.
+        let no_session = |lead: &str| {
+            bus_failures_of([1, 16, 31].map(|m| {
+                let mut r = failure("hub", None, m * min);
+                r.lead = Some(lead.to_owned());
+                r
+            }))
+        };
+        up(&mut f).hook_failures = Ok(no_session("the-lead"));
+        assert_eq!(hook_check(&f).status, Status::Fail);
+        // Three different leads with one failure per window each are not one session.
+        let mixed: Vec<BusFailure> = ["a", "b", "c"]
+            .into_iter()
+            .zip([1, 16, 31])
+            .flat_map(|(lead, m)| {
+                let mut r = failure("hub", None, m * min);
+                r.lead = Some(lead.to_owned());
+                bus_failures_of([r])
+            })
+            .collect();
+        up(&mut f).hook_failures = Ok(mixed);
+        assert_eq!(hook_check(&f).status, Status::Warn);
+    }
+
+    /// Tracing: TC-029-16
+    /// ACs: FR-029-AC-16
+    ///
+    /// The detail names the three sessions and the three machines with the most failures,
+    /// with their counts, the stage and kind that repeat most and the newest time, and no
+    /// text taken from a failure message.
+    #[test]
+    fn tc_029_16_the_detail_names_the_top_sessions_and_machines() {
+        let min = 60_000;
+        let mut records = Vec::new();
+        for (machine, session, count) in [
+            ("hub", "sess-a", 9),
+            ("node-a", "sess-b", 6),
+            ("node-b", "sess-c", 4),
+            ("node-c", "sess-d", 2),
+            ("node-d", "sess-e", 1),
+        ] {
+            for n in 0..count {
+                records.push(failure(machine, Some(session), (n + 1) * min));
+            }
+        }
+        let mut lost = failure("hub", Some("sess-a"), min / 2);
+        lost.stage = Stage::RequeueFailed;
+        lost.messages = vec![Message {
+            from: name("x"),
+            to: "a".parse().unwrap(),
+            text: "SECRET MESSAGE TEXT".into(),
+            sent_at_ms: 1,
+        }];
+        records.push(lost);
+        let mut f = healthy();
+        up(&mut f).hook_failures = Ok(bus_failures_of(records));
+        let check = hook_check(&f);
+        let sessions: Vec<&String> = check
+            .details
+            .iter()
+            .filter(|d| d.starts_with("session "))
+            .collect();
+        assert_eq!(sessions.len(), 3, "{:?}", check.details);
+        assert!(
+            sessions[0].contains("sess-a")
+                && sessions[0].contains("on hub")
+                && sessions[0].contains("10 failure(s)"),
+            "{}",
+            sessions[0]
+        );
+        assert!(sessions[0].contains("connect / connection") && sessions[0].contains("ago"));
+        assert!(sessions[1].contains("sess-b") && sessions[1].contains("6 failure(s)"));
+        assert!(sessions[2].contains("sess-c") && sessions[2].contains("4 failure(s)"));
+        let machines: Vec<&String> = check
+            .details
+            .iter()
+            .filter(|d| d.starts_with("machine "))
+            .collect();
+        assert_eq!(machines.len(), 3, "{:?}", check.details);
+        assert!(
+            machines[0].starts_with("machine hub: 10 failure(s)"),
+            "{}",
+            machines[0]
+        );
+        assert!(
+            machines[1].starts_with("machine node-a: 6"),
+            "{}",
+            machines[1]
+        );
+        assert!(
+            machines[2].starts_with("machine node-b: 4"),
+            "{}",
+            machines[2]
+        );
+        assert!(
+            !check
+                .details
+                .iter()
+                .filter(|d| d.starts_with("session ") || d.starts_with("machine "))
+                .any(|d| d.contains("sess-d") || d.contains("node-d")),
+            "only the top three"
+        );
+        // The requeue_failed line keeps its own rule (the only copy of the messages).
+        assert!(check.details.iter().any(|d| d.contains("requeue_failed")));
+    }
+
     /// The spool's `dropped` count (records dropped for the bound, lines removed
     /// unreadable) is shown, not only carried on the record.
     #[test]
@@ -2649,6 +3072,7 @@ mod tests {
         let mut flush = record(Stage::Decode, K::Corrupt, "hub", NOW - 1_000);
         flush.dropped = 3;
         up(&mut f).hook_failures = Ok(vec![BusFailure {
+            id: None,
             machine: flush.machine.clone(),
             record: Some(flush),
         }]);
@@ -2812,6 +3236,7 @@ mod tests {
         up(&mut f).hook_failures = Ok(entries
             .into_iter()
             .map(|r| BusFailure {
+                id: None,
                 machine: r.machine.clone(),
                 record: Some(r),
             })

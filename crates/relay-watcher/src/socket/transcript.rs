@@ -99,7 +99,7 @@ impl Watch {
         self.look(msg_id).found
     }
 
-    /// [`Watch::records`], and the `type` of a line that named the id in a shape not known.
+    /// What the next window says about `msg_id`, and the `type` of a line that named the id in a shape not known.
     pub fn look(&mut self, msg_id: &str) -> Scan {
         let absent = || Scan {
             found: TranscriptMatch::Absent,

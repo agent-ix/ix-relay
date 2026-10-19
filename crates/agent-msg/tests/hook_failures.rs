@@ -215,11 +215,17 @@ fn tc_030_05_records_are_typed_and_carry_no_error_text() {
             "at_ms",
             "error_kind",
             "event",
+            "id",
             "lead",
             "machine",
             "session_id",
             "stage"
         ]
+    );
+    assert_eq!(
+        record["id"].as_str().map(str::len),
+        Some(32),
+        "minted at append"
     );
     assert_eq!(record["event"], "Stop");
     assert_eq!(record["session_id"], "s1");
@@ -273,6 +279,11 @@ fn tc_030_02_the_next_healthy_hook_ships_three_records_once() {
         assert_eq!(shipped.len(), 3, "{shipped:?}");
         for entry in &shipped {
             let record: Value = serde_json::from_str(&entry.record).unwrap();
+            assert_eq!(
+                entry.id.as_deref(),
+                record["id"].as_str(),
+                "the stream carries the id"
+            );
             assert_eq!(record["stage"], "connect");
             assert_eq!(entry.lead, None);
             assert!(!entry.machine.as_str().is_empty());
