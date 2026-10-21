@@ -21,6 +21,15 @@ working, what it is waiting for, or what capacity an operator has allocated to a
 server. The review must distinguish a lead's report from inferred tracker or
 machine facts.
 
+## Acceptance Example
+
+**Given** two registered lanes and a status request sent to both, with one lane
+having an explicitly set focus and its server having operator-recorded capacity,
+**when** one lane submits its fixed-form reply and the operator reads the partial
+collection, **then** the JSON identifies the request, contains the submitted
+reply and lists the other lane as a nonresponder; `who --focus` shows only the
+explicitly reported focus, and `who --servers` shows only the recorded capacity.
+
 ## Traceability (Informative)
 
 Drives [FR-056](../functional/FR-056-repeatable-program-review-status.md),
