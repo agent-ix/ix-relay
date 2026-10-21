@@ -1,0 +1,48 @@
+---
+id: SR-070
+title: "Gap analysis — ix-relay SWM-107–109"
+type: SpecReview
+analysis: gap-analysis
+scope: "agent-ix/ix-relay; spec/, crates/agent-msg/, crates/relay-core/, tests/"
+review_set: subset
+relationships:
+  - { target: "ix://agent-ix/ix-relay/spec", type: references }
+---
+
+## Summary
+
+Repository-driven gap analysis for the SWM-107–109 implementation. The new status request, lane focus, and server capacity interfaces are user-visible behavior with no owning requirement in `spec/`; the repository's computed matrix also reports 345 of 358 criteria as untagged, a pre-existing repository-wide condition.
+
+## Verdict
+
+**FAIL** — newly added CLI and relay behavior has no owning specification requirement.
+
+## Scope
+
+| Unit | Role | Excerpt |
+| --- | --- | --- |
+| SWM-107-AC-1 | examined | Request and replies carry a request id; redelivery does not duplicate a reply |
+| SWM-107-AC-2 | examined | JSON output for the collected replies |
+| SWM-107-AC-3 | examined | A lead can answer by hand or through team-minder (separate ticket) |
+| SWM-107-AC-4 | examined | Tests for send, partial collection and redelivery |
+| SWM-108-AC-1 | examined | A lead sets and clears its focus with one command |
+| SWM-108-AC-2 | examined | `who --focus` shows focus and when it was last set |
+| SWM-108-AC-3 | examined | Stale focus (older than a configurable age) is marked, not hidden |
+| SWM-109-AC-1 | examined | Capacity is set by the operator, not guessed |
+| SWM-109-AC-2 | examined | Shows which lanes run on each server |
+
+## Findings
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-001 | high | SWM-107 status request/reply commands and persisted response behavior have no owning requirement in `spec/` | crates/agent-msg/src/main.rs::Cmd::StatusRequest, crates/agent-msg/src/status_request.rs::request, crates/relay-core/src/status.rs::StatusReply |
+| FND-002 | high | SWM-108 focus set/clear and stale focus display have no owning requirement in `spec/` | crates/agent-msg/src/main.rs::Cmd::Focus, crates/agent-msg/src/status_request.rs::focus_list |
+| FND-003 | high | SWM-109 server capacity set/clear and lane grouping display have no owning requirement in `spec/` | crates/agent-msg/src/main.rs::Cmd::ServerCapacity, crates/agent-msg/src/status_request.rs::server_list |
+
+## Coverage
+
+- Reconciliation: `quoin matrix --repo . --json` (quoin 0.28.3); 55 requirements, 358 criteria, 10 statically tagged, 345 untagged, 3 method-without-symbol; all 358 show no run evidence.
+- Plan completion: not assessed.
+- Untraced changed behavior: 3 feature groups (status request/replies, focus, server capacity); no placeholder source or test implementations found in changed files.
+- Semantic review: skipped (optional and not requested).
+- Redis integration evidence: unavailable because `IX_RELAY_TEST_URL` is unset. The affected tests compile and are wired to return early when the URL is absent; their runtime behavior remains unverified here.
