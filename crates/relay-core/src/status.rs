@@ -130,8 +130,8 @@ pub struct StatusReply {
     pub blocker_ticket_ids: Vec<StatusItem>,
     /// Current lane activity.
     pub lane_state: LaneState,
-    /// Number of additional coder slots available.
-    pub spare_coder_slots: u16,
+    /// Number of additional coder slots available, or `None` when the lane cannot report it.
+    pub spare_coder_slots: Option<u16>,
     /// Decisions required from the project owner.
     pub owner_decisions: Vec<StatusItem>,
     /// Assigned by the store on receipt, never trusted from input.
@@ -268,7 +268,7 @@ mod tests {
             pull_requests: vec![],
             blocker_ticket_ids: vec![StatusItem::new("SWM-107").unwrap()],
             lane_state: LaneState::Active,
-            spare_coder_slots: 0,
+            spare_coder_slots: Some(0),
             owner_decisions: vec![],
             submitted_at_ms: 0,
         };

@@ -30,9 +30,9 @@ pub(super) struct StatusReplyArgs {
     /// Lane state: active, idle, or blocked.
     #[arg(long, value_parser = ["active", "idle", "blocked"])]
     state: String,
-    /// Number of coder slots currently free in this lane.
+    /// Number of coder slots currently free in this lane, when explicitly known.
     #[arg(long)]
-    spare_coder_slots: u32,
+    spare_coder_slots: Option<u32>,
     /// Decisions required from the project owner; repeat if needed.
     #[arg(long = "owner-decision")]
     owner_decisions: Vec<String>,
@@ -153,7 +153,9 @@ pub(super) fn reply(
         pull_requests: items(pull_requests)?,
         blocker_ticket_ids: items(blocker_ticket_ids)?,
         lane_state,
-        spare_coder_slots: u16::try_from(spare_coder_slots)
+        spare_coder_slots: spare_coder_slots
+            .map(u16::try_from)
+            .transpose()
             .map_err(|_| "spare coder slots must be at most 65535")?,
         owner_decisions: items(owner_decisions)?,
         submitted_at_ms: 0,

@@ -30,3 +30,4 @@ relationships:
 | FR-056-AC-1 | Given `all` or explicit registered addresses, `status-request` creates a request id, reports the selected lanes, and reports each enqueue outcome; unknown, duplicate, and self lanes are refused. | Test |
 | FR-056-AC-2 | Given a request id, a selected lane can store one valid fixed-form reply; an unrequested lane is refused and a later reply cannot replace the first. | Test |
 | FR-056-AC-3 | Given a partly answered request, `status-replies` emits JSON with the request id, requested lanes, replies, and nonresponders. | Test |
+| FR-056-AC-4 | Given a reply without an explicit spare-coder-slot count, `status-replies` emits the `spare_coder_slots` field as JSON `null`, preserving the distinction between unknown and zero. | Test |

@@ -232,7 +232,7 @@ mod tests {
             pull_requests: vec![],
             blocker_ticket_ids: vec![],
             lane_state: LaneState::Active,
-            spare_coder_slots: 1,
+            spare_coder_slots: Some(1),
             owner_decisions: vec![],
             submitted_at_ms: 0,
         };

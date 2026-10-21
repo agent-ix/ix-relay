@@ -32,7 +32,7 @@ fn assert_success(result: &support::Run, args: &[&str]) {
     );
 }
 
-/// Trace: FR-056-AC-1, FR-056-AC-2, FR-056-AC-3
+/// Trace: FR-056-AC-1, FR-056-AC-2, FR-056-AC-3, FR-056-AC-4
 #[test]
 fn tc_056_status_commands_parse_arguments_and_report_the_collection_contract() {
     let Some(url) = test_url() else { return };
@@ -183,6 +183,25 @@ fn tc_056_status_commands_parse_arguments_and_report_the_collection_contract() {
     assert_eq!(report["replies"].as_array().unwrap().len(), 1);
     assert_eq!(report["replies"][0]["tickets"][0], "SWM-107");
     assert_eq!(report["replies"][0]["lane_state"], "active");
+    assert_eq!(report["replies"][0]["spare_coder_slots"], 2);
+
+    let unknown_request_args = ["status-request", "hub:EA:code"];
+    let unknown_request = run(&unknown_request_args, "hub:EA:sender", &url, &prefix);
+    assert_success(&unknown_request, &unknown_request_args);
+    let unknown: serde_json::Value = serde_json::from_str(unknown_request.stdout.trim()).unwrap();
+    let unknown_id = unknown["request_id"].as_str().expect("request id");
+    let unknown_reply_args = ["status-reply", unknown_id, "--state", "idle"];
+    let unknown_reply = run(&unknown_reply_args, "hub:EA:code", &url, &prefix);
+    assert_success(&unknown_reply, &unknown_reply_args);
+    let unknown_collection_args = ["status-replies", unknown_id];
+    let unknown_collection = run(&unknown_collection_args, "hub:EA:sender", &url, &prefix);
+    assert_success(&unknown_collection, &unknown_collection_args);
+    let unknown_report: serde_json::Value =
+        serde_json::from_str(unknown_collection.stdout.trim()).unwrap();
+    assert_eq!(
+        unknown_report["replies"][0]["spare_coder_slots"],
+        serde_json::Value::Null
+    );
 
     let invalid_state = [
         "status-reply",
