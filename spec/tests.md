@@ -360,6 +360,24 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-055 | FR-055-AC-3 | TC-055-03 | ✅ written (`tc_055_03_a_registered_live_lead_is_kept`, `tc_055_03_a_registry_read_that_fails_drops_no_entry`) |
 | FR-055 | FR-055-AC-4 | TC-055-04 | ✅ written (`tc_055_04_dropping_an_entry_keeps_held_batches_decisions_and_dead_letter_reasons`) |
 | FR-055 | FR-055-AC-5 | TC-055-05 | ✅ written (`tc_055_05_the_process_lookup_runs_unlocked_and_at_most_once_per_period`) |
+| FR-056 | FR-056-AC-1 | TC-056-01 | 🚧 not written (SWM-107; CLI request and recipient snapshot assertions are absent on main) |
+| FR-056 | FR-056-AC-2 | TC-056-02 | 🚧 not written (SWM-107; CLI notification content assertion is absent on main) |
+| FR-056 | FR-056-AC-3 | TC-056-03 | 🚧 not written (SWM-107; CLI reply-form invocation and output assertion are absent on main) |
+| FR-056 | FR-056-AC-4 | TC-056-04 | 🚧 not written (SWM-107; duplicate CLI reply and first-write-wins assertion is absent on main) |
+| FR-056 | FR-056-AC-5 | TC-056-05 | 🚧 not written (SWM-107; CLI JSON and partial-collection assertion is absent on main) |
+| FR-056 | FR-056-AC-6 | TC-056-06 | 🚧 not written (SWM-107; team-minder response path with request-id correlation is absent on main) |
+| FR-057 | FR-057-AC-1 | TC-057-01 | 🚧 not written (SWM-108; lane-focus set command is absent on main) |
+| FR-057 | FR-057-AC-2 | TC-057-02 | 🚧 not written (SWM-108; lane-focus clear command is absent on main) |
+| FR-057 | FR-057-AC-3 | TC-057-03 | 🚧 not written (SWM-108; `who --focus` CLI assertion is absent on main) |
+| FR-057 | FR-057-AC-4 | TC-057-04 | 🚧 not written (SWM-108; stale-focus CLI threshold assertion is absent on main) |
+| FR-057 | FR-057-AC-5 | TC-057-05 | 🚧 not written (SWM-108; fresh-focus CLI threshold assertion is absent on main) |
+| FR-057 | FR-057-AC-6 | TC-057-06 | 🚧 not written (SWM-108; no-inferred-focus CLI assertion is absent on main) |
+| FR-058 | FR-058-AC-1 | TC-058-01 | 🚧 not written (SWM-109; operator capacity-set command assertion is absent on main) |
+| FR-058 | FR-058-AC-2 | TC-058-02 | 🚧 not written (SWM-109; operator capacity-clear command assertion is absent on main) |
+| FR-058 | FR-058-AC-3 | TC-058-03 | 🚧 not written (SWM-109; server grouping CLI assertion is absent on main) |
+| FR-058 | FR-058-AC-4 | TC-058-04 | 🚧 not written (SWM-109; unset capacity CLI assertion is absent on main) |
+| FR-058 | FR-058-AC-5 | TC-058-05 | 🚧 not written (SWM-109; empty configured server CLI assertion is absent on main) |
+| FR-058 | FR-058-AC-6 | TC-058-06 | 🚧 not written (SWM-109; no-guessed-capacity CLI assertion is absent on main) |
 
 ### Non-Functional Requirement Coverage
 
@@ -443,6 +461,24 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-055-03 | A registered live lead is kept and a failed registry read drops nothing. | Integration | FR-055-AC-3 | ✅ written (`tc_055_03_a_registered_live_lead_is_kept`, `tc_055_03_a_registry_read_that_fails_drops_no_entry`) |
 | TC-055-04 | Dropping an entry keeps held batches, decisions, dead-letter reasons and drift counts. | Integration | FR-055-AC-4 | ✅ written (`tc_055_04_dropping_an_entry_keeps_held_batches_decisions_and_dead_letter_reasons`) |
 | TC-055-05 | The process lookup runs with the delivery lock released and at most once per place-refresh period; an unregistered lead still leaves at once. | Integration | FR-055-AC-5 | ✅ written (`tc_055_05_the_process_lookup_runs_unlocked_and_at_most_once_per_period`) |
+| TC-056-01 | Given `all` or an explicit set of registered lane addresses, a status request returns one request id and the selected responders; `all` excludes the requester. | Integration | FR-056-AC-1 | 🚧 not written |
+| TC-056-02 | Given a status request, each queued recipient notice carries the same request id and the manual reply command. | Integration | FR-056-AC-2 | 🚧 not written |
+| TC-056-03 | Given a requested lane and a request id, the CLI accepts the fixed reply form and associates all submitted fields with that lane and request. | Integration | FR-056-AC-3 | 🚧 not written |
+| TC-056-04 | Given a repeated reply delivery for one lane and request id, the first valid reply remains stored and the second submission reports the existing reply. | Integration | FR-056-AC-4 | 🚧 not written |
+| TC-056-05 | Given zero, some, or all requested lanes have replied, the JSON result lists received replies and exactly the outstanding nonresponders. | Integration | FR-056-AC-5 | 🚧 not written |
+| TC-056-06 | Given a team-minder response for a selected lane, the response is stored with the request id and the same fixed fields as a manual reply. | Integration | FR-056-AC-6 | 🚧 not written |
+| TC-057-01 | Given two registered lanes, setting one lane's focus changes only that lane's reported focus. | Integration | FR-057-AC-1 | 🚧 not written |
+| TC-057-02 | Given two registered lanes with focus values, clearing one lane's focus leaves the other value intact. | Integration | FR-057-AC-2 | 🚧 not written |
+| TC-057-03 | Given registered lanes with and without focus, `who --focus` shows each address, explicit value or unset state, and the set time for reported values. | Integration | FR-057-AC-3 | 🚧 not written |
+| TC-057-04 | Given a focus older than a supplied threshold, `who --focus` retains the value and marks it stale. | Integration | FR-057-AC-4 | 🚧 not written |
+| TC-057-05 | Given a focus newer than a supplied threshold, `who --focus` does not mark it stale. | Integration | FR-057-AC-5 | 🚧 not written |
+| TC-057-06 | Given a registered lane with open tickets but no focus record, `who --focus` reports the lane as unset. | Integration | FR-057-AC-6 | 🚧 not written |
+| TC-058-01 | Given an operator-set capacity, the stored cores, RAM in MiB, optional agent limit, and owner rules match the supplied values; the RAM value equals the input GiB converted to MiB. | Integration | FR-058-AC-1 | 🚧 not written |
+| TC-058-02 | Given capacities for two servers, clearing one leaves the other server's capacity unchanged. | Integration | FR-058-AC-2 | 🚧 not written |
+| TC-058-03 | Given registered lanes on multiple servers, `who --servers` groups each lane under its registered server and displays configured capacity. | Integration | FR-058-AC-3 | 🚧 not written |
+| TC-058-04 | Given a registered server with no capacity record, `who --servers` displays capacity as unset. | Integration | FR-058-AC-4 | 🚧 not written |
+| TC-058-05 | Given a server with recorded capacity and no registered lanes, `who --servers` still lists that server and its capacity. | Integration | FR-058-AC-5 | 🚧 not written |
+| TC-058-06 | Given a registered server with no operator-set capacity, output contains no derived cores, RAM, or agent limit. | Integration | FR-058-AC-6 | 🚧 not written |
 | TC-010-01 | Every send from any registered sender to any registered lead X increases X's inbox length by exactly one … | Property | FR-010-AC-1 | ✅ written |
 | TC-010-02 | Given alias `old` pointing at registered `new`, sending to `old` queues the message in `new`'s inbox and … | Unit | FR-010-AC-2 | ✅ written |
 | TC-010-03 | Given an unregistered target name, the send returns an unknown-agent error and no inbox or log entry is added. | Unit | FR-010-AC-3 | ✅ written |
@@ -753,7 +789,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 
 | Gap ID | Description | Risk Level | Mitigation |
 |--------|-------------|------------|------------|
-| GAP-001 | 270 of 353 rows have a written test; changed 0.3.0 obligations have replacement evidence above. Retired alias tests are not evidence for the new contract. Remaining pending/partial rows require their stated evidence. | High | Complete remaining evidence without claiming full coverage. |
+| GAP-001 | 270 of 371 rows have a written test; changed 0.3.0 obligations have replacement evidence above. Retired alias tests are not evidence for the new contract. Remaining pending/partial rows require their stated evidence. | High | Complete remaining evidence without claiming full coverage. |
 | GAP-002 | 15 rows still say `red on main`: obligations of requirements `main` does not yet meet, red when written (FR-031, FR-033-AC-2, FR-034-AC-4, FR-035, FR-037). The rest of FR-032..FR-034 are written or partial since the relink work (FR-043). | High | AGE-2033 (AGE-2032 landed; the NFR-001 stdin row landed under AGE-2033). |
 | GAP-003 | No `herdr` stub or blackholed-Redis harness exists yet for the fault-injection and benchmark rows. | Medium | Build with the NFR-001..003 suites. |
 
@@ -764,7 +800,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | Benchmark | 8 | 5 | 0 | 0 | 0 | 0 | 62% |
 | Fuzz | 3 | 0 | 3 | 0 | 0 | 0 | 0% |
 | Inspection | 3 | 0 | 0 | 0 | 0 | 0 | 0% |
-| Integration | 180 | 140 | 0 | 12 | 0 | 0 | 77% |
+| Integration | 198 | 140 | 0 | 12 | 0 | 0 | 71% |
 | Property | 38 | 29 | 0 | 5 | 0 | 0 | 76% |
 | Static | 2 | 0 | 2 | 0 | 0 | 0 | 0% |
 | Unit | 119 | 91 | 0 | 3 | 0 | 0 | 76% |

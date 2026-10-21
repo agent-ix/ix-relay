@@ -9,6 +9,8 @@ relationships:
     type: "satisfied_by"
   - target: "ix://agent-ix/ix-relay/US-003"
     type: "satisfied_by"
+  - target: "ix://agent-ix/ix-relay/US-008"
+    type: "satisfied_by"
 ---
 # StR-001: Leads exchange messages without a human relay, and never to the wrong lead
 
@@ -51,5 +53,6 @@ the text it sends is not trusted to be well-formed.
 ## Traceability
 
 Satisfied by [US-001](../usecase/US-001-message-a-lead-by-where-it-sits.md),
-[US-002](../usecase/US-002-receive-messages-without-losing-the-turn.md) and
-[US-003](../usecase/US-003-be-reachable-without-configuring-a-name.md).
+[US-002](../usecase/US-002-receive-messages-without-losing-the-turn.md),
+[US-003](../usecase/US-003-be-reachable-without-configuring-a-name.md) and
+[US-008](../usecase/US-008-review-program-status-from-reported-lane-facts.md).
