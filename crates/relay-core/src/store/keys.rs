@@ -10,6 +10,7 @@ use crate::{
     escalation::EscalationId,
     ids::{MachineName, SessionId},
     name::AgentName,
+    status::StatusRequestId,
 };
 
 /// The key namespace of one bus: the prefix plus one builder per key.
@@ -56,6 +57,26 @@ impl Keys {
 
     pub(super) fn agents_key(&self) -> String {
         format!("{}agents", self.prefix)
+    }
+
+    pub(super) fn lane_focus_key(&self) -> String {
+        format!("{}lane:focus", self.prefix)
+    }
+
+    pub(super) fn server_capacity_key(&self) -> String {
+        format!("{}lane:server-capacity", self.prefix)
+    }
+
+    pub(super) fn status_sequence_key(&self) -> String {
+        format!("{}status:sequence", self.prefix)
+    }
+
+    pub(super) fn status_request_key(&self, id: &StatusRequestId) -> String {
+        format!("{}status:request:{id}", self.prefix)
+    }
+
+    pub(super) fn status_reply_key(&self, id: &StatusRequestId, agent: &AgentName) -> String {
+        format!("{}status:reply:{id}:{agent}", self.prefix)
     }
 
     pub(super) fn log_key(&self) -> String {
@@ -177,6 +198,7 @@ mod tests {
         let id: EscalationId = "e1".parse().unwrap();
         let sid: SessionId = "sid-1".parse().unwrap();
         let machine: MachineName = "node-a".parse().unwrap();
+        let request: StatusRequestId = "r1".parse().unwrap();
         vec![
             (
                 "directory_committed_key",
@@ -194,6 +216,11 @@ mod tests {
             ("work_key", relay.work_key(&machine, &sid, 42)),
             ("inbox_key", relay.inbox_key(&agent)),
             ("agents_key", relay.agents_key()),
+            ("lane_focus_key", relay.lane_focus_key()),
+            ("server_capacity_key", relay.server_capacity_key()),
+            ("status_sequence_key", relay.status_sequence_key()),
+            ("status_request_key", relay.status_request_key(&request)),
+            ("status_reply_key", relay.status_reply_key(&request, &agent)),
             ("log_key", relay.log_key()),
             ("health_hooks_key", relay.health_hooks_key()),
             ("health_hooks_shipped_key", relay.health_hooks_shipped_key()),
@@ -227,6 +254,11 @@ mod tests {
             ("work_key", "p:work:node-a:sid-1:42"),
             ("inbox_key", "p:inbox:lead-a"),
             ("agents_key", "p:agents"),
+            ("lane_focus_key", "p:lane:focus"),
+            ("server_capacity_key", "p:lane:server-capacity"),
+            ("status_sequence_key", "p:status:sequence"),
+            ("status_request_key", "p:status:request:r1"),
+            ("status_reply_key", "p:status:reply:r1:lead-a"),
             ("log_key", "p:log"),
             ("health_hooks_key", "p:health:hooks"),
             ("health_hooks_shipped_key", "p:health:hooks-shipped"),
@@ -277,6 +309,7 @@ mod tests {
         let id: EscalationId = "e1".parse().unwrap();
         let sid: SessionId = "sid-1".parse().unwrap();
         let machine: MachineName = "node-a".parse().unwrap();
+        let request: StatusRequestId = "r1".parse().unwrap();
         let moved = [
             other.directory_committed_key(&machine),
             other.directory_key(&machine),
@@ -285,6 +318,11 @@ mod tests {
             other.work_key(&machine, &sid, 42),
             other.inbox_key(&agent),
             other.agents_key(),
+            other.lane_focus_key(),
+            other.server_capacity_key(),
+            other.status_sequence_key(),
+            other.status_request_key(&request),
+            other.status_reply_key(&request, &agent),
             other.log_key(),
             other.health_hooks_key(),
             other.health_hooks_shipped_key(),

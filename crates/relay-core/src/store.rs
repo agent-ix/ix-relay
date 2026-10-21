@@ -67,12 +67,14 @@ mod moves;
 #[cfg(test)]
 mod pop_budget_tests;
 mod scan;
+mod status;
 mod stranded;
 #[cfg(test)]
 mod stranded_fault_tests;
 mod work;
 
 use keys::Keys;
+use status::StatusStore;
 
 pub use commit::{CommitOutcome, IdentityCommit};
 pub use directory::{DIRECTORY_LEASE, DirectoryRead, DirectoryRecipient};
@@ -86,6 +88,7 @@ pub use inflight::{
 };
 pub use moves::{Moves, PanesReplaced, PlaceRefresh};
 pub use scan::ScanCut;
+pub use status::ReplyOutcome;
 pub use stranded::Buried;
 
 /// Largest `text` a single [`Message`] may carry, in bytes. Enforced by
@@ -167,6 +170,135 @@ impl Relay {
             .arg(encode(reg))
             .query(&mut self.conn)?;
         Ok(())
+    }
+
+    /// Sets or clears one lead's lane focus without changing its registration.
+    pub fn set_focus(&mut self, agent: &AgentName, focus: Option<&str>) -> Result<()> {
+        let key = self.keys.lane_focus_key();
+        match focus {
+            Some(focus) => {
+                let item = crate::StatusItem::new(focus.to_owned()).map_err(|error| {
+                    Error::InvalidName {
+                        name: error.to_string(),
+                    }
+                })?;
+                let (seconds, microseconds): (u64, u64) =
+                    redis::cmd("TIME").query(&mut self.conn)?;
+                let set_at_ms = seconds
+                    .checked_mul(1_000)
+                    .and_then(|millis| millis.checked_add(microseconds / 1_000))
+                    .and_then(|millis| i64::try_from(millis).ok())
+                    .ok_or_else(|| Error::InvalidName {
+                        name: "focus timestamp overflow".into(),
+                    })?;
+                let record = crate::FocusRecord {
+                    agent: agent.clone(),
+                    focus: item.as_str().to_owned(),
+                    set_at_ms,
+                };
+                let (): () = self.conn.hset(&key, agent.as_str(), encode(&record))?;
+            }
+            None => {
+                let _: usize = self.conn.hdel(&key, agent.as_str())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads explicitly stored focus values, sorted by lead name.
+    pub fn focus_records(&mut self) -> Result<Vec<crate::FocusRecord>> {
+        let key = self.keys.lane_focus_key();
+        let raw: Vec<(Vec<u8>, Vec<u8>)> = self.conn.hgetall(&key)?;
+        let mut records = raw
+            .into_iter()
+            .map(|(_, value)| decode_bytes::<crate::FocusRecord>(&key, &value))
+            .collect::<Result<Vec<_>>>()?;
+        records.sort_by(|a, b| a.agent.cmp(&b.agent));
+        Ok(records)
+    }
+
+    /// Stores explicitly supplied capacity for one server with a Redis timestamp.
+    pub fn set_server_capacity(
+        &mut self,
+        machine: &MachineName,
+        cores: u32,
+        ram_mib: u64,
+        max_agents: Option<u32>,
+        owner_rules: Vec<String>,
+    ) -> Result<crate::ServerCapacity> {
+        let (seconds, microseconds): (u64, u64) = redis::cmd("TIME").query(&mut self.conn)?;
+        let set_at_ms = seconds
+            .checked_mul(1_000)
+            .and_then(|millis| millis.checked_add(microseconds / 1_000))
+            .and_then(|millis| i64::try_from(millis).ok())
+            .ok_or_else(|| Error::InvalidName {
+                name: "server capacity timestamp overflow".into(),
+            })?;
+        let capacity = crate::ServerCapacity::try_new(
+            machine.clone(),
+            cores,
+            ram_mib,
+            max_agents,
+            owner_rules,
+            set_at_ms,
+        )
+        .map_err(|error| Error::InvalidName {
+            name: error.to_string(),
+        })?;
+        let (): () = self.conn.hset(
+            self.keys.server_capacity_key(),
+            machine.as_str(),
+            encode(&capacity),
+        )?;
+        Ok(capacity)
+    }
+
+    /// Reads explicitly stored server capacity, sorted by server name.
+    pub fn server_capacities(&mut self) -> Result<Vec<crate::ServerCapacity>> {
+        let key = self.keys.server_capacity_key();
+        let raw: Vec<(Vec<u8>, Vec<u8>)> = self.conn.hgetall(&key)?;
+        let mut capacities = raw
+            .into_iter()
+            .map(|(_, value)| decode_bytes::<crate::ServerCapacity>(&key, &value))
+            .collect::<Result<Vec<_>>>()?;
+        capacities.sort_by(|a, b| a.machine.cmp(&b.machine));
+        Ok(capacities)
+    }
+
+    /// Removes an explicit capacity record; no server is inferred to be empty or unlimited.
+    pub fn clear_server_capacity(&mut self, machine: &MachineName) -> Result<()> {
+        let _: usize = self
+            .conn
+            .hdel(self.keys.server_capacity_key(), machine.as_str())?;
+        Ok(())
+    }
+
+    /// Opens a seven-day fixed-form status request for a snapshot of lanes.
+    pub fn create_status_request(
+        &mut self,
+        requester: AgentName,
+        expected_agents: Vec<AgentName>,
+    ) -> std::result::Result<crate::StatusRequest, crate::StatusError> {
+        StatusStore::new(&mut self.conn, &self.keys).create_new(requester, expected_agents)
+    }
+
+    /// Saves the first fixed-form reply from a requested lane.
+    pub fn submit_status_reply(
+        &mut self,
+        reply: crate::StatusReply,
+    ) -> std::result::Result<ReplyOutcome, crate::StatusError> {
+        StatusStore::new(&mut self.conn, &self.keys).submit(reply)
+    }
+
+    /// Returns the request snapshot and replies collected so far.
+    pub fn status_snapshot(
+        &mut self,
+        id: &crate::StatusRequestId,
+    ) -> std::result::Result<
+        Option<(crate::StatusRequest, Vec<crate::StatusReply>)>,
+        crate::StatusError,
+    > {
+        StatusStore::new(&mut self.conn, &self.keys).snapshot(id)
     }
 
     /// Every registered lead that decodes, sorted by name, plus a report of the
