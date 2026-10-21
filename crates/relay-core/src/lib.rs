@@ -14,11 +14,13 @@ mod error;
 mod escalation;
 pub mod health;
 mod ids;
+pub mod lane_registry;
 mod message;
 pub mod moves;
 mod name;
 mod resolve;
 pub mod socket_status;
+pub mod status;
 mod store;
 #[cfg(test)]
 mod test_env;
@@ -32,9 +34,14 @@ pub use escalation::{
     Escalation, EscalationFiling, EscalationId, EscalationList, EscalationStatus, TicketId,
 };
 pub use ids::{MAX_ID_BYTES, MachineName, PaneId, PaneRef, SessionId, TabId, WorkspaceId};
+pub use lane_registry::{FocusRecord, ServerCapacity, ServerCapacityError, focus_is_stale};
 pub use message::{CLAUDE_KIND, Message, Registration, tries_socket};
 pub use name::{AgentName, Target};
 pub use resolve::{resolve_target, resolve_target_scoped};
+pub use status::{
+    LaneState, MAX_STATUS_AGENTS, MAX_STATUS_ITEM_BYTES, MAX_STATUS_ITEMS, STATUS_REQUEST_TTL_SECS,
+    StatusError, StatusItem, StatusReply, StatusRequest, StatusRequestId,
+};
 pub use store::{
     AgentList, AgentSlot, BACKLOG_SCAN_BOUND, Backlog, BatchId, BudgetPopResult, Buried, Claim,
     CommitOutcome, DEAD_LETTER_CAP, DEFAULT_PREFIX, DIRECTORY_LEASE, DirectoryRead,
@@ -42,6 +49,6 @@ pub use store::{
     INFLIGHT_ROW_OVERHEAD, IdentityCommit, InboxOverview, LeadBacklog, LeadOverview, LeaseState,
     MAX_HEARTBEAT_KEYS, MAX_INFLIGHT_BATCHES, MAX_INFLIGHT_BYTES, MAX_LEASE, MAX_MESSAGE_BYTES,
     MAX_REDELIVERIES, Moves, Now, PanesReplaced, PlaceRefresh, PopResult, Popper, Reaped,
-    RecipientProbe, Relay, Salvage, Salvaged, ScanCut, SessionProbe, SkippedRegistration, Sweep,
-    WATCHER_LEASE,
+    RecipientProbe, Relay, ReplyOutcome, Salvage, Salvaged, ScanCut, SessionProbe,
+    SkippedRegistration, Sweep, WATCHER_LEASE,
 };
