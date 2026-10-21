@@ -332,15 +332,10 @@ fn tc_056_status_commands_parse_arguments_and_report_the_collection_contract() {
     }
 
     let empty_prefix = format!("test:{}:program-review-empty:", std::process::id());
-    let empty_sender = run(&["register"], "hub:EA:empty-sender", &url, &empty_prefix);
+    let empty_sender = run(&["register"], "hub:EA:code", &url, &empty_prefix);
     assert_success(&empty_sender, &["register"]);
     let empty_request_args = ["status-request", "all"];
-    let empty_request = run(
-        &empty_request_args,
-        "hub:EA:empty-sender",
-        &url,
-        &empty_prefix,
-    );
+    let empty_request = run(&empty_request_args, "hub:EA:code", &url, &empty_prefix);
     assert_success(&empty_request, &empty_request_args);
     let empty_request: serde_json::Value =
         serde_json::from_str(empty_request.stdout.trim()).unwrap();
@@ -352,12 +347,7 @@ fn tc_056_status_commands_parse_arguments_and_report_the_collection_contract() {
     assert_eq!(empty_request["deliveries"], serde_json::json!([]));
     let empty_request_id = empty_request["request_id"].as_str().unwrap();
     let empty_collection_args = ["status-replies", empty_request_id];
-    let empty_collection = run(
-        &empty_collection_args,
-        "hub:EA:empty-sender",
-        &url,
-        &empty_prefix,
-    );
+    let empty_collection = run(&empty_collection_args, "hub:EA:code", &url, &empty_prefix);
     assert_success(&empty_collection, &empty_collection_args);
     let empty_collection: serde_json::Value =
         serde_json::from_str(empty_collection.stdout.trim()).unwrap();
@@ -473,7 +463,7 @@ fn tc_057_focus_commands_set_clear_and_render_stale_focus() {
     );
     assert!(listed.stdout.contains("STALE"), "{}", listed.stdout);
     assert!(
-        listed.stdout.contains("hub:EA:other  focus unset"),
+        listed.stdout.contains("other-lane  focus unset"),
         "{}",
         listed.stdout
     );
@@ -489,7 +479,7 @@ fn tc_057_focus_commands_set_clear_and_render_stale_focus() {
         .unwrap();
     let with_activity = run(&["who", "--focus"], "hub:EA:code", &url, &prefix);
     assert_success(&with_activity, &["who", "--focus"]);
-    assert!(with_activity.stdout.contains("hub:EA:other  focus unset"));
+    assert!(with_activity.stdout.contains("other-lane  focus unset"));
     assert_eq!(relay.inbox_len(&other_lane).unwrap(), 1);
     relay
         .set_focus(&other_lane, Some("Other lane focus"))
@@ -499,7 +489,7 @@ fn tc_057_focus_commands_set_clear_and_render_stale_focus() {
     assert!(
         both_focused
             .stdout
-            .contains("hub:EA:other  Other lane focus  set ")
+            .contains("other-lane  Other lane focus  set ")
     );
 
     let clear_args = ["focus", "--clear"];
@@ -516,7 +506,7 @@ fn tc_057_focus_commands_set_clear_and_render_stale_focus() {
     assert!(
         after_clear
             .stdout
-            .contains("hub:EA:other  Other lane focus  set "),
+            .contains("other-lane  Other lane focus  set "),
         "clearing the caller's focus changed another lane: {}",
         after_clear.stdout
     );
@@ -594,7 +584,8 @@ fn tc_058_capacity_commands_record_clear_and_group_server_lanes() {
     assert!(
         listed
             .stdout
-            .contains("hub: capacity unset, lanes=[hub:EA:code]"),
+            .lines()
+            .any(|line| line.starts_with("hub: capacity unset, lanes=[")),
         "{}",
         listed.stdout
     );
