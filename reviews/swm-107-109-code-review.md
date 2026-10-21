@@ -89,3 +89,10 @@ After excerpt, verified at `crates/agent-msg/tests/program_review.rs` in `ab53e1
 | FND-003 | medium | FR-056's new CLI test does not exercise the acceptance criteria's rejection or partial-collection cases | crates/agent-msg/tests/program_review.rs:45-106 |
 
 The test covers one explicitly selected lane, a valid reply, a repeated identical reply, and a fully answered collection. It does not test `all`, unknown/duplicate/self-targeted lanes, an unrequested responder, a changed second reply, or a partly answered CLI collection with a nonresponder. Those acceptance branches can regress while the newly tagged tests stay green.
+
+## Current-head reconciliation
+
+The follow-up proposed allowing an unknown spare-coder-slot count to serialize as
+JSON `null`. That change is not included in the rebased branch because the
+merged FR-056 contract requires `--spare-coder-slots` and defines the field as an
+integer. This branch preserves the required argument and numeric JSON value.

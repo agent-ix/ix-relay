@@ -61,3 +61,9 @@ After excerpts, verified in commit d34cf353:
 > **FND-001 after_excerpt:** Given a partly answered request, `status-replies` emits JSON with the request id, requested lanes, replies, and nonresponders.
 > **FND-002 after_excerpt:** Given a focus older than the configured stale age, `who --focus --stale-after` marks it `STALE` and still prints the focus.
 > **FND-003 after_excerpt:** Given registered lanes on multiple servers, `who --servers` groups their names by server and displays the explicit capacity or unset state.
+
+## Current-head reconciliation
+
+The follow-up proposal to serialize an omitted spare-coder-slot count as JSON
+`null` is not adopted here: merged FR-056 requires the option and defines the
+field as an integer. The implementation and tests retain that contract.
