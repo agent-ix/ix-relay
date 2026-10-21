@@ -34,10 +34,7 @@ pub use escalation::{
     Escalation, EscalationFiling, EscalationId, EscalationList, EscalationStatus, TicketId,
 };
 pub use ids::{MAX_ID_BYTES, MachineName, PaneId, PaneRef, SessionId, TabId, WorkspaceId};
-pub use lane_registry::{
-    FocusRecord, MAX_OWNER_RULE_BYTES, MAX_OWNER_RULES, ServerCapacity, ServerCapacityError,
-    focus_is_stale,
-};
+pub use lane_registry::{FocusRecord, ServerCapacity, ServerCapacityError, focus_is_stale};
 pub use message::{CLAUDE_KIND, Message, Registration, tries_socket};
 pub use name::{AgentName, Target};
 pub use resolve::{resolve_target, resolve_target_scoped};

@@ -43,7 +43,7 @@ fn assert_json_keys(value: &serde_json::Value, expected: &[&str]) {
     assert_eq!(actual, expected.iter().copied().collect());
 }
 
-/// Trace: FR-056-AC-1, FR-056-AC-3, FR-056-AC-4, FR-056-AC-5
+/// Trace: FR-056-AC-1, FR-056-AC-2, FR-056-AC-3, FR-056-AC-4, FR-056-AC-5, FR-056-AC-7
 #[test]
 fn tc_056_status_commands_parse_arguments_and_report_the_collection_contract() {
     let Some(url) = test_url() else { return };
@@ -511,7 +511,7 @@ fn tc_057_focus_commands_set_clear_and_render_stale_focus() {
     );
 }
 
-/// Trace: FR-058-AC-1, FR-058-AC-2, FR-058-AC-3, FR-058-AC-4, FR-058-AC-6
+/// Trace: FR-058-AC-1, FR-058-AC-2, FR-058-AC-3, FR-058-AC-4, FR-058-AC-5, FR-058-AC-6
 #[test]
 fn tc_058_capacity_commands_record_clear_and_group_server_lanes() {
     let Some(url) = test_url() else { return };

@@ -4,11 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AgentName, MachineName};
 
-/// Maximum number of operator rule strings recorded for one server.
-pub const MAX_OWNER_RULES: usize = 32;
-/// Maximum UTF-8 bytes in one operator rule.
-pub const MAX_OWNER_RULE_BYTES: usize = 500;
-
 /// A server capacity value violates a storage or display bound.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ServerCapacityError {
@@ -21,11 +16,8 @@ pub enum ServerCapacityError {
     /// An explicit max-agent limit must be positive.
     #[error("max_agents must be greater than zero when set")]
     ZeroMaxAgents,
-    /// Too many owner rules were supplied.
-    #[error("at most 32 owner rules are allowed")]
-    TooManyOwnerRules,
-    /// An owner rule is empty or exceeds its byte bound.
-    #[error("owner rule must contain 1 to {MAX_OWNER_RULE_BYTES} bytes")]
+    /// An owner rule is empty.
+    #[error("owner rule must not be empty")]
     OwnerRuleLength,
     /// An owner rule contains a character that is unsafe to display.
     #[error("owner rule contains unsafe display text")]
@@ -100,11 +92,8 @@ impl ServerCapacity {
         if self.max_agents == Some(0) {
             return Err(ServerCapacityError::ZeroMaxAgents);
         }
-        if self.owner_rules.len() > MAX_OWNER_RULES {
-            return Err(ServerCapacityError::TooManyOwnerRules);
-        }
         for rule in &self.owner_rules {
-            if rule.is_empty() || rule.len() > MAX_OWNER_RULE_BYTES {
+            if rule.is_empty() {
                 return Err(ServerCapacityError::OwnerRuleLength);
             }
             if rule
@@ -157,16 +146,20 @@ mod tests {
 
     #[test]
     fn capacity_constructor_accepts_unbounded_agent_limit_and_rules() {
+        let long_rule = "r".repeat(501);
+        let many_rules = std::iter::repeat_n(long_rule, 33).collect::<Vec<_>>();
         let capacity = ServerCapacity::try_new(
             "node-a".parse().expect("valid machine name"),
             8,
             16_384,
             None,
-            vec!["Kani-only".to_owned()],
+            many_rules,
             42,
         )
         .expect("valid operator capacity");
         assert_eq!(capacity.max_agents, None);
+        assert_eq!(capacity.owner_rules.len(), 33);
+        assert!(capacity.owner_rules.iter().all(|rule| rule.len() == 501));
     }
 
     #[test]

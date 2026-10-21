@@ -135,7 +135,6 @@ pub struct StatusReply {
     /// Decisions required from the project owner.
     pub owner_decisions: Vec<StatusItem>,
     /// Assigned by the store on receipt, never trusted from input.
-    #[serde(default)]
     pub submitted_at_ms: u64,
 }
 impl StatusReply {
@@ -259,6 +258,26 @@ mod tests {
         assert!(StatusItem::new("\u{1b}[31mred").is_err());
         assert!(StatusItem::new("x".repeat(MAX_STATUS_ITEM_BYTES + 1)).is_err());
         assert!(StatusItem::new("  ").is_err());
+    }
+
+    /// Trace: FR-056-AC-3
+    #[test]
+    fn reply_requires_submitted_at_timestamp_on_the_wire() {
+        let reply = StatusReply {
+            request_id: "request-1".parse().unwrap(),
+            agent: "review-lane".parse().unwrap(),
+            tickets: vec![],
+            pull_requests: vec![],
+            blocker_ticket_ids: vec![],
+            lane_state: LaneState::Active,
+            spare_coder_slots: 0,
+            owner_decisions: vec![],
+            submitted_at_ms: 1_700_000_000_000,
+        };
+        let mut wire = serde_json::to_value(reply).unwrap();
+        wire.as_object_mut().unwrap().remove("submitted_at_ms");
+
+        assert!(serde_json::from_value::<StatusReply>(wire).is_err());
     }
     /// Trace: FR-056-AC-3
     #[test]
