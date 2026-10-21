@@ -26,6 +26,7 @@ fn test_url() -> Option<String> {
     Some(url)
 }
 
+/// Trace: FR-049-AC-1
 #[test]
 fn json_inbox_is_an_empty_report_when_there_is_nothing_pending() {
     let Some(url) = test_url() else { return };
@@ -33,17 +34,19 @@ fn json_inbox_is_an_empty_report_when_there_is_nothing_pending() {
     agent_msg(&["register"], "hub:EA:code", &url, &prefix);
 
     let stdout = agent_msg(&["inbox", "--json"], "hub:EA:code", &url, &prefix);
+    assert_eq!(stdout, "{\"messages\":[],\"rejected\":[]}\n");
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("json stdout");
     assert_eq!(parsed, serde_json::json!({"messages": [], "rejected": []}));
 }
 
+/// Trace: FR-049-AC-1
 #[test]
 fn json_inbox_prints_pending_messages_with_a_rendered_line_and_pops_them() {
     let Some(url) = test_url() else { return };
     let prefix = format!("test:{}:inboxjson:pop:", std::process::id());
     agent_msg(&["register"], "hub:EA:code", &url, &prefix);
     agent_msg(
-        &["send", "hub:EA:code", "hi", "there"],
+        &["send", "hub:EA:code", "hi\n\"there\""],
         "hub:EA:sender",
         &url,
         &prefix,
@@ -55,13 +58,20 @@ fn json_inbox_prints_pending_messages_with_a_rendered_line_and_pops_them() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["from"], "hub:EA:sender");
     assert_eq!(messages[0]["to"], "hub:EA:code");
-    assert_eq!(messages[0]["text"], "hi there");
+    assert_eq!(messages[0]["text"], "hi\n\"there\"");
     assert!(messages[0]["sent_at_ms"].is_i64());
     assert_eq!(
         messages[0]["rendered"],
-        "[ix-relay] from hub:EA:sender: hi there"
+        "[ix-relay] from hub:EA:sender: hi\n    \"there\""
     );
     assert_eq!(parsed["rejected"], serde_json::json!([]));
+    let sent_at_ms = messages[0]["sent_at_ms"].as_i64().unwrap();
+    assert_eq!(
+        stdout,
+        format!(
+            "{{\"messages\":[{{\"from\":\"hub:EA:sender\",\"to\":\"hub:EA:code\",\"text\":\"hi\\n\\\"there\\\"\",\"sent_at_ms\":{sent_at_ms},\"rendered\":\"[ix-relay] from hub:EA:sender: hi\\n    \\\"there\\\"\"}}],\"rejected\":[]}}\n"
+        )
+    );
 
     // Popped: a second call sees nothing left.
     let stdout = agent_msg(&["inbox", "--json"], "hub:EA:code", &url, &prefix);

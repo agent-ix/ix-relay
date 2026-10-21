@@ -16,6 +16,7 @@ mod hook;
 mod hook_run;
 mod identity;
 mod inbox_report;
+mod json;
 mod render;
 mod report;
 mod retry;
@@ -497,8 +498,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
             let popped = relay.pop_inbox(&name, max)?;
             if json {
                 let report = InboxReport::new(&popped, &display_book(&mut relay, &redial));
-                serde_json::to_writer(&mut out, &report)?;
-                writeln!(out)?;
+                json::write_line(&mut out, &report)?;
             } else {
                 if popped.messages.is_empty() {
                     writeln!(out, "inbox empty")?;
@@ -592,8 +592,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
             }
             if json {
                 for row in &report.rows {
-                    serde_json::to_writer(&mut out, &find::FoundJson::from(row))?;
-                    writeln!(out)?;
+                    json::write_line(&mut out, &find::FoundJson::from(row))?;
                 }
             } else {
                 if report.rows.is_empty() {
@@ -716,11 +715,10 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
             });
             match &identity {
                 Some(id) if json => {
-                    serde_json::to_writer(
+                    json::write_line(
                         &mut out,
                         &identity::WhoamiJson::lead(id, address.as_deref()),
                     )?;
-                    writeln!(out)?;
                 }
                 Some(id) => {
                     if let Some(address) = &address {
@@ -730,8 +728,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                     writeln!(out)?;
                 }
                 None if json => {
-                    serde_json::to_writer(&mut out, &identity::WhoamiJson::not_a_lead())?;
-                    writeln!(out)?;
+                    json::write_line(&mut out, &identity::WhoamiJson::not_a_lead())?;
                 }
                 None => writeln!(out, "not a lead")?,
             }

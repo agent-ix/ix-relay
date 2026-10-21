@@ -378,6 +378,7 @@ fn tc_029_05_doctor_changes_nothing() {
 
 /// Tracing: TC-029-06
 /// ACs: FR-029-AC-6
+/// Trace: FR-049-AC-1
 ///
 /// The JSON is one typed object: `ok` and `checks`, each check with exactly the
 /// documented fields, a stable code and one of three statuses.
@@ -386,6 +387,11 @@ fn tc_029_06_the_json_output_is_typed() {
     let world = World::new("redis://127.0.0.1:1", "json");
     let run = world.run(&["--json"]);
     assert_eq!(run.stdout.trim().lines().count(), 1, "one JSON line");
+    assert!(
+        run.stdout
+            .starts_with("{\"ok\":false,\"strict\":false,\"checks\":[")
+    );
+    assert!(run.stdout.ends_with("]}\n"));
     let report = json(&run);
     let mut top: Vec<_> = report.as_object().unwrap().keys().cloned().collect();
     top.sort();
@@ -601,6 +607,7 @@ fn tc_029_03_a_slow_multi_call_scan_is_cut_by_the_one_deadline() {
 
 /// Tracing: TC-029-10
 /// ACs: FR-029-AC-10
+/// Trace: FR-049-AC-2
 ///
 /// A closed pipe is not a failure of the relay: `agent-msg doctor | head` exits
 /// with the relay's health (0 here), not 1.
@@ -613,22 +620,24 @@ fn tc_029_10_a_closed_pipe_exits_with_the_relays_health() {
     world.watcher_file(std::process::id());
     // A slow herdr so the reader has closed the pipe long before doctor writes.
     stub(world.bin.path(), "herdr", "#!/bin/sh\nexec /bin/sleep 3\n");
-    let mut cmd = support::base_cmd(&["doctor"], None);
-    cmd.env("IX_RELAY_URL", &world.url)
-        .env("IX_RELAY_PREFIX", &world.prefix)
-        .env("IX_RELAY_MACHINE", MACHINE)
-        .env("IX_RELAY_CONFIG", world.config.path().join("config.toml"))
-        .env("PATH", world.bin.path())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let mut child = cmd.spawn().unwrap();
-    drop(child.stdout.take());
-    let status = child.wait().unwrap();
-    assert_eq!(
-        status.code(),
-        Some(0),
-        "a healthy relay exits 0 with a closed pipe"
-    );
+    for args in [&["doctor"][..], &["doctor", "--json"][..]] {
+        let mut cmd = support::base_cmd(args, None);
+        cmd.env("IX_RELAY_URL", &world.url)
+            .env("IX_RELAY_PREFIX", &world.prefix)
+            .env("IX_RELAY_MACHINE", MACHINE)
+            .env("IX_RELAY_CONFIG", world.config.path().join("config.toml"))
+            .env("PATH", world.bin.path())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        drop(child.stdout.take());
+        let status = child.wait().unwrap();
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "a healthy relay exits 0 with a closed pipe for {args:?}"
+        );
+    }
 }
 
 /// Tracing: TC-043-07

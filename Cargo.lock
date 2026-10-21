@@ -21,6 +21,7 @@ dependencies = [
  "claude-wire",
  "herdr-cli",
  "ix-board",
+ "ix-cli-kit",
  "proptest",
  "redis",
  "relay-core",
@@ -1498,7 +1499,7 @@ dependencies = [
 [[package]]
 name = "ix-cli-kit"
 version = "0.1.0"
-source = "git+https://github.com/agent-ix/ix-cli-kit?branch=main#be26cf02836e25f8ec7efa6de51e974d331a5816"
+source = "git+https://github.com/agent-ix/ix-cli-kit?branch=main#7f3b58b6a65e237bf733437c1c10cd609c84f835"
 dependencies = [
  "keyring",
  "serde",
@@ -2642,6 +2643,7 @@ dependencies = [
  "clap",
  "claude-wire",
  "herdr-cli",
+ "ix-cli-kit",
  "nix",
  "proptest",
  "redis",

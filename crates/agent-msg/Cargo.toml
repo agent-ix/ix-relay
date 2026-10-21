@@ -13,6 +13,7 @@ publish = false
 workspace = true
 
 [dependencies]
+ix-cli-kit.workspace = true
 ix-board.workspace = true
 claude-wire.workspace = true
 relay-core.workspace = true
