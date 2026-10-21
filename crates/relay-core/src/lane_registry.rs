@@ -131,6 +131,7 @@ pub fn focus_is_stale(now_ms: i64, set_at_ms: i64, max_age_ms: u64) -> bool {
 mod tests {
     use super::*;
 
+    /// Trace: FR-057-AC-4, FR-057-AC-5
     #[test]
     fn focus_staleness_marks_old_records_without_hiding_future_records() {
         assert!(!focus_is_stale(10_000, 9_000, 1_000));

@@ -251,13 +251,16 @@ mod tests {
             assert!(id.parse::<StatusRequestId>().is_err());
         }
     }
+    /// Trace: FR-056-AC-3
     #[test]
     fn items_reject_unsafe_or_oversized_text() {
         assert!(StatusItem::new("SWM-102 in progress").is_ok());
+        assert!(StatusItem::new("x".repeat(MAX_STATUS_ITEM_BYTES)).is_ok());
         assert!(StatusItem::new("\u{1b}[31mred").is_err());
         assert!(StatusItem::new("x".repeat(MAX_STATUS_ITEM_BYTES + 1)).is_err());
         assert!(StatusItem::new("  ").is_err());
     }
+    /// Trace: FR-056-AC-3
     #[test]
     fn reply_enforces_bounded_lists_and_ticket_keys() {
         let agent = "lead".parse().unwrap();
@@ -275,6 +278,11 @@ mod tests {
         assert!(reply.validate().is_ok());
         reply.blocker_ticket_ids[0] = StatusItem::new("not a ticket").unwrap();
         assert!(reply.validate().is_err());
+        reply.blocker_ticket_ids[0] = StatusItem::new("SWM-107").unwrap();
+        reply.tickets = vec![StatusItem::new("SWM-107").unwrap(); MAX_STATUS_ITEMS];
+        assert!(reply.validate().is_ok());
+        reply.tickets.push(StatusItem::new("SWM-107").unwrap());
+        assert!(reply.validate().is_err());
     }
     #[test]
     fn responder_set_is_unique_and_excludes_requester() {
@@ -288,5 +296,18 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// Trace: FR-056-AC-1
+    #[test]
+    fn request_recipient_count_is_bounded() {
+        let requester = "requester".parse().unwrap();
+        let agents = (0..MAX_STATUS_AGENTS)
+            .map(|index| format!("lane-{index}").parse().unwrap())
+            .collect::<Vec<AgentName>>();
+        assert!(validate_request(&requester, &agents).is_ok());
+        let mut too_many = agents;
+        too_many.push("lane-over-limit".parse().unwrap());
+        assert!(validate_request(&requester, &too_many).is_err());
     }
 }
