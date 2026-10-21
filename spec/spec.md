@@ -61,6 +61,9 @@ This specification governs:
 - Session queue identities, canonical public locations and rejection of ambiguous tabs.
 - Escalations: identifiers, status transitions and text safety.
 - Configuration: precedence and malformed-file behaviour.
+- Repeatable program review: fixed-form lane status requests and replies,
+  explicitly reported lane focus, and operator-entered server capacity grouped
+  with registered lanes.
 - Failure visibility and self-healing (AGE-2033): watcher liveness, `agent-msg
   doctor`, hook-failure spooling, dead letters, undeliverable-recipient state,
   stable-id identity across moves and renames, herdr version checks and
@@ -268,6 +271,7 @@ lands.
 | Requirement | Gap on `main` | Ticket |
 |---|---|---|
 | [NFR-003](./non-functional/NFR-003-watcher-keeps-running.md) (rows 2, 3) | the watcher exits after 60 s without a successful poll and relies on a service manager | AGE-2033 |
+| [FR-056](./functional/FR-056-repeatable-program-review-status.md) to [FR-058](./functional/FR-058-explicit-server-capacity.md) | fixed-form status requests/replies, lane-focus reporting, and operator-set capacity are not on `main` | SWM-107, SWM-108, SWM-109 |
 | [FR-028](./functional/FR-028-watcher-heartbeat.md) to [FR-037](./functional/FR-037-escalation-retention.md) | built by AGE-2033: watcher heartbeat (FR-028), `agent-msg doctor` (FR-029), herdr version and shape check (FR-036). Built by AGE-2033 as [FR-043](./functional/FR-043-moves-and-renames-are-followed-and-recorded.md): following a session to its new pane, rename and relink events, and the `who` line for a pane that hosts another session (FR-032-AC-4). Built by AGE-2033 as [FR-041](./functional/FR-041-send-prints-the-recipients-state.md): the `send` state line (FR-032-AC-1 and AC-3). Not built: dead letters (FR-031), the workspace and tab ids of FR-033/FR-034 and their 7-day, 10,000-event log, old-address refusal (FR-035), escalation retention (FR-037) | AGE-2033 |
 
 Closed by AGE-2032 and removed from this table: FR-020 (a popped batch stays in
