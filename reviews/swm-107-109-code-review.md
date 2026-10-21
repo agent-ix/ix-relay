@@ -45,6 +45,10 @@ Reviewed PR #26 at `e35e6b9835ad2baad8494b0296cb6f2b4f0d0601` for the SWM-107–
 - GitHub CI workflow files are unchanged. PR body already references SWM-107, so no PR comment was needed.
 - Redis-backed request/redelivery and focus/capacity persistence behavior could not be run against Redis in this environment.
 
+## Current-head follow-up (`1b21e665673f0213469713a485b01634b597b9ef`)
+
+Reviewed the added unknown-slot behavior and rechecked the prior findings. `StatusReply.spare_coder_slots` is now `Option<u16>`; omitting the CLI flag stores `None`, which serde emits as JSON `null`, while an explicit count remains numeric. `tc_056_status_commands_parse_arguments_and_report_the_collection_contract` asserts both an explicit value (`2`) and an omitted value (`null`), and FR-056-AC-4 specifies that contract. The prior Clippy and CLI-coverage findings remain fixed. No new findings.
+
 
 ## Dispositions
 
