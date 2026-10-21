@@ -22,6 +22,7 @@ mod retry;
 mod send_state;
 mod since;
 mod spool;
+mod status_request;
 mod stdin;
 mod work;
 
@@ -120,7 +121,42 @@ enum Cmd {
         in_flight: bool,
     },
     /// List registered leads.
-    Who,
+    Who {
+        /// Include each lead's explicitly reported focus and freshness.
+        #[arg(long, conflicts_with = "servers")]
+        focus: bool,
+        /// Group registered lanes by server and show operator-set capacity.
+        #[arg(long, conflicts_with = "focus")]
+        servers: bool,
+        /// Mark focus older than this age as stale (for example `7d` or `12h`).
+        #[arg(long, default_value = "7d", requires = "focus")]
+        stale_after: Since,
+    },
+    /// Set or clear this lead's lane focus.
+    Focus {
+        /// The current project, layer, or ticket focus.
+        focus: Option<String>,
+        /// Clear this lane's focus.
+        #[arg(long, conflicts_with = "focus")]
+        clear: bool,
+    },
+    /// Manage operator-entered build-server capacity.
+    ServerCapacity {
+        #[command(subcommand)]
+        cmd: ServerCapacityCmd,
+    },
+    /// Ask selected registered lanes for the fixed program-review status form.
+    StatusRequest {
+        /// `all`, or comma-separated full lane addresses.
+        lanes: String,
+    },
+    /// Submit one structured response to a status request.
+    StatusReply(status_request::StatusReplyArgs),
+    /// Return structured replies and lanes that have not responded yet.
+    StatusReplies {
+        /// Request ID from `status-request`.
+        request_id: String,
+    },
     /// Look up a live lead by address, workspace/tab label, session name,
     /// pane id or `server:workspace[:tab[:pane]]` address, joining the bus registry
     /// against live herdr state on this machine and every saved one
@@ -234,6 +270,32 @@ enum EscalationCmd {
     PostLinear {
         /// The escalation id, e.g. `e7`.
         id: relay_core::EscalationId,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServerCapacityCmd {
+    /// Record explicit capacity for one server.
+    Set {
+        /// Relay server name such as terra, luna, titan, or draco.
+        server: String,
+        /// Cores allocated to agent work.
+        #[arg(long)]
+        cores: u32,
+        /// RAM in GiB.
+        #[arg(long)]
+        ram_gib: u32,
+        /// Optional maximum number of agents.
+        #[arg(long)]
+        max_agents: Option<u32>,
+        /// Operator-entered constraints, such as `Kani team only`.
+        #[arg(long = "owner-rule")]
+        owner_rules: Vec<String>,
+    },
+    /// Remove explicit capacity for one server.
+    Clear {
+        /// Relay server name.
+        server: String,
     },
 }
 
@@ -512,74 +574,124 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 eprintln!("agent-msg: dropped one inbox entry: {e}");
             }
         }
-        Cmd::Who => {
-            let (list, replaced, holding) = retry::read(&mut relay, &redial, |r| {
-                let list = r.agents()?;
-                let names: Vec<&AgentName> = list.registrations.iter().map(|x| &x.name).collect();
-                let replaced = r.panes_replaced(&names);
-                // Mail left for a replaced session is forwarded or dead-lettered by the
-                // watcher (FR-053): only a lead that still holds some is undeliverable. A
-                // failed read of an inbox leaves the lead marked.
-                let lens = r.inbox_lens(&names)?;
-                let holding: std::collections::BTreeSet<AgentName> = names
-                    .iter()
-                    .zip(lens)
-                    .filter(|(_, len)| !matches!(len, Ok(0)))
-                    .map(|(name, _)| (*name).clone())
-                    .collect();
-                Ok((list, replaced, holding))
-            })?;
-            // Whether a pane now hosts another session is extra: a failed read of
-            // it is said, and the listing is still printed.
-            let replaced = replaced.map(|p| p.found).unwrap_or_else(|e| {
-                eprintln!("agent-msg who: could not read which panes were replaced: {e}");
-                std::collections::BTreeMap::new()
-            });
-            let registrations =
-                list.into_registrations_reporting(|skipped| eprintln!("agent-msg who: {skipped}"));
-            // The address column follows the one shown-address rule (a lead's
-            // tab is dropped only when it is alone in its workspace), so it needs
-            // the whole registry, which is in hand.
-            let book = AddressBook::from_registrations(&registrations);
-            for r in registrations {
-                let address = book
-                    .place_address(&r.name)
-                    .map_or_else(|| "-".to_owned(), ToString::to_string);
-                // Registration fields come from whoever registered: one line, no
-                // escape codes, before they reach this terminal.
-                let line = relay_core::text::sanitise_line;
-                let cwd = line(r.cwd.as_deref().unwrap_or("-"));
-                let pane = r.herdr_pane.as_ref().map_or("-", PaneId::as_str);
-                let (machine, kind) = (r.machine.as_str(), line(&r.kind));
-                let seen = clock(r.last_seen_ms);
-                let place_cache = match r
-                    .verified_place()
-                    .and_then(|place| place.herdr_ids.as_ref())
-                {
-                    Some(ids) if ids.is_stale(now_ms()) => {
-                        format!("cache stale: {}:{}", ids.workspace, ids.tab)
-                    }
-                    Some(ids) => format!("Herdr {}:{}", ids.workspace, ids.tab),
-                    None => "location unverified".to_owned(),
-                };
-                write!(
-                    out,
-                    "{address}  {machine}  {kind}  seen {seen}  pane {pane}  {cwd}  {place_cache}"
-                )?;
-                // FR-032: the watcher found this lead's pane hosting another
-                // session, so what is listed for it is stale, not live.
-                if let Some(found) = replaced
-                    .get(&r.name)
-                    .filter(|f| f.describes(&r) && holding.contains(&r.name))
-                {
+        Cmd::Who {
+            focus,
+            servers,
+            stale_after,
+        } => {
+            if focus {
+                status_request::focus_list(&mut relay, stale_after, &mut out)?;
+            } else if servers {
+                status_request::server_list(&mut relay, &mut out)?;
+            } else {
+                let (list, replaced, holding) = retry::read(&mut relay, &redial, |r| {
+                    let list = r.agents()?;
+                    let names: Vec<&AgentName> =
+                        list.registrations.iter().map(|x| &x.name).collect();
+                    let replaced = r.panes_replaced(&names);
+                    // Mail left for a replaced session is forwarded or dead-lettered by the
+                    // watcher (FR-053): only a lead that still holds some is undeliverable. A
+                    // failed read of an inbox leaves the lead marked.
+                    let lens = r.inbox_lens(&names)?;
+                    let holding: std::collections::BTreeSet<AgentName> = names
+                        .iter()
+                        .zip(lens)
+                        .filter(|(_, len)| !matches!(len, Ok(0)))
+                        .map(|(name, _)| (*name).clone())
+                        .collect();
+                    Ok((list, replaced, holding))
+                })?;
+                // Whether a pane now hosts another session is extra: a failed read of
+                // it is said, and the listing is still printed.
+                let replaced = replaced.map(|p| p.found).unwrap_or_else(|e| {
+                    eprintln!("agent-msg who: could not read which panes were replaced: {e}");
+                    std::collections::BTreeMap::new()
+                });
+                let registrations = list
+                    .into_registrations_reporting(|skipped| eprintln!("agent-msg who: {skipped}"));
+                // The address column follows the one shown-address rule (a lead's
+                // tab is dropped only when it is alone in its workspace), so it needs
+                // the whole registry, which is in hand.
+                let book = AddressBook::from_registrations(&registrations);
+                for r in registrations {
+                    let address = book
+                        .place_address(&r.name)
+                        .map_or_else(|| "-".to_owned(), ToString::to_string);
+                    // Registration fields come from whoever registered: one line, no
+                    // escape codes, before they reach this terminal.
+                    let line = relay_core::text::sanitise_line;
+                    let cwd = line(r.cwd.as_deref().unwrap_or("-"));
+                    let pane = r.herdr_pane.as_ref().map_or("-", PaneId::as_str);
+                    let (machine, kind) = (r.machine.as_str(), line(&r.kind));
+                    let seen = clock(r.last_seen_ms);
+                    let place_cache = match r
+                        .verified_place()
+                        .and_then(|place| place.herdr_ids.as_ref())
+                    {
+                        Some(ids) if ids.is_stale(now_ms()) => {
+                            format!("cache stale: {}:{}", ids.workspace, ids.tab)
+                        }
+                        Some(ids) => format!("Herdr {}:{}", ids.workspace, ids.tab),
+                        None => "location unverified".to_owned(),
+                    };
                     write!(
                         out,
-                        "  UNDELIVERABLE: pane {pane} now hosts another session (since {})",
-                        clock(found.since_ms)
+                        "{address}  {machine}  {kind}  seen {seen}  pane {pane}  {cwd}  {place_cache}"
                     )?;
+                    // FR-032: the watcher found this lead's pane hosting another
+                    // session, so what is listed for it is stale, not live.
+                    if let Some(found) = replaced
+                        .get(&r.name)
+                        .filter(|f| f.describes(&r) && holding.contains(&r.name))
+                    {
+                        write!(
+                            out,
+                            "  UNDELIVERABLE: pane {pane} now hosts another session (since {})",
+                            clock(found.since_ms)
+                        )?;
+                    }
+                    writeln!(out)?;
                 }
-                writeln!(out)?;
             }
+        }
+        Cmd::Focus { focus, clear } => {
+            let focus = if clear {
+                None
+            } else {
+                Some(focus.ok_or("provide focus text or use --clear")?)
+            };
+            status_request::set_focus(focus, &mut relay, &settings.machine.value, &mut out)?;
+        }
+        Cmd::ServerCapacity { cmd } => match cmd {
+            ServerCapacityCmd::Set {
+                server,
+                cores,
+                ram_gib,
+                max_agents,
+                owner_rules,
+            } => {
+                status_request::set_capacity(
+                    server,
+                    cores,
+                    ram_gib,
+                    max_agents,
+                    owner_rules,
+                    &mut relay,
+                    &mut out,
+                )?;
+            }
+            ServerCapacityCmd::Clear { server } => {
+                status_request::clear_capacity(server, &mut relay, &mut out)?;
+            }
+        },
+        Cmd::StatusRequest { lanes } => {
+            status_request::request(lanes, &mut relay, &settings.machine.value, &mut out)?;
+        }
+        Cmd::StatusReply(args) => {
+            status_request::reply(args, &mut relay, &settings.machine.value, &mut out)?;
+        }
+        Cmd::StatusReplies { request_id } => {
+            status_request::replies(request_id, &mut relay, &mut out)?;
         }
         Cmd::Find { query, json } => {
             let query = query.unwrap_or_default();
