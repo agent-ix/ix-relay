@@ -46,3 +46,18 @@ Repository-driven gap analysis for the SWM-107–109 implementation. The new sta
 - Untraced changed behavior: 3 feature groups (status request/replies, focus, server capacity); no placeholder source or test implementations found in changed files.
 - Semantic review: skipped (optional and not requested).
 - Redis integration evidence: unavailable because `IX_RELAY_TEST_URL` is unset. The affected tests compile and are wired to return early when the URL is absent; their runtime behavior remains unverified here.
+
+
+## Dispositions
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | FR-056 now specifies status request, reply, retention, and collection behavior. Its three acceptance criteria are tagged by the new CLI integration test. |
+| FND-002 | fixed | FR-057 now specifies focus set/clear, display, and stale marking. Its three acceptance criteria are tagged by the new CLI integration test. |
+| FND-003 | fixed | FR-058 now specifies operator-entered capacity and grouped lane display. Its two acceptance criteria are tagged by the new CLI integration test. |
+
+After excerpts, verified in commit d34cf353:
+
+> **FND-001 after_excerpt:** Given a partly answered request, `status-replies` emits JSON with the request id, requested lanes, replies, and nonresponders.
+> **FND-002 after_excerpt:** Given a focus older than the configured stale age, `who --focus --stale-after` marks it `STALE` and still prints the focus.
+> **FND-003 after_excerpt:** Given registered lanes on multiple servers, `who --servers` groups their names by server and displays the explicit capacity or unset state.

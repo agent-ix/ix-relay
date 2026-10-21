@@ -44,3 +44,38 @@ Reviewed PR #26 at `e35e6b9835ad2baad8494b0296cb6f2b4f0d0601` for the SWM-107–
 - `cargo deny check`: exited 0; it reported existing workspace dependency and yanked crate warnings.
 - GitHub CI workflow files are unchanged. PR body already references SWM-107, so no PR comment was needed.
 - Redis-backed request/redelivery and focus/capacity persistence behavior could not be run against Redis in this environment.
+
+
+## Dispositions
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | Commit d34cf353 replaces the cloned one-item slice with `std::slice::from_ref`. |
+| FND-002 | fixed | Commit d34cf353 adds direct CLI integration tests for status request/reply collection, focus, and server capacity. The tests were skipped at runtime here because Redis is unavailable. |
+
+After excerpts, verified in commit d34cf353:
+
+- FND-001: `assert!(validate_request(&requester, std::slice::from_ref(&requester)).is_err());`
+- FND-002: `fn tc_056_status_commands_parse_arguments_and_report_the_collection_contract()` invokes `status-request`, `status-reply`, and `status-replies`; `fn tc_057_focus_commands_set_clear_and_render_stale_focus()` invokes `focus` and `who --focus`; `fn tc_058_capacity_commands_record_clear_and_group_server_lanes()` invokes `server-capacity` and `who --servers`.
+
+
+## Disposition pass 1 scope additions
+
+| Unit | Role | Excerpt |
+| --- | --- | --- |
+| FR-056-AC-1 | examined | Given `all` or explicit registered addresses, `status-request` creates a request id, reports the selected lanes, and reports each enqueue outcome; unknown, duplicate, and self lanes are refused. |
+| FR-056-AC-2 | examined | Given a request id, a selected lane can store one valid fixed-form reply; an unrequested lane is refused and a later reply cannot replace the first. |
+| FR-056-AC-3 | examined | Given a partly answered request, `status-replies` emits JSON with the request id, requested lanes, replies, and nonresponders. |
+| FR-057-AC-1 | examined | Given a registered lead, `focus <text>` stores that text and `focus --clear` removes it. |
+| FR-057-AC-2 | examined | Given registered lanes with set and unset focus, `who --focus` displays each lane, its focus or unset state, and the set time. |
+| FR-057-AC-3 | examined | Given a focus older than the configured stale age, `who --focus --stale-after` marks it `STALE` and still prints the focus. |
+| FR-058-AC-1 | examined | Given valid capacity values, `server-capacity set` records them and reports the server; `clear` removes the record. |
+| FR-058-AC-2 | examined | Given registered lanes on multiple servers, `who --servers` groups their names by server and displays the explicit capacity or unset state. |
+
+## New findings (disposition pass 1)
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-003 | medium | FR-056's new CLI test does not exercise the acceptance criteria's rejection or partial-collection cases | crates/agent-msg/tests/program_review.rs:45-106 |
+
+The test covers one explicitly selected lane, a valid reply, a repeated identical reply, and a fully answered collection. It does not test `all`, unknown/duplicate/self-targeted lanes, an unrequested responder, a changed second reply, or a partly answered CLI collection with a nonresponder. Those acceptance branches can regress while the newly tagged tests stay green.

@@ -42,18 +42,100 @@ fn tc_056_status_commands_parse_arguments_and_report_the_collection_contract() {
         assert_success(&result, &["register"]);
     }
 
-    let requested = run(
-        &["status-request", "hub:EA:code"],
-        "hub:EA:sender",
-        &url,
-        &prefix,
+    let mut relay = Relay::connect(&url, Duration::from_secs(2))
+        .unwrap()
+        .with_prefix(prefix.clone());
+    relay
+        .register(&Registration {
+            name: "review-lane".parse().unwrap(),
+            machine: "hub".parse().unwrap(),
+            kind: "codex".into(),
+            session_id: Some("review-lane-session".parse().unwrap()),
+            cwd: None,
+            herdr_pane: None,
+            place: Some(Place {
+                workspace: "EA".into(),
+                tab: "review".into(),
+                herdr_ids: None,
+            }),
+            last_seen_ms: 1,
+        })
+        .unwrap();
+
+    for target in ["hub:EA:missing", "hub:EA:code,hub:EA:code", "hub:EA:sender"] {
+        let args = ["status-request", target];
+        let refused = run(&args, "hub:EA:sender", &url, &prefix);
+        assert_ne!(refused.status, 0, "target {target:?} was accepted");
+        assert!(
+            !refused.stderr.is_empty(),
+            "target {target:?}: {}",
+            refused.stderr
+        );
+    }
+
+    let all_args = ["status-request", "all"];
+    let all_result = run(&all_args, "hub:EA:sender", &url, &prefix);
+    assert_success(&all_result, &all_args);
+    let all: serde_json::Value = serde_json::from_str(all_result.stdout.trim()).unwrap();
+    let hub: relay_core::MachineName = "hub".parse().unwrap();
+    let code_name = relay_core::AgentName::for_session(&hub, &"s1".parse().unwrap());
+    let sender_name = relay_core::AgentName::for_session(&hub, &"sender-session".parse().unwrap());
+    let all_requested = all["requested"].as_array().unwrap();
+    assert_eq!(all_requested.len(), 2);
+    assert!(all_requested.contains(&serde_json::json!("review-lane")));
+    assert!(all_requested.contains(&serde_json::json!(code_name.as_str())));
+    assert!(!all_requested.contains(&serde_json::json!(sender_name.as_str())));
+    assert!(
+        all["deliveries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|delivery| delivery["outcome"] == "queued")
     );
-    assert_success(&requested, &["status-request", "hub:EA:code"]);
+
+    let requested_args = ["status-request", "hub:EA:code"];
+    let requested = run(&requested_args, "hub:EA:sender", &url, &prefix);
+    assert_success(&requested, &requested_args);
     let request: serde_json::Value = serde_json::from_str(requested.stdout.trim()).unwrap();
     let request_id = request["request_id"].as_str().expect("request id");
     let requested_lane = request["requested"][0].as_str().expect("requested lane");
     assert!(!requested_lane.is_empty());
     assert_eq!(request["deliveries"][0]["outcome"], "queued");
+
+    let reviewer_request_args = ["status-request", "review-lane"];
+    let reviewer_request = run(&reviewer_request_args, "hub:EA:sender", &url, &prefix);
+    assert_success(&reviewer_request, &reviewer_request_args);
+    let reviewer_request_report: serde_json::Value =
+        serde_json::from_str(reviewer_request.stdout.trim()).unwrap();
+    let reviewer_request_id = reviewer_request_report["request_id"]
+        .as_str()
+        .expect("reviewer request id");
+    let unrequested_args = [
+        "status-reply",
+        reviewer_request_id,
+        "--state",
+        "idle",
+        "--spare-coder-slots",
+        "1",
+    ];
+    let unrequested = run(&unrequested_args, "hub:EA:code", &url, &prefix);
+    assert_ne!(unrequested.status, 0);
+    assert!(!unrequested.stderr.is_empty(), "{}", unrequested.stderr);
+
+    let replies_args = ["status-replies", request_id];
+    let partial = run(&replies_args, "hub:EA:sender", &url, &prefix);
+    assert_success(&partial, &replies_args);
+    let partial_report: serde_json::Value = serde_json::from_str(partial.stdout.trim()).unwrap();
+    assert_eq!(partial_report["request_id"], request_id);
+    assert_eq!(
+        partial_report["requested"],
+        serde_json::json!([requested_lane])
+    );
+    assert_eq!(partial_report["replies"], serde_json::json!([]));
+    assert_eq!(
+        partial_report["nonresponders"],
+        serde_json::json!([requested_lane])
+    );
 
     let reply_args = [
         "status-reply",
@@ -74,14 +156,24 @@ fn tc_056_status_commands_parse_arguments_and_report_the_collection_contract() {
     let first = run(&reply_args, "hub:EA:code", &url, &prefix);
     assert_success(&first, &reply_args);
     assert_eq!(first.stdout.trim(), "reply recorded");
-    let duplicate = run(&reply_args, "hub:EA:code", &url, &prefix);
-    assert_success(&duplicate, &reply_args);
+
+    let changed_reply_args = [
+        "status-reply",
+        request_id,
+        "--ticket",
+        "SWM-999",
+        "--state",
+        "blocked",
+        "--spare-coder-slots",
+        "0",
+    ];
+    let changed_duplicate = run(&changed_reply_args, "hub:EA:code", &url, &prefix);
+    assert_success(&changed_duplicate, &changed_reply_args);
     assert_eq!(
-        duplicate.stdout.trim(),
+        changed_duplicate.stdout.trim(),
         "reply already recorded; the first reply was kept"
     );
 
-    let replies_args = ["status-replies", request_id];
     let collected = run(&replies_args, "hub:EA:sender", &url, &prefix);
     assert_success(&collected, &replies_args);
     let report: serde_json::Value = serde_json::from_str(collected.stdout.trim()).unwrap();
