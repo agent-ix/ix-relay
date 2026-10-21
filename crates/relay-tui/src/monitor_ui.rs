@@ -600,27 +600,38 @@ mod tests {
             status: "Started".into(),
             priority: 2,
             sort_order: 0.0,
+            target_date: None,
             team_keys: vec![TeamKey("SWM".into())],
             milestones: vec![],
             initiatives: vec![],
         };
-        let issue = |n, category, parent: Option<&str>| Issue {
-            id: IssueId(format!("id-{n}")),
-            identifier: format!("SWM-{n}"),
-            title: "Shared Rust settings and OS credential store".into(),
-            description: None,
-            state: if category == WorkflowStateType::Completed {
-                "Done".into()
+        let issue = |n, category, parent: Option<&str>| {
+            let state = if category == WorkflowStateType::Completed {
+                "Done"
             } else {
-                "Review".into()
-            },
-            state_type: category,
-            parent_id: parent.map(|id| IssueId(id.into())),
-            team_key: TeamKey("SWM".into()),
-            project_id: Some(ProjectId("project".into())),
-            priority: 2.0,
-            sort_order: 0.0,
-            blocked_by: vec![],
+                "Review"
+            };
+            Issue {
+                id: IssueId(format!("id-{n}")),
+                identifier: format!("SWM-{n}"),
+                title: "Shared Rust settings and OS credential store".into(),
+                description: None,
+                state: state.into(),
+                state_name: state.into(),
+                state_type: category,
+                parent_id: parent.map(|id| IssueId(id.into())),
+                team_key: TeamKey("SWM".into()),
+                assignee_id: None,
+                project_id: Some(ProjectId("project".into())),
+                project_milestone_id: None,
+                priority: 2.0,
+                sort_order: 0.0,
+                blocked_by: vec![],
+                created_at: None,
+                updated_at: None,
+                attachment_urls: vec![],
+                attachments_complete: true,
+            }
         };
         let mut app = App {
             binding: Some(binding.clone()),
@@ -897,6 +908,7 @@ mod tests {
         let snapshot = app.tracker.value.as_mut().unwrap();
         let initiative = ix_board::Initiative {
             id: "initiative".into(),
+            identifier: "I-3".into(),
             name: "Program".into(),
         };
         snapshot.projects[0].initiatives.push(initiative.clone());
@@ -1016,6 +1028,7 @@ mod tests {
         let snapshot = app.tracker.value.as_mut().unwrap();
         snapshot.projects[0].initiatives.push(ix_board::Initiative {
             id: "program".into(),
+            identifier: "I-1".into(),
             name: "Program".into(),
         });
         snapshot.issues[2]
@@ -1025,6 +1038,7 @@ mod tests {
         ready.id = IssueId("ready".into());
         ready.identifier = "SWM-20".into();
         ready.state = "Specced".into();
+        ready.state_name = "Specced".into();
         ready.state_type = WorkflowStateType::Unstarted;
         ready.blocked_by.clear();
         snapshot.issues.push(ready);
@@ -1175,6 +1189,7 @@ mod tests {
         let snapshot = app.tracker.value.as_mut().unwrap();
         let ticket = snapshot.issues.last_mut().unwrap();
         ticket.state = "Specced".into();
+        ticket.state_name = "Specced".into();
         ticket.state_type = WorkflowStateType::Unstarted;
         ticket.priority = 1.0;
         let mut other = ticket.clone();
@@ -1275,6 +1290,7 @@ mod tests {
         let snapshot = app.tracker.value.as_mut().unwrap();
         snapshot.projects[0].initiatives.push(ix_board::Initiative {
             id: "parent".into(),
+            identifier: "I-2".into(),
             name: "Parent initiative".into(),
         });
         let mut foreign = snapshot.issues[2].clone();
