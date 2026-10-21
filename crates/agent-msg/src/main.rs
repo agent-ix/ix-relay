@@ -22,6 +22,7 @@ mod retry;
 mod send_state;
 mod since;
 mod spool;
+mod status;
 mod stdin;
 mod work;
 
@@ -144,6 +145,12 @@ enum Cmd {
         /// Exit 1 on a warning too (the default fails only on a failure).
         #[arg(long)]
         strict: bool,
+    },
+    /// Report this machine's relay, watcher and verified lead status.
+    Status {
+        /// Print a stable JSON object instead of the compact Herdr status text.
+        #[arg(long)]
+        json: bool,
     },
     /// Show recent message history.
     Log {
@@ -339,6 +346,9 @@ fn main() -> ExitCode {
     // and connects for itself.
     if let Cmd::Doctor { json, strict } = cli.cmd {
         return doctor::run(core_flags(&cli), json, strict);
+    }
+    if let Cmd::Status { json } = cli.cmd {
+        return status::run(core_flags(&cli), json);
     }
 
     // ~/.ix/relay/config.toml (AGE-2017), resolved flag > env > file >
@@ -736,7 +746,9 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 None => writeln!(out, "not a lead")?,
             }
         }
-        Cmd::Hook { .. } | Cmd::Doctor { .. } => unreachable!("handled in main"),
+        Cmd::Hook { .. } | Cmd::Doctor { .. } | Cmd::Status { .. } => {
+            unreachable!("handled in main")
+        }
     }
     Ok(())
 }

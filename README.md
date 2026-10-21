@@ -771,6 +771,7 @@ state can be read with Redis down; a `last_ok_tick_ms` more than about 20 second
 | `crates/herdr-cli` | shared herdr process-running/JSON-envelope plumbing for `agent-msg` and `relay-watcher` |
 | `plugins/claude` | Claude Code plugin: hooks a lead session into the bus |
 | `plugins/codex` | Codex plugin: hooks a lead session into the bus |
+| `plugins/herdr` | Herdr plugin and tab bar status indicator for any coding agent |
 
 Planned: `relay-tui` (escalation inbox), `plugins/opencode`.
 Tracked in Linear AGE-2007.
