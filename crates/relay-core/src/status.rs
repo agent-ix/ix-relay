@@ -227,7 +227,7 @@ pub(crate) fn validate_request(
     requester: &AgentName,
     agents: &[AgentName],
 ) -> Result<(), StatusError> {
-    if agents.is_empty() || agents.len() > MAX_STATUS_AGENTS || agents.contains(requester) {
+    if agents.len() > MAX_STATUS_AGENTS || agents.contains(requester) {
         return Err(StatusError::InvalidResponders);
     }
     let mut sorted = agents.iter().map(AgentName::as_str).collect::<Vec<_>>();
@@ -284,9 +284,11 @@ mod tests {
         reply.tickets.push(StatusItem::new("SWM-107").unwrap());
         assert!(reply.validate().is_err());
     }
+    /// Trace: FR-056-AC-1, FR-056-AC-5
     #[test]
     fn responder_set_is_unique_and_excludes_requester() {
         let requester = "lead".parse().unwrap();
+        assert!(validate_request(&requester, &[]).is_ok());
         assert!(validate_request(&requester, &["other".parse().unwrap()]).is_ok());
         assert!(validate_request(&requester, std::slice::from_ref(&requester)).is_err());
         assert!(
