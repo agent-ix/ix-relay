@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+data:
+  agent-spend.json: |-
+{{ .Files.Get "agent-spend.json" | indent 4 }}

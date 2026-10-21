@@ -1,5 +1,10 @@
 # Release notes
 
+## 0.3.4
+
+- Publish the versioned `agent-spend-dashboard` Helm chart for Grafana to consume.
+- Add the agent-facing procedure for configuring and troubleshooting Claude Code, Codex, and relay-watcher telemetry on Herdr machines.
+
 ## 0.3.3
 
 - Deliver stranded mail. When a lead's session is replaced or gone and exactly one verified session holds the same `server:workspace:tab` address, its queued mail moves there, each message marked as sent to a prior session with its original time and sender. With no holder, the mail is dead-lettered and the registration pruned at the 24-hour prune age.
