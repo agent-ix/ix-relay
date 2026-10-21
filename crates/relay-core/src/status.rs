@@ -280,7 +280,7 @@ mod tests {
     fn responder_set_is_unique_and_excludes_requester() {
         let requester = "lead".parse().unwrap();
         assert!(validate_request(&requester, &["other".parse().unwrap()]).is_ok());
-        assert!(validate_request(&requester, &[requester.clone()]).is_err());
+        assert!(validate_request(&requester, std::slice::from_ref(&requester)).is_err());
         assert!(
             validate_request(
                 &requester,
