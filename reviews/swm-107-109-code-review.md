@@ -59,6 +59,16 @@ After excerpts, verified in commit d34cf353:
 - FND-002: `fn tc_056_status_commands_parse_arguments_and_report_the_collection_contract()` invokes `status-request`, `status-reply`, and `status-replies`; `fn tc_057_focus_commands_set_clear_and_render_stale_focus()` invokes `focus` and `who --focus`; `fn tc_058_capacity_commands_record_clear_and_group_server_lanes()` invokes `server-capacity` and `who --servers`.
 
 
+### Round 2
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-003 | fixed | At `ab53e1141c1c9ea634eabf020e0d64b29b692919`, `tc_056_status_commands_parse_arguments_and_report_the_collection_contract` now exercises all and explicit selection, unknown/duplicate/self requests, an unrequested responder, partial collection JSON with a nonresponder, and changed-payload first-write-wins. Redis-backed execution is not independently confirmed in this environment: `make test-redis` could not fetch the pinned ix-board dependency because GitHub authentication failed. |
+
+After excerpt, verified at `crates/agent-msg/tests/program_review.rs` in `ab53e11`:
+
+- FND-003: `for target in ["hub:EA:missing", "hub:EA:code,hub:EA:code", "hub:EA:sender"] {` followed by nonzero and nonempty-stderr assertions; separate assertions cover `all`, unrequested reply rejection, partial JSON `replies=[]` plus the requested lane in `nonresponders`, and changed-payload duplicate reply preserving `SWM-107` / `active`.
+
 ## Disposition pass 1 scope additions
 
 | Unit | Role | Excerpt |
