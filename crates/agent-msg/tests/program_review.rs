@@ -365,18 +365,17 @@ fn tc_056_status_commands_parse_arguments_and_report_the_collection_contract() {
         assert_eq!(empty_collection[field], serde_json::json!([]));
     }
 
-    for missing in [
-        [
-            "status-reply",
-            minimal_request_id,
-            "--spare-coder-slots",
-            "0",
-        ],
-        ["status-reply", minimal_request_id, "--state", "active"],
-    ] {
-        let missing_required = run(&missing, "hub:EA:code", &url, &prefix);
-        assert_ne!(missing_required.status, 0);
-    }
+    let missing_state = [
+        "status-reply",
+        minimal_request_id,
+        "--spare-coder-slots",
+        "0",
+    ];
+    let missing_required = run(&missing_state, "hub:EA:code", &url, &prefix);
+    assert_ne!(missing_required.status, 0);
+    let missing_spare = ["status-reply", minimal_request_id, "--state", "active"];
+    let missing_required = run(&missing_spare, "hub:EA:code", &url, &prefix);
+    assert_ne!(missing_required.status, 0);
 
     let invalid_state = [
         "status-reply",
