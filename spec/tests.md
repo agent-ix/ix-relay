@@ -374,7 +374,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-057 | FR-057-AC-5 | TC-057-05 | 🚧 not written (SWM-108; equal-age and future-timestamp fresh boundary assertions are absent on main) |
 | FR-057 | FR-057-AC-6 | TC-057-06 | 🚧 not written (SWM-108; accepted/rejected duration syntax and overflow assertions are absent on main) |
 | FR-057 | FR-057-AC-7 | TC-057-07 | 🚧 not written (SWM-108; no-inferred-focus CLI assertion is absent on main) |
-| FR-058 | FR-058-AC-1 | TC-058-01 | 🚧 not written (SWM-109; operator capacity-set command assertion is absent on main) |
+| FR-058 | FR-058-AC-1 | TC-058-01 | 🚧 not written (SWM-109; explicit server-target capacity-set command assertion is absent on main) |
 | FR-058 | FR-058-AC-2 | TC-058-02 | 🚧 not written (SWM-109; operator capacity-clear command assertion is absent on main) |
 | FR-058 | FR-058-AC-3 | TC-058-03 | 🚧 not written (SWM-109; server grouping CLI assertion is absent on main) |
 | FR-058 | FR-058-AC-4 | TC-058-04 | 🚧 not written (SWM-109; unset capacity CLI assertion is absent on main) |
@@ -477,7 +477,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-057-05 | Given a focus age of exactly 30,000 ms or a future timestamp with `--stale-after 30s`, `who --focus` does not mark it stale. | Integration | FR-057-AC-5 | 🚧 not written |
 | TC-057-06 | Given duration values with accepted `s`, `m`, `h`, `d` suffixes and invalid fractional, signed, unitless, whitespace, unknown-unit, and overflowing forms, the parser accepts or refuses them as specified. | Integration | FR-057-AC-6 | 🚧 not written |
 | TC-057-07 | Given a registered lane with open tickets but no focus record, `who --focus` reports the lane as unset. | Integration | FR-057-AC-7 | 🚧 not written |
-| TC-058-01 | Given an operator-set capacity, the stored cores, RAM in MiB, optional agent limit, and zero or more supplied owner rules match the supplied values; omitted owner rules are stored as an empty list and RAM in MiB equals the input GiB converted to MiB. | Integration | FR-058-AC-1 | 🚧 not written |
+| TC-058-01 | Given `agent-msg server-capacity set <server>` with an explicit server name, the stored cores, RAM in MiB, optional agent limit, and zero or more supplied owner rules match the supplied values; omitted owner rules are stored as an empty list and RAM in MiB equals the input GiB converted to MiB. | Integration | FR-058-AC-1 | 🚧 not written |
 | TC-058-02 | Given capacities for two servers, clearing one leaves the other server's capacity unchanged. | Integration | FR-058-AC-2 | 🚧 not written |
 | TC-058-03 | Given registered lanes on multiple servers, `who --servers` groups each lane under its registered server and displays configured capacity. | Integration | FR-058-AC-3 | 🚧 not written |
 | TC-058-04 | Given a registered server with no capacity record, `who --servers` displays capacity as unset. | Integration | FR-058-AC-4 | 🚧 not written |

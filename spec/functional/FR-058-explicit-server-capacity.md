@@ -15,9 +15,10 @@ recorded it.
 
 ## Inputs
 
-- An operator-entered server capacity containing cores, RAM in GiB, an optional
-  maximum agent count, and an optional list of owner rules (empty when omitted).
-- A request to clear the recorded capacity for one server.
+- An explicit server name and operator-entered capacity containing cores, RAM
+  in GiB, an optional maximum agent count, and optional owner rules (empty when
+  omitted).
+- An explicit server name whose recorded capacity is to be cleared.
 
 ## Outputs
 
@@ -26,15 +27,16 @@ recorded it.
 
 ## Behavior
 
-- The explicit local invocation of `agent-msg server-capacity set` or
-  `agent-msg server-capacity clear` is the operator action for this feature;
-  the commands SHALL NOT claim or imply a separate role-based authorization
-  check.
-- `agent-msg server-capacity set` SHALL accept RAM in GiB, store it as MiB, and
-  display the stored amount in MiB. `--owner-rule` MAY be supplied zero or more
-  times; omission records an empty list.
-- `agent-msg server-capacity clear` SHALL remove the capacity record for the
-  named server only.
+- The explicit local invocation of `agent-msg server-capacity set <server>` or
+  `agent-msg server-capacity clear <server>` is the operator action for this
+  feature; the commands SHALL NOT claim or imply a separate role-based
+  authorization check.
+- `agent-msg server-capacity set <server>` SHALL record capacity for the
+  explicitly named server, accept RAM in GiB, store it as MiB, and display the
+  stored amount in MiB. `--owner-rule` MAY be supplied zero or more times;
+  omission records an empty list.
+- `agent-msg server-capacity clear <server>` SHALL remove the capacity record
+  for the explicitly named server only.
 - `agent-msg who --servers` SHALL group registered lanes under their registered
   server and show that server's explicitly recorded capacity or an unset state.
 - The system SHALL show no capacity values for a server with no operator-set
@@ -44,7 +46,7 @@ recorded it.
 
 | ID | Criteria | Verification |
 |----|----------|--------------|
-| FR-058-AC-1 | The operator's capacity-set invocation records the supplied cores and RAM in GiB, the optional maximum agent count, and zero or more `--owner-rule` values; omitted owner rules are stored as an empty list and displayed RAM equals the GiB value converted to MiB. | Test |
+| FR-058-AC-1 | The operator's invocation of `agent-msg server-capacity set <server>` records the supplied cores and RAM in GiB for that explicitly named server, the optional maximum agent count, and zero or more `--owner-rule` values; omitted owner rules are stored as an empty list and displayed RAM equals the GiB value converted to MiB. | Test |
 | FR-058-AC-2 | An operator's capacity clear command removes only the selected server's capacity. | Test |
 | FR-058-AC-3 | `agent-msg who --servers` groups every registered lane under its registered server and displays explicitly recorded capacity fields, including RAM in MiB, for servers that have them. | Test |
 | FR-058-AC-4 | A server with registered lanes but no capacity is shown with capacity unset. | Test |
