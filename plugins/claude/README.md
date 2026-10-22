@@ -124,6 +124,9 @@ typing it in through herdr. It is **off by default** and opt-in per machine
 "Delivery through Claude Code's inbox socket"). Two things to know before turning it
 on:
 
+- Socket delivery includes busy and blocked sessions. Hooks keep registration current
+  but leave inbox consumption to the watcher in socket mode. Deploy matching CLI and
+  watcher binaries together; if the watcher is stopped, messages wait in the inbox.
 - A lead running in bypass mode holds every message from another session behind an
   approval prompt unless its user settings, `--settings` or managed settings have
   `crossSessionInbound: "accept"`. This plugin cannot set that (plugins and project

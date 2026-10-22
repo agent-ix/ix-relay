@@ -95,7 +95,11 @@ impl<H: Herdr> Herdr for Routed<H> {
     }
 }
 
-impl<H: Deliverer> Deliverer for Routed<H> {
+impl<H: Deliverer + Herdr> Deliverer for Routed<H> {
+    fn prefers_socket(&self, kind: &str) -> bool {
+        self.socket.is_some() && relay_core::tries_socket(kind)
+    }
+
     fn deliver(&self, pane: &PaneId, text: &str) -> Result<(), DeliverError> {
         self.herdr.deliver(pane, text)
     }
@@ -120,10 +124,26 @@ impl<H: Deliverer> Deliverer for Routed<H> {
             Ok(()) => Ok(()),
             Err(deliverer::SocketError::NotSent(why)) => {
                 eprintln!(
-                    "relay-watcher: {}: inbox socket not used ({why}); typing it in through herdr",
+                    "relay-watcher: {}: inbox socket not used ({why}); checking safe herdr fallback",
                     target.lead
                 );
-                self.herdr.deliver_to(target, pane, text)
+                // Socket attempts may run mid-turn. Only terminal delivery needs an
+                // idle pane, unchanged across two reads, with the same session.
+                let first = self.herdr.get(pane).ok().flatten();
+                let second = self.herdr.get(pane).ok().flatten();
+                let safe = matches!((&first, &second), (Some(a), Some(b))
+                    if matches!(a.status, crate::herdr::AgentStatus::Idle | crate::herdr::AgentStatus::Done)
+                    && matches!(b.status, crate::herdr::AgentStatus::Idle | crate::herdr::AgentStatus::Done)
+                    && a.state_change_seq == b.state_change_seq
+                    && crate::watch::session_matches(target.session, a.session_id.as_ref())
+                    && crate::watch::session_matches(target.session, b.session_id.as_ref()));
+                if safe {
+                    self.herdr.deliver_to(target, pane, text)
+                } else {
+                    Err(DeliverError::Deferred(format!(
+                        "socket unavailable ({why}); queued until terminal fallback is safe"
+                    )))
+                }
             }
             Err(other) => Err(other.into()),
         }

@@ -105,6 +105,8 @@ pub enum Outcome {
     /// approval prompt) and asked for none to be popped: the mail waits in the
     /// inbox. Part of the held episode, so it is logged once.
     SocketHeldQuiet,
+    /// The socket accepted the batch and its lease is renewed pending consumption.
+    SocketPending(String),
     /// The transport chose not to try the batch now: it was put back at the front
     /// of the inbox unmarked.
     SocketDeferred {
@@ -182,6 +184,7 @@ impl Outcome {
             | Self::SocketDenied { .. } => Some(EpisodeKind::SocketHeld),
             Self::InflightFull => Some(EpisodeKind::InflightFull),
             Self::SocketPostponed { .. }
+            | Self::SocketPending(_)
             | Self::Delivered { .. }
             | Self::SkippedWorking
             | Self::SkippedUnknown
@@ -223,8 +226,9 @@ impl Outcome {
             Self::SocketHeldQuiet => format!(
                 "{lead} ({pane}): Claude Code holds relay mail for approval; new mail waits in the inbox"
             ),
+            Self::SocketPending(why) => format!("{lead} ({pane}): {why}"),
             Self::SocketDeferred { requeued } => format!(
-                "{lead} ({pane}): mail held for approval; put {requeued} message(s) back unmarked"
+                "{lead} ({pane}): delivery deferred; put {requeued} message(s) back unmarked"
             ),
             Self::SocketHeld { why, notified } => format!(
                 "{lead} ({pane}): Claude Code holds relay mail for approval ({why}); left in \
@@ -301,10 +305,11 @@ pub fn try_deliver<H: Herdr + Deliverer>(
         return Outcome::StaleRegistration;
     }
 
+    let socket = herdr.prefers_socket(kind);
     match first.status {
-        AgentStatus::Working => Outcome::SkippedWorking,
-        AgentStatus::Unknown => Outcome::SkippedUnknown,
-        AgentStatus::Blocked => {
+        AgentStatus::Working if !socket => Outcome::SkippedWorking,
+        AgentStatus::Unknown if !socket => Outcome::SkippedUnknown,
+        AgentStatus::Blocked if !socket => {
             match notice {
                 Notice::Done => return Outcome::SkippedBlocked,
                 Notice::RetryLater => return Outcome::NotifyPending,
@@ -317,13 +322,16 @@ pub fn try_deliver<H: Herdr + Deliverer>(
                 Err(e) => Outcome::NotifyFailed(e),
             }
         }
-        AgentStatus::Idle | AgentStatus::Done => {
+        _ => {
             let recheck = match herdr.get(pane) {
                 Ok(Some(info)) => info,
                 Ok(None) => return Outcome::NoAgent,
                 Err(e) => return Outcome::GetFailed(e),
             };
-            if recheck.state_change_seq != first.state_change_seq {
+            if !session_matches(registered_session_id, recheck.session_id.as_ref()) {
+                return Outcome::StaleRegistration;
+            }
+            if !socket && recheck.state_change_seq != first.state_change_seq {
                 return Outcome::SkippedSeqChanged;
             }
             if relay_core::tries_socket(kind) && herdr.holds(lead, registered_session_id) {
@@ -381,6 +389,7 @@ pub fn try_deliver<H: Herdr + Deliverer>(
                             };
                         Outcome::SocketHeld { why, notified }
                     }
+                    Err(DeliverError::Pending(why)) => Outcome::SocketPending(why),
                     Err(e @ DeliverError::Ambiguous(_)) => {
                         let title = format!("ix-relay: prompt to {lead} may have failed");
                         let body = format!(
@@ -782,6 +791,19 @@ mod tests {
         let herdr = FakeHerdr::with_gets(vec![ready(AgentStatus::Working, 5)]);
         let outcome = deliver(&herdr, Notice::Needed, &mut FakeInbox::none());
         assert_eq!(outcome, Outcome::SkippedWorking);
+    }
+
+    #[test]
+    fn replacing_the_session_between_checks_never_pops_its_mail() {
+        let herdr = FakeHerdr::with_gets(vec![
+            ready(AgentStatus::Idle, 10),
+            ready_with_session(AgentStatus::Idle, 10, Some("another-session")),
+        ]);
+        assert_eq!(
+            deliver(&herdr, Notice::Needed, &mut FakeInbox::none()),
+            Outcome::StaleRegistration
+        );
+        assert!(herdr.prompts.borrow().is_empty());
     }
 
     #[test]

@@ -147,6 +147,9 @@ pub struct HeldBatch {
     /// restart, and an approved message is never dead-lettered as never approved.
     #[serde(default)]
     pub delivered_since_ms: Option<i64>,
+    /// Fully posted, awaiting consumption rather than an approval decision.
+    #[serde(default)]
+    pub awaiting_consumption: bool,
 }
 
 /// A decision about a batch whose write to the bus has not succeeded yet, kept so a
@@ -642,6 +645,7 @@ mod tests {
                 session: "s".into(),
                 since_ms: 5,
                 delivered_since_ms: Some(6),
+                awaiting_consumption: false,
             }],
             owed: vec![OwedSettlement {
                 lead: "b".into(),

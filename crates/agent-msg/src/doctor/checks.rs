@@ -271,11 +271,29 @@ fn socket_state(state: &SocketState, now_ms: i64, checks: &mut Vec<Check>) {
         claude_wire::MIN_VERSION.2,
         claude_wire::KNOWN_PEER_PROTOCOL
     ));
+    let pending = status
+        .held_batches
+        .iter()
+        .filter(|b| b.awaiting_consumption)
+        .count();
+    let fallback_notes = status
+        .notes
+        .iter()
+        .filter(|n| !n.contains(": socket_pending:"))
+        .count();
+    details.extend(
+        status
+            .notes
+            .iter()
+            .filter(|n| n.contains(": socket_pending:"))
+            .cloned(),
+    );
     let summary = format!(
-        "delivery = socket: {} lead(s) resolved, {} held, {} using herdr",
+        "delivery = socket: {} lead(s) resolved, {} held, {} using herdr, {} awaiting consumption",
         status.leads.len(),
         status.held.len(),
-        status.notes.len()
+        fallback_notes,
+        pending
     );
     wire_drift(&versions, now_ms, &subject, checks);
     if !status.dead_lettered.is_empty() {
@@ -316,7 +334,7 @@ fn socket_state(state: &SocketState, now_ms: i64, checks: &mut Vec<Check>) {
             )
             .with_details(status.notes.iter().cloned().chain(details)),
         );
-    } else if !status.notes.is_empty() || status.reply_socket.is_none() {
+    } else if fallback_notes > 0 || status.reply_socket.is_none() {
         let mut lines = status.notes.clone();
         if status.reply_socket.is_none() && !lines.iter().any(|n| n.contains("not bound")) {
             lines.push("reply socket not bound: every batch goes to herdr".to_owned());
@@ -329,8 +347,8 @@ fn socket_state(state: &SocketState, now_ms: i64, checks: &mut Vec<Check>) {
                 summary,
                 "the socket could not be used for these leads (no session record, an unsupported \
                  Claude Code, several processes on one session, a refused connection, an \
-                 unconfirmed delivery or a reply socket that is not bound yet); their batches \
-                 were typed in through herdr",
+                 unconfirmed delivery or a reply socket that is not bound yet); terminal fallback \
+                 is allowed only for a verified idle session, otherwise mail stays queued",
                 "nothing is lost; see the lines below, and the README section on delivery \
                  through the inbox socket",
             )
@@ -3783,6 +3801,23 @@ mod tests {
                 .chars()
                 .any(|c| (c.is_control() && c != '\n') || c == '\u{202e}'),
             "{text:?}"
+        );
+    }
+
+    /// Tracing: TC-044-18
+    /// ACs: FR-044-AC-18
+    #[test]
+    fn pending_socket_consumption_is_not_reported_as_herdr_fallback() {
+        let status = socket_status(&[], &["ea: socket_pending: waiting for consumption"], true);
+        let checks = socket_checks(status);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, Status::Ok);
+        assert!(checks[0].message.contains("0 using herdr"));
+        assert!(
+            checks[0]
+                .details
+                .iter()
+                .any(|d| d.contains("socket_pending"))
         );
     }
 

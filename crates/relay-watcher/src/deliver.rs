@@ -23,6 +23,8 @@ pub enum DeliverError {
     /// Input may have reached the session (a timeout, an unrecognised failure).
     /// Retrying could type the batch twice, so it is not retried.
     Ambiguous(String),
+    /// Posted through a socket; ownership is retained until consumption is known.
+    Pending(String),
     /// The session's Claude Code holds the batch behind an approval prompt (a
     /// bypass-mode receiver without `crossSessionInbound: "accept"`). It is in
     /// the session's hold queue, so it is neither requeued nor sent again by
@@ -48,6 +50,7 @@ impl fmt::Display for DeliverError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (Self::NotSent(why)
         | Self::Ambiguous(why)
+        | Self::Pending(why)
         | Self::Held(why)
         | Self::Deferred(why)
         | Self::Postponed(why)
@@ -130,6 +133,11 @@ pub enum SettleAction {
 
 /// Types `text` into the session in `pane` and submits it.
 pub trait Deliverer {
+    /// Whether this harness uses a socket independently of pane activity.
+    fn prefers_socket(&self, _kind: &str) -> bool {
+        false
+    }
+
     /// Delivers one rendered batch.
     ///
     /// # Errors

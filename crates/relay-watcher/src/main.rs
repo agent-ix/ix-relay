@@ -19,9 +19,10 @@
 //! costs seconds, not a message. A new connection reads the log's tail *before*
 //! its first sweep, so a send in between still wakes the next wait.
 //!
-//! Working leads are left alone (their hook will deliver); blocked leads are
-//! left alone and the operator is notified once per blocked episode via `herdr
-//! notification show`. See [`watch::try_deliver`] for the per-lead decision.
+//! In socket mode, Claude leads receive through their inbox socket independently
+//! of pane activity, and Claude hooks leave their mail for this watcher. Terminal
+//! delivery still requires an idle/done session; blocked terminal recipients are
+//! notified once per episode. See [`watch::try_deliver`] for the per-lead decision.
 //!
 //! The process never exits because Redis is unhealthy: [`supervise`] retries
 //! forever with capped backoff. The only exits are a command-line error and a
