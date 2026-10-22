@@ -1,5 +1,16 @@
 # Release notes
 
+## Unreleased
+
+- Prefer Claude inbox sockets while leads are busy, idle, or blocked; Claude hooks
+  keep enrollment current but leave delivery to the watcher in socket mode.
+- Gate terminal fallback on two matching idle/done session checks. Accepted socket
+  messages keep renewable leases across delayed consumption and watcher restart;
+  after 30 minutes without confirmation they expire without a terminal duplicate.
+- Restore the valid Cargo lockfile preceding the truncated lockfile committed upstream.
+- Count matching batch ownership on lease renewal even when the requested deadline
+  is already covered, so two renewals in one millisecond do not abandon a live batch.
+
 ## 0.3.4
 
 - Publish the versioned `agent-spend-dashboard` Helm chart for Grafana to consume.

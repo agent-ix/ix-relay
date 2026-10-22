@@ -496,8 +496,9 @@ impl Relay {
     /// (never shortening it, and at most [`MAX_LEASE`]), for a consumer that knows the
     /// batch is being held elsewhere (a receiver's approval prompt) and must not have
     /// it returned to the inbox or popped by another consumer meanwhile. Returns how
-    /// many entries it extended: none for a batch that is no longer in flight, which
-    /// is left untouched.
+    /// many entries still match the batch, including entries whose deadline already
+    /// covers the lease. Zero means the batch is no longer owned by this consumer,
+    /// rather than merely that the requested extension was unnecessary.
     ///
     /// # Errors
     ///

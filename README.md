@@ -401,6 +401,9 @@ changes nothing. Nothing here is on unless you turn it on.
 
 How it behaves:
 
+- Socket delivery works while Claude is busy, idle, or blocked. In socket mode,
+  Claude hooks maintain registration but leave mail for the watcher. If the watcher
+  is stopped, mail remains queued until it returns.
 - It finds the socket by the lead's session id in Claude Code's session registry
   (`~/.claude/sessions`, read only), every time, and only trusts a record whose process
   is alive, has the recorded start time and pid namespace, and reports `peerProtocol`
@@ -412,7 +415,8 @@ How it behaves:
 - herdr stays the fallback: no session id, no live record, a refused connection, a reply
   socket that is not bound yet (it is bound later, with backoff), or a receipt saying the
   message was refused or dropped all fall back to `herdr agent prompt` for that batch, so
-  delivery is never worse than without it.
+  the fallback is attempted only after two reads confirm the same session is idle
+  or done. Otherwise the batch is returned to the inbox without typing into the session.
 - A batch is acknowledged only when its message id shows in the lead's transcript
   (`~/.claude/projects/.../<session>.jsonl`, read only, at its end). The watcher waits up
   to 3 s for that, and posts a batch only when the tick's 8 s socket budget still covers
@@ -420,10 +424,11 @@ How it behaves:
   batch is put back for the next tick, unposted, with no notification. Leads are looked at
   in a rotating order, so a lead behind slow ones is reached within as many ticks as there
   are leads. The transcript baseline is taken before the line is written, so a receiver
-  that records the message at once is never missed. If the wait ends with no receipt and no transcript line the batch stays in
-  flight (a later tick acknowledges it if the transcript shows it) and, because the socket
-  could not confirm it, that lead's mail goes through herdr for ten minutes, so a receiver
-  the socket cannot read gets exactly one socket post; `doctor` names the possible causes.
+  that records the message at once is never missed. If the wait ends with no receipt
+  and no transcript line, the batch stays in flight with its lease renewed. Later mail
+  still uses sockets. Pending consumption survives a watcher restart; after 30 minutes
+  without confirmation it is dead-lettered as `consumption_expired`, without reposting.
+  A pending message appears as `socket_pending` in doctor, distinct from an approval hold.
 - Receipts are read for the life of the watcher and matched by the exact status:
   `delivered` (the user approved a held message) lets the transcript acknowledge it,
   `denied` dead-letters that batch (its reason is in `doctor`, not on the entry), a hold

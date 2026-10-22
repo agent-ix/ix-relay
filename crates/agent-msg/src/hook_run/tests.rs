@@ -433,6 +433,7 @@ impl Harness {
     ) {
         let cx = HookCtx {
             machine: &"Hub.local".parse().unwrap(),
+            socket_delivery: false,
         };
         run(
             &cx,
@@ -497,6 +498,44 @@ fn budget_of(event: &str) -> Duration {
 }
 
 const EVENTS: [&str; 4] = ["SessionStart", "PostToolUse", "UserPromptSubmit", "Stop"];
+
+/// Socket-mode Claude hooks maintain enrollment without taking watcher-owned mail.
+/// Tracing: TC-044-17
+/// ACs: FR-044-AC-17
+#[test]
+fn socket_hooks_register_but_never_pop_or_ack() {
+    for event in EVENTS {
+        let h = Harness::new().with_inbox(&["socket mail"]);
+        let cx = HookCtx {
+            machine: &"hub".parse().unwrap(),
+            socket_delivery: true,
+        };
+        let mut stdout = Sink::default();
+        run(
+            &cx,
+            &*h.clock,
+            Some(&h.spool),
+            (
+                &mut input(event).as_bytes(),
+                &mut stdout,
+                &mut Sink::default(),
+            ),
+            &mut |timeout| connect(&h.world, timeout),
+        );
+        let world = h.world.borrow();
+        assert!(
+            world.calls.contains(&Op::Derive),
+            "{event}: identity still checked"
+        );
+        assert!(
+            !world.calls.contains(&Op::Pop),
+            "{event}: inbox belongs to watcher"
+        );
+        assert!(!world.calls.contains(&Op::Ack));
+        assert_eq!(world.inbox.len(), 1);
+        assert!(stdout.written.is_empty());
+    }
+}
 
 // ---- budgets ---------------------------------------------------------------
 
@@ -840,6 +879,7 @@ fn tc_n001_m_05_a_stdin_that_never_closes_records_one_timeout_and_pops_nothing()
     let mut stdout = Sink::default();
     let cx = HookCtx {
         machine: &"Hub.local".parse().unwrap(),
+        socket_delivery: false,
     };
     run(
         &cx,
@@ -1077,6 +1117,7 @@ fn tc_030_01_a_complete_non_hook_object_on_an_open_pipe_is_malformed_not_a_timeo
     let clock = crate::budget::testing::TickingClock::new(ms(10));
     let cx = HookCtx {
         machine: &"Hub.local".parse().unwrap(),
+        socket_delivery: false,
     };
     run(
         &cx,
@@ -1305,6 +1346,7 @@ fn tc_030_08_every_stage_records_exactly_once_with_a_closed_stderr() {
     let ticking = crate::budget::testing::TickingClock::new(ms(100));
     let cx = HookCtx {
         machine: &"Hub.local".parse().unwrap(),
+        socket_delivery: false,
     };
     run(
         &cx,
@@ -1804,6 +1846,7 @@ fn a_suppressed_session_is_committed_alone() {
     }
     let cx = HookCtx {
         machine: &"hub".parse().unwrap(),
+        socket_delivery: false,
     };
     run(
         &cx,
@@ -1994,6 +2037,7 @@ impl Harness {
         world.borrow_mut().clock = Rc::clone(&fresh);
         let cx = HookCtx {
             machine: &"hub".parse().unwrap(),
+            socket_delivery: false,
         };
         run(
             &cx,
@@ -2217,7 +2261,7 @@ proptest! {
                             w.faults.insert(Op::Requeue);
                         }
                     }
-                    let cx = HookCtx { machine: &"hub".parse().unwrap() };
+                    let cx = HookCtx { machine: &"hub".parse().unwrap(), socket_delivery: false };
                     let mut out = Sink { fail: !matches!(output, OutputFault::Fine), ..Sink::default() };
                     run(&cx, &*clock, Some(&spool),
                         (&mut input("UserPromptSubmit").as_bytes(), &mut out, &mut Sink::default()),
