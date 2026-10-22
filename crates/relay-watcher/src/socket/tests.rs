@@ -152,6 +152,8 @@ enum Act {
     Silent,
     /// Records `origin.msg_id` in the transcript, as a consumed message.
     Consume,
+    /// Consumes while busy, using the attachment origin captured on Claude 2.1.302.
+    ConsumeAttachment,
     /// Sends a receipt with these `status` and `status_detail`.
     Receipt(&'static str, Option<&'static str>),
     /// Sends this raw line to the reply socket, whatever it is.
@@ -191,13 +193,18 @@ impl FakeClaude {
                 let id = msg["msg_id"].as_str().unwrap().to_owned();
                 match act {
                     Act::Silent => {}
-                    Act::Consume => {
+                    Act::Consume | Act::ConsumeAttachment => {
                         let mut f = fs::OpenOptions::new()
                             .create(true)
                             .append(true)
                             .open(&transcript)
                             .unwrap();
-                        let entry = json!({"type":"user","origin":{"kind":"peer","msg_id":id}});
+                        let entry = if matches!(act, Act::ConsumeAttachment) {
+                            json!({"type":"attachment","attachment":{"type":"queued_command",
+                                "origin":{"kind":"peer","msg_id":id}}})
+                        } else {
+                            json!({"type":"user","origin":{"kind":"peer","msg_id":id}})
+                        };
                         writeln!(f, "{entry}").unwrap();
                     }
                     Act::RenamedOrigin => {
@@ -2043,7 +2050,11 @@ fn tc_044_17_socket_delivery_ignores_pane_activity() {
         let Some(mut w) = Watching::new(&format!("socket-activity-{status:?}")) else {
             return;
         };
-        let rig = Rig::new(Act::Consume);
+        let rig = Rig::new(if matches!(status, crate::herdr::AgentStatus::Working) {
+            Act::ConsumeAttachment
+        } else {
+            Act::Consume
+        });
         let herdr = IdleHerdr {
             status: Some(status),
             changes_sequence: true,

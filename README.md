@@ -521,9 +521,10 @@ no I/O, and every format has a drift signal so a change is detected, not silentl
 - A transcript line that names a message id without a structured `origin.msg_id` is evidence
   Claude Code received it: the batch is acknowledged as received but unconfirmed (a drift
   note, no herdr fallback, no redelivery) and shows as `socket_transcript_shape_unrecognised`.
-  Unverified, to capture once in a scratch session before enabling `delivery = "socket"`:
-  whether Claude Code writes a queue-operation line carrying the envelope when a busy session
-  receives a message (it would be counted as drift for every busy lead). Also, a lead that
+  Busy consumption on Claude Code 2.1.302 is recognized through the typed
+  `attachment.origin.msg_id` of a peer `queued_command`, captured during titan's
+  live acceptance. Queue-operation enqueue/remove entries alone are not that acknowledgement.
+  A lead that
   reads `socket-<pid>.json` (it lists held message ids) can cause a false drift count.
 - The formats were captured on Claude Code 2.1.283 (`claude_wire::CAPTURED_ON`); `doctor`
   prints that version as what the fixtures describe, but whether another version works is

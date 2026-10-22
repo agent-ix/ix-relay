@@ -10,6 +10,8 @@
 - Restore the valid Cargo lockfile preceding the truncated lockfile committed upstream.
 - Count matching batch ownership on lease renewal even when the requested deadline
   is already covered, so two renewals in one millisecond do not abandon a live batch.
+- Recognize Claude Code 2.1.302's consumed mid-turn peer attachment as a structured
+  acknowledgement, using the shape captured during titan's live loopback acceptance.
 
 ## 0.3.4
 
