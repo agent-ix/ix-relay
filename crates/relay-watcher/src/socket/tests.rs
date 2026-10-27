@@ -1877,6 +1877,7 @@ struct IdleHerdr {
     notified: Arc<Mutex<Vec<(String, String)>>>,
     status: Option<crate::herdr::AgentStatus>,
     changes_sequence: bool,
+    get_missing: bool,
     gets: Arc<AtomicU64>,
 }
 
@@ -1885,6 +1886,10 @@ impl crate::herdr::Herdr for IdleHerdr {
         &self,
         _pane: &PaneId,
     ) -> Result<Option<crate::herdr::AgentGet>, crate::herdr::ProcessError> {
+        if self.get_missing {
+            self.gets.fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
+        }
         Ok(Some(crate::herdr::AgentGet {
             status: self.status.unwrap_or(crate::herdr::AgentStatus::Idle),
             state_change_seq: if self.changes_sequence {
@@ -2073,10 +2078,33 @@ fn tc_044_17_socket_delivery_ignores_pane_activity() {
 /// Tracing: TC-044-17
 /// ACs: FR-044-AC-17
 #[test]
-fn tc_044_17_unavailable_socket_never_types_into_a_working_or_blocked_lead() {
+fn tc_044_17_socket_delivery_does_not_require_a_herdr_get() {
+    let Some(mut w) = Watching::new("socket-without-herdr-get") else {
+        return;
+    };
+    let rig = Rig::new(Act::Consume);
+    let herdr = IdleHerdr {
+        get_missing: true,
+        ..IdleHerdr::default()
+    };
+    let routed = routed(rig.deliverer, &herdr);
+    w.send("socket delivery without pane state");
+    w.tick(&routed);
+    assert_eq!(rig.claude.received().len(), 1);
+    assert_eq!((w.inbox(), w.in_flight()), (0, 0));
+    assert_eq!(herdr.gets.load(Ordering::Relaxed), 0);
+    assert!(herdr.typed.lock().unwrap().is_empty());
+}
+
+/// Tracing: TC-044-17
+/// ACs: FR-044-AC-17
+#[test]
+fn tc_044_17_herdr_fallback_ignores_pane_activity_after_socket_failure() {
     for status in [
         crate::herdr::AgentStatus::Working,
         crate::herdr::AgentStatus::Blocked,
+        crate::herdr::AgentStatus::Idle,
+        crate::herdr::AgentStatus::Done,
     ] {
         let Some(mut w) = Watching::new(&format!("socket-fallback-{status:?}")) else {
             return;
@@ -2085,13 +2113,14 @@ fn tc_044_17_unavailable_socket_never_types_into_a_working_or_blocked_lead() {
         let d = SocketDeliverer::start(home.config(), Box::new(FakeProcs::with(&[])));
         let herdr = IdleHerdr {
             status: Some(status),
+            changes_sequence: true,
             ..IdleHerdr::default()
         };
         let routed = routed(d, &herdr);
-        w.send("wait for a safe fallback");
+        w.send("fallback after socket failure");
         w.tick(&routed);
-        assert_eq!((w.inbox(), w.in_flight()), (1, 0));
-        assert!(herdr.typed.lock().unwrap().is_empty());
+        assert_eq!((w.inbox(), w.in_flight()), (0, 0));
+        assert_eq!(herdr.typed.lock().unwrap().len(), 1, "{status:?}");
     }
 }
 

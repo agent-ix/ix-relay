@@ -355,8 +355,8 @@ is Claude Code-specific); any other kind needs `--fresh`.
 One process per machine. It wakes when a message is sent (it blocks on the message
 log stream that every send appends to, so there is no poll delay), then reads the
 leads registered on this machine (same machine name `agent-msg` resolves — see
-"Configuration") with a known herdr pane and a non-empty inbox, asks herdr for their
-state, and:
+"Configuration") with a known herdr pane and a non-empty inbox. In herdr mode,
+it asks herdr for their state, and:
 
 - idle or done: pops the inbox and types the messages in with `herdr agent prompt`,
   rechecking `state_change_seq` right before typing so a lead that just started a
@@ -401,7 +401,8 @@ changes nothing. Nothing here is on unless you turn it on.
 
 How it behaves:
 
-- Socket delivery works while Claude is busy, idle, or blocked. In socket mode,
+- Socket delivery works while Claude is busy, idle, or blocked without first
+  reading herdr's pane state. In socket mode,
   Claude hooks maintain registration but leave mail for the watcher. If the watcher
   is stopped, mail remains queued until it returns.
 - It finds the socket by the lead's session id in Claude Code's session registry
@@ -412,11 +413,12 @@ How it behaves:
   `/tmp/cc-socks/<pid>.sock` on macOS (an explicit `XDG_RUNTIME_DIR` overrides
   the reply directory). On macOS process identity matches Claude
   Code’s UTC `ps -o lstart=` timestamp and `darwin` pid domain; Linux uses `/proc`.
-- herdr stays the fallback: no session id, no live record, a refused connection, a reply
+- herdr stays the fallback: no live socket record, a refused connection, a reply
   socket that is not bound yet (it is bound later, with backoff), or a receipt saying the
-  message was refused or dropped all fall back to `herdr agent prompt` for that batch, so
-  the fallback is attempted only after two reads confirm the same session is idle
-  or done. Otherwise the batch is returned to the inbox without typing into the session.
+  message was refused or dropped can fall back to `herdr agent prompt` for that batch.
+  The fallback requires two reads confirming the same registered session, regardless
+  of pane activity. If identity cannot be confirmed, including when there is no session
+  id, the batch returns to the inbox.
 - A batch is acknowledged only when its message id shows in the lead's transcript
   (`~/.claude/projects/.../<session>.jsonl`, read only, at its end). The watcher waits up
   to 3 s for that, and posts a batch only when the tick's 8 s socket budget still covers

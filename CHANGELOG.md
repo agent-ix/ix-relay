@@ -4,7 +4,8 @@
 
 - Prefer Claude inbox sockets while leads are busy, idle, or blocked; Claude hooks
   keep enrollment current but leave delivery to the watcher in socket mode.
-- Gate terminal fallback on two matching idle/done session checks. Accepted socket
+- Gate terminal fallback on two matching session identity checks, independent of
+  pane activity. Accepted socket
   messages keep renewable leases across delayed consumption and watcher restart;
   after 30 minutes without confirmation they expire without a terminal duplicate.
 - Restore the valid Cargo lockfile preceding the truncated lockfile committed upstream.
