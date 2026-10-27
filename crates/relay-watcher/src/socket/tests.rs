@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -104,7 +104,6 @@ impl Home {
             ack_wait: Duration::from_millis(400),
             dedupe_window: Duration::from_secs(35),
             held_quiet: Duration::from_secs(600),
-            suspect_for: Duration::from_secs(600),
             rebind_start: Duration::from_millis(50),
             max_hold: Duration::from_secs(600),
             tick_budget: Duration::from_secs(30),
@@ -153,6 +152,8 @@ enum Act {
     Silent,
     /// Records `origin.msg_id` in the transcript, as a consumed message.
     Consume,
+    /// Consumes while busy, using the attachment origin captured on Claude 2.1.302.
+    ConsumeAttachment,
     /// Sends a receipt with these `status` and `status_detail`.
     Receipt(&'static str, Option<&'static str>),
     /// Sends this raw line to the reply socket, whatever it is.
@@ -192,13 +193,18 @@ impl FakeClaude {
                 let id = msg["msg_id"].as_str().unwrap().to_owned();
                 match act {
                     Act::Silent => {}
-                    Act::Consume => {
+                    Act::Consume | Act::ConsumeAttachment => {
                         let mut f = fs::OpenOptions::new()
                             .create(true)
                             .append(true)
                             .open(&transcript)
                             .unwrap();
-                        let entry = json!({"type":"user","origin":{"kind":"peer","msg_id":id}});
+                        let entry = if matches!(act, Act::ConsumeAttachment) {
+                            json!({"type":"attachment","attachment":{"type":"queued_command",
+                                "origin":{"kind":"peer","msg_id":id}}})
+                        } else {
+                            json!({"type":"user","origin":{"kind":"peer","msg_id":id}})
+                        };
                         writeln!(f, "{entry}").unwrap();
                     }
                     Act::RenamedOrigin => {
@@ -697,7 +703,7 @@ fn tc_044_04_a_batch_is_delivered_only_when_its_id_is_in_the_transcript() {
     assert_eq!(rig.send("one"), Ok(()));
     // Accepted with no receipt and nothing recorded: not known to be delivered.
     let rig = Rig::new(Act::Silent);
-    assert!(matches!(rig.send("one"), Err(SocketError::Ambiguous(_))));
+    assert!(matches!(rig.send("one"), Err(SocketError::Pending(_))));
 }
 
 /// Tracing: TC-044-04
@@ -711,7 +717,7 @@ fn tc_044_04_a_transcript_that_does_not_show_this_id_is_not_an_acknowledgement()
         "{\"origin\":{\"kind\":\"peer\",\"msg_id\":\"an-earlier-message\"}}\n",
     )
     .unwrap();
-    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    assert!(matches!(rig.send("m"), Err(SocketError::Pending(_))));
 }
 
 /// Tracing: TC-044-04
@@ -795,6 +801,7 @@ fn tc_044_10_each_receipt_maps_to_one_outcome() {
             Err(SocketError::Postponed(_)) => "postponed",
             Err(SocketError::Denied(_)) => "denied",
             Err(SocketError::Ambiguous(_)) => "ambiguous",
+            Err(SocketError::Pending(_)) => "pending",
         };
         assert_eq!(kind, expect, "case {i}: {got:?}");
     }
@@ -847,7 +854,7 @@ fn tc_044_10_a_receipt_for_another_message_and_a_silent_connection_are_ignored()
         r#"{{"type":"control","action":"peer_message_status","status":"held","orig_msg_id":"someone-else"}}"#
     )
     .unwrap();
-    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    assert!(matches!(rig.send("m"), Err(SocketError::Pending(_))));
 }
 
 // ---- FR-044-AC-6: falling back to herdr ---------------------------------------
@@ -863,7 +870,11 @@ impl crate::herdr::Herdr for FakeHerdr {
         &self,
         _pane: &PaneId,
     ) -> Result<Option<crate::herdr::AgentGet>, crate::herdr::ProcessError> {
-        Ok(None)
+        Ok(Some(crate::herdr::AgentGet {
+            status: crate::herdr::AgentStatus::Idle,
+            state_change_seq: 1,
+            session_id: Some(SESSION.parse().unwrap()),
+        }))
     }
     fn notify(&self, _t: &str, _b: &str) -> Result<(), crate::herdr::ProcessError> {
         Ok(())
@@ -918,7 +929,7 @@ fn tc_044_06_herdr_types_the_batch_only_when_the_socket_certainly_did_not() {
             0,
             Err("ambiguous"),
         ),
-        (Act::Silent, 0, Err("ambiguous")),
+        (Act::Silent, 0, Err("pending")),
     ] {
         let herdr = FakeHerdr::default();
         let (result, _claude, _dir) = routed_send(Rig::new(act), &herdr, "batch text");
@@ -928,6 +939,7 @@ fn tc_044_06_herdr_types_the_batch_only_when_the_socket_certainly_did_not() {
             DeliverError::Postponed(_) => "postponed",
             DeliverError::Denied(_) => "denied",
             DeliverError::Ambiguous(_) => "ambiguous",
+            DeliverError::Pending(_) => "pending",
             DeliverError::NotSent(_) => "not sent",
         });
         assert_eq!(kind, expect.err(), "{result:?}");
@@ -960,11 +972,17 @@ fn tc_044_06_a_missing_session_a_refused_connection_and_no_registry_go_to_herdr(
         Ok(())
     );
     // A lead that registered no session id.
-    assert_eq!(routed.deliver_to(&target(None), &pane, "b"), Ok(()));
+    assert!(matches!(
+        routed.deliver_to(&target(None), &pane, "b"),
+        Err(DeliverError::Deferred(_))
+    ));
     // A session no record names.
     let other: SessionId = "cccccccc-3333-4333-8333-cccccccccccc".parse().unwrap();
-    assert_eq!(routed.deliver_to(&target(Some(&other)), &pane, "c"), Ok(()));
-    assert_eq!(*herdr.typed.lock().unwrap(), ["a", "b", "c"]);
+    assert!(matches!(
+        routed.deliver_to(&target(Some(&other)), &pane, "c"),
+        Err(DeliverError::Deferred(_))
+    ));
+    assert_eq!(*herdr.typed.lock().unwrap(), ["a"]);
     let status = SocketStatus::read(&home.status()).unwrap();
     assert!(
         status.notes.iter().any(|n| n.starts_with("ea: ")),
@@ -1013,7 +1031,7 @@ fn tc_044_07_an_identical_body_is_not_posted_twice_inside_the_window() {
     assert!(matches!(rig.send("same"), Err(SocketError::NotSent(_))));
     let second = rig.send("same");
     assert!(
-        matches!(&second, Err(SocketError::NotSent(why)) if why.contains("30 s")),
+        matches!(&second, Err(SocketError::Deferred(why)) if why.contains("30 s")),
         "{second:?}"
     );
     assert_eq!(rig.claude.received().len(), 1, "posted once");
@@ -1317,7 +1335,7 @@ fn tc_044_05_a_late_denied_receipt_dead_letters_the_batch_and_clears_the_hold() 
 #[test]
 fn tc_044_10_a_late_drop_names_its_messages_and_puts_exactly_those_back() {
     let rig = Rig::new(Act::Silent);
-    assert!(matches!(rig.send("one"), Err(SocketError::Ambiguous(_))));
+    assert!(matches!(rig.send("one"), Err(SocketError::Pending(_))));
     let ours = rig.claude.received()[0]["msg_id"]
         .as_str()
         .unwrap()
@@ -1350,7 +1368,7 @@ fn tc_044_10_late_hold_timeout_refusal_expiry_and_unknown_receipts() {
         ("brand-new", None, None),
     ] {
         let rig = Rig::new(Act::Silent);
-        assert!(matches!(rig.send("one"), Err(SocketError::Ambiguous(_))));
+        assert!(matches!(rig.send("one"), Err(SocketError::Pending(_))));
         receipt(&rig, status_of(&rig, status, detail, json!({})));
         match action {
             Some(action) => assert_eq!(only(settled(&rig.deliverer)).action, action, "{status}"),
@@ -1375,7 +1393,7 @@ fn tc_044_10_late_hold_timeout_refusal_expiry_and_unknown_receipts() {
 #[test]
 fn tc_044_10_a_receipt_for_an_unknown_message_settles_nothing() {
     let rig = Rig::new(Act::Silent);
-    assert!(matches!(rig.send("one"), Err(SocketError::Ambiguous(_))));
+    assert!(matches!(rig.send("one"), Err(SocketError::Pending(_))));
     receipt(
         &rig,
         json!({"type":"control","action":"peer_message_status","status":"denied","orig_msg_id":"forgotten"}),
@@ -1392,7 +1410,7 @@ fn tc_044_10_a_receipt_for_an_unknown_message_settles_nothing() {
 #[test]
 fn tc_044_04_a_message_that_outlived_its_wait_is_acked_when_the_transcript_shows_it() {
     let rig = Rig::new(Act::Silent);
-    assert!(matches!(rig.send("one"), Err(SocketError::Ambiguous(_))));
+    assert!(matches!(rig.send("one"), Err(SocketError::Pending(_))));
     assert!(without_renewals(rig.deliverer.settle()).is_empty());
     let id = rig.claude.received()[0]["msg_id"]
         .as_str()
@@ -1420,27 +1438,23 @@ fn tc_044_04_a_message_that_outlived_its_wait_is_acked_when_the_transcript_shows
 /// Tracing: TC-044-06
 /// ACs: FR-044-AC-6
 ///
-/// A socket attempt that was accepted but never confirmed is not tried through the
-/// socket again: the redelivery goes through herdr, the note names the causes,
-/// and the socket is tried again after the suspicion period.
+/// A posted batch awaiting consumption retains its lease and does not disable
+/// socket delivery for subsequent batches.
 #[test]
-fn tc_044_06_an_ambiguous_socket_attempt_sends_the_redelivery_through_herdr() {
+fn tc_044_06_pending_consumption_does_not_switch_to_herdr() {
     let rig = Rig::new(Act::Silent);
-    assert!(matches!(rig.send("one"), Err(SocketError::Ambiguous(_))));
-    let second = rig.send("one (redelivered)");
+    assert!(matches!(rig.send("one"), Err(SocketError::Pending(_))));
     assert!(
-        matches!(&second, Err(SocketError::NotSent(why)) if why.contains("herdr")),
-        "{second:?}"
+        rig.deliverer
+            .settle()
+            .iter()
+            .any(|s| matches!(s.action, SettleAction::Renew(_)))
     );
-    assert_eq!(rig.claude.received().len(), 1, "no second post");
     let note = SocketStatus::read(&rig.home.status())
         .unwrap()
         .notes
         .join(" ");
-    for cause in ["CLAUDE_CONFIG_DIR", "authentication", "cleared", "wire"] {
-        assert!(note.contains(cause), "{cause} in {note}");
-    }
-    // Through Routed the second batch is typed by herdr, exactly once.
+    assert!(note.contains("socket_pending"), "{note}");
     let Rig {
         home: _home,
         claude: _claude,
@@ -1457,17 +1471,20 @@ fn tc_044_06_an_ambiguous_socket_attempt_sends_the_redelivery_through_herdr() {
         session: Some(&session),
         senders: "s",
     };
-    assert_eq!(routed.deliver_to(&target, &pane, "two"), Ok(()));
-    assert_eq!(*herdr.typed.lock().unwrap(), ["two"]);
+    assert!(matches!(
+        routed.deliver_to(&target, &pane, "two"),
+        Err(DeliverError::Pending(_))
+    ));
+    assert!(herdr.typed.lock().unwrap().is_empty());
 }
 
 /// Tracing: TC-044-06
 /// ACs: FR-044-AC-6
 #[test]
-fn tc_044_06_the_socket_is_tried_again_once_the_suspicion_has_passed() {
-    let rig = Rig::tuned(Act::Silent, |c| c.suspect_for = Duration::ZERO);
-    assert!(matches!(rig.send("one"), Err(SocketError::Ambiguous(_))));
-    assert!(matches!(rig.send("two"), Err(SocketError::Ambiguous(_))));
+fn tc_044_06_subsequent_batches_use_the_socket_while_consumption_is_pending() {
+    let rig = Rig::new(Act::Silent);
+    assert!(matches!(rig.send("one"), Err(SocketError::Pending(_))));
+    assert!(matches!(rig.send("two"), Err(SocketError::Pending(_))));
     assert_eq!(rig.claude.received().len(), 2);
 }
 
@@ -1858,6 +1875,10 @@ fn tc_044_02_a_symlink_a_foreign_directory_another_owner_and_an_open_mode_are_re
 struct IdleHerdr {
     typed: Arc<Mutex<Vec<String>>>,
     notified: Arc<Mutex<Vec<(String, String)>>>,
+    status: Option<crate::herdr::AgentStatus>,
+    changes_sequence: bool,
+    get_missing: bool,
+    gets: Arc<AtomicU64>,
 }
 
 impl crate::herdr::Herdr for IdleHerdr {
@@ -1865,9 +1886,17 @@ impl crate::herdr::Herdr for IdleHerdr {
         &self,
         _pane: &PaneId,
     ) -> Result<Option<crate::herdr::AgentGet>, crate::herdr::ProcessError> {
+        if self.get_missing {
+            self.gets.fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
+        }
         Ok(Some(crate::herdr::AgentGet {
-            status: crate::herdr::AgentStatus::Idle,
-            state_change_seq: 1,
+            status: self.status.unwrap_or(crate::herdr::AgentStatus::Idle),
+            state_change_seq: if self.changes_sequence {
+                self.gets.fetch_add(1, Ordering::Relaxed)
+            } else {
+                1
+            },
             session_id: Some(SESSION.parse().unwrap()),
         }))
     }
@@ -2012,6 +2041,166 @@ fn routed(rig_deliverer: SocketDeliverer, herdr: &IdleHerdr) -> Routed<IdleHerdr
     Routed::socket_first(herdr.clone(), rig_deliverer)
 }
 
+/// Tracing: TC-044-17
+/// ACs: FR-044-AC-17
+/// Real Unix socket delivery through the watcher, including working and blocked leads.
+#[test]
+fn tc_044_17_socket_delivery_ignores_pane_activity() {
+    for status in [
+        crate::herdr::AgentStatus::Working,
+        crate::herdr::AgentStatus::Blocked,
+        crate::herdr::AgentStatus::Idle,
+        crate::herdr::AgentStatus::Done,
+    ] {
+        let Some(mut w) = Watching::new(&format!("socket-activity-{status:?}")) else {
+            return;
+        };
+        let rig = Rig::new(if matches!(status, crate::herdr::AgentStatus::Working) {
+            Act::ConsumeAttachment
+        } else {
+            Act::Consume
+        });
+        let herdr = IdleHerdr {
+            status: Some(status),
+            changes_sequence: true,
+            ..IdleHerdr::default()
+        };
+        let routed = routed(rig.deliverer, &herdr);
+        w.send("socket delivery regardless of activity");
+        w.tick(&routed);
+        assert_eq!(rig.claude.received().len(), 1, "{status:?}");
+        assert_eq!((w.inbox(), w.in_flight()), (0, 0));
+        assert!(herdr.typed.lock().unwrap().is_empty());
+        assert!(herdr.notified.lock().unwrap().is_empty());
+    }
+}
+
+/// Tracing: TC-044-17
+/// ACs: FR-044-AC-17
+#[test]
+fn tc_044_17_socket_delivery_does_not_require_a_herdr_get() {
+    let Some(mut w) = Watching::new("socket-without-herdr-get") else {
+        return;
+    };
+    let rig = Rig::new(Act::Consume);
+    let herdr = IdleHerdr {
+        get_missing: true,
+        ..IdleHerdr::default()
+    };
+    let routed = routed(rig.deliverer, &herdr);
+    w.send("socket delivery without pane state");
+    w.tick(&routed);
+    assert_eq!(rig.claude.received().len(), 1);
+    assert_eq!((w.inbox(), w.in_flight()), (0, 0));
+    assert_eq!(herdr.gets.load(Ordering::Relaxed), 0);
+    assert!(herdr.typed.lock().unwrap().is_empty());
+}
+
+/// Tracing: TC-044-17
+/// ACs: FR-044-AC-17
+#[test]
+fn tc_044_17_herdr_fallback_ignores_pane_activity_after_socket_failure() {
+    for status in [
+        crate::herdr::AgentStatus::Working,
+        crate::herdr::AgentStatus::Blocked,
+        crate::herdr::AgentStatus::Idle,
+        crate::herdr::AgentStatus::Done,
+    ] {
+        let Some(mut w) = Watching::new(&format!("socket-fallback-{status:?}")) else {
+            return;
+        };
+        let home = Home::new();
+        let d = SocketDeliverer::start(home.config(), Box::new(FakeProcs::with(&[])));
+        let herdr = IdleHerdr {
+            status: Some(status),
+            changes_sequence: true,
+            ..IdleHerdr::default()
+        };
+        let routed = routed(d, &herdr);
+        w.send("fallback after socket failure");
+        w.tick(&routed);
+        assert_eq!((w.inbox(), w.in_flight()), (0, 0));
+        assert_eq!(herdr.typed.lock().unwrap().len(), 1, "{status:?}");
+    }
+}
+
+/// Tracing: TC-044-18
+/// ACs: FR-044-AC-18
+#[test]
+fn tc_044_18_pending_consumption_survives_watcher_restart_without_an_approval_hold() {
+    let rig = Rig::new(Act::Silent);
+    assert!(matches!(rig.send("pending"), Err(SocketError::Pending(_))));
+    let saved = SocketStatus::read(&rig.home.status()).unwrap();
+    assert!(saved.held_batches[0].awaiting_consumption);
+    assert!(saved.held.is_empty());
+    let id = rig.claude.received()[0]["msg_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    drop(rig.deliverer);
+    // A real restart has a different pid; represent the stopped watcher with
+    // the same fixture used by the approval-hold restart tests.
+    dead_status(&rig.home, saved.held_batches, vec![]);
+    let restarted = SocketDeliverer::start(rig.home.config(), Box::new(FakeProcs::with(&[4242])));
+    assert!(!restarted.holds("ea", Some(&rig.session)));
+    assert!(
+        restarted
+            .settle()
+            .iter()
+            .any(|s| matches!(s.action, SettleAction::Renew(_)))
+    );
+    consume_in_transcript(&rig.home, &id);
+    let settled = without_renewals(restarted.settle());
+    assert_eq!(settled.len(), 1);
+    assert_eq!(settled[0].action, SettleAction::Ack);
+    assert_eq!(rig.claude.received().len(), 1);
+}
+
+/// Tracing: TC-044-18
+/// ACs: FR-044-AC-18
+#[test]
+fn tc_044_18_pending_consumption_expires_without_reposting() {
+    let rig = Rig::tuned(Act::Silent, |c| c.max_hold = Duration::from_millis(20));
+    assert!(matches!(rig.send("pending"), Err(SocketError::Pending(_))));
+    let decision = only(without_renewals(rig.deliverer.settle()));
+    assert_eq!(decision.action, SettleAction::DeadLetter);
+    assert!(decision.why.contains("consumption_expired"));
+    assert_eq!(rig.claude.received().len(), 1);
+}
+
+/// Tracing: TC-044-18
+/// ACs: FR-044-AC-18
+#[test]
+fn tc_044_18_pending_capacity_defers_without_evicting_socket_ownership() {
+    let rig = Rig::tuned(Act::Silent, |c| {
+        c.ack_wait = Duration::ZERO;
+        c.tick_budget = Duration::from_secs(600);
+    });
+    for batch in 1..=256 {
+        let outcome = rig.deliverer.deliver(
+            &BatchTarget {
+                kind: "claude",
+                lead: "ea",
+                batch: BatchId::new(batch),
+                session: Some(&rig.session),
+                senders: "sender",
+            },
+            &format!("pending {batch}"),
+        );
+        assert!(
+            matches!(outcome, Err(SocketError::Pending(_))),
+            "{outcome:?}"
+        );
+    }
+    assert!(matches!(
+        rig.send("over capacity"),
+        Err(SocketError::Postponed(_))
+    ));
+    let status = SocketStatus::read(&rig.home.status()).unwrap();
+    assert_eq!(status.held_batches.len(), 256);
+    assert!(status.held_batches.iter().all(|p| p.awaiting_consumption));
+}
+
 /// Tracing: TC-044-05
 /// ACs: FR-044-AC-5
 ///
@@ -2133,7 +2322,7 @@ fn tc_044_05_a_late_denial_dead_letters_the_held_batch_and_only_it() {
 /// the next tick; a receipt for a batch that was reaped meanwhile is logged as no
 /// longer in flight and changes nothing else.
 #[test]
-fn tc_044_10_a_late_refusal_requeues_and_herdr_types_it_and_a_reaped_batch_is_left() {
+fn tc_044_10_a_late_refusal_requeues_without_disabling_future_socket_attempts() {
     let Some(mut w) = Watching::new("late-refusal") else {
         return;
     };
@@ -2166,14 +2355,15 @@ fn tc_044_10_a_late_refusal_requeues_and_herdr_types_it_and_a_reaped_batch_is_le
         }
         thread::sleep(Duration::from_millis(5));
     }
-    // Put back unmarked and typed by herdr, which is where the lead goes now.
+    // Duplicate suppression leaves the rejected batch queued rather than
+    // disabling an otherwise usable socket for later messages.
     assert_eq!(w.dead(), 0);
-    assert_eq!(
-        *herdr.typed.lock().unwrap(),
-        ["[ix-relay] from hub:sender:code: first"],
-        "{:?}",
-        w.log
-    );
+    assert!(herdr.typed.lock().unwrap().is_empty());
+    assert_eq!(w.inbox(), 1);
+    w.send("second");
+    w.tick(&routed);
+    assert_eq!(claude.received().len(), 2);
+    assert!(herdr.typed.lock().unwrap().is_empty());
 }
 
 // ---- second review: a held batch's lease, restarts, budgets ----------------------------
@@ -2556,7 +2746,7 @@ fn tc_044_14_the_default_ack_wait_fits_in_the_default_tick_budget() {
 /// gets exactly one socket post: the unconfirmed wait marks the lead suspect, so the
 /// next batch (another body, as a redelivery's marker makes it) goes through herdr.
 #[test]
-fn tc_044_06_a_receiver_that_never_confirms_gets_one_post_and_then_herdr_at_production_timings() {
+fn tc_044_06_pending_batches_keep_socket_ownership_at_production_timings() {
     let home = Home::new();
     home.record(4242, SESSION, |_| {});
     let claude = FakeClaude::start(&home.socket(4242), home.transcript(SESSION), Act::Silent);
@@ -2574,19 +2764,19 @@ fn tc_044_06_a_receiver_that_never_confirms_gets_one_post_and_then_herdr_at_prod
     };
     let _ = routed.settle();
     let first = routed.deliver_to(&target(1), &pane, "one");
+    assert!(matches!(first, Err(DeliverError::Pending(_))), "{first:?}");
     assert!(
-        matches!(first, Err(DeliverError::Ambiguous(_))),
-        "{first:?}"
+        routed
+            .settle()
+            .iter()
+            .any(|s| matches!(s.action, SettleAction::Renew(_)))
     );
-    // The batch comes back after its lease, marked; every batch after goes to herdr.
-    let _ = routed.settle();
-    assert_eq!(
-        routed.deliver_to(&target(2), &pane, "one (redelivered)"),
-        Ok(())
-    );
-    assert_eq!(routed.deliver_to(&target(3), &pane, "two"), Ok(()));
-    assert_eq!(claude.received().len(), 1, "exactly one socket post");
-    assert_eq!(*herdr.typed.lock().unwrap(), ["one (redelivered)", "two"]);
+    assert!(matches!(
+        routed.deliver_to(&target(2), &pane, "two"),
+        Err(DeliverError::Pending(_))
+    ));
+    assert_eq!(claude.received().len(), 2);
+    assert!(herdr.typed.lock().unwrap().is_empty());
 }
 
 /// Tracing: TC-044-14
@@ -2626,7 +2816,7 @@ fn tc_044_14_a_healthy_lead_after_a_wedged_one_is_deferred_not_flagged() {
     let started = std::time::Instant::now();
     assert!(matches!(
         send("wedged", &wedged, 1),
-        Err(SocketError::Ambiguous(_))
+        Err(SocketError::Pending(_))
     ));
     let second = send("healthy", &healthy, 2);
     assert!(
@@ -2692,17 +2882,17 @@ fn tc_044_14_twenty_wedged_leads_cannot_hold_a_tick_past_its_budget() {
         posted, 1,
         "one lead used the budget, the rest were deferred"
     );
-    assert!(matches!(outcomes[0], Err(SocketError::Ambiguous(_))));
+    assert!(matches!(outcomes[0], Err(SocketError::Pending(_))));
     assert!(
         outcomes[1..]
             .iter()
             .all(|o| matches!(o, Err(SocketError::Postponed(_)))),
         "{outcomes:?}"
     );
-    // The next tick: the first lead is suspect (herdr), so the budget reaches the second.
+    // The next tick: duplicate suppression leaves the budget for the second lead.
     let _ = deliverer.settle();
-    assert!(matches!(deliver(0), Err(SocketError::NotSent(_))));
-    assert!(matches!(deliver(1), Err(SocketError::Ambiguous(_))));
+    assert!(matches!(deliver(0), Err(SocketError::Deferred(_))));
+    assert!(matches!(deliver(1), Err(SocketError::Pending(_))));
     assert_eq!(fakes[1].received().len(), 1);
 }
 
@@ -2715,7 +2905,6 @@ fn tc_044_14_twenty_wedged_leads_cannot_hold_a_tick_past_its_budget() {
 fn tc_044_04_the_transcript_checks_rotate_so_a_late_send_still_gets_its_ack() {
     let rig = Rig::tuned(Act::Silent, |c| {
         c.ack_wait = Duration::from_millis(5);
-        c.suspect_for = Duration::ZERO;
         c.dedupe_window = Duration::ZERO;
     });
     for i in 0..40_u64 {
@@ -2922,7 +3111,7 @@ impl Rig {
 /// Through the real tick at production timings: a receiver that never confirms gets one
 /// post and one notification; the redelivery (the lease lapses) is typed by herdr.
 #[test]
-fn tc_044_06_an_unconfirmed_receiver_costs_one_post_and_one_notification_through_the_tick() {
+fn tc_044_06_pending_consumption_is_renewed_through_the_tick() {
     let Some(mut w) = Watching::new("unconfirmed-prod") else {
         return;
     };
@@ -2938,8 +3127,9 @@ fn tc_044_06_an_unconfirmed_receiver_costs_one_post_and_one_notification_through
     w.tick(&routed);
     assert_eq!(claude.received().len(), 1);
     assert_eq!(w.in_flight(), 1);
+    w.tick(&routed);
     let reaped = w.reap_after_a_lease();
-    assert_eq!(reaped.requeued, 1, "the unrenewed lease lapsed");
+    assert_eq!(reaped.requeued, 0, "the pending batch lease was renewed");
     w.tick(&routed);
     assert_eq!(
         claude.received().len(),
@@ -2949,13 +3139,13 @@ fn tc_044_06_an_unconfirmed_receiver_costs_one_post_and_one_notification_through
     );
     assert_eq!(
         herdr.typed.lock().unwrap().len(),
-        1,
-        "herdr typed the redelivery"
+        0,
+        "herdr must not type pending socket mail"
     );
     let told = herdr.notified.lock().unwrap().len();
     assert_eq!(
-        told, 1,
-        "one notification, for the one real unconfirmed post"
+        told, 0,
+        "pending consumption does not raise a failure notification"
     );
 }
 
@@ -3222,6 +3412,7 @@ fn held_batch(lead: &str, batch: u64, since_ms: i64) -> relay_core::socket_statu
         session: SESSION.into(),
         since_ms,
         delivered_since_ms: None,
+        awaiting_consumption: false,
     }
 }
 
@@ -3392,7 +3583,7 @@ fn tc_044_11_a_dead_letter_write_that_fails_for_ever_never_re_posts_the_message(
         return;
     };
     let Rig {
-        home: _home,
+        home,
         claude,
         deliverer,
         session: _,
@@ -3404,6 +3595,16 @@ fn tc_044_11_a_dead_letter_write_that_fails_for_ever_never_re_posts_the_message(
     w.tick(&routed);
     w.break_key("deadletter:ea");
     late_receipt(&routed, &claude, "denied");
+    // The receipt is handled on another thread. Observe it before counting
+    // failed settlement attempts; fast local Redis ticks can finish before
+    // the receiver thread wakes.
+    w.tick_until(&routed, "denial receipt processed", |_| {
+        SocketStatus::read(&home.status())
+            .unwrap()
+            .notes
+            .iter()
+            .any(|n| n.contains("denied"))
+    });
     for round in 0..20 {
         w.tick(&routed);
         let reaped = w.reap_after_a_lease();
@@ -3483,10 +3684,9 @@ fn tc_044_14_the_budget_covers_the_worst_case_of_a_post() {
     let rig = Rig::tuned(Act::Silent, |c| {
         c.ack_wait = Duration::from_millis(300);
         c.tick_budget = c.post_worst_case() + Duration::from_millis(100);
-        c.suspect_for = Duration::ZERO;
     });
     let _ = rig.deliverer.settle();
-    assert!(matches!(rig.send("one"), Err(SocketError::Ambiguous(_))));
+    assert!(matches!(rig.send("one"), Err(SocketError::Pending(_))));
     // 0.3 s spent: 0.3 + 4.3 > 4.4.
     let second = rig.send("two");
     assert!(
@@ -3609,7 +3809,6 @@ fn tc_044_14_a_healthy_lead_behind_twenty_wedged_ones_is_served_within_one_round
             .unwrap();
     }
     let mut config = home.production();
-    config.suspect_for = Duration::ZERO; // the worst case: no lead stays suspect
     config.dedupe_window = Duration::ZERO;
     let deliverer = SocketDeliverer::start(config, Box::new(FakeProcs::with(&pids)));
     let herdr = PaneHerdr {
@@ -3693,11 +3892,11 @@ fn tc_044_14_a_slow_reader_cannot_stretch_the_write_past_its_deadline() {
     assert!(matches!(got, Err(SocketError::Ambiguous(_))), "{got:?}");
     assert!(took < Duration::from_millis(3500), "the post took {took:?}");
     assert!(
-        matches!(
-            deliverer.deliver(&target(2), "next"),
-            Err(SocketError::NotSent(_))
-        ),
-        "the slow lead goes through herdr"
+        deliverer
+            .settle()
+            .iter()
+            .any(|s| matches!(s.action, SettleAction::Renew(_))),
+        "the partially written batch retains its lease instead of being sent through herdr"
     );
 }
 
@@ -3854,7 +4053,7 @@ fn tc_044_11_owed_decisions_are_persisted_and_applied_after_a_restart() {
     let d = SocketDeliverer::start(home.config(), Box::new(FakeProcs::with(&[4242])));
     assert!(matches!(
         d.deliver(&target(5), "five"),
-        Err(SocketError::Ambiguous(_))
+        Err(SocketError::Pending(_))
     ));
     let msg = claude.received()[0]["msg_id"].as_str().unwrap().to_owned();
     consume_in_transcript(&home, &msg);
@@ -4085,11 +4284,11 @@ fn drift_now(rig: &Rig) -> relay_core::socket_status::DriftCounts {
 fn tc_046_03_unrecognised_and_non_json_reply_lines_are_counted_and_change_nothing() {
     let renamed = r#"{"type":"control","action":"peer_status","status":"held","orig_msg_id":"x"}"#;
     let rig = Rig::new(Act::ReplyLine(renamed));
-    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    assert!(matches!(rig.send("m"), Err(SocketError::Pending(_))));
     let drift = drift_now(&rig);
     assert_eq!((drift.unrecognised_lines, drift.not_json_lines), (1, 0));
     let rig = Rig::new(Act::ReplyLine("this is not json"));
-    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    assert!(matches!(rig.send("m"), Err(SocketError::Pending(_))));
     let drift = drift_now(&rig);
     assert_eq!((drift.unrecognised_lines, drift.not_json_lines), (0, 1));
     // A liveness check and a receipt for another message are known, not drift.
@@ -4103,7 +4302,7 @@ fn tc_046_03_unrecognised_and_non_json_reply_lines_are_counted_and_change_nothin
     )
     .unwrap();
     drop(other);
-    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    assert!(matches!(rig.send("m"), Err(SocketError::Pending(_))));
     let drift = drift_now(&rig);
     assert_eq!(drift.control_total(), 0);
 }
@@ -4118,7 +4317,7 @@ fn tc_046_03_a_reply_line_of_invalid_utf8_is_counted() {
     let mut conn = UnixStream::connect(rig.deliverer.reply_path().unwrap()).unwrap();
     conn.write_all(b"\xff\xfe\x00 garbage\n").unwrap();
     drop(conn);
-    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    assert!(matches!(rig.send("m"), Err(SocketError::Pending(_))));
     let drift = drift_now(&rig);
     assert_eq!(drift.not_json_lines, 1);
 }
@@ -4155,10 +4354,10 @@ fn tc_046_05_a_renamed_transcript_origin_is_acked_counted_and_never_falls_back()
     // Not suspect: the socket is tried again (a suspect lead would be NotSent, to herdr).
     assert_eq!(rig.send("two"), Ok(()));
     assert_eq!(rig.claude.received().len(), 2, "still posted to the socket");
-    // The contrast: a silent socket makes the lead suspect and the next batch goes to herdr.
+    // A silent socket retains its batches without disabling later socket sends.
     let silent = Rig::new(Act::Silent);
-    assert!(matches!(silent.send("one"), Err(SocketError::Ambiguous(_))));
-    assert!(matches!(silent.send("two"), Err(SocketError::NotSent(_))));
+    assert!(matches!(silent.send("one"), Err(SocketError::Pending(_))));
+    assert!(matches!(silent.send("two"), Err(SocketError::Pending(_))));
     let drift = drift_now(&silent);
     assert_eq!(drift.transcript_shape_unrecognised, 0);
 }
@@ -4171,7 +4370,7 @@ fn tc_046_05_a_renamed_transcript_origin_is_acked_counted_and_never_falls_back()
 #[test]
 fn tc_046_12_settle_acks_an_unrecognised_shape_with_a_note() {
     let rig = Rig::new(Act::Silent);
-    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    assert!(matches!(rig.send("m"), Err(SocketError::Pending(_))));
     let id = rig.claude.received()[0]["msg_id"]
         .as_str()
         .unwrap()
@@ -4262,7 +4461,7 @@ fn tc_046_06_a_clean_transcript_is_absent_not_drift() {
         "{\"type\":\"user\",\"origin\":{\"msg_id\":\"other\"}}\n",
     )
     .unwrap();
-    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    assert!(matches!(rig.send("m"), Err(SocketError::Pending(_))));
     let drift = drift_now(&rig);
     assert_eq!(drift.transcript_shape_unrecognised, 0);
 }
@@ -4868,7 +5067,7 @@ fn versions_of(rig: &Rig) -> Vec<relay_core::socket_status::VersionDrift> {
 fn tc_046_03_a_drifting_line_is_counted_against_the_leads_version_with_its_shape() {
     let renamed = r#"{"type":"control","action":"peer_status","status":"held","orig_msg_id":"x","body":"secret"}"#;
     let rig = Rig::new(Act::ReplyLine(renamed));
-    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    assert!(matches!(rig.send("m"), Err(SocketError::Pending(_))));
     let versions = versions_of(&rig);
     assert_eq!(versions.len(), 1);
     assert_eq!(versions[0].version, "2.1.283");
@@ -4881,7 +5080,7 @@ fn tc_046_03_a_drifting_line_is_counted_against_the_leads_version_with_its_shape
     assert!(!file.contains("secret"), "no body is kept");
 
     let rig = Rig::new(Act::ReplyLine("this is not json"));
-    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    assert!(matches!(rig.send("m"), Err(SocketError::Pending(_))));
     let window = versions_of(&rig)[0].window(wall_ms());
     assert_eq!(window.counts.not_json_lines, 1);
     assert_eq!(
@@ -4955,7 +5154,7 @@ fn tc_046_17_an_offending_line_leaves_only_a_bounded_neutralised_type_and_action
         .into_boxed_str(),
     );
     let rig = Rig::new(Act::ReplyLine(line));
-    assert!(matches!(rig.send("m"), Err(SocketError::Ambiguous(_))));
+    assert!(matches!(rig.send("m"), Err(SocketError::Pending(_))));
     let file = fs::read_to_string(rig.home.status()).unwrap();
     assert!(!file.contains("secret"), "no body or path");
     assert!(!file.contains("/home/peter"));

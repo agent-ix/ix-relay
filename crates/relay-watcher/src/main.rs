@@ -4,8 +4,8 @@
 //! end (`Stop`), but a lead that is simply sitting idle between turns never
 //! runs a hook, so nothing wakes it up. This watches the leads registered on
 //! this machine (see [`relay_core::config`], AGE-2017) and, for any that are
-//! idle or done with a non-empty inbox, types the queued messages in through
-//! a [`deliver::Deliverer`] (`herdr agent prompt`).
+//! idle or done with a non-empty inbox in herdr mode, types the queued messages
+//! in through a [`deliver::Deliverer`] (`herdr agent prompt`).
 //!
 //! # Waking
 //!
@@ -19,9 +19,11 @@
 //! costs seconds, not a message. A new connection reads the log's tail *before*
 //! its first sweep, so a send in between still wakes the next wait.
 //!
-//! Working leads are left alone (their hook will deliver); blocked leads are
-//! left alone and the operator is notified once per blocked episode via `herdr
-//! notification show`. See [`watch::try_deliver`] for the per-lead decision.
+//! In socket mode, Claude leads receive through their inbox socket independently
+//! of pane activity and without a herdr state read, and Claude hooks leave their
+//! mail for this watcher. Herdr fallback after a confirmed socket failure checks
+//! the session identity, not pane activity. See [`watch::try_deliver`] for the
+//! per-lead decision.
 //!
 //! The process never exits because Redis is unhealthy: [`supervise`] retries
 //! forever with capped backoff. The only exits are a command-line error and a
@@ -976,8 +978,7 @@ fn tick<H: Herdr + Deliverer>(
         // Mail is queued and nothing new will announce it: come back.
         state.retry_at.insert(name.clone(), now + state.retry_every);
         // herdr's output is in a shape ix-relay cannot read (FR-036): type into
-        // no pane. The mail stays queued for the lead's own hook, and the check
-        // that blocks this is re-run until it passes.
+        // no pane. The mail stays queued until the check is rerun and passes.
         if state.live.delivery_blocked() {
             continue;
         }

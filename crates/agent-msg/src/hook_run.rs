@@ -301,6 +301,8 @@ impl Bus for RelayBus {
 pub(crate) struct HookCtx<'a> {
     /// This machine's bus name.
     pub(crate) machine: &'a MachineName,
+    /// Maintain identity but leave inbox delivery to the socket watcher.
+    pub(crate) socket_delivery: bool,
 }
 
 /// Everything that can fail in a hook call. One value is one failure, and one
@@ -635,7 +637,7 @@ pub(crate) fn decode_input(raw: &[u8]) -> Result<HookInput, serde_json::Error> {
 }
 
 fn try_run<B: Bus>(
-    _cx: &HookCtx<'_>,
+    cx: &HookCtx<'_>,
     (clock, started): (&dyn Clock, Duration),
     rec: &mut Recorder<'_>,
     stdin: &mut dyn InputSource,
@@ -741,6 +743,10 @@ fn try_run<B: Bus>(
     // so a call that ran out of time before here has written nothing.
     if commit != IdentityCommit::default() {
         apply(&mut bus, &budget, &commit, rec)?;
+    }
+
+    if cx.socket_delivery {
+        return Ok(());
     }
 
     let window = if sampled {

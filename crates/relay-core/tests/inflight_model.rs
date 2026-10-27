@@ -994,7 +994,15 @@ fn tc_044_05_a_renewed_lease_keeps_a_batch_in_flight_past_its_old_deadline() {
         .unwrap();
     assert_eq!((reaped.requeued, reaped.dead), (0, 0));
     assert_eq!(run.bus.relay.inflight_len(&lead(1)).unwrap(), 1);
-    // A shorter renew never shortens it.
+    // Repeating the same renewal in the same millisecond still confirms ownership.
+    assert_eq!(
+        run.bus
+            .relay
+            .renew_batch(&lead(1), id, lease, Now::AtMs(now), Popper::Hook)
+            .unwrap(),
+        1
+    );
+    // A shorter renew never shortens it, but still confirms ownership.
     assert_eq!(
         run.bus
             .relay
@@ -1006,7 +1014,7 @@ fn tc_044_05_a_renewed_lease_keeps_a_batch_in_flight_past_its_old_deadline() {
                 Popper::Hook
             )
             .unwrap(),
-        0
+        1
     );
     // Past the renewed deadline it is reaped once, as any lapsed lease.
     let reaped = run

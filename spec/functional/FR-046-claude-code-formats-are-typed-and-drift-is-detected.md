@@ -40,13 +40,13 @@ reconstructed or placeholder values), `derived-from-program-text` (never seen li
 version works is told by what the watcher observes of it (Drift signals, below), not by
 comparing its version to the captured one.
 
-**Unverified, to capture once before delivery = "socket" is enabled anywhere.** Whether
-Claude Code 2.1.283 writes a queue-operation (or similar) transcript line that carries the
-envelope's `msg_id` when a *busy* session receives a peer message has not been checked. If
-it does, that line is a transcript line naming our id without a structured `origin.msg_id`,
-and it is handled as received but unconfirmed (below), which is the right outcome but is
-counted as drift for every busy lead. It must be captured once in a scratch session (never a
-real one) and recorded here as a fixture. Likewise `socket-<pid>.json` lists the `msg_id` of
+**Busy consumption captured on Claude Code 2.1.302, titan, 2026-10-22 (SWM-124).**
+A consumed peer message is recorded as `type: attachment`, with
+`attachment.type: queued_command` and `attachment.origin.kind: peer`; its
+`attachment.origin.msg_id` is the socket message id. This typed shape is a strong
+acknowledgement, covered by the redacted fixture under `fixtures/claude-2.1.302/`.
+Queue-operation enqueue/remove records alone are not this acknowledgement.
+Separately, `socket-<pid>.json` lists the `msg_id` of
 each held batch: a lead that reads that file writes the id into its own transcript, which is
 counted as transcript drift (a false positive) and, for a held batch, acknowledges it: the
 message is already in Claude Code's hands, which delivers it on approval.
@@ -68,7 +68,8 @@ message is already in Claude Code's hands, which delivers it on approval.
   another value, `status` missing, a field of the wrong type), or `NotJson`. It shall
   never panic.
 - `scan` shall map any transcript text and message id to `Acked` (a line whose
-  `origin.msg_id` is the id), `ShapeUnrecognised` (a line containing the id's text with no
+  `origin.msg_id` is the id, including a consumed peer queued-command attachment),
+  `ShapeUnrecognised` (a line containing the id's text with no
   structured `origin.msg_id`, or an `origin` of another shape) or `Absent`, `Acked` taking
   precedence, and shall never panic.
 - `SessionRecord::verdict` shall return `Supported`, `UnsupportedProtocol`,
@@ -177,8 +178,8 @@ Recorded because they are delivery-visible, though neither is reachable from Cla
 | FR-046-AC-2 | Given arbitrary strings, arbitrary bytes read lossily, and JSON-shaped input with random fields, `parse_control_line`, `scan`, `SessionRecord::parse` and `parse_version` never panic; `classify` maps every triple to a verdict and only the six known status words to anything but `Unknown`; a well-formed receipt line parses to a `Receipt` whose verdict is `classify` of its fields. | Property |
 | FR-046-AC-3 | Given a reply-socket line that is JSON in a renamed shape, one that is not JSON, and one whose bytes are not UTF-8 (decoded lossily, then classified), the status file counts each against the sending lead's version (`unrecognised_lines`, `not_json_lines`) and delivery is the same as without it; a liveness connection and a receipt for another message are not counted. | Test |
 | FR-046-AC-4 | Given a receipt with an unknown status, the delivery is ambiguous as before and that version's `unknown_status_receipts` is 1; a known status is not counted. | Test |
-| FR-046-AC-5 | Given a transcript line that names the message id under a renamed field, during the ack wait, the delivery is acknowledged, that version's `transcript_shape_unrecognised` is 1, and the next batch for the lead is still posted to the socket (not sent to herdr), whereas a receiver that is only silent makes the next batch go to herdr. | Test |
-| FR-046-AC-6 | Given a transcript with no line naming the id (another message's structured `origin.msg_id` included), `scan` is `Absent`, the delivery is ambiguous as before and nothing is counted as drift; a line naming the id with no structured origin (renamed field, an `origin` string, non-JSON, another field) is `ShapeUnrecognised`, and an acknowledgement anywhere in the text wins. | Test |
+| FR-046-AC-5 | Given a transcript line that names the message id under a renamed field, during the ack wait, the delivery is acknowledged and that version's transcript_shape_unrecognised is 1. Later batches still use sockets, including while an earlier batch awaits consumption. | Test |
+| FR-046-AC-6 | Given a root origin.msg_id or a peer queued-command attachment.origin.msg_id matching the message id, scan is Acked. Another message's structured id is Absent. Unknown line, attachment or origin kinds do not become acknowledgements; a matching id without a recognized structured origin is ShapeUnrecognised. An acknowledgement anywhere wins. | Test |
 | FR-046-AC-7 | Given session records with an unknown `peerProtocol`, an absent, unparseable or older version, an absent `messagingSocketPath` and an absent `sessionId`, the verdicts are `UnsupportedProtocol`, `UnsupportedVersion`, `Malformed` and no record, each with its fields, and `2.1.224`, `2.2.0` and `3.0.0-beta.1` are `Supported`. | Test |
 | FR-046-AC-8 | Given every fixture of the captured version, each parses to its exact typed result, and the manifest lists exactly the files on disk, each as `captured`, `derived-from-program-text` or `synthetic`, with every `drift-` fixture synthetic. | Test |
 | FR-046-AC-9 | Given the envelope line and the wrapper for plain and hostile names and bodies, the bytes are the golden ones; for any text, no `<` survives in the wrapped body and the wrapper's own two tags are the only ones. | Property |

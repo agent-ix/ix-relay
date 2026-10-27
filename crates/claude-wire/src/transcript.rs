@@ -5,6 +5,8 @@
 //! message writes a JSON line with `origin.msg_id` equal to the sender's id, and
 //! only when the id is a UUID. Everything else on the line is ignored. This is
 //! pure scanning of text already read; the file access stays with the caller.
+//! Claude Code 2.1.302 also records mid-turn consumption under
+//! `attachment.origin.msg_id` in a `queued_command` attachment (captured on titan).
 //!
 //! The scan is drift-aware: a line that *contains* our id but has no
 //! structured `origin.msg_id` is [`TranscriptMatch::ShapeUnrecognised`], not
@@ -24,6 +26,44 @@ struct Line {
 struct Origin {
     #[serde(default)]
     msg_id: Option<String>,
+}
+
+/// The mid-turn consumption shape captured from Claude Code 2.1.302.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum ConsumedLine {
+    #[serde(rename = "attachment")]
+    Attachment { attachment: QueuedCommand },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum QueuedCommand {
+    #[serde(rename = "queued_command")]
+    Consumed { origin: PeerOrigin },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind")]
+enum PeerOrigin {
+    #[serde(rename = "peer")]
+    Peer { msg_id: String },
+}
+
+fn recorded_id(line: &str) -> Option<String> {
+    if let Ok(Line {
+        origin: Some(Origin { msg_id: Some(id) }),
+    }) = serde_json::from_str(line)
+    {
+        return Some(id);
+    }
+    let ConsumedLine::Attachment {
+        attachment:
+            QueuedCommand::Consumed {
+                origin: PeerOrigin::Peer { msg_id },
+            },
+    } = serde_json::from_str(line).ok()?;
+    Some(msg_id)
 }
 
 /// What one scan of transcript text found about one message id.
@@ -70,12 +110,8 @@ pub fn scan_detail(bytes: &[u8], msg_id: &str) -> Scan {
     }
     let text = String::from_utf8_lossy(bytes);
     for line in text.lines().filter(|l| l.contains(msg_id)) {
-        match serde_json::from_str::<Line>(line) {
-            Ok(Line {
-                origin: Some(Origin {
-                    msg_id: Some(id), ..
-                }),
-            }) => {
+        match recorded_id(line) {
+            Some(id) => {
                 if id == msg_id {
                     return Scan {
                         found: TranscriptMatch::Acked,
@@ -113,6 +149,26 @@ mod tests {
         );
         assert_eq!(scan(b"", "id-9"), TranscriptMatch::Absent);
         assert_eq!(scan(b"{\"a\":1}\n", "id-9"), TranscriptMatch::Absent);
+    }
+
+    /// Tracing: TC-046-06
+    /// ACs: FR-046-AC-6
+    #[test]
+    fn a_consumed_mid_turn_peer_attachment_is_a_structured_ack() {
+        let captured = include_bytes!("../fixtures/claude-2.1.302/consumed-mid-turn.jsonl");
+        assert_eq!(scan(captured, "busy-message-id"), TranscriptMatch::Acked);
+        assert_eq!(scan(captured, "busy-message"), TranscriptMatch::Absent);
+        for line in [
+            r#"{"type":"queue-operation","attachment":{"type":"queued_command","origin":{"kind":"peer","msg_id":"busy-message-id"}}}"#,
+            r#"{"type":"attachment","attachment":{"type":"other","origin":{"kind":"peer","msg_id":"busy-message-id"}}}"#,
+            r#"{"type":"attachment","attachment":{"type":"queued_command","origin":{"kind":"user","msg_id":"busy-message-id"}}}"#,
+            r#"{"type":"attachment","attachment":{"type":"queued_command","origin":{"kind":"peer","message_id":"busy-message-id"}}}"#,
+        ] {
+            assert_eq!(
+                scan(line.as_bytes(), "busy-message-id"),
+                TranscriptMatch::ShapeUnrecognised
+            );
+        }
     }
 
     /// Tracing: TC-046-06

@@ -1,18 +1,19 @@
 //! [`SocketDeliverer`]: posts a batch to a lead's Claude Code inbox socket and
 //! decides, from what comes back, what the caller may do about the batch.
 //!
-//! The outcome is one of the four the watcher acts on:
+//! The watcher distinguishes definite non-delivery from socket-owned batches:
 //!
 //! - [`SocketError::NotSent`]: certain nothing was delivered (no socket, refused
 //!   connection, a receipt saying refused or dropped). The caller falls back to
 //!   herdr.
 //! - [`SocketError::Held`]: Claude Code holds it behind an approval prompt.
 //!   Sending it again, by any transport, would duplicate it.
+//! - [`SocketError::Pending`]: the socket took the line and consumption is not
+//!   confirmed yet. The lease is renewed and retained across watcher restart.
 //! - [`SocketError::Deferred`]: not tried, because the lead's mail is held. It goes
 //!   back to the inbox unmarked.
-//! - [`SocketError::Ambiguous`]: it may have arrived. The batch stays in flight
-//!   and is redelivered, marked, when its lease expires (FR-020); that redelivery
-//!   goes through herdr, because the socket has shown it cannot say.
+//! - [`SocketError::Ambiguous`]: a partial write or unknown receipt leaves an
+//!   uncertain outcome. Retain the socket-owned batch rather than reposting it.
 //!
 //! `Ok` is returned only when the batch's `msg_id` is in the lead's transcript.
 //!
@@ -71,10 +72,6 @@ pub const DEDUPE_WINDOW: Duration = Duration::from_secs(35);
 /// again: each retry would add another held message behind the same prompt.
 pub const HELD_QUIET: Duration = Duration::from_secs(10 * 60);
 
-/// How long a lead whose socket delivery was ambiguous, or was refused after the
-/// fact, goes through herdr before the socket is tried again.
-pub const SUSPECT_FOR: Duration = Duration::from_secs(10 * 60);
-
 /// How long a connect may take. A session that has stopped accepting fills its
 /// socket's backlog, and a connect to it then blocks without end.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -114,11 +111,6 @@ const REBIND_START: Duration = Duration::from_secs(2);
 
 /// The longest wait before the reply socket is bound again.
 const REBIND_MAX: Duration = Duration::from_secs(5 * 60);
-
-/// What an unconfirmed socket delivery may be down to, for the note `doctor` shows.
-const AMBIGUOUS_CAUSES: &str = "the cause may be a transcript under another CLAUDE_CONFIG_DIR, \
-    a socket that wants authentication, a session that was cleared or busy, or a changed \
-    wire format";
 
 /// How long a held batch's lease is extended by each renewal. It must outlast the
 /// longest gap between two ticks (the sweep is every 15 s), so a batch held behind an
@@ -189,8 +181,6 @@ pub struct SocketConfig {
     pub dedupe_window: Duration,
     /// See [`HELD_QUIET`].
     pub held_quiet: Duration,
-    /// See [`SUSPECT_FOR`].
-    pub suspect_for: Duration,
     /// See [`REBIND_START`].
     pub rebind_start: Duration,
     /// See [`MAX_HOLD`].
@@ -228,7 +218,6 @@ impl SocketConfig {
             ack_wait: DEFAULT_ACK_WAIT,
             dedupe_window: DEDUPE_WINDOW,
             held_quiet: HELD_QUIET,
-            suspect_for: SUSPECT_FOR,
             rebind_start: REBIND_START,
             max_hold: MAX_HOLD,
             tick_budget: TICK_BUDGET,
@@ -283,6 +272,8 @@ pub enum SocketError {
     Postponed(String),
     /// May have been delivered.
     Ambiguous(String),
+    /// The full line was posted; the receiver has not consumed it yet.
+    Pending(String),
     /// The receiver's user denied it.
     Denied(String),
 }
@@ -295,6 +286,7 @@ impl From<SocketError> for DeliverError {
             SocketError::Deferred(why) => Self::Deferred(why),
             SocketError::Postponed(why) => Self::Postponed(why),
             SocketError::Ambiguous(why) => Self::Ambiguous(why),
+            SocketError::Pending(why) => Self::Pending(why),
             SocketError::Denied(why) => Self::Denied(why),
         }
     }
@@ -484,6 +476,8 @@ struct Pending {
     /// When Claude Code first held the message, while it is held (or approved and
     /// not yet in the transcript): the batch's lease is renewed until it is settled.
     held_since: Option<Instant>,
+    /// Posted successfully but not yet observed in the receiver's transcript.
+    awaiting_consumption: bool,
     /// When Claude Code reported the message delivered (the user approved it).
     delivered_at: Option<Instant>,
     /// The transcript poll for this message.
@@ -514,20 +508,12 @@ struct Held {
     since: Instant,
 }
 
-/// A lead whose socket cannot be relied on for now.
-struct Suspect {
-    session: String,
-    since: Instant,
-}
-
 struct State {
     reply: ReplyState,
     /// Bodies posted, by target session, and when.
     sent: HashMap<(String, u64), Instant>,
     /// Leads whose Claude Code holds their mail.
     held: HashMap<String, Held>,
-    /// Leads that go through herdr for now.
-    suspect: HashMap<String, Suspect>,
     /// Sends whose outcome is open, by message id.
     pending: HashMap<String, Pending>,
     /// The socket each lead last resolved to, with the start time of its process then.
@@ -618,7 +604,6 @@ impl SocketDeliverer {
             reply,
             sent: HashMap::new(),
             held: HashMap::new(),
-            suspect: HashMap::new(),
             pending: HashMap::new(),
             leads: BTreeMap::new(),
             notes: BTreeMap::new(),
@@ -672,13 +657,15 @@ impl SocketDeliverer {
                     .unwrap_or_else(Instant::now)
             };
             let since = ago(age_ms);
-            state.held.insert(
-                h.lead.clone(),
-                Held {
-                    session: h.session.clone(),
-                    since,
-                },
-            );
+            if !h.awaiting_consumption {
+                state.held.insert(
+                    h.lead.clone(),
+                    Held {
+                        session: h.session.clone(),
+                        since,
+                    },
+                );
+            }
             state.pending.insert(
                 h.msg_id.clone(),
                 Pending {
@@ -689,6 +676,7 @@ impl SocketDeliverer {
                     msg_id: h.msg_id,
                     at: Instant::now(),
                     held_since: Some(since),
+                    awaiting_consumption: h.awaiting_consumption,
                     delivered_at: delivered_age_ms.map(ago),
                     watch: None,
                     resolution: None,
@@ -746,6 +734,7 @@ impl SocketDeliverer {
                     msg_id: format!("owed-{}", o.batch),
                     at: Instant::now(),
                     held_since: None,
+                    awaiting_consumption: false,
                     delivered_at: None,
                     watch: None,
                     resolution: Some(resolution),
@@ -912,14 +901,12 @@ impl SocketDeliverer {
     }
 
     /// Forgets what the status file said about `lead`'s socket (its resolved entry, its note
-    /// and its suspicion) because the lead does not try the socket: a lead whose
+    /// and note) because the lead does not try the socket: a lead whose
     /// registration changed `kind` is judged by the registration the tick read (FR-054).
     /// A held batch, a pending decision and a dead-letter reason are not touched.
     pub fn not_tried(&self, lead: &str) {
         let mut state = self.lock();
-        let had = state.leads.remove(lead).is_some()
-            | state.notes.remove(lead).is_some()
-            | state.suspect.remove(lead).is_some();
+        let had = state.leads.remove(lead).is_some() | state.notes.remove(lead).is_some();
         if had {
             self.publish(&mut state);
         }
@@ -936,7 +923,6 @@ impl SocketDeliverer {
         match &result {
             Ok(()) => {
                 state.notes.remove(target.lead);
-                state.suspect.remove(target.lead);
             }
             Err(SocketError::NotSent(why)) => {
                 state.leads.remove(target.lead);
@@ -944,7 +930,7 @@ impl SocketDeliverer {
                     .notes
                     .insert(target.lead.to_owned(), sanitise_line(why));
             }
-            Err(SocketError::Ambiguous(why)) => {
+            Err(SocketError::Ambiguous(why) | SocketError::Pending(why)) => {
                 state
                     .notes
                     .insert(target.lead.to_owned(), sanitise_line(why));
@@ -1030,15 +1016,6 @@ impl SocketDeliverer {
                 }
                 state.held.remove(lead);
             }
-            if let Some(suspect) = state.suspect.get(lead) {
-                if suspect.session == session && suspect.since.elapsed() < self.config.suspect_for {
-                    return Err(SocketError::NotSent(format!(
-                        "an earlier socket delivery to this lead could not be confirmed, so \
-                         herdr types its mail for now; {AMBIGUOUS_CAUSES}"
-                    )));
-                }
-                state.suspect.remove(lead);
-            }
             // Posted only when what is left of the tick's budget covers the worst case of
             // the post: a connect, a write and a whole ack wait (what was spent before,
             // this attempt's resolving included, is counted).
@@ -1050,12 +1027,17 @@ impl SocketDeliverer {
                         .to_owned(),
                 ));
             }
+            if state.pending.len() >= MAX_PENDING {
+                return Err(SocketError::Postponed(
+                    "socket pending capacity reached; nothing posted".to_owned(),
+                ));
+            }
             let content = self.content(&reply_path, target, text);
             let key = (session.to_owned(), hash_of(&content));
             let window = self.config.dedupe_window;
             state.sent.retain(|_, at| at.elapsed() < window);
             if state.sent.contains_key(&key) {
-                return Err(SocketError::NotSent(
+                return Err(SocketError::Deferred(
                     "an identical body was posted to this session in the last 30 s".to_owned(),
                 ));
             }
@@ -1075,32 +1057,6 @@ impl SocketDeliverer {
             let watch = transcript::find(&self.config.projects_dir, session).map(Watch::new);
             state.drift.posted(&resolved.version);
             state.sent.insert(key, Instant::now());
-            if let Err(e) = write_within(&mut stream, line.as_bytes(), WRITE_TIMEOUT) {
-                // Part of the line may have been read: unconfirmed, and a receiver that
-                // reads this slowly goes through herdr for a while.
-                state.suspect.insert(
-                    lead.to_owned(),
-                    Suspect {
-                        session: session.to_owned(),
-                        since: Instant::now(),
-                    },
-                );
-                return Err(SocketError::Ambiguous(format!(
-                    "the line was not written within {}s: {e}; this lead goes through herdr \
-                     for now",
-                    WRITE_TIMEOUT.as_secs()
-                )));
-            }
-            if state.pending.len() >= MAX_PENDING
-                && let Some(oldest) = state
-                    .pending
-                    .iter()
-                    .filter(|(_, p)| p.held_since.is_none())
-                    .min_by_key(|(_, p)| p.at)
-                    .map(|(id, _)| id.clone())
-            {
-                state.pending.remove(&oldest);
-            }
             state.pending.insert(
                 msg_id.clone(),
                 Pending {
@@ -1110,7 +1066,8 @@ impl SocketDeliverer {
                     batch: target.batch,
                     msg_id: msg_id.clone(),
                     at: Instant::now(),
-                    held_since: None,
+                    held_since: Some(Instant::now()),
+                    awaiting_consumption: true,
                     delivered_at: None,
                     watch: None,
                     resolution: None,
@@ -1120,6 +1077,17 @@ impl SocketDeliverer {
                     alerted: false,
                 },
             );
+            if let Err(e) = write_within(&mut stream, line.as_bytes(), WRITE_TIMEOUT) {
+                // A partial write may have reached Claude. Retain ownership just
+                // like a complete post; another transport must not resend it.
+                if let Some(p) = state.pending.get_mut(&msg_id) {
+                    p.watch = watch;
+                }
+                return Err(SocketError::Ambiguous(format!(
+                    "the line was not written within {}s: {e}; retained in flight",
+                    WRITE_TIMEOUT.as_secs()
+                )));
+            }
             (shared, msg_id, watch)
         };
         Ok(posted)
@@ -1210,7 +1178,7 @@ impl SocketDeliverer {
                 if delivered {
                     // Claude Code said delivered: the transcript is waited for, on the
                     // pending entry, until the grace ends.
-                    return Err(SocketError::Ambiguous(
+                    return Err(SocketError::Pending(
                         "Claude Code reported the message delivered; its transcript does not \
                          show it yet"
                             .to_owned(),
@@ -1221,16 +1189,9 @@ impl SocketDeliverer {
                 } else {
                     "its transcript cannot be found"
                 };
-                state.suspect.insert(
-                    target.lead.to_owned(),
-                    Suspect {
-                        session: session.to_owned(),
-                        since: now,
-                    },
-                );
-                return Err(SocketError::Ambiguous(format!(
-                    "the socket took the line but sent no receipt and {seen}; {AMBIGUOUS_CAUSES}; \
-                     this lead goes through herdr for now"
+                return Err(SocketError::Pending(format!(
+                    "socket_pending: the socket took the line and {seen}; retained in flight \
+                     until consumption is confirmed"
                 )));
             }
             let guard = shared.queue();
@@ -1262,7 +1223,10 @@ impl SocketDeliverer {
                     },
                 );
                 if let Some(p) = state.pending.get_mut(msg_id) {
-                    p.held_since.get_or_insert_with(Instant::now);
+                    if p.awaiting_consumption {
+                        p.held_since = Some(Instant::now());
+                    }
+                    p.awaiting_consumption = false;
                 }
                 Some(Err(SocketError::Held(
                     "Claude Code holds the message for approval (bypass mode)".to_owned(),
@@ -1378,7 +1342,12 @@ impl SocketDeliverer {
         match result {
             Ok(moved) => {
                 if matches!(settlement.action, SettleAction::Renew(_)) {
-                    if *moved == 0 {
+                    if *moved == 0
+                        && state
+                            .pending
+                            .get(&id)
+                            .is_some_and(|p| p.resolution.is_none())
+                    {
                         // No longer in flight (acknowledged or reaped): stop renewing it.
                         state.pending.remove(&id);
                     }
@@ -1399,6 +1368,14 @@ impl SocketDeliverer {
                             reason,
                         );
                     }
+                }
+                if !state.pending.values().any(|p| p.lead == settlement.lead)
+                    && state
+                        .notes
+                        .get(&settlement.lead)
+                        .is_some_and(|n| n.starts_with("socket_pending:"))
+                {
+                    state.notes.remove(&settlement.lead);
                 }
             }
             Err(why) => {
@@ -1607,17 +1584,35 @@ impl SocketDeliverer {
                 && p.held_since.is_some_and(|s| s.elapsed() >= max_hold)
             {
                 let lead = p.lead.clone();
+                let awaiting = p.awaiting_consumption;
                 p.resolution = Some(Resolution {
                     action: SettleAction::DeadLetter,
-                    why: "hold_expired: nobody answered the approval prompt in time".to_owned(),
+                    why: if awaiting {
+                        "consumption_expired: socket delivery was not confirmed in time"
+                    } else {
+                        "hold_expired: nobody answered the approval prompt in time"
+                    }
+                    .to_owned(),
                     notice: Some((
-                        format!("ix-relay: a message to {lead} was never approved"),
-                        "Claude Code held it behind an approval prompt that nobody answered; it \
-                         was dead-lettered (reason hold_expired) and will not be posted again. \
-                         Set crossSessionInbound to accept, or delivery = herdr."
-                            .to_owned(),
+                        if awaiting {
+                            format!("ix-relay: a socket message to {lead} expired")
+                        } else {
+                            format!("ix-relay: a message to {lead} was never approved")
+                        },
+                        if awaiting {
+                            "The receiver did not confirm the message before the deadline. It was \
+                             dead-lettered and will not be posted again."
+                        } else {
+                            "Claude Code held it behind an approval prompt that nobody answered; it \
+                             was dead-lettered (reason hold_expired) and will not be posted again. \
+                             Set crossSessionInbound to accept, or delivery = herdr."
+                        }.to_owned(),
                     )),
-                    reason: Some("hold_expired"),
+                    reason: Some(if awaiting {
+                        "consumption_expired"
+                    } else {
+                        "hold_expired"
+                    }),
                 });
             }
         }
@@ -1638,7 +1633,7 @@ impl SocketDeliverer {
                     lead: p.lead.clone(),
                     batch: p.batch,
                     action: SettleAction::Renew(HELD_RENEW_LEASE),
-                    why: "held behind an approval prompt".to_owned(),
+                    why: "socket delivery awaits consumption or approval".to_owned(),
                     notice: None,
                 });
             }
@@ -1687,7 +1682,10 @@ impl SocketDeliverer {
                     },
                 );
                 if let Some(p) = state.pending.get_mut(id) {
-                    p.held_since.get_or_insert_with(Instant::now);
+                    if p.awaiting_consumption {
+                        p.held_since = Some(Instant::now());
+                    }
+                    p.awaiting_consumption = false;
                 }
             }
             Verdict::Delivered => {
@@ -1714,13 +1712,6 @@ impl SocketDeliverer {
                 );
             }
             Verdict::Refused | Verdict::Dropped => {
-                state.suspect.insert(
-                    lead,
-                    Suspect {
-                        session,
-                        since: Instant::now(),
-                    },
-                );
                 resolve(
                     state,
                     SettleAction::Requeue,
@@ -1802,6 +1793,7 @@ impl SocketDeliverer {
                     session: p.session.clone(),
                     since_ms: ms_ago(now, since),
                     delivered_since_ms: p.delivered_at.map(|d| ms_ago(now, d)),
+                    awaiting_consumption: p.awaiting_consumption,
                 })
             })
             .collect();

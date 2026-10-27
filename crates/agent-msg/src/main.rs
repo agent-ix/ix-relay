@@ -350,7 +350,7 @@ fn main() -> ExitCode {
         }
     };
 
-    if let Cmd::Hook { kind: _ } = cli.cmd {
+    if let Cmd::Hook { kind } = cli.cmd {
         // Hooks outside Herdr are not lead hooks. Identity is established from
         // the genuine session association after the machine config is loaded.
         if std::env::var("HERDR_ENV").as_deref() != Ok("1") {
@@ -371,6 +371,9 @@ fn main() -> ExitCode {
         };
         let cx = HookCtx {
             machine: &settings.machine.value,
+            socket_delivery: matches!(kind, HookKind::Claude)
+                && relay_core::config::watcher_delivery()
+                    == Ok(relay_core::config::DeliveryMode::Socket),
         };
         // A panic anywhere in the hook is caught inside `run` and recorded;
         // this second net keeps even a panic in that recording from becoming a
