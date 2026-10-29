@@ -39,3 +39,7 @@ Automatic Linear reads SHALL run on a 30-minute timer. Rate-limited reads SHALL 
 
 - ix-board owns structured scope selection, leaf progress and snapshot queue computation.
 - Herdr supplies live pane and native process evidence; Redis stores explicit reports.
+
+## Planned-focus extension
+
+[FR-049](./FR-049-revisioned-planner-focus.md) adds shared planned-focus publication without changing the meaning of the existing activity summary. [FR-050](./FR-050-planner-follow-and-adoption.md) defines effective adopted scope while following; that explicit state takes precedence over the absent-local-scope team fallback in AC-3 and AC-9. [FR-051](./FR-051-focus-monitor-evidence-and-presentation.md) requires visible fallback labeling and adds milestone filtering, follower views and evidence-bearing metrics. These extensions are specified by SWM-127 and remain unimplemented until their delivery tickets land.
