@@ -1,8 +1,8 @@
-# systemd user unit, the hub only (AGE-2067): the bus's address, 10.99.0.1:6380
+# systemd user unit, the hub only: the bus's address, 10.99.0.1:6380
 # on the hub's WireGuard interface wg0. Leads on every machine, the hub included,
 # connect here; relay-redis-proxy.service carries each connection to
 # relay-redis inside the kind cluster. Replaces redis-port-forward.service
-# (`kubectl port-forward`) for the relay. See README.md "Transport".
+# (`kubectl port-forward`) for the relay. See docs/setup.md.
 #
 #   cp deploy/relay-redis-proxy.{socket,service} ~/.config/systemd/user/
 #   systemctl --user daemon-reload

@@ -10,7 +10,7 @@
 #   relay-admin migrate                     copy ixr:v3:* keys from platform/redis
 #   relay-admin status                      wg0, forwarder, relay-redis
 #
-# See README.md "Transport". relay-redis is the `ix-relay` chart in helm/
+# See docs/setup.md. relay-redis is the `ix-relay` chart in helm/
 # (`ix local up ix-relay --from-source`); its admin password never leaves the
 # pod: every Redis command here runs inside it, fed on stdin.
 set -euo pipefail

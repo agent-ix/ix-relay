@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  launchd agent for `relay-watcher` (AGE-2013), for node-b (macOS). node-a and
-  hub use `relay-watcher.service` (systemd user unit) instead.
+  launchd agent for `relay-watcher` on macOS. Linux machines
+  use `relay-watcher.service` (systemd user unit) instead.
 
-  Not installed by this repo — see README.md "Installing the watcher" for how
+  Not installed by this repo — see docs/setup.md for how
   to install it by hand. launchd does not expand `~` or `$HOME`: replace
   YOUR_USER below with the real account name before loading this.
 
   Machine-specific settings (Redis URL, key prefix, machine name) belong in
-  ~/.ix/relay/config.toml (see README.md "Configuration"), not env vars here.
+  ~/.ix/relay/config.toml (see docs/configuration.md), not env vars here.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
