@@ -7,7 +7,7 @@ An escalation is a request for a decision that only the operator can make. A lea
   <img alt="A lead files an escalation and keeps working. The operator lists it, investigates it in a Claude Code session, and resolves it. The decision goes back to the lead over the bus and is posted as a comment on the Linear ticket." src="images/escalation-light.svg">
 </picture>
 
-A lead escalates only for a decision that is the operator's to make. It states the options it sees and its own recommendation. An escalation has one of three states, and its status moves forward only:
+An escalation states the ticket, the context to decide, the options the lead sees and the lead's recommendation. It has one of three states, and its status moves forward only:
 
 | State | Meaning |
 |---|---|

@@ -1,6 +1,6 @@
 # ix-relay Claude Code plugin
 
-The plugin connects a team lead's Claude Code session to the ix-relay bus. Messages from other leads appear in the session's context, and a pending message blocks the turn from ending until it is seen.
+The ix-relay Claude Code plugin is the hook set that connects a team lead's Claude Code session to the ix-relay bus. Messages from other leads appear in the session's context, and a pending message blocks the turn from ending until it is seen.
 
 The plugin is for team leads. `agent-msg hook claude` stays silent for subagents, which it detects from `agent_id` in the hook input, and for any session without a verified Herdr location. A subagent session gains nothing from installing it.
 

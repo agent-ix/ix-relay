@@ -36,7 +36,7 @@ A send expands shortcuts with the sender's verified location, then reads the des
 | Fresh, no session | One refresh is requested from the destination watcher. |
 | Missing or expired | A refresh is requested through Redis. |
 
-After a refresh request the sender waits up to 60 seconds for a newer snapshot. A machine with no live watcher produces a precise error and no enqueue. Local Herdr is a fallback for cold local recovery. The [directory state model](../spec/reviews/relay-directory-state-model.md) states these guarantees and their limits.
+After a refresh request the sender waits up to 3 seconds for a newer snapshot on the local machine and up to 60 seconds on a remote machine. A machine with no live watcher produces a precise error and no enqueue. Local Herdr is a fallback for cold local recovery. The [directory state model](../spec/reviews/relay-directory-state-model.md) states these guarantees and their limits.
 
 ## Delivery by lead state
 
@@ -88,9 +88,9 @@ A lead left for a hook or a dialog is looked at again every `interval_secs` (def
 
 A pop moves a batch into the lead's in-flight record in the same Redis script, so a batch is never in two places. The hook acknowledges after its output is written and flushed. The watcher acknowledges when `herdr agent prompt` reports success.
 
-A batch that is not acknowledged returns to the front of the inbox, in order, when its lease expires on the Redis clock. A hook holds a 20-second lease and the watcher a 60-second lease. The hook reaps its own lead's expired batches inside its pop. The watcher reaps every registered lead at start-up and on each sweep.
+A batch that is not acknowledged returns to the front of the inbox, in order, when its lease expires on the Redis clock. The hook reaps its own lead's expired batches inside its pop. The watcher reaps every registered lead at start-up and on each sweep.
 
-A crash between delivery and acknowledgement delivers the batch twice. The second delivery is signed `[ix-relay] from <sender> (redelivered): ...`, and the redelivery count travels with the stored entry. After 3 redeliveries the next expiry moves the message to the dead-letter list, which keeps the newest 1,000.
+A crash between delivery and acknowledgement delivers the batch twice. The second delivery is signed `[ix-relay] from <sender> (redelivered): ...`, and the redelivery count travels with the stored entry. After the redelivery cap the next expiry moves the message to the dead-letter list, which keeps the newest 1,000.
 
 A lead can hold at most 16 unacknowledged batches and 1 MiB of them. A pop that would exceed either takes nothing until a lease frees room. The hook records the refusal, and the watcher logs `in-flight cap reached` once per episode.
 
@@ -108,7 +108,7 @@ On each directory refresh the watcher looks at every local registration with que
 - If no registration holds the address and the stale registration is 24 hours old, the mail moves to the dead-letter list and the registration is pruned.
 - If anything is uncertain, such as Herdr being silent, two registrations at the address or a pane that still hosts its session, nothing moves.
 
-Upgrade every machine together after this behavior is added: an older `agent-msg` rejects a forwarded message and does not show it.
+Every machine must run an `agent-msg` that accepts forwarded messages. An older one rejects them without showing them.
 
 ## Delivery through the Claude Code inbox socket
 

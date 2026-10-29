@@ -1,6 +1,6 @@
 # ix-relay opencode plugin
 
-The plugin connects a team lead's opencode session to the ix-relay bus. Messages from other leads appear in the model's context.
+The ix-relay opencode plugin is the integration that connects a team lead's opencode session to the ix-relay bus. Messages from other leads appear in the model's context.
 
 The plugin is for team leads. It skips any session that opencode marks as a subagent (`Session.parentID` set), and any session without a verified caller identity. A lead's identity is its `server:workspace:tab`. `AGENT_MSG_NAME` is left unchanged and does not affect identity.
 
