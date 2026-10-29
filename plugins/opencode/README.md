@@ -1,156 +1,56 @@
 # ix-relay opencode plugin
 
-Connects a team lead's opencode session to the ix-relay bus: incoming messages
-from other leads show up in the model's context automatically.
+The plugin connects a team lead's opencode session to the ix-relay bus. Messages from other leads appear in the model's context.
 
-This plugin is for **team leads only**. A subagent (task) session should not
-need it installed separately — it already skips any session opencode marks as
-a subagent (`Session.parentID` set) — but there's no reason to pay even the
-plugin's `agent-msg` calls in a session that isn't a lead. It also skips a session without a verified genuine caller identity. Public
-identity is exactly `server:workspace:tab`; `AGENT_MSG_NAME` is preserved and
-ignored. The current adapter's load-time identity gate and destructive inbox
-pop remain limitations: this directory release does not claim fresh OpenCode
-startup or at-least-once delivery has been repaired. See the
-[state model](../../spec/reviews/relay-directory-state-model.md) for its separate
-startup and delivery contract.
+The plugin is for team leads. It skips any session that opencode marks as a subagent (`Session.parentID` set), and any session without a verified caller identity. A lead's identity is its `server:workspace:tab`. `AGENT_MSG_NAME` is left unchanged and does not affect identity.
 
-## What was verified, and how (AGE-2016)
+The adapter checks identity when it loads and stays disabled if that proof is unavailable. Its inbox pop is destructive, so deliveries through this plugin are at-most-once. The [directory state model](../../spec/reviews/relay-directory-state-model.md) states the intended startup and delivery contract.
 
-Checked against opencode `1.17.11` and `@opencode-ai/plugin` `1.17.11` (the
-plugin API version that ships with it), installed via `npm view
-@opencode-ai/plugin@1.17.11` / `npm pack` and read directly from
-`dist/index.d.ts`, plus live runs of `opencode run` against a real plugin file
-under `.opencode/plugin/`.
+It was checked against opencode and `@opencode-ai/plugin` 1.17.11.
 
-1. **Is opencode installed?** Yes: `opencode --version` → `1.17.11`
-   (`opencode-ai` installed globally via npm at
-   `~/.npm-global/lib/node_modules/opencode-ai`). No install step was needed
-   in this environment; where it is missing, install it user-locally with
-   `npm install -g opencode-ai` (no sudo) or opencode's own install script —
-   both put a `opencode` binary on `PATH` without touching system
-   directories.
+## Delivery points
 
-2. **Can a JS/TS plugin inject text mid-turn, keep a turn from ending or
-   start a new one, and add context on session start?**
+| Point | Mechanism |
+|---|---|
+| Mid-turn | The `tool.execute.after` hook appends pending messages to the tool's `output.output`, and the harness sends that text to the model as the tool result. This is the main delivery point and corresponds to Claude Code's `PostToolUse` hook. |
+| Turn end | opencode has no hook that blocks a turn from ending. On `session.idle`, the plugin runs `agent-msg inbox --count`, which removes nothing. If the count is above zero, it sends a short nudge through `client.session.promptAsync` telling the model to run `agent-msg inbox`. The pop happens inside the model's own `agent-msg inbox` call, whose output the model always sees. |
+| Session start | The `session.created` event registers the lead. No delivery point fires before the first tool call, so a backlog is delivered at the first tool call or at the first idle nudge. |
 
-   - **(a) inject mid-turn — yes, verified live.** The `"tool.execute.after"`
-     hook receives `(input: {tool, sessionID, callID, args}, output: {title,
-     output, metadata})`; `output` is mutable, and the harness sends the
-     mutated `output.output` back to the model as that tool's result. A probe
-     plugin that appended a marker string to `output.output` produced a
-     marker that showed up verbatim in the model's own event stream on the
-     very next step. This is the plugin's main delivery point, and it mirrors
-     Claude Code's `PostToolUse` hook.
+Under `opencode run` the process can exit before the model acts on the nudge. Under `opencode serve` and the TUI the server stays up, and the nudge is acted on.
 
-   - **(b) block/restart a turn — verified live, end-to-end, against
-     `opencode serve`.** There is no hook that can block a turn from ending
-     (nothing like Claude's `Stop` → `decision: "block"`). There *is*
-     `client.session.promptAsync({path: {id}, body: {parts}})` — "create and
-     send a new message to a session, start if needed, and return
-     immediately" — callable from the `event` hook on `session.idle` (fires
-     when a turn ends). The first version of this plugin called it with the
-     *actual pending messages* and popped the inbox right there in the idle
-     handler. That's wrong, and PR review caught it: `opencode run` tears
-     down its ephemeral local server the instant the idle event finishes
-     dispatching — confirmed by putting a bare `setTimeout` in the handler
-     after the `promptAsync` call and watching it never fire even once — so
-     nothing async this handler does after that point can be trusted to run,
-     and a pop here is a pop nobody can promise gets seen. The fix: the idle
-     handler **never pops**. It only peeks the count
-     (`agent-msg inbox --count`, non-destructive) and, if nonzero, sends a
-     short nudge — `"you have N pending messages — run agent-msg inbox
-     now"` — checking `result.error` and logging it if set. The actual pop
-     happens inside the model's own subsequent `agent-msg inbox` call, whose
-     output the model always sees regardless of whether this plugin's own
-     process survives. Verified end-to-end against `opencode serve` (a
-     persistent server, not torn down at idle): started the server, drove an
-     initial turn against it with `opencode run --attach`, sent a message
-     once that turn's only tool call had completed, and polled the server's
-     own `/session/{id}/message` over HTTP — the model's own follow-up
-     `agent-msg inbox` output, containing the pending message, showed up
-     there. Under plain `opencode run` (no persistent server) the nudge is
-     still queued via `promptAsync`, but whether the model acts on it before
-     the process exits isn't guaranteed the way it is under `serve`/the TUI.
+The `chat.message` hook is not used, because text pushed into the first user message did not reach the session's event stream in testing.
 
-   - **(c) session start — yes, verified live.** The `event` hook fires
-     `session.created` reliably, with `properties.info` being a full
-     `Session` object (id, `parentID`, directory, ...). The plugin registers
-     the lead here. There is no delivery point that fires *before* any tool
-     call and before any turn ends, so backlog queued before a session starts
-     is delivered at whichever of (a) or (b) happens first — in practice,
-     almost always (a), since a lead's first turn calls a tool.
+## Subagent detection
 
-   A `"chat.message"` hook also exists (`(input: {sessionID, ...}, output:
-   {message, parts})`) that looks like it should let a plugin push an extra
-   `Part` into the very first user message. In testing, pushing a
-   well-formed `TextPart` (with `id`/`sessionID`/`messageID` set) into
-   `output.parts` did not error, but the pushed text never appeared anywhere
-   in that session's own event stream — so it is **not** used here; the
-   plugin relies only on the two verified mechanisms above.
+The plugin treats a session as a lead only after it confirms that `parentID` is unset. It tracks `session.created` and `session.updated` events, and resolves an unknown session through `client.session.get`. A session that cannot be resolved is treated as not a lead.
 
-3. **How does opencode mark a subagent (task) session?** `Session.parentID`
-   (from `@opencode-ai/sdk`'s generated `types.gen.d.ts`): unset for a lead's
-   own top-level session, set to the lead's session id for a subagent's child
-   session. The plugin tracks this from `session.created`/`session.updated`
-   events, and resolves it via `client.session.get` for any session it sees
-   in `"tool.execute.after"` or `session.idle` before an event has told it
-   what that session is — the same role `agent_id` plays in Claude's hook
-   JSON. This is **deny-by-default**: a session is only treated as a lead
-   once its absence of `parentID` has been positively confirmed; a session
-   that can't be resolved (the `client.session.get` call errors, or returns
-   nothing) is treated as not-a-lead, not as a lead. The first version of
-   this plugin got this backwards — an unrecognized session was allowed
-   through by default — which review also caught.
-
-4. **What if more than one lead session runs in one opencode process?**
-   Delivery is bound to whichever confirmed lead session was most recently
-   active. `tool.execute.after` and `session.idle` both re-check, after
-   their own `agent-msg` round trip, that their session is still the most
-   recently active one before doing anything — so two idle lead sessions
-   under one process don't both try to drain the same inbox, and a message
-   surfaces in whichever session you're actually looking at.
+When one opencode process runs several lead sessions, delivery follows the most recently active confirmed lead. Each hook rechecks after its `agent-msg` round trip that its session is still the most recent, so two idle sessions do not drain one inbox.
 
 ## Install
 
-1. **Build `agent-msg` and put it on `PATH`** — same as the Claude plugin
-   (see `plugins/claude/README.md`):
+1. Install `agent-msg`:
 
    ```bash
-   cargo install --path crates/agent-msg
+   cargo install --git https://github.com/agent-ix/ix-relay agent-msg --locked
    ```
 
-2. **Use a genuine verified root session.** `agent-msg whoami --json` must
-   report its canonical `server:workspace:tab` identity. Names and inherited
-   pane variables cannot establish it. Preserve any existing `AGENT_MSG_NAME`;
-   setting it cannot override identity or repair startup. The current plugin
-   checks identity at load and stays disabled if that proof is unavailable.
+2. Run the lead in a genuine verified root session. `agent-msg whoami --json` must report the canonical `server:workspace:tab` identity.
 
-3. **Set `~/.ix/relay/config.toml` if this machine needs different settings**
-   — Redis isn't reachable at the default address (`redis://127.0.0.1:6379`),
-   the key prefix needs to differ, or the machine's hostname needs fixing.
-   This is a machine-level file, not per-session (same as the Claude plugin,
-   see `plugins/claude/README.md`): set it up once, and every lead session on
-   the machine — Claude, Codex or opencode — picks it up.
+3. Put the machine's bus URL in `~/.ix/relay/config.toml`, as for the [Claude Code plugin](../claude/README.md). [Setup](../../docs/setup.md) explains how to get the URL.
 
    ```toml
-   url = "redis://127.0.0.1:6380"
-   machine = "node-b"
+   url = "redis://<machine>:<password>@10.99.0.1:6380"
+   machine = "<machine>"
    ```
 
-   See the main [README.md](../../README.md#configuration) for the full key
-   list and precedence order. Most machines reach the bus through an SSH
-   tunnel at the default address and need no file at all.
-
-4. **Install the plugin file.** opencode auto-loads every file under a
-   project's `.opencode/plugin/` directory, or a global one under
-   `~/.config/opencode/plugin/`. Either copy or symlink it in:
+4. Install the plugin file. opencode loads every file in a project's `.opencode/plugin/` directory, or in `~/.config/opencode/plugin/` for all projects:
 
    ```bash
    mkdir -p .opencode/plugin
    ln -s /path/to/ix-relay/plugins/opencode/ix-relay.ts .opencode/plugin/ix-relay.ts
    ```
 
-   or reference it explicitly from `opencode.json` without copying anything:
+   Alternatively, reference the file from `opencode.json`:
 
    ```json
    {
@@ -158,11 +58,7 @@ under `.opencode/plugin/`.
    }
    ```
 
-5. **Give the lead the bus guidance.** opencode combines `AGENTS.md` with any
-   files listed under `instructions` in `opencode.json`. Point it at
-   `plugins/opencode/AGENTS.md` (the same content as the Claude plugin's
-   `skills/msg/SKILL.md`, in opencode's own instructions format) instead
-   of copying it in:
+5. Give the lead the bus guidance. `plugins/opencode/AGENTS.md` has the same content as the Claude plugin's `/msg` skill. Reference it from `opencode.json`:
 
    ```json
    {
@@ -170,26 +66,14 @@ under `.opencode/plugin/`.
    }
    ```
 
-## Verifying it's working
+## Verify
 
 ```bash
-agent-msg who      # see other registered leads
-agent-msg log       # recent bus history
+agent-msg whoami --json   # this session's address
+agent-msg who             # registered leads
+agent-msg log             # recent bus history
 ```
-
-If `agent-msg who` only shows leads you expect and `agent-msg log` shows sends
-you've made land, the plugin is reaching the same Redis your CLI does.
-
-The retired pre-0.3 alias-based live driver previously ran a fuller version of
-this against a throwaway Redis and a throwaway opencode config dir, including
-the idle-nudge path (against `opencode serve`) and an exchange with a live
-Claude Code lead in both directions.
 
 ## Idle leads
 
-A lead sitting completely idle (no turn running at all, not even one the
-`session.idle` nudge could ride) isn't reachable by this plugin at all — there
-is no opencode hook that fires without a turn in flight. That's covered by
-`relay-watcher` (AGE-2013), which polls registered leads and wakes an idle one
-by typing into its herdr-managed pane with `herdr agent prompt`, the same way
-it does for Claude and Codex leads.
+An opencode lead that is fully idle is outside the plugin's reach, because no opencode hook fires without a turn. `relay-watcher` covers that case. It wakes the lead by typing into its Herdr pane with `herdr agent prompt`, as it does for Claude Code and Codex leads.

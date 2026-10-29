@@ -2,19 +2,17 @@
 
 Connects a team lead's Codex session to the ix-relay bus: incoming messages
 from other leads show up in context automatically, and a pending message
-blocks the turn from ending until it's been seen. This mirrors the Claude
-Code plugin at `plugins/claude` — see that directory for the design; this one
-is Codex's version of the same four hooks plus the same lead guidance.
+blocks the turn from ending until it's been seen. It has the same four
+hooks and the same lead guidance as the Claude Code plugin in `plugins/claude`.
 
 This plugin is for **team leads only**. A subagent session should not use it
 — `agent-msg hook codex` already stays silent for subagent calls (Codex marks
 them with a top-level `agent_id`, exactly like Claude Code's subagent marker)
 and for sessions without a verified live Herdr session association.
 
-Unlike Claude Code, Codex has no `--plugin-dir`-style auto-loading for hooks:
-there is one `$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`), so
-this plugin's `hooks.json` has to be merged into it by hand rather than
-pointed at directly.
+Codex has no `--plugin-dir` auto-loading for hooks. It reads one
+`$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`), so this plugin's
+`hooks.json` is merged into that file by hand.
 
 ## Install
 
@@ -59,8 +57,8 @@ pointed at directly.
    time the session would run these hooks. **This interactive prompt has not
    been verified live**: everything in this section is inferred from Codex's
    own error strings (`"plugin hook trust update was cancelled"`, `"failed to
-   write hook trust"`) and `codex --help`, not from watching the actual
-   prompt appear and approving it in a real TUI session. If it doesn't match
+   write hook trust"`) and `codex --help`. The prompt was not observed
+   in a real TUI session. If it doesn't match
    what you see, trust what's in front of you and open an issue.
 
    <details>
@@ -78,12 +76,11 @@ pointed at directly.
    Codex documents this flag as "Run enabled hooks without requiring
    persisted hook trust for this invocation. DANGEROUS. Intended only for
    automation that already vets hook sources." Read literally: it bypasses
-   trust for **every** hook enabled in that `CODEX_HOME`, not only this
-   plugin's — anything else configured in the same `hooks.json` runs
+   trust for **every** hook enabled in that `CODEX_HOME`, including
+   hooks other than this plugin's: anything else configured in the same `hooks.json` runs
    unreviewed too. Reach for it in an isolated, scratch `CODEX_HOME` for
-   testing (using the isolated Herdr startup acceptance procedure below), not for a real lead's
-   normal environment; a real lead should go through the interactive prompt
-   once instead.
+   testing (using the isolated Herdr startup acceptance procedure below). A real lead goes through the
+   interactive prompt once.
 
    </details>
 
@@ -103,21 +100,17 @@ pointed at directly.
    lead's public identity is always `server:workspace:tab`. Run
    `agent-msg whoami` to verify it.
 
-6. **Set `~/.ix/relay/config.toml` if this machine needs different settings**
-   — Redis isn't reachable at the default address (`redis://127.0.0.1:6379`),
-   the key prefix needs to differ, or the machine's hostname needs fixing
-   (casing, domain suffix). This is a machine-level file, not per-session: set
-   it up once, and every lead session on the machine — Claude Code or Codex —
-   picks it up.
+6. **Set `~/.ix/relay/config.toml`.** The machine's bus URL goes in this
+   machine-level file, and every lead session on the machine uses it, whether
+   it runs Claude Code, Codex or opencode.
 
    ```toml
-   url = "redis://127.0.0.1:6380"
-   machine = "node-b"
+   url = "redis://<machine>:<password>@10.99.0.1:6380"
+   machine = "<machine>"
    ```
 
-   See the main [README.md](../../README.md#configuration) for the full key
-   list and precedence order. Most machines reach the bus through an SSH
-   tunnel at the default address and need no file at all.
+   [Setup](../../docs/setup.md) explains how to get the URL, and
+   [Configuration](../../docs/configuration.md) lists every key.
 
 7. **Add lead guidance.** Merge [`AGENTS.md`](./AGENTS.md)'s content into the
    lead session's own `AGENTS.md` (project-level, or `~/.codex/AGENTS.md` for

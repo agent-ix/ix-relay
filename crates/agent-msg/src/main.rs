@@ -109,7 +109,7 @@ enum Cmd {
         /// them (the opencode plugin's idle path does this).
         #[arg(long)]
         count: bool,
-        /// Print your dead letters (messages whose redeliveries ran out, FR-040)
+        /// Print your dead letters (messages whose redeliveries ran out)
         /// instead of popping, oldest first, and leave them where they are.
         #[arg(long, conflicts_with_all = ["count", "json"])]
         dead: bool,
@@ -160,8 +160,8 @@ enum Cmd {
     },
     /// Look up a live lead by address, workspace/tab label, session name,
     /// pane id or `server:workspace[:tab[:pane]]` address, joining the bus registry
-    /// against live herdr state on this machine and every saved one
-    /// (AGE-2018). Ends with the address(es) to use with `send`. Not needed
+    /// against live herdr state on this machine and every saved one.
+    /// Ends with the address(es) to use with `send`. Not needed
     /// before `send`: `send` resolves an address itself.
     Find {
         /// Case-insensitive substring to match; omit to list everyone.
@@ -211,7 +211,7 @@ enum Cmd {
     },
     /// File an escalation: a decision only the operator can make. Prints its id.
     Escalate {
-        /// The Linear ticket this decision belongs to, e.g. `AGE-2014`.
+        /// The Linear ticket this decision belongs to, e.g. `ENG-123`.
         ticket: String,
         /// What needs deciding.
         #[arg(long)]
@@ -278,7 +278,7 @@ enum EscalationCmd {
 enum ServerCapacityCmd {
     /// Record explicit capacity for one server.
     Set {
-        /// Relay server name such as terra, luna, titan, or draco.
+        /// Relay server name, such as the machine name in `agent-msg who`.
         server: String,
         /// Cores allocated to agent work.
         #[arg(long)]

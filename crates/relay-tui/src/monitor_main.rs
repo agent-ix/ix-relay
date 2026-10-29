@@ -17,7 +17,7 @@ use clap::Parser;
     about = "Monitor one explicitly assigned lead session"
 )]
 struct Args {
-    /// Lead Herdr address, e.g. luna:SWM:code.
+    /// Lead Herdr address, e.g. hub:TEAM:code.
     #[arg(long)]
     lead: String,
     /// Linear team key; defaults to the bound lead workspace label.

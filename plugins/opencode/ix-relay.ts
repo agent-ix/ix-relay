@@ -1,4 +1,4 @@
-// ix-relay opencode plugin (AGE-2016): connects an opencode team-lead session to
+// ix-relay opencode plugin: connects an opencode team-lead session to
 // the ix-relay message bus. It shells out to `agent-msg`, the same CLI the
 // Claude Code plugin (plugins/claude) and Codex use, so all three harnesses
 // share one bus and one message format.
@@ -27,7 +27,7 @@
 //     For a session under `opencode serve` (long-lived, not torn down at
 //     idle) this reliably produces a real reply; for `opencode run` the
 //     nudge is queued but the run may exit before the model acts on it.
-//     Otherwise-idle leads are covered by relay-watcher (AGE-2013), which
+//     Otherwise-idle leads are covered by relay-watcher, which
 //     wakes them by typing into the opencode TUI through herdr.
 //   - session start: `session.created` fires reliably and carries
 //     `Session.parentID`. There is no delivery point that fires before any
@@ -195,7 +195,7 @@ export const IxRelayPlugin: Plugin = async ({ client, $ }) => {
     // At-most-once: `inbox --json` pops outright and records nothing in flight, so
     // messages popped here are lost if opencode aborts before they are shown. The
     // hook and the watcher acknowledge their deliveries; this path needs a claim and
-    // an acknowledgement too (AGE-2051).
+    // an acknowledgement too.
     const result = await $`agent-msg inbox --json`.nothrow().quiet();
     if (result.exitCode !== 0) {
       console.error(

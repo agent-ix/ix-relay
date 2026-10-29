@@ -31,6 +31,8 @@
 ## 0.3.0
 
 - Replace lead aliases with verified Herdr location identities (`server:workspace:tab`).
+- Move the bus to the `ixr:v3:` key namespace. Archive the earlier namespace without deleting its keys using `scripts/archive-relay-namespace.py --prefix ixr: --output <file>`, then stage matching binaries, launcher and plugin guidance on every machine before changing the configured prefix. Earlier aliases are never imported.
+- Run relay-redis as its own Redis on the hub, reached over WireGuard with one Redis user per machine. `scripts/relay-admin migrate` copies `ixr:v3:*` keys from the earlier shared Redis and keeps any key relay-redis already has.
 - Reject stale interactive identities that have no matching live session, and diagnose stale Codex caller context with limited SessionStart capture.
 - Resolve cold remote leads through exact saved Herdr profiles.
 - Bound hook session probing to one Redis reply, and measure the drip-input deadline at hook exit.
