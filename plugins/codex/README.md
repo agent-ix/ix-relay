@@ -94,4 +94,4 @@ Approve the changed hook configuration through the real session's normal trust f
 
 Use an owned isolated Herdr session and isolated Redis namespace. Launch an interactive Codex through `scripts/codex-herdr-launcher.py`, submit its first prompt, and capture only the genuine SessionStart event, session ID, transcript path, and Herdr context. Verify that Herdr reports that exact session ID and that the installed hook wrote the registration before invoking `whoami`. `whoami` must show `server:workspace:tab` even with a stale `AGENT_MSG_NAME`. Repeat for resume, then verify `:tab`, `:workspace:tab`, and a remote cold send without running `register` or `find` first.
 
-Judge startup by the registration, `whoami` and the Herdr session ID. If a check fails, fix the cause and do not register manually. Take the pane from the Herdr association, not from focus.
+Judge startup by the registration, `whoami` and the Herdr session ID. If a check fails, fix the cause and do not register manually. Take the pane from the Herdr association.
