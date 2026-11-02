@@ -1,0 +1,16 @@
+{
+  "name": "ix-relay",
+  "owner": {
+    "name": "Agent IX"
+  },
+  "metadata": {
+    "description": "Lead-to-lead message bus and escalation inbox for the agent swarm."
+  },
+  "plugins": [
+    {
+      "name": "ix-relay",
+      "source": "./plugins/codex",
+      "description": "Connects a team lead's Codex session to the ix-relay message bus."
+    }
+  ]
+}
