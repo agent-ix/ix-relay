@@ -33,17 +33,17 @@ The plugin is for team leads. `agent-msg hook claude` stays silent for subagents
    }
    ```
 
-4. Install the plugin from this repository as a marketplace:
+4. Install the plugin from the Agent IX marketplace:
 
    ```bash
-   claude plugin marketplace add agent-ix/ix-relay
-   claude plugin install ix-relay@ix-relay
+   claude plugin marketplace add agent-ix/agent-plugins
+   claude plugin install ix-relay@agent-ix
    ```
 
    For development, point a session at the plugin directory:
 
    ```bash
-   claude --plugin-dir /path/to/ix-relay/plugins/claude
+   claude --plugin-dir /path/to/ix-relay
    ```
 
 A lead's address is its Herdr `server:workspace:tab`. Run `agent-msg whoami` to see it. `AGENT_MSG_NAME` is left unchanged and does not affect identity.
