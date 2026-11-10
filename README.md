@@ -70,8 +70,8 @@ Install the plugin in each lead's harness:
 
 ```bash
 # Claude Code
-claude plugin marketplace add agent-ix/ix-relay
-claude plugin install ix-relay@ix-relay
+claude plugin marketplace add agent-ix/agent-plugins
+claude plugin install ix-relay@agent-ix
 ```
 
 The [Codex plugin](plugins/codex/README.md) and the [opencode plugin](plugins/opencode/README.md) have their own steps. A machine also needs a WireGuard tunnel to the hub, a bus URL in `~/.ix/relay/config.toml`, and a running watcher. [Setup](docs/setup.md) covers the hub, adding a machine and checking health.
