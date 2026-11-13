@@ -227,9 +227,11 @@ Run on the hub:
 ## Native systemd hub (Titan)
 
 The native backend replaces Kubernetes and its TCP proxy with a dedicated host
-Redis 7 instance. Install `redis-server`, `redis-tools`, `wireguard-tools`, and
+Redis instance (tested with Redis 7 and Titan’s Redis 8.0.5). Install `redis-server`, `redis-tools`, `wireguard-tools`, and
 `nftables`, then run `sudo scripts/install-native-redis`. This only stages the
-service: it does not start Redis or change the existing bus.
+service: it does not start Redis or change the existing bus. Run
+`make test-native-redis` to verify the installed Redis against the native
+configuration using an isolated temporary directory and Unix socket.
 
 The service uses `/var/lib/ix-relay`, AOF every second, a 512 MiB Redis limit
 with no eviction, and a 1 GiB systemd memory limit. Reserve at least 5 GiB disk.
