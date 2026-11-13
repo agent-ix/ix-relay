@@ -222,3 +222,58 @@ Run on the hub:
 | Remove a machine | `scripts/relay-admin remove-peer <machine>`. On the machine, disable `wg-quick@relay` or delete the app's tunnel. |
 
 `scripts/relay-admin remove-user <machine>` removes the Redis user alone.
+
+
+## Native systemd hub (Titan)
+
+The native backend replaces Kubernetes and its TCP proxy with a dedicated host
+Redis 7 instance. Install `redis-server`, `redis-tools`, `wireguard-tools`, and
+`nftables`, then run `sudo scripts/install-native-redis`. This only stages the
+service: it does not start Redis or change the existing bus.
+
+The service uses `/var/lib/ix-relay`, AOF every second, a 512 MiB Redis limit
+with no eviction, and a 1 GiB systemd memory limit. Reserve at least 5 GiB disk.
+Its admin password stays in `/etc/ix-relay/admin.password` (root only).
+Use `IX_RELAY_BACKEND=systemd scripts/relay-admin ...` for native peer/user
+administration. Kubernetes remains the default backend. Native `migrate` is
+intentionally unavailable.
+
+### Coordinated empty-bus move from Luna
+
+Reserve Titan wired address `192.168.50.21` in DHCP. Inventory every peer and
+save root-only copies of WireGuard configuration and each client's relay config
+before changing anything. Do not publish private keys or client URLs.
+
+Stop watchers on all machines, stop Luna's relay proxy socket **and service**,
+scale its dedicated `ix-relay` deployment to zero, and disable its `wg0` hub.
+Disable Titan's old `wg-quick@relay` peer before bringing up the new hub at the
+same logical address. Leave all unrelated Luna services running.
+
+On Titan run `IX_RELAY_BACKEND=systemd scripts/relay-admin hub-init --lan
+192.168.50.0/24`, then `sudo systemctl enable --now ix-relay-redis`. The hub-init
+firewall permits only destination `10.99.0.1:6380` through wg0 and blocks all
+forwarding to/from wg0, independently of Docker's tables. Existing LAN access
+is unchanged; no SSH credentials or access are added. The hub key is generated
+on Titan. Do not reuse Luna's private key.
+
+Enroll each remote machine using its existing public key and native `add-peer`;
+set `RELAY_ENDPOINT=192.168.50.21` when generating peer instructions. Address
+allocation follows enrollment order, so install the printed address on each
+peer rather than assuming the previous assignment. Luna can reuse its existing
+hub key locally as its new peer key, without transferring it. Use `add-user
+titan` for Titan itself. Each machine gets a fresh Redis URL; install it in its
+local config and remove stale URL environment overrides. Keep secrets out of
+chat, tickets, logs, and shell history. Restart watchers and verify genuine live
+Herdr sessions repopulate the directory without fabricated registrations.
+
+Before retiring the old deployment, verify authenticated health on every peer,
+message enqueue/delivery/acknowledgement in both directions, denial of other
+tunnel ports and forwarding, denial of unauthenticated/admin Redis commands,
+and Redis persistence across restart. Reboot Titan during the maintenance
+window to check startup ordering. Observe 24 healthy hours before deleting the
+old deployment. Monitor local logs, Redis latency, memory, disk/AOF failures,
+watcher reconnects and hook budget failures independently of Luna.
+
+Rollback means stopping Titan's bus and restoring the saved topology and client
+configs on every machine together. Queued messages are disposable; never merge
+the two buses. Do not run the legacy namespace migration for this move.

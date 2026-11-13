@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Stage only: does not start Redis, change WireGuard, or stop the existing bus.
+set -euo pipefail
+[[ $EUID == 0 ]] || { echo "run with sudo" >&2; exit 1; }
+root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+command -v redis-server >/dev/null || { echo "install redis-server and redis-tools first" >&2; exit 1; }
+getent passwd ix-relay >/dev/null || useradd --system --home-dir /var/lib/ix-relay --shell /usr/sbin/nologin ix-relay
+install -d -m 700 /etc/ix-relay
+install -d -o ix-relay -g ix-relay -m 700 /var/lib/ix-relay
+# Refuse partial initialization; never silently rotate credentials or erase ACL users.
+if [[ -e /etc/ix-relay/admin.password || -e /var/lib/ix-relay/users.acl ]]; then
+  [[ -s /etc/ix-relay/admin.password && -s /var/lib/ix-relay/users.acl ]] || { echo "partial credentials: inspect before retrying" >&2; exit 1; }
+else
+  umask 077
+  od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > /etc/ix-relay/admin.password
+  hash=$(sha256sum /etc/ix-relay/admin.password | cut -d' ' -f1)
+  printf 'user default off resetchannels -@all\nuser admin on #%s ~* &* +@all\n' "$hash" > /var/lib/ix-relay/users.acl
+  chown ix-relay:ix-relay /var/lib/ix-relay/users.acl
+fi
+install -o ix-relay -g ix-relay -m 400 "$root/deploy/redis-native.conf" /etc/ix-relay/redis.conf
+# Redis must traverse the directory, but cannot read the root-only admin password.
+chown root:ix-relay /etc/ix-relay
+chmod 750 /etc/ix-relay
+install -D -m 755 "$root/scripts/ix-relay-native-admin" /usr/local/libexec/ix-relay-native-admin
+install -m 644 "$root/deploy/ix-relay-redis.service" /etc/systemd/system/ix-relay-redis.service
+systemctl daemon-reload
+echo "Staged. Redis has not been enabled or started."

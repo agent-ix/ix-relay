@@ -15,6 +15,9 @@
 # pod: every Redis command here runs inside it, fed on stdin.
 set -euo pipefail
 
+BACKEND=${IX_RELAY_BACKEND:-kubernetes}
+[[ $BACKEND == kubernetes || $BACKEND == systemd ]] || { echo "invalid IX_RELAY_BACKEND" >&2; exit 2; }
+
 WG_CONF=/etc/wireguard/wg0.conf
 WG_NET=10.99.0
 HUB_ADDR=$WG_NET.1
@@ -37,6 +40,10 @@ valid_machine() {
 
 # Feed redis-cli commands on stdin to relay-redis, authenticated as admin.
 relay_cli() {
+  if [[ $BACKEND == systemd ]]; then
+    sudo /usr/local/libexec/ix-relay-native-admin
+    return
+  fi
   kubectl -n "$NS" exec -i "$DEPLOY" -c redis -- \
     sh -c 'REDISCLI_AUTH="$ADMIN_PASSWORD" exec redis-cli --no-auth-warning --user admin'
 }
@@ -71,7 +78,7 @@ cmd_hub_init() {
   # it: phase 1 takes WireGuard only from the LAN, and over wg0 peers reach
   # the bus port and nothing else. It filters nothing else on the host, so it
   # does not depend on (or change) ufw.
-  printf 'table inet ixrelay {\n  chain input {\n    type filter hook input priority 0; policy accept;\n    udp dport %s ip saddr != %s drop\n    iifname "wg0" tcp dport %s accept\n    iifname "wg0" drop\n  }\n}\n' \
+  printf 'table inet ixrelay {\n  chain input {\n    type filter hook input priority 0; policy accept;\n    udp dport %s ip saddr != %s drop\n    iifname "wg0" ip daddr 10.99.0.1 tcp dport %s accept\n    iifname "wg0" drop\n  }\n  chain forward {\n    type filter hook forward priority -10; policy accept;\n    iifname "wg0" drop\n    oifname "wg0" drop\n  }\n}\n' \
     "$WG_PORT" "$lan" "$BUS_PORT" | sudo tee /etc/wireguard/ixrelay.nft >/dev/null
   if sudo test -e "$WG_CONF"; then
     echo "$WG_CONF exists; leaving it as it is"
@@ -182,6 +189,7 @@ cmd_remove_peer() {
 }
 
 cmd_migrate() {
+  [[ $BACKEND == kubernetes ]] || die "migrate is only for the legacy Kubernetes bus"
   # MIGRATE from inside platform/redis (no auth) to relay-redis, keeping TTLs
   # and leaving the originals. The admin password is read from the Secret and
   # travels on stdin, never in a command line. No REPLACE: in a staggered
@@ -220,6 +228,11 @@ cmd_migrate() {
 
 cmd_status() {
   echo "== wg0"; sudo wg show wg0 || true
+  if [[ $BACKEND == systemd ]]; then
+    systemctl --no-pager status ix-relay-redis || true
+    printf 'PING\nACL USERS\nDBSIZE\n' | relay_cli
+    return
+  fi
   echo "== forwarder"; systemctl --user --no-pager status relay-redis-proxy.socket | head -n 3 || true
   echo "== relay-redis"; printf 'PING\nACL USERS\nDBSIZE\n' | relay_cli
 }
