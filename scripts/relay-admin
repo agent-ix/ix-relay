@@ -78,7 +78,7 @@ cmd_hub_init() {
   # it: phase 1 takes WireGuard only from the LAN, and over wg0 peers reach
   # the bus port and nothing else. It filters nothing else on the host, so it
   # does not depend on (or change) ufw.
-  printf 'table inet ixrelay {\n  chain input {\n    type filter hook input priority 0; policy accept;\n    udp dport %s ip saddr != %s drop\n    iifname "wg0" ip daddr 10.99.0.1 tcp dport %s accept\n    iifname "wg0" drop\n  }\n  chain forward {\n    type filter hook forward priority -10; policy accept;\n    iifname "wg0" drop\n    oifname "wg0" drop\n  }\n}\n' \
+  printf 'table inet ixrelay {\n  chain input {\n    type filter hook input priority 0; policy accept;\n    meta nfproto ipv6 udp dport 51820 drop\n    udp dport %s ip saddr != %s drop\n    iifname "wg0" ip daddr 10.99.0.1 tcp dport %s accept\n    iifname "wg0" drop\n  }\n  chain forward {\n    type filter hook forward priority -10; policy accept;\n    iifname "wg0" drop\n    oifname "wg0" drop\n  }\n}\n' \
     "$WG_PORT" "$lan" "$BUS_PORT" | sudo tee /etc/wireguard/ixrelay.nft >/dev/null
   if sudo test -e "$WG_CONF"; then
     echo "$WG_CONF exists; leaving it as it is"
