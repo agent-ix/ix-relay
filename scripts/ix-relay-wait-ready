@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# systemd ExecStartPost readiness gate; run as root to read the local admin secret.
+set -euo pipefail
+deadline=$((SECONDS + 30))
+while (( SECONDS < deadline )); do
+  if reply=$(printf 'PING\n' | timeout 1 /usr/local/libexec/ix-relay-native-admin 2>/dev/null) && [[ $reply == PONG ]]; then
+    exit 0
+  fi
+  sleep 0.1
+done
+echo 'ix-relay: Redis did not answer authenticated PING within 30 seconds' >&2
+exit 1

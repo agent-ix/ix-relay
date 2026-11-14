@@ -9,6 +9,9 @@ Type=simple
 User=ix-relay
 Group=ix-relay
 ExecStart=/usr/bin/redis-server /etc/ix-relay/redis.conf
+# Root-only admin credentials stay unreadable by the Redis service account.
+ExecStartPost=+/usr/local/libexec/ix-relay-wait-ready
+TimeoutStartSec=40
 Restart=always
 RestartSec=2
 StateDirectory=ix-relay

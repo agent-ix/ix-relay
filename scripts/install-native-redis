@@ -22,6 +22,7 @@ install -o ix-relay -g ix-relay -m 400 "$root/deploy/redis-native.conf" /etc/ix-
 chown root:ix-relay /etc/ix-relay
 chmod 750 /etc/ix-relay
 install -D -m 755 "$root/scripts/ix-relay-native-admin" /usr/local/libexec/ix-relay-native-admin
+install -D -m 755 "$root/scripts/ix-relay-wait-ready" /usr/local/libexec/ix-relay-wait-ready
 install -m 644 "$root/deploy/ix-relay-redis.service" /etc/systemd/system/ix-relay-redis.service
 systemctl daemon-reload
 echo "Staged. Redis has not been enabled or started."

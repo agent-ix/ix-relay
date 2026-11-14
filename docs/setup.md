@@ -287,3 +287,9 @@ read a configuration staged under `/etc/ix-relay/`, even as root. The hub's
 PostUp hook pipes the firewall file through `cat` to `nft -f -`: wg-quick may
 read `/etc/wireguard/`, while its confined nft child need not open that file.
 Do not disable AppArmor to stage or activate the hub.
+
+The native systemd unit waits for an authenticated Redis PING before start
+completes (30-second readiness budget, 40-second systemd startup timeout).
+A running process alone is not readiness: Redis may still be opening its
+socket or loading AOF data. Re-run the staging installer after updating the
+unit or its readiness helper; it does not start or restart services.
