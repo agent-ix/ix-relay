@@ -83,7 +83,7 @@ cmd_hub_init() {
   if sudo test -e "$WG_CONF"; then
     echo "$WG_CONF exists; leaving it as it is"
   else
-    sudo sh -c "umask 077; k=\$(wg genkey); printf '[Interface]\n# ix-relay hub (relay-admin hub-init)\nAddress = %s/24\nListenPort = %s\nPrivateKey = %s\nPostUp = nft -f /etc/wireguard/ixrelay.nft\nPostDown = nft delete table inet ixrelay\n' '$HUB_ADDR' '$WG_PORT' \"\$k\" > '$WG_CONF'"
+    sudo sh -c "umask 077; k=\$(wg genkey); printf '[Interface]\n# ix-relay hub (relay-admin hub-init)\nAddress = %s/24\nListenPort = %s\nPrivateKey = %s\nPostUp = cat /etc/wireguard/ixrelay.nft | nft -f -\nPostDown = nft delete table inet ixrelay\n' '$HUB_ADDR' '$WG_PORT' \"\$k\" > '$WG_CONF'"
   fi
   sudo systemctl enable --now wg-quick@wg0
   sudo nft list table inet ixrelay >/dev/null || die "wg0 is up without its firewall (table inet ixrelay)"

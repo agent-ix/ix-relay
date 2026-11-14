@@ -279,3 +279,11 @@ watcher reconnects and hook budget failures independently of Luna.
 Rollback means stopping Titan's bus and restoring the saved topology and client
 configs on every machine together. Queued messages are disposable; never merge
 the two buses. Do not run the legacy namespace migration for this move.
+
+
+On Ubuntu hosts with the packaged WireGuard AppArmor profiles, keep staged
+WireGuard configurations under `/etc/wireguard/` too. `wg-quick strip` cannot
+read a configuration staged under `/etc/ix-relay/`, even as root. The hub's
+PostUp hook pipes the firewall file through `cat` to `nft -f -`: wg-quick may
+read `/etc/wireguard/`, while its confined nft child need not open that file.
+Do not disable AppArmor to stage or activate the hub.
