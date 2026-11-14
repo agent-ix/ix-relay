@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $EUID == 0 ]] || { echo "run as root" >&2; exit 1; }
+export REDISCLI_AUTH
+REDISCLI_AUTH=$(cat /etc/ix-relay/admin.password)
+exec /usr/bin/redis-cli --no-auth-warning --user admin -s /run/ix-relay/redis.sock

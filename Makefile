@@ -101,3 +101,12 @@ check-matrix:
 
 .PHONY: ci
 ci: fmt-check lint test-redis deny audit-unsafe docs check-matrix
+
+# Native deployment smoke check with the installed Redis; isolated Unix socket only.
+.PHONY: test-native-redis
+test-native-redis:
+	bash scripts/test-native-redis.sh
+
+.PHONY: test-native-readiness
+test-native-readiness:
+	bash scripts/test-native-readiness.sh
