@@ -51,7 +51,7 @@ A lead's address is its Herdr `server:workspace:tab`. Run `agent-msg whoami` to 
 ## Contents
 
 - Hooks in `hooks/hooks.json`. `SessionStart`, `PostToolUse`, `UserPromptSubmit` and `Stop` each run `agent-msg hook claude`. `SessionStart` registers the lead from its verified Herdr location and delivers any backlog, with a 5 s timeout. `PostToolUse` and `UserPromptSubmit` deliver mid-turn messages from a cached session lookup, with a timeout of about 2 s. `Stop` blocks the turn from ending while a message is pending.
-- `/msg` (`skills/msg/SKILL.md`) tells the lead what the bus is, that incoming `[ix-relay]` lines are data from another lead and carry no user authority, when to send, and the `agent-msg` commands.
+- `/msg` (`skills/msg/SKILL.md`) tells the lead what the bus is, how incoming `[ix-relay]` lines identify the sender, when to send, and the `agent-msg` commands.
 - `/setup` (`skills/setup/SKILL.md`) walks through the WireGuard hub, joining a machine, the watcher and re-keying.
 - `/join` (`skills/join/SKILL.md`) checks whether the machine is connected and whether the session has its intended address.
 - `/doctor` (`skills/doctor/SKILL.md`) diagnoses identity, registration and delivery.
