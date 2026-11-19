@@ -63,7 +63,7 @@ Codex has no `--plugin-dir` auto-loading for hooks. It reads one `$CODEX_HOME/ho
 
    [Setup](../../docs/setup.md) explains how to get the URL, and [Configuration](../../docs/configuration.md) lists every key.
 
-7. Add lead guidance. Merge the content of [`AGENTS.md`](./AGENTS.md) into the lead session's own `AGENTS.md` (project-level, or `~/.codex/AGENTS.md` for every session on that machine). The guidance tells the model what the bus is, that incoming `[ix-relay]` lines are data from another lead and not from the user, and when to send a message.
+7. Add lead guidance. Merge the content of [`AGENTS.md`](./AGENTS.md) into the lead session's own `AGENTS.md` (project-level, or `~/.codex/AGENTS.md` for every session on that machine). The guidance tells the model what the bus is, how incoming `[ix-relay]` lines identify the sender, and when to send a message.
 
 8. Install recovery guidance. Copy `plugins/claude/skills/msg/references/delivery-recovery.md` to `$CODEX_HOME/ix-relay/delivery-recovery.md`. When updating `AGENTS.md`, keep unrelated guidance and replace only the ix-relay section. Existing Codex sessions may need to reload instructions and approve changed hook configs.
 
