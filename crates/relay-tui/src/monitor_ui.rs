@@ -574,7 +574,8 @@ fn ticket_details(view: &DashboardView, ticket: &TicketSummary) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+/// Existing populated tracker and binding fixtures for terminal regressions.
+pub(crate) mod tests {
     use super::*;
     use ix_board::{
         Issue, IssueId, Project, ProjectId, TeamKey, WorkflowStateType, WorkspaceSnapshot,
@@ -586,7 +587,8 @@ mod tests {
     };
     use relay_core::work::{WorkBinding, WorkReport, WorkScope};
 
-    fn app() -> App {
+    /// Bound SWM lead with a populated structured tracker snapshot.
+    pub(crate) fn app() -> App {
         let now = Instant::now();
         let binding = WorkBinding {
             machine: "luna".parse().unwrap(),

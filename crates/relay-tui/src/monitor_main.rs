@@ -373,6 +373,7 @@ impl<Restore: FnMut()> Drop for TerminalGuard<Restore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ix_trace_rs::trace;
     use std::cell::Cell;
 
     fn args(values: &[&str]) -> Args {
@@ -380,6 +381,7 @@ mod tests {
     }
 
     /// Trace: FR-059-AC-1, FR-059-AC-2
+    #[trace("FR-059-AC-1", "FR-059-AC-2")]
     #[test]
     fn explicit_scopes_and_saved_input_need_no_native_binding_or_live_factory() {
         for values in [vec!["--team", "SWM"], vec!["--project", "native-project"]] {
@@ -423,6 +425,7 @@ mod tests {
     }
 
     /// Trace: FR-059-AC-1
+    #[trace("FR-059-AC-1")]
     #[test]
     fn missing_and_ambiguous_requested_leads_keep_explicit_scope_but_refuse_legacy_startup() {
         for reason in ["native agent absent", "ambiguous native process"] {
@@ -450,6 +453,7 @@ mod tests {
     }
 
     /// Trace: FR-059-AC-2
+    #[trace("FR-059-AC-2")]
     #[test]
     fn invalid_options_refuse_before_source_access() {
         let absent = args(&[]);
@@ -470,6 +474,7 @@ mod tests {
     }
 
     /// Trace: FR-059-AC-6
+    #[trace("FR-059-AC-6")]
     #[test]
     fn terminal_guard_restores_after_quit_initialization_and_render_failures() {
         let restored = Cell::new(0);

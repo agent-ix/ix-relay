@@ -1519,6 +1519,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "ix-trace-rs"
+version = "0.1.0"
+source = "git+https://github.com/agent-ix/ix-trace-rs?tag=v0.1.1#2ce4ebf47f726b9d76388220545cd0abda8a5cfb"
+
+[[package]]
 name = "jiff"
 version = "0.2.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2639,6 +2644,7 @@ dependencies = [
  "herdr-cli",
  "ix-board",
  "ix-cli-kit",
+ "ix-trace-rs",
  "ratatui",
  "redis",
  "relay-core",

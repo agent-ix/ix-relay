@@ -53,6 +53,7 @@ Plan fields absent from a saved report remain unavailable.
 Press `1`, `2` or `3` for Status, Health or Retro.
 Use arrows or `j` and `k` to select a row; `d` or Enter opens details.
 Left and right arrows scroll department evidence details vertically.
+Press `e` to inspect source errors, then select a source and open its full diagnostic with `d`.
 Use `t`, `a` and `p` for the lead's Tickets, Agents and Scope views.
 Press `r` to refresh and `q` or Escape to quit.
 

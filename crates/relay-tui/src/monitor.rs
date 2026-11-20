@@ -16,6 +16,8 @@ pub struct Source<T> {
     pub last_success: Option<Instant>,
     /// Most recent refresh error.
     pub error: Option<String>,
+    /// Compact classified summary, when the source supplies one.
+    pub error_summary: Option<String>,
 }
 
 impl<T> Default for Source<T> {
@@ -24,6 +26,7 @@ impl<T> Default for Source<T> {
             value: None,
             last_success: None,
             error: None,
+            error_summary: None,
         }
     }
 }
@@ -34,11 +37,19 @@ impl<T> Source<T> {
         self.value = Some(value);
         self.last_success = Some(now);
         self.error = None;
+        self.error_summary = None;
     }
 
     /// Keeps the last good value but exposes the newest failure.
     pub fn failure(&mut self, error: impl Into<String>) {
         self.error = Some(error.into());
+        self.error_summary = None;
+    }
+
+    /// Retains a compact summary alongside the complete actionable diagnostic.
+    pub fn failure_with_summary(&mut self, summary: impl Into<String>, error: impl Into<String>) {
+        self.failure(error);
+        self.error_summary = Some(summary.into());
     }
 }
 
@@ -91,6 +102,8 @@ pub struct App {
     pub details: bool,
     /// Vertical offset within expanded department evidence.
     pub detail_scroll: u16,
+    /// Whether source failures replace the department rows for full inspection.
+    pub show_diagnostics: bool,
     /// Whether source timestamps are visible in the optional status line.
     pub show_status: bool,
     /// Complete authoritative tracker snapshot from Linear.
@@ -106,6 +119,18 @@ pub struct App {
 }
 
 impl App {
+    /// Team selector shared with lead views, without narrowing project-only requests.
+    pub fn department_team(&self) -> Option<String> {
+        self.team.clone().or_else(|| {
+            if !self.projects.is_empty() {
+                return None;
+            }
+            self.binding
+                .as_ref()
+                .and_then(|binding| binding.address.parse::<relay_core::Address>().ok())
+                .map(|address| address.workspace().to_ascii_uppercase())
+        })
+    }
     /// Applies native observations without ever following a replacement binding.
     pub fn apply_runtime_refresh(&mut self, refresh: crate::monitor_runtime::RuntimeRefresh) {
         match refresh {
@@ -169,8 +194,10 @@ impl App {
             }
             Err(error) => {
                 self.tracker_retry_at = None;
-                self.tracker
-                    .failure(crate::monitor_ops::source_diagnostic(&error));
+                self.tracker.failure_with_summary(
+                    crate::monitor_ops::source_summary(&error),
+                    crate::monitor_ops::source_diagnostic(&error),
+                );
             }
         }
     }
@@ -184,6 +211,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('r') => app.refresh_now = true,
         KeyCode::Char('d') | KeyCode::Enter => app.details = !app.details,
         KeyCode::Char('s') => app.show_status = !app.show_status,
+        KeyCode::Char('e') => {
+            app.show_diagnostics = !app.show_diagnostics;
+            app.table = Default::default();
+            app.detail_scroll = 0;
+        }
         KeyCode::Char('t') => select_view(app, View::Tickets),
         KeyCode::Char('a') => select_view(app, View::Agents),
         KeyCode::Char('p') => select_view(app, View::Scope),
@@ -229,6 +261,7 @@ fn select_view(app: &mut App, view: View) {
         app.table = Default::default();
         app.row_count = 0;
         app.detail_scroll = 0;
+        app.show_diagnostics = false;
     }
 }
 
@@ -241,6 +274,7 @@ pub fn display_text(raw: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use ix_trace_rs::trace;
     use std::time::Instant;
 
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -275,6 +309,7 @@ mod tests {
     }
 
     /// Trace: FR-059-AC-7
+    #[trace("FR-059-AC-7")]
     #[test]
     fn replacement_cannot_change_attribution_and_department_data_survives() {
         let now = Instant::now();

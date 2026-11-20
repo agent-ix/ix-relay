@@ -33,5 +33,6 @@ ix-board.workspace = true
 ix-cli-kit.workspace = true
 
 [dev-dependencies]
+ix-trace-rs = { git = "https://github.com/agent-ix/ix-trace-rs", tag = "v0.1.1" }
 redis.workspace = true
 tempfile.workspace = true

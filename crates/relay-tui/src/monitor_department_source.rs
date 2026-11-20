@@ -156,6 +156,7 @@ fn collect(config: &retro::RetroConfig) -> Result<Delta, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ix_trace_rs::trace;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
@@ -173,6 +174,7 @@ mod tests {
     }
 
     /// Trace: FR-059-AC-2, FR-059-AC-3
+    #[trace("FR-059-AC-2", "FR-059-AC-3")]
     #[test]
     fn supplied_report_uses_shared_decoder_and_never_rewrites_input() {
         let path = std::env::temp_dir().join(format!(
@@ -210,6 +212,7 @@ mod tests {
     }
 
     /// Trace: FR-059-AC-6
+    #[trace("FR-059-AC-6")]
     #[test]
     fn blocked_department_read_does_not_hold_quit() {
         let (entered_tx, entered_rx) = mpsc::channel();

@@ -329,13 +329,11 @@ fn retro_rows(delta: &Delta) -> Vec<DisplayRow> {
 }
 
 fn status_rows(app: &App) -> Vec<DisplayRow> {
+    let team = app.department_team();
     let mut rows = vec![row("Plan / progress / blockers", "unavailable", "No structured tracker snapshot".into(), "Saved department reports do not supply a tracker plan or leaf-task progress. Select live scope to read structured tracker data.".into())];
     if let Some(snapshot) = &app.tracker.value {
-        match crate::monitor_tracker::summarize_department(
-            snapshot,
-            app.team.as_deref(),
-            &app.projects,
-        ) {
+        match crate::monitor_tracker::summarize_department(snapshot, team.as_deref(), &app.projects)
+        {
             Ok(view) => {
                 rows.clear();
                 rows.push(row(
@@ -425,14 +423,44 @@ fn status_rows(app: &App) -> Vec<DisplayRow> {
     rows
 }
 
+fn diagnostic_rows(app: &App) -> Vec<DisplayRow> {
+    [
+        (
+            "Department",
+            &app.department.error_summary,
+            &app.department.error,
+        ),
+        ("Tracker", &app.tracker.error_summary, &app.tracker.error),
+        (
+            "Binding / Herdr",
+            &app.runtime.error_summary,
+            &app.runtime.error,
+        ),
+        ("Reports", &app.report.error_summary, &app.report.error),
+    ]
+    .into_iter()
+    .filter_map(|(label, summary, error)| {
+        error.as_ref().map(|error| {
+            row(
+                label,
+                "unavailable",
+                summary.as_deref().map_or_else(|| safe(error), safe),
+                safe(error),
+            )
+        })
+    })
+    .collect()
+}
+
 /// Draws shared results without collecting or assessing evidence.
 pub(crate) fn render(frame: &mut Frame, app: &mut App) {
+    let failures = diagnostic_rows(app);
     let [header, tabs, source, body, diagnostics, controls] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(1),
         Constraint::Length(2),
         Constraint::Min(3),
-        Constraint::Length(2),
+        Constraint::Length(u16::try_from(failures.len()).unwrap_or(4)),
         Constraint::Length(1),
     ])
     .areas(frame.area());
@@ -440,7 +468,7 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
         || {
             format!(
                 "team:{} · projects:{}",
-                app.team.as_deref().unwrap_or("unknown"),
+                app.department_team().as_deref().unwrap_or("unknown"),
                 app.projects.join(", ")
             )
         },
@@ -511,19 +539,23 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
             .style(Style::default().fg(MUTED)),
         source,
     );
-    let rows = match app.view {
-        View::Status => status_rows(app),
-        View::Health => app
-            .department
-            .value
-            .as_ref()
-            .map_or_else(Vec::new, health_rows),
-        View::Retro => app
-            .department
-            .value
-            .as_ref()
-            .map_or_else(Vec::new, retro_rows),
-        View::Tickets | View::Agents | View::Scope => Vec::new(),
+    let rows = if app.show_diagnostics {
+        diagnostic_rows(app)
+    } else {
+        match app.view {
+            View::Status => status_rows(app),
+            View::Health => app
+                .department
+                .value
+                .as_ref()
+                .map_or_else(Vec::new, health_rows),
+            View::Retro => app
+                .department
+                .value
+                .as_ref()
+                .map_or_else(Vec::new, retro_rows),
+            View::Tickets | View::Agents | View::Scope => Vec::new(),
+        }
     };
     let selected = select_row(app, rows.len());
     let [table_area, detail_area] = content_areas(body, app.details);
@@ -548,7 +580,11 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
     frame.render_stateful_widget(table, table_area, &mut app.table);
     if rows.is_empty() {
         frame.render_widget(
-            Paragraph::new("Unavailable: no shared department report"),
+            Paragraph::new(if app.show_diagnostics {
+                "No source failures"
+            } else {
+                "Unavailable: no shared department report"
+            }),
             table_area,
         );
     }
@@ -564,39 +600,39 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
             detail_area,
         );
     }
-    let errors = [
-        &app.department.error,
-        &app.tracker.error,
-        &app.runtime.error,
-        &app.report.error,
-    ]
-    .into_iter()
-    .flatten()
-    .map(|v| safe(v))
-    .collect::<Vec<_>>()
-    .join(" · ");
-    let diagnostic = Record::error("DepartmentSource", &errors).with_fields(DiagnosticFields {
-        reason: Some("source_unavailable"),
-        remedy: Some("Inspect source access or open a saved report with --report"),
-        ..DiagnosticFields::default()
-    });
+    let diagnostic =
+        Record::error("DepartmentSource", "Source failure").with_fields(DiagnosticFields {
+            reason: Some("source_unavailable"),
+            remedy: Some("Inspect source access or open a saved report with --report"),
+            ..DiagnosticFields::default()
+        });
     let color = match diagnostic.severity {
         DiagnosticSeverity::Error => Color::LightRed,
         DiagnosticSeverity::Warning => WARNING,
     };
     frame.render_widget(
-        Paragraph::new(diagnostic.render_human(false))
-            .wrap(Wrap { trim: true })
-            .style(Style::default().fg(if app.color_enabled {
-                color
-            } else {
-                Color::Reset
-            })),
+        Paragraph::new(
+            failures
+                .iter()
+                .map(|failure| {
+                    Line::from(format!(
+                        "{}: {}",
+                        failure.name,
+                        Record::error("DepartmentSource", &failure.value).render_human(false)
+                    ))
+                })
+                .collect::<Vec<_>>(),
+        )
+        .style(Style::default().fg(if app.color_enabled {
+            color
+        } else {
+            Color::Reset
+        })),
         diagnostics,
     );
     frame.render_widget(
         Paragraph::new(Line::from(
-            "↑↓ select · d details · ←→ scroll evidence · r refresh · q quit",
+            "↑↓ select · d details · ←→ scroll · e source errors · r refresh · q quit",
         )),
         controls,
     );
@@ -613,6 +649,7 @@ pub(crate) mod tests {
             self, ClassAssessment, MetricComparisons, Parameters, Report, Selector, Summary,
         },
     };
+    use ix_trace_rs::trace;
     use ratatui::{
         Terminal,
         backend::TestBackend,
@@ -663,7 +700,29 @@ pub(crate) mod tests {
                         id: (*id).into(),
                         required: BTreeSet::from(["wip_active".into()]),
                         optional: BTreeSet::new(),
-                        metrics: BTreeMap::new(),
+                        metrics: BTreeMap::from([(
+                            "wip_active".into(),
+                            department::MetricAssessment {
+                                policy: None,
+                                keys: BTreeMap::from([(
+                                    String::new(),
+                                    department::KeyAssessment {
+                                        value: Some(17.0),
+                                        severity: Severity::Red,
+                                        reason: None,
+                                    },
+                                )]),
+                                summary: Summary {
+                                    severity: Severity::Red,
+                                    complete: false,
+                                    missing: BTreeMap::from([(
+                                        "host_observation".into(),
+                                        "partial relation page / unreachable host".into(),
+                                    )]),
+                                },
+                                reason: Some("partial evidence".into()),
+                            },
+                        )]),
                         summary: Summary {
                             severity: Severity::Red,
                             complete: false,
@@ -712,7 +771,21 @@ pub(crate) mod tests {
                 scope,
                 observations: Vec::new(),
                 measurements: BTreeMap::from([("wip_active".into(), metric)]),
-                loops: BTreeMap::new(),
+                loops: BTreeMap::from([(
+                    "state_bounce_loop".into(),
+                    department::LoopReport {
+                        detector_id: "state_bounce_loop".into(),
+                        status: Status::Ok,
+                        reason: None,
+                        findings: vec![department::LoopFinding {
+                            event_ids: vec!["state-event-1".into(), "state-event-2".into()],
+                            start: "2026-11-18T01:00:00Z".into(),
+                            end: "2026-11-18T02:00:00Z".into(),
+                            participants: BTreeSet::from(["SWM-165".into()]),
+                            deduplication_key: "fixture-loop-165".into(),
+                        }],
+                    },
+                )]),
                 classes,
                 rollup: Summary {
                     severity: Severity::Red,
@@ -746,50 +819,102 @@ pub(crate) mod tests {
         handle_key(app, KeyEvent::new(code, KeyModifiers::NONE));
     }
 
+    fn painted_details(app: &mut App, width: u16, height: u16) -> String {
+        app.details = true;
+        let mut pages = Vec::new();
+        for offset in 0..64 {
+            app.detail_scroll = offset;
+            pages.push(screen(app, width, height));
+        }
+        pages
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// Trace: FR-059-AC-3, FR-059-AC-4
+    #[trace("FR-059-AC-3", "FR-059-AC-4")]
     #[test]
     fn shared_fixture_and_serialized_model_project_the_same_values_and_evidence() {
         let model = fixture();
         let json = serde_json::to_vec(&model).unwrap();
         let decoded: Delta = serde_json::from_slice(&json).unwrap();
-        for view in [View::Status, View::Health, View::Retro] {
-            let mut typed = App {
-                view,
-                ..App::default()
-            };
-            typed.department.success(model.clone(), Instant::now());
-            let mut serialized = App {
-                view,
-                ..App::default()
-            };
-            serialized
-                .department
-                .success(decoded.clone(), Instant::now());
+        for source in [model, decoded] {
             for (width, height) in [(80, 24), (120, 40)] {
-                assert_eq!(
-                    screen(&mut typed, width, height),
-                    screen(&mut serialized, width, height)
+                let metric = &source.current.measurements["wip_active"];
+                let Value::Scalar(number) = metric.value.as_ref().unwrap() else {
+                    panic!("fixture must carry scalar source value");
+                };
+                let mut app = App {
+                    view: View::Status,
+                    ..App::default()
+                };
+                app.department.success(source.clone(), Instant::now());
+                let status = screen(&mut app, width, height)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                assert!(
+                    status.contains(&format!("{} ok {number}", metric.id)),
+                    "{status}"
                 );
+                key(&mut app, KeyCode::Char('2'));
+                let health = screen(&mut app, width, height)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let class = &source.current.classes["flow_wip"];
+                assert!(
+                    health.contains(&format!("{} red / incomplete", class.id)),
+                    "{health}"
+                );
+                assert!(health.contains("unrouted"));
+                let detail = painted_details(&mut app, width, height);
+                let Route::Routed(route) = &class.route else {
+                    panic!("fixture must carry an owner action");
+                };
+                assert!(detail.contains(&route.owner));
+                assert!(detail.contains(&route.action));
+                for reason in class.summary.missing.values() {
+                    assert!(detail.contains(reason), "{detail}");
+                }
+                assert!(detail.contains("wip_active: red / incomplete"));
+                assert!(detail.contains(&format!("{number} {}", metric.unit)));
+                for reference in &metric.evidence_refs {
+                    assert!(detail.contains(reference));
+                }
+                key(&mut app, KeyCode::Char('3'));
+                let detail = painted_details(&mut app, width, height);
+                let comparisons = &source.measurements[&metric.id];
+                assert!(detail.contains("Previous: query_changed"));
+                assert!(detail.contains(comparisons.since_previous.reason.as_deref().unwrap()));
+                assert!(detail.contains("Baseline: unavailable"));
+                assert!(detail.contains(comparisons.since_baseline.reason.as_deref().unwrap()));
+                for reference in &metric.evidence_refs {
+                    assert!(detail.contains(reference));
+                }
+                app.details = false;
+                screen(&mut app, width, height);
+                key(&mut app, KeyCode::Down);
+                let detail = painted_details(&mut app, width, height);
+                for finding in &source.current.loops["state_bounce_loop"].findings {
+                    assert!(detail.contains(&finding.deduplication_key));
+                    assert!(detail.contains(&finding.start));
+                    assert!(detail.contains(&finding.end));
+                    for event in &finding.event_ids {
+                        assert!(detail.contains(event));
+                    }
+                    for participant in &finding.participants {
+                        assert!(detail.contains(participant));
+                    }
+                }
             }
         }
-        let health = health_rows(&decoded);
-        assert_eq!(health.len(), 10);
-        assert_eq!(health[0].state, "red / incomplete");
-        assert!(health[0].detail.contains("Assign a reviewer"));
-        assert!(
-            health[0]
-                .detail
-                .contains("partial relation page / unreachable host")
-        );
-        assert!(health[1].detail.contains("unrouted"));
-        let retro = retro_rows(&decoded);
-        assert!(retro[0].detail.contains("query_changed"));
-        assert!(retro[0].detail.contains("missing baseline"));
-        assert!(retro[0].detail.contains("linear:issue:fixture-17"));
-        assert!(retro[0].detail.contains("17 issues"));
     }
 
     /// Trace: FR-059-AC-4
+    #[trace("FR-059-AC-4")]
     #[test]
     fn navigation_preserves_scope_reaches_last_class_and_clamps_after_refresh() {
         let mut app = App {
@@ -821,12 +946,16 @@ pub(crate) mod tests {
         assert_eq!(app.table.selected(), Some(9));
         assert!(output.contains("comms_overhead"));
         key(&mut app, KeyCode::Char('3'));
+        let mut shortened = fixture();
+        shortened.current.loops.clear();
+        app.department.success(shortened, Instant::now());
         app.table.select(Some(99));
         screen(&mut app, 120, 40);
         assert_eq!(app.table.selected(), Some(0));
     }
 
     /// Trace: FR-059-AC-5
+    #[trace("FR-059-AC-5")]
     #[test]
     fn failed_refresh_retains_evidence_age_and_visible_error_with_status_hidden() {
         let mut app = App {
@@ -847,6 +976,7 @@ pub(crate) mod tests {
     }
 
     /// Trace: FR-059-AC-3, FR-059-AC-4
+    #[trace("FR-059-AC-3", "FR-059-AC-4")]
     #[test]
     fn categorical_evidence_is_literal_and_untrusted_text_cannot_inject_controls() {
         let mut model = fixture();
@@ -878,6 +1008,7 @@ pub(crate) mod tests {
     }
 
     /// Trace: FR-059-AC-3
+    #[trace("FR-059-AC-3")]
     #[test]
     fn classified_subset_coverage_is_displayed_without_recalculating_the_rate() {
         let mut model = fixture();
@@ -891,5 +1022,72 @@ pub(crate) mod tests {
         assert!(detail.contains("2 classified / 8 total"));
         assert!(detail.contains("LabeledSubset"));
         assert!(detail.contains("17 issues"));
+    }
+
+    #[trace("FR-059-AC-1", "FR-059-AC-4", "FR-059-AC-6")]
+    #[test]
+    fn simultaneous_source_failures_have_visible_summaries_and_complete_details() {
+        let mut app = App {
+            view: View::Status,
+            ..App::default()
+        };
+        app.department.failure("Department health/retro unavailable: supply --retro-config with department policies matching the selected scope, or open --report");
+        app.apply_tracker_refresh(Err(ix_board::Error::MissingApiKey), Instant::now());
+        app.runtime.failure(format!(
+            "ambiguous requested lead; {}",
+            "native identity must remain unknown. ".repeat(12)
+        ));
+        for view in ['1', '2', '3'] {
+            key(&mut app, KeyCode::Char(view));
+            let output = screen(&mut app, 80, 24);
+            assert!(output.contains("Department:"), "{output}");
+            assert!(output.contains("Tracker:"), "{output}");
+            assert!(output.contains("ix-board auth login"), "{output}");
+            assert!(
+                output.contains("Binding / Herdr: ambiguous requested lead"),
+                "{output}"
+            );
+            assert!(output.contains("e source errors"), "{output}");
+        }
+        key(&mut app, KeyCode::Char('e'));
+        screen(&mut app, 80, 24);
+        let expected = [
+            app.department.error.clone().unwrap(),
+            app.tracker.error.clone().unwrap(),
+            app.runtime.error.clone().unwrap(),
+        ];
+        for (index, diagnostic) in expected.iter().enumerate() {
+            app.table.select(Some(index));
+            app.detail_scroll = 0;
+            let detail = painted_details(&mut app, 80, 24);
+            assert!(
+                detail.contains(diagnostic),
+                "missing complete diagnostic: {detail}"
+            );
+        }
+    }
+
+    #[trace("FR-059-AC-1", "FR-048-AC-9")]
+    #[test]
+    fn lead_status_uses_bound_team_and_project_only_scope_does_not_inherit_it() {
+        let mut app = crate::monitor_ui::tests::app();
+        let expected =
+            crate::monitor_tracker::summarize(app.tracker.value.as_ref().unwrap(), None, "SWM")
+                .unwrap();
+        assert!(!expected.scope.leaf_ids.is_empty());
+        key(&mut app, KeyCode::Char('1'));
+        let progress = format!(
+            "{}/{} done",
+            expected.scope.done,
+            expected.scope.leaf_ids.len()
+        );
+        assert!(screen(&mut app, 80, 24).contains(&progress));
+        assert_eq!(app.department_team().as_deref(), Some("SWM"));
+        app.binding.as_mut().unwrap().address = "luna:OTHER:code".into();
+        app.projects = vec!["project".into()];
+        assert!(app.department_team().is_none());
+        assert!(screen(&mut app, 80, 24).contains(&progress));
+        app.team = Some("SWM".into());
+        assert_eq!(app.department_team().as_deref(), Some("SWM"));
     }
 }

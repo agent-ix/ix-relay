@@ -16,6 +16,18 @@ use crate::monitor_tracker::TrackerState;
 use ix_board::{LinearGraphQlSource, ReadService};
 use ix_cli_kit::streams::{DiagnosticFields, Record};
 
+/// Compact source classification suitable for a single diagnostic line.
+pub(crate) fn source_summary(error: &ix_board::Error) -> &'static str {
+    match error {
+        ix_board::Error::MissingApiKey => "Authentication unavailable; ix-board auth login",
+        ix_board::Error::Credential(_) => {
+            "Saved credential access denied; contact credential owner"
+        }
+        ix_board::Error::LinearRateLimited { .. } => "Linear rate limited",
+        _ => "Structured tracker read failed; inspect source availability",
+    }
+}
+
 /// Safe, actionable presentation of the approved SDK's typed authentication errors.
 pub(crate) fn source_diagnostic(error: &ix_board::Error) -> String {
     let (kind, message, remedy) = match error {
@@ -233,6 +245,7 @@ fn read_tracker_with_factory<S: ix_board::WorkspaceSource>(
 
 #[cfg(test)]
 mod tests {
+    use ix_trace_rs::trace;
     use std::{sync::mpsc, thread, time::Duration};
 
     use super::*;
@@ -250,8 +263,9 @@ mod tests {
     }
 
     /// Trace: FR-059-AC-6
+    #[trace("FR-059-AC-6")]
     #[test]
-    fn injected_saved_credential_factory_succeeds_without_an_environment_override() {
+    fn injected_read_service_factory_populates_tracker_without_live_sources() {
         let factory_calls = std::cell::Cell::new(0);
         let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let directory = tempfile::tempdir().unwrap();
@@ -280,6 +294,7 @@ mod tests {
     }
 
     /// Trace: FR-059-AC-6
+    #[trace("FR-059-AC-6")]
     #[test]
     fn injected_authentication_denial_is_classified_and_quit_retains_collection_failure() {
         let result = read_tracker_with_factory::<FixtureSource>(false, || {
