@@ -9,24 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Tracker source snapshot; its timestamp belongs to the source fetch.
 pub type TrackerState = WorkspaceSnapshot;
 
-/// Whether the shared model considers a project finished, as carried from its status category.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "mapped from the shared model once it supplies a status category"
-    )
-)]
-pub enum ProjectCompletion {
-    /// Completed or canceled.
-    Terminal,
-    /// Any other known category.
-    Nonterminal,
-    /// Unrecognized, absent or not supplied by the shared model.
-    #[default]
-    Unknown,
-}
+pub use ix_board::ProjectCompletion;
 
 /// One initiative a project belongs to, as supplied by the shared model.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -212,6 +195,7 @@ fn summarize_inputs(
             Some(&project.status),
         );
         project_progress.id = project.id.0.clone();
+        project_progress.completion = project.completion();
         project_progress.initiatives = project.initiatives.iter().map(|i| i.name.clone()).collect();
         project_progress.initiative_refs = project
             .initiatives
@@ -327,6 +311,10 @@ fn summarize_inputs(
             .cmp(&b.agents.is_empty())
             .then_with(|| a.identifier.cmp(&b.identifier))
     });
+    // The category is supplied once any displayed project carries evidence of it.
+    let completion_supplied = projects
+        .iter()
+        .any(|p| p.completion != ProjectCompletion::Unknown);
     Ok(DashboardView {
         scope,
         ticket_roots: ticket_roots.into_iter().collect(),
@@ -334,8 +322,7 @@ fn summarize_inputs(
         projects,
         tickets,
         ready_queue: ready.into_iter().map(|item| item.identifier).collect(),
-        // The pinned shared model carries no project status category.
-        completion_supplied: false,
+        completion_supplied,
     })
 }
 
@@ -368,8 +355,9 @@ fn progress(
         name: name.into(),
         initiatives: Vec::new(),
         initiative_refs: Vec::new(),
-        // The pinned model lists every initiative of a project and flags no gaps.
-        links_complete: true,
+        // The shared model carries no completeness marker for a project's initiative links,
+        // so they are unknown rather than complete.
+        links_complete: false,
         completion: ProjectCompletion::Unknown,
         status: status.map(str::to_owned),
         remaining_by_stage,

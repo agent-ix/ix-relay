@@ -632,3 +632,86 @@ fn a_changed_report_scope_updates_the_displayed_rows() {
     assert!(text.contains("Other"), "{text}");
     assert_eq!(app.row_count, 2);
 }
+
+/// Real shared-model summary: one initiative with projects in every category.
+fn categorized_app() -> App {
+    use ix_board::{ProjectStatusCategory as Category, WorkflowStateType};
+    let mut app = monitor_ui::tests::app();
+    app.view = View::Scope;
+    let initiative = Initiative {
+        id: "i1".into(),
+        identifier: "I-1".into(),
+        name: "Program".into(),
+    };
+    let snapshot = app.tracker.value.as_mut().unwrap();
+    let project_template = snapshot.projects[0].clone();
+    let issue_template = snapshot.issues[2].clone();
+    snapshot.projects.clear();
+    snapshot.issues.clear();
+    let rows = [
+        ("Live", Category::Started, WorkflowStateType::Started),
+        ("Retired", Category::Completed, WorkflowStateType::Completed),
+        ("Dropped", Category::Canceled, WorkflowStateType::Started),
+        ("Mystery", Category::Unknown, WorkflowStateType::Started),
+        ("Finished tasks", Category::Started, WorkflowStateType::Completed),
+    ];
+    for (n, (name, category, state)) in rows.into_iter().enumerate() {
+        let mut project = project_template.clone();
+        project.id = ProjectId(format!("p{n}"));
+        project.name = name.into();
+        project.status_category = category;
+        project.initiatives = vec![initiative.clone()];
+        let mut issue = issue_template.clone();
+        issue.id = IssueId(format!("leaf-{n}"));
+        issue.identifier = format!("SWM-{}", 200 + n);
+        issue.project_id = Some(project.id.clone());
+        issue.state_type = state;
+        snapshot.projects.push(project);
+        snapshot.issues.push(issue);
+    }
+    app.report.value.as_mut().unwrap().as_mut().unwrap().scope = Some(scope(&["i1"], &[], &[]));
+    app.scope.invalidate();
+    app
+}
+
+/// Trace: FR-060-AC-4, FR-060-AC-5
+#[trace("FR-060-AC-4")]
+#[test]
+fn supplied_categories_hide_only_terminal_projects_from_a_real_summary() {
+    let mut app = categorized_app();
+    let hiding = screen(&mut app, 130, 30);
+    for shown in ["Live", "Mystery", "Finished tasks"] {
+        assert!(hiding.contains(shown), "{shown}\n{hiding}");
+    }
+    for hidden in ["Retired", "Dropped"] {
+        assert!(!hidden_row(&hiding, hidden), "{hidden}\n{hiding}");
+    }
+    assert!(hiding.contains("2 completed/canceled projects hidden"), "{hiding}");
+    assert!(hiding.contains("hiding completed"), "{hiding}");
+    assert!(!hiding.contains(FILTER_UNAVAILABLE));
+    let summaries = app.scope.summary_computations;
+    press(&mut app, KeyCode::Char('c'));
+    let showing = screen(&mut app, 130, 30);
+    for shown in ["Live", "Retired", "Dropped", "Mystery", "Finished tasks"] {
+        assert!(showing.contains(shown), "{shown}\n{showing}");
+    }
+    assert!(showing.contains("showing completed"), "{showing}");
+    assert_eq!(app.scope.summary_computations, summaries, "no recomputation");
+    press(&mut app, KeyCode::Char('c'));
+    assert_eq!(screen(&mut app, 130, 30), hiding, "the toggle returns to the same rows");
+}
+
+fn hidden_row(text: &str, name: &str) -> bool {
+    text.lines().any(|line| line.contains("📁") && line.contains(name))
+}
+
+/// Trace: FR-060-AC-2
+#[trace("FR-060-AC-2")]
+#[test]
+fn projects_outside_a_displayed_initiative_are_never_called_unassigned_without_a_marker() {
+    let mut app = monitor_ui::tests::app();
+    app.view = View::Scope;
+    let text = screen(&mut app, 120, 24);
+    assert!(text.contains(LINKS_UNAVAILABLE), "{text}");
+    assert!(!text.contains(NO_SELECTED_INITIATIVE) && !text.contains("unassigned"));
+}

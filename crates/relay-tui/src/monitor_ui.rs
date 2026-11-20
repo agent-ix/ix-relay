@@ -647,6 +647,9 @@ pub(crate) mod tests {
             updated_at: None,
             content: None,
             status: "Started".into(),
+            status_name: None,
+            // A record without category evidence, as cached before categories were kept.
+            status_category: ix_board::ProjectStatusCategory::Unknown,
             priority: 2,
             sort_order: 0.0,
             target_date: None,

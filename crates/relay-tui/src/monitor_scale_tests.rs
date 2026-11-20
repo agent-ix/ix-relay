@@ -13,7 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ix_board::{Initiative, IssueId, Project, ProjectId, WorkflowStateType};
+use ix_board::{
+    Initiative, IssueId, Project, ProjectId, ProjectStatusCategory, WorkflowStateType,
+};
 use ix_trace_rs::trace;
 use ratatui::{
     Terminal,
@@ -45,7 +47,13 @@ fn large_scope_app() -> App {
             name: format!("Initiative {n:02}"),
         })
         .collect();
-    let statuses = ["Started", "Paused", "Completed", "Canceled", "Backlog"];
+    let statuses = [
+        ("Started", ProjectStatusCategory::Started),
+        ("Paused", ProjectStatusCategory::Paused),
+        ("Completed", ProjectStatusCategory::Completed),
+        ("Canceled", ProjectStatusCategory::Canceled),
+        ("Backlog", ProjectStatusCategory::Backlog),
+    ];
     snapshot.projects.clear();
     snapshot.issues.clear();
     for p in 0..PROJECTS {
@@ -53,7 +61,9 @@ fn large_scope_app() -> App {
         let mut project: Project = project_template.clone();
         project.id = project_id.clone();
         project.name = format!("Project {p:02}");
-        project.status = statuses[p % statuses.len()].into();
+        let (status, category) = statuses[p % statuses.len()];
+        project.status = status.into();
+        project.status_category = category;
         project.sort_order = p as f64;
         project.initiatives = vec![initiatives[p % INITIATIVES].clone()];
         if p == 0 {
