@@ -11,7 +11,11 @@ relationships:
     type: "depends_on"
   - target: "ix://agent-ix/ix-relay/FR-060"
     type: "depends_on"
-  - target: "ix://agent-ix/ix-board"
+  - target: "ix://agent-ix/ix-board/FR-010"
+    type: "depends_on"
+  - target: "ix://agent-ix/ix-board/FR-012"
+    type: "depends_on"
+  - target: "ix://agent-ix/ix-board/FR-016"
     type: "depends_on"
 ---
 # FR-063: Shared ix-board membership, exclusions and partial summaries for named focuses
@@ -28,9 +32,13 @@ read Linear by another path to build one.
 This requirement states the behavior the relay needs from the shared library and
 checks at its boundary. It does not define the library's types or API: the
 ix-board owner defines them in the ix-board repository, and this requirement
-neither restates nor duplicates that contract. Until the owning ix-board
-requirement exists, the dependency is declared on the repository alone, and the
-requirement identifiers are added as edges when ix-board assigns them.
+neither restates nor duplicates that contract. The owning contracts are
+[ix-board FR-010](ix://agent-ix/ix-board/FR-010) (membership, team, leaf and
+qualified selector rules), [ix-board FR-012](ix://agent-ix/ix-board/FR-012)
+(per-focus and combined summaries, partial and shared facts, readiness and
+blocker integration) and [ix-board FR-016](ix://agent-ix/ix-board/FR-016) (the
+versioned focus record). They reuse ix-board's existing expansion, readiness and
+blocker-closure behavior.
 
 It also adds the option `--members` to `agent-msg focuses show` of
 [FR-061](./FR-061-named-focus-definitions.md).
@@ -124,8 +132,13 @@ It also adds the option `--members` to `agent-msg focuses show` of
 
 ### What the relay needs from the shared library
 
-The relay consumes the library; it does not specify it. Conditions the relay
-checks at its boundary, and treats as the library's obligations:
+The relay consumes the library; it does not specify it. Some of this exists in
+ix-board today (qualified milestone parsing and partial-project summaries). The
+rest (stored qualification, exclusions, an explicit empty named selection distinct
+from the whole-team meaning of a team alone, and the batch result) is a **future
+ix-board extension** tracked by SWM-178, an implementation prerequisite of the
+relay work; the project status category is already available. Conditions the
+relay checks at its boundary, and treats as the library's obligations:
 
 - One computation per refresh returns the per-focus results and the per-team-group
   union for all active selections, in deterministic order, so that an individual
@@ -137,9 +150,9 @@ checks at its boundary, and treats as the library's obligations:
   it cannot resolve is reported with a typed state.
 - A snapshot read can be bounded by a deadline and returns a typed timeout, so a
   command or a refresh never waits unboundedly and a timeout publishes nothing.
-- The project status category already required by
-  [FR-060](./FR-060-focused-scope-presentation.md) is available. It blocks only
-  the hiding of completed projects.
+  This is a need handed to the ix-board owner; the relay defines no SDK API for it.
+- The project status category required by
+  [FR-060](./FR-060-focused-scope-presentation.md) is already available.
 
 The relay may keep a bounded cache of results (see
 [FR-064](./FR-064-named-focus-dashboard-reader.md)). It SHALL NOT edit the shared
@@ -174,11 +187,11 @@ library revision through one dependency update.
   snapshot. [FR-048](./FR-048-session-work-monitor.md) AC-3 and AC-9 define the
   existing progress meaning and team boundary for legacy scope, which this
   requirement does not change.
-- The shared ix-board library owns the interface the relay consumes, including
-  exclusions, explicit empty selection, milestone qualification, the multi-focus
-  result, typed member states and a deadline-bounded read. The relay waits for the
-  accepted ix-board contract and then makes one dependency update; it does not pin
-  intermediate revisions. The project status category is tracked separately (see
-  [FR-060](./FR-060-focused-scope-presentation.md)).
+- The shared ix-board library owns the interface the relay consumes (ix-board
+  FR-010, FR-012 and FR-016 above). The extension is specified by the single
+  ix-board ticket SWM-178, which follows the accepted relay contract and is an
+  explicit implementation prerequisite of the relay adapter work. The relay then
+  makes one dependency update and does not pin intermediate revisions. A
+  deadline-bounded read is a separate need handed to the ix-board owner.
 - Out of scope: the whole-team slow snapshot read, a second raw tracker reader,
   department metrics, spend and drift measures, and any Linear write.

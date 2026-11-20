@@ -15,7 +15,7 @@ relationships:
     type: "depends_on"
   - target: "ix://agent-ix/ix-relay/FR-063"
     type: "depends_on"
-  - target: "ix://agent-ix/ix-board"
+  - target: "ix://agent-ix/ix-board/FR-012"
     type: "depends_on"
 ---
 # FR-064: Present a session's named active focuses in the existing dashboard

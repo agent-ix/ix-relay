@@ -17,7 +17,9 @@ relationships:
     type: "depends_on"
   - target: "ix://agent-ix/ix-relay/NFR-004"
     type: "depends_on"
-  - target: "ix://agent-ix/ix-board"
+  - target: "ix://agent-ix/ix-board/FR-010"
+    type: "depends_on"
+  - target: "ix://agent-ix/ix-board/FR-016"
     type: "depends_on"
 ---
 # FR-061: Durable, revisioned named focus definitions with one owner
@@ -410,11 +412,17 @@ keep their meanings and no subcommand is placed under either existing name.
   [NFR-004](../non-functional/NFR-004-prerelease-no-compatibility-layers.md) are
   reconciled above.
 - The shared ix-board library owns reference resolution, the wire type of a
-  selection and the workspace read, including a read that stops at a deadline
-  with a typed timeout. Its contract is in the ix-board repository (see
-  [FR-063](./FR-063-shared-focus-membership-and-summaries.md) for what the relay
-  needs from it). Relay delivery starts after that contract is accepted; no
-  intermediate dependency pin is specified here.
+  selection and the workspace read. Its existing contracts are
+  [ix-board FR-010](ix://agent-ix/ix-board/FR-010) (membership, team, leaf and
+  qualified selector rules) and [ix-board FR-016](ix://agent-ix/ix-board/FR-016)
+  (the versioned focus record and its schema). Stored qualification, exclusions,
+  an explicit empty named selection and the batch result are **future ix-board
+  extensions**, not available today; they are tracked by the single ix-board
+  specification ticket SWM-178, which is an implementation prerequisite of the
+  relay work. A read that stops at a deadline with a typed timeout is a further
+  need that root hands to the ix-board owner; this requirement defines no SDK
+  API for it. See [FR-063](./FR-063-shared-focus-membership-and-summaries.md) for
+  what the relay needs. No intermediate dependency pin is specified here.
 - Out of scope: following another session's active set, planner publication,
   worker budgets and goal thresholds (an optional monitor policy, never required
   to create a definition), nested focuses, unarchive, history or drift metrics, a
