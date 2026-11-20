@@ -810,9 +810,10 @@ pub(crate) mod tests {
             .backend()
             .buffer()
             .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect()
+            .chunks(usize::from(width))
+            .map(|line| line.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn key(app: &mut App, code: KeyCode) {
