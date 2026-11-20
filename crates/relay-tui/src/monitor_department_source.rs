@@ -145,7 +145,15 @@ fn collect(config: &retro::RetroConfig) -> Result<Delta, String> {
             .map_err(|error| error.to_string())?,
         end_exclusive: false,
     };
-    let record = retro::collect_snapshot(config, frame, &sources, None, None)
+    collect_from_sources(config, frame, &sources)
+}
+
+fn collect_from_sources(
+    config: &retro::RetroConfig,
+    frame: retro::Frame,
+    sources: &retro::Sources<'_>,
+) -> Result<Delta, String> {
+    let record = retro::collect_snapshot(config, frame, sources, None, None)
         .map_err(|error| error.to_string())?;
     let current = record
         .department

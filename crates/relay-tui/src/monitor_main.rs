@@ -174,13 +174,7 @@ fn run() -> io::Result<(Outcome, Option<String>)> {
         }
         if let Some(worker) = &department_worker {
             while let Ok(result) = worker.events.try_recv() {
-                match result {
-                    Ok(report) => app.department.success(report, Instant::now()),
-                    Err(error) => {
-                        app.collection_failed = true;
-                        app.department.failure(error);
-                    }
-                }
+                app.apply_department_refresh(result, Instant::now());
             }
         }
         if let Some(worker) = &runtime_worker {

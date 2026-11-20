@@ -119,6 +119,21 @@ pub struct App {
 }
 
 impl App {
+    /// Retains shared department evidence on failure without rewriting its timestamps.
+    pub fn apply_department_refresh(
+        &mut self,
+        result: Result<ix_board::retro::department::Delta, String>,
+        now: Instant,
+    ) {
+        match result {
+            Ok(report) => self.department.success(report, now),
+            Err(error) => {
+                self.collection_failed = true;
+                self.department.failure(error);
+            }
+        }
+    }
+
     /// Team selector shared with lead views, without narrowing project-only requests.
     pub fn department_team(&self) -> Option<String> {
         self.team.clone().or_else(|| {
