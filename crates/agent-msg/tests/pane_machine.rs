@@ -38,6 +38,7 @@ fn repeated_pane_and_session_ids_are_scoped_by_machine() {
                 )),
                 text: machine.into(),
                 sent_at_ms: 1,
+                forwarded: false,
             })
             .unwrap();
     }

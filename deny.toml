@@ -29,4 +29,5 @@ unknown-git = "deny"
 allow-git = [
     "https://github.com/agent-ix/ix-cli-kit",
     "https://github.com/agent-ix/ix-board",
+    "https://github.com/agent-ix/ix-trace-rs",
 ]

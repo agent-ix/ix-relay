@@ -1446,6 +1446,7 @@ mod tests {
                 to: relay_core::Target::Agent(name("lead-c")),
                 text: "hi".into(),
                 sent_at_ms: 1,
+                forwarded: false,
             })
             .unwrap();
         let herdr = TickHerdr::new("pane-moved-other-workspace", Some(("w2:p2", "sess-A3")));

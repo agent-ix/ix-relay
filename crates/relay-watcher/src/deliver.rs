@@ -72,6 +72,9 @@ impl From<ProcessError> for DeliverError {
 pub struct BatchTarget<'a> {
     /// The lead's bus name.
     pub lead: &'a str,
+    /// The harness kind the lead registered (`claude`, `codex`, ...): the socket is tried
+    /// only for a Claude Code lead (FR-054).
+    pub kind: &'a str,
     /// The in-flight batch being delivered.
     pub batch: BatchId,
     /// The harness session id the lead registered under (for Claude, the
@@ -79,6 +82,18 @@ pub struct BatchTarget<'a> {
     pub session: Option<&'a SessionId>,
     /// Who sent it, as the sender addresses read in the rendered text.
     pub senders: &'a str,
+}
+
+/// A lead's registration as a tick read it, for a transport that remembers leads between
+/// ticks (FR-055).
+#[derive(Debug, Clone, Copy)]
+pub struct RegisteredLead<'a> {
+    /// The lead's bus name.
+    pub name: &'a str,
+    /// The harness kind it registered.
+    pub kind: &'a str,
+    /// Whether the registration is on this watcher's machine.
+    pub here: bool,
 }
 
 /// What a transport learned, after a delivery returned, about a batch it could
@@ -138,6 +153,11 @@ pub trait Deliverer {
     ) -> Result<(), DeliverError> {
         self.deliver(pane, text)
     }
+
+    /// Told at the start of every tick which leads the registry the tick read holds, so a
+    /// transport that remembers leads can forget the ones that are gone (FR-055). The
+    /// default remembers none.
+    fn registry_read(&self, _registered: &[RegisteredLead<'_>]) {}
 
     /// Whether this transport is holding mail for the lead and wants none popped
     /// for it now. Asked before a batch is popped, so mail that will not be

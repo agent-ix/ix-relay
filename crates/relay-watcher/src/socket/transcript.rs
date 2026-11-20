@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use claude_wire::{TranscriptMatch, scan};
+use claude_wire::{Scan, TranscriptMatch, scan_detail};
 
 /// The most bytes read from the end of a transcript in one read: the message was
 /// just consumed, so it is near the end.
@@ -94,12 +94,22 @@ impl Watch {
 
     /// What the next window of the transcript says about `msg_id`. A read
     /// error is [`TranscriptMatch::Absent`] ("not yet").
+    #[cfg(test)]
     pub fn records(&mut self, msg_id: &str) -> TranscriptMatch {
+        self.look(msg_id).found
+    }
+
+    /// What the next window says about `msg_id`, and the `type` of a line that named the id in a shape not known.
+    pub fn look(&mut self, msg_id: &str) -> Scan {
+        let absent = || Scan {
+            found: TranscriptMatch::Absent,
+            line_type: None,
+        };
         let Ok(mut file) = fs::File::open(&self.path) else {
-            return TranscriptMatch::Absent;
+            return absent();
         };
         let Ok(len) = file.metadata().map(|m| m.len()) else {
-            return TranscriptMatch::Absent;
+            return absent();
         };
         // A transcript that shrank was replaced: read it from its tail, where a line
         // boundary is not known.
@@ -112,7 +122,7 @@ impl Watch {
         // naming the id would read as a shape change), one that starts on a line keeps it.
         let lookback = u64::from(!known_boundary && start > 0);
         if file.seek(SeekFrom::Start(start - lookback)).is_err() {
-            return TranscriptMatch::Absent;
+            return absent();
         }
         let mut bytes = Vec::new();
         if file
@@ -120,7 +130,7 @@ impl Watch {
             .read_to_end(&mut bytes)
             .is_err()
         {
-            return TranscriptMatch::Absent;
+            return absent();
         }
         let at_line_start = if lookback == 1 {
             let before = bytes.remove(0);
@@ -139,7 +149,7 @@ impl Watch {
                 .position(|b| *b == b'\n')
                 .map_or(whole, |i| (i + 1).min(whole))
         };
-        let found = scan(&bytes[first..whole], msg_id);
+        let found = scan_detail(&bytes[first..whole], msg_id);
         // Progress: past the whole lines, or past a window that holds none (a line
         // longer than a window is skipped rather than stalled on, and the next window
         // starts inside it).

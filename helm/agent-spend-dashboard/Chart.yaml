@@ -1,0 +1,12 @@
+apiVersion: v2
+name: agent-spend-dashboard
+description: Agent spend Grafana dashboard definition for Claude Code and Codex telemetry
+type: application
+version: 0.3.4
+appVersion: "0.3.4"
+annotations:
+  org.agent-ix.deployable: "service"
+  org.agent-ix.title: "Agent Spend Dashboard"
+  org.agent-ix.category: "observability"
+  org.agent-ix.namespace: "platform"
+  org.opencontainers.image.source: "https://github.com/agent-ix/ix-relay"

@@ -6,6 +6,7 @@ use relay_core::AgentName;
 use support::run;
 
 use support::location::Fixture;
+/// Trace: FR-049-AC-1
 #[test]
 fn genuine_startup_ignores_stale_pane_and_explicit_alias_then_caches_session() {
     let Some(f) = Fixture::new("location-startup") else {
@@ -25,6 +26,10 @@ fn genuine_startup_ignores_stale_pane_and_explicit_alias_then_caches_session() {
     );
     assert_eq!(regs[0].herdr_pane.as_ref().unwrap().as_str(), "w1:p1");
     let who = run(f.cmd(&["whoami", "--json"]), "");
+    assert_eq!(
+        who.stdout,
+        "{\"name\":\"draco:misc:agent-skills\",\"source\":\"location\",\"address\":\"draco:misc:agent-skills\"}\n"
+    );
     let value: serde_json::Value = serde_json::from_str(&who.stdout).unwrap();
     assert_eq!(value["name"], "draco:misc:agent-skills");
     assert!(!who.stdout.contains("filament"));
@@ -364,6 +369,7 @@ fn malformed_topology_and_unaddressable_labels_never_create_fallback_identities(
     }
 }
 
+/// Trace: FR-049-AC-1
 #[test]
 fn relay_hit_sends_with_no_herdr_or_ssh_access_for_sender_or_recipient() {
     let Some(f) = Fixture::new("location-relay-only") else {
@@ -388,8 +394,15 @@ fn relay_hit_sends_with_no_herdr_or_ssh_access_for_sender_or_recipient() {
     }
     let found = run(f.cmd(&["find", "laya", "--json"]), "");
     assert_eq!(found.status, 0, "{}", found.stderr);
+    assert_eq!(
+        found.stdout,
+        "{\"address\":\"terra:laya:code\",\"bus_name\":\"terra:laya:code\",\"machine\":\"terra\",\"workspace_label\":\"laya\",\"tab_label\":\"code\",\"pane_id\":\"w1:p1\",\"session_name\":null,\"herdr_status\":\"unknown\",\"on_bus\":true}\n"
+    );
     assert!(found.stdout.contains("terra:laya:code"), "{}", found.stdout);
     assert!(!found.stderr.contains("forbidden"));
+    let missing = run(f.cmd(&["find", "no-such-workspace", "--json"]), "");
+    assert_eq!(missing.status, 0, "{}", missing.stderr);
+    assert_eq!(missing.stdout, "");
     assert_eq!(f.relay().log(0, 10).unwrap().len(), 3);
 }
 

@@ -78,6 +78,7 @@ mod tests {
             to: to.parse().unwrap(),
             text: text.into(),
             sent_at_ms: 42,
+            forwarded: false,
         }
     }
 

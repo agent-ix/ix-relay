@@ -16,6 +16,8 @@ pub struct Source<T> {
     pub last_success: Option<Instant>,
     /// Most recent refresh error.
     pub error: Option<String>,
+    /// Compact classified summary, when the source supplies one.
+    pub error_summary: Option<String>,
 }
 
 impl<T> Default for Source<T> {
@@ -24,6 +26,7 @@ impl<T> Default for Source<T> {
             value: None,
             last_success: None,
             error: None,
+            error_summary: None,
         }
     }
 }
@@ -34,11 +37,19 @@ impl<T> Source<T> {
         self.value = Some(value);
         self.last_success = Some(now);
         self.error = None;
+        self.error_summary = None;
     }
 
     /// Keeps the last good value but exposes the newest failure.
     pub fn failure(&mut self, error: impl Into<String>) {
         self.error = Some(error.into());
+        self.error_summary = None;
+    }
+
+    /// Retains a compact summary alongside the complete actionable diagnostic.
+    pub fn failure_with_summary(&mut self, summary: impl Into<String>, error: impl Into<String>) {
+        self.failure(error);
+        self.error_summary = Some(summary.into());
     }
 }
 
@@ -52,11 +63,25 @@ pub enum View {
     Agents,
     /// Initiative and project progress within the reported scope.
     Scope,
+    /// Structured department progress and source availability.
+    Status,
+    /// Shared assessments, with severity separate from completeness.
+    Health,
+    /// Shared current, previous and baseline comparisons.
+    Retro,
 }
 
 /// Complete dashboard state.
 #[derive(Debug, Default)]
 pub struct App {
+    /// Explicit source-native project selectors, independent of pane identity.
+    pub projects: Vec<String>,
+    /// Shared department report and comparisons, retained on failed refresh.
+    pub department: Source<ix_board::retro::department::Delta>,
+    /// The terminal surface's resolved color policy.
+    pub color_enabled: bool,
+    /// Requested live collection has failed; quitting must retain that outcome.
+    pub collection_failed: bool,
     /// Explicit Linear team override; otherwise the bound workspace is the team key.
     pub team: Option<String>,
     /// Native session incarnation this monitor follows.
@@ -75,6 +100,10 @@ pub struct App {
     pub view: View,
     /// Whether the detail panel is expanded.
     pub details: bool,
+    /// Vertical offset within expanded department evidence.
+    pub detail_scroll: u16,
+    /// Whether source failures replace the department rows for full inspection.
+    pub show_diagnostics: bool,
     /// Whether source timestamps are visible in the optional status line.
     pub show_status: bool,
     /// Complete authoritative tracker snapshot from Linear.
@@ -90,12 +119,84 @@ pub struct App {
 }
 
 impl App {
+    /// Retains shared department evidence on failure without rewriting its timestamps.
+    pub fn apply_department_refresh(
+        &mut self,
+        result: Result<ix_board::retro::department::Delta, String>,
+        now: Instant,
+    ) {
+        match result {
+            Ok(report) => self.department.success(report, now),
+            Err(error) => {
+                self.collection_failed = true;
+                self.department.failure(error);
+            }
+        }
+    }
+
+    /// Team selector shared with lead views, without narrowing project-only requests.
+    pub fn department_team(&self) -> Option<String> {
+        self.team.clone().or_else(|| {
+            if !self.projects.is_empty() {
+                return None;
+            }
+            self.binding
+                .as_ref()
+                .and_then(|binding| binding.address.parse::<relay_core::Address>().ok())
+                .map(|address| address.workspace().to_ascii_uppercase())
+        })
+    }
+    /// Applies native observations without ever following a replacement binding.
+    pub fn apply_runtime_refresh(&mut self, refresh: crate::monitor_runtime::RuntimeRefresh) {
+        match refresh {
+            crate::monitor_runtime::RuntimeRefresh::Observation(result, read_at) => match result {
+                Ok(observation) if !self.session_ended => {
+                    if self.binding.as_ref() == Some(&observation.binding) {
+                        self.runtime.success(observation, read_at);
+                    } else {
+                        self.session_ended = true;
+                        self.runtime
+                            .failure("session ended/replaced · restart to rebind");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    if matches!(
+                        error,
+                        relay_ops::OpsError::WorkSessionReplaced
+                            | relay_ops::OpsError::WorkAgentAbsent
+                    ) {
+                        self.session_ended = true;
+                    }
+                    self.runtime.failure(error.to_string());
+                }
+            },
+            crate::monitor_runtime::RuntimeRefresh::Report(result, read_at) => match result {
+                Ok(report) if !self.session_ended => {
+                    if report
+                        .as_ref()
+                        .is_some_and(|report| self.binding.as_ref() != Some(&report.binding))
+                    {
+                        self.session_ended = true;
+                        self.report
+                            .failure("session ended/replaced · restart to rebind");
+                    } else {
+                        self.report.success(report, read_at);
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => self.report.failure(error.to_string()),
+            },
+        }
+    }
+
     /// Applies an independently refreshed Linear tracker result.
     pub fn apply_tracker_refresh(
         &mut self,
         tracker: Result<crate::monitor_tracker::TrackerState, ix_board::Error>,
         now: Instant,
     ) {
+        self.collection_failed |= tracker.is_err();
         match tracker {
             Ok(data) => {
                 self.tracker_retry_at = None;
@@ -108,7 +209,10 @@ impl App {
             }
             Err(error) => {
                 self.tracker_retry_at = None;
-                self.tracker.failure(error.to_string());
+                self.tracker.failure_with_summary(
+                    crate::monitor_ops::source_summary(&error),
+                    crate::monitor_ops::source_diagnostic(&error),
+                );
             }
         }
     }
@@ -116,14 +220,29 @@ impl App {
 
 /// Handles the dashboard's read-only keyboard controls.
 pub fn handle_key(app: &mut App, key: KeyEvent) {
+    let selected_before = app.table.selected();
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Char('r') => app.refresh_now = true,
         KeyCode::Char('d') | KeyCode::Enter => app.details = !app.details,
         KeyCode::Char('s') => app.show_status = !app.show_status,
+        KeyCode::Char('e') => {
+            app.show_diagnostics = !app.show_diagnostics;
+            app.table = Default::default();
+            app.detail_scroll = 0;
+        }
         KeyCode::Char('t') => select_view(app, View::Tickets),
         KeyCode::Char('a') => select_view(app, View::Agents),
         KeyCode::Char('p') => select_view(app, View::Scope),
+        KeyCode::Char('1') => select_view(app, View::Status),
+        KeyCode::Char('2') => select_view(app, View::Health),
+        KeyCode::Char('3') => select_view(app, View::Retro),
+        KeyCode::Right if app.details => {
+            app.detail_scroll = app.detail_scroll.saturating_add(1);
+        }
+        KeyCode::Left if app.details => {
+            app.detail_scroll = app.detail_scroll.saturating_sub(1);
+        }
         KeyCode::Down | KeyCode::Char('j') => app.table.select(Some(
             app.table
                 .selected()
@@ -146,6 +265,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             .select(Some(app.table.selected().unwrap_or(0).saturating_sub(5))),
         _ => {}
     }
+    if app.table.selected() != selected_before {
+        app.detail_scroll = 0;
+    }
 }
 
 fn select_view(app: &mut App, view: View) {
@@ -153,6 +275,8 @@ fn select_view(app: &mut App, view: View) {
         app.view = view;
         app.table = Default::default();
         app.row_count = 0;
+        app.detail_scroll = 0;
+        app.show_diagnostics = false;
     }
 }
 
@@ -165,6 +289,7 @@ pub fn display_text(raw: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use ix_trace_rs::trace;
     use std::time::Instant;
 
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -196,5 +321,68 @@ mod tests {
     #[test]
     fn tracker_text_is_sanitized_and_bounded() {
         assert_eq!(display_text("hi\u{1b}[31mthere\nagain", 8), "hi�[31mt");
+    }
+
+    /// Trace: FR-059-AC-7
+    #[trace("FR-059-AC-7")]
+    #[test]
+    fn replacement_cannot_change_attribution_and_department_data_survives() {
+        let now = Instant::now();
+        let original = relay_core::work::WorkBinding {
+            machine: "luna".parse().unwrap(),
+            pane: "w1:p1".parse().unwrap(),
+            session: "session-a".parse().unwrap(),
+            process_id: 42,
+            kind: "codex".into(),
+            address: "luna:SWM:code".into(),
+        };
+        let mut replacement = original.clone();
+        replacement.session = "session-b".parse().unwrap();
+        replacement.process_id = 43;
+        let mut app = App {
+            binding: Some(original.clone()),
+            ..App::default()
+        };
+        app.department
+            .success(crate::monitor_department::tests::fixture(), now);
+        app.apply_runtime_refresh(crate::monitor_runtime::RuntimeRefresh::Observation(
+            Ok(relay_ops::work::WorkObservation {
+                binding: original.clone(),
+                status: "idle".into(),
+                panes: Vec::new(),
+            }),
+            now,
+        ));
+        app.apply_runtime_refresh(crate::monitor_runtime::RuntimeRefresh::Observation(
+            Err(relay_ops::OpsError::WorkSessionReplaced),
+            now,
+        ));
+        app.apply_runtime_refresh(crate::monitor_runtime::RuntimeRefresh::Observation(
+            Ok(relay_ops::work::WorkObservation {
+                binding: replacement.clone(),
+                status: "working".into(),
+                panes: Vec::new(),
+            }),
+            now,
+        ));
+        app.apply_runtime_refresh(crate::monitor_runtime::RuntimeRefresh::Report(
+            Ok(Some(relay_core::work::WorkReport {
+                binding: replacement,
+                scope: None,
+                focus: None,
+                agents: Vec::new(),
+            })),
+            now,
+        ));
+        assert!(app.session_ended);
+        assert_eq!(app.binding, Some(original.clone()));
+        assert_eq!(app.runtime.value.as_ref().unwrap().binding, original);
+        assert!(app.report.value.is_none());
+        assert!(app.department.value.is_some());
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE),
+        );
+        assert_eq!(app.view, View::Health);
     }
 }

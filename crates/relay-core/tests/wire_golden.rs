@@ -99,12 +99,14 @@ fn a_message_is_byte_identical_to_main() {
         to: "all".parse().unwrap(),
         text: "hi \"q\"\n \u{e9}".into(),
         sent_at_ms: 5,
+        forwarded: false,
     };
     let direct = Message {
         from: "qsl-lead".parse().unwrap(),
         to: "tl-lead".parse().unwrap(),
         text: "x".into(),
         sent_at_ms: -1,
+        forwarded: false,
     };
     assert_wire(&broadcast, MESSAGE_BROADCAST);
     assert_wire(&direct, MESSAGE_DIRECT);
@@ -212,6 +214,7 @@ fn what_redis_holds_is_byte_identical_to_main() {
 
     bus.relay
         .push_hook_health(&[relay_core::HookHealthEntry {
+            id: Some("rec-1".into()),
             machine: "node-a".parse().unwrap(),
             lead: Some("qsl-lead".into()),
             record: r#"{"at_ms":1}"#.into(),
@@ -235,6 +238,7 @@ fn what_redis_holds_is_byte_identical_to_main() {
         [
             ("machine".to_owned(), "node-a".to_owned()),
             ("lead".to_owned(), "qsl-lead".to_owned()),
+            ("id".to_owned(), "rec-1".to_owned()),
             ("rec".to_owned(), r#"{"at_ms":1}"#.to_owned()),
         ]
     );
@@ -379,6 +383,46 @@ fn a_hook_health_entry_with_a_malformed_machine_is_skipped() {
     let entries = read.entries;
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].machine.as_str(), "node-a");
+}
+
+/// Tracing: TC-030-12
+/// ACs: FR-030-AC-12
+///
+/// A stream entry with no `id` field whose record carries one is counted by the record's
+/// id, so two such entries are one failure; an entry with an empty id of both kinds stays
+/// distinct. The read does this once, for every reader (the gauge and doctor).
+#[test]
+fn tc_030_12_a_hook_health_entry_without_a_stream_id_is_counted_by_its_records_id() {
+    let Some(mut bus) = Bus::connect("wire-health-inner-id") else {
+        return;
+    };
+    for rec in [
+        r#"{"id":"r1"}"#,
+        r#"{"id":"r1"}"#,
+        r#"{"id":""}"#,
+        r#"{"id":""}"#,
+    ] {
+        redis::cmd("XADD")
+            .arg(bus.key("health:hooks"))
+            .arg("*")
+            .arg("machine")
+            .arg("node-a")
+            .arg("lead")
+            .arg("")
+            .arg("rec")
+            .arg(rec)
+            .exec(&mut bus.raw)
+            .unwrap();
+    }
+    let read = bus.relay.hook_health(10).unwrap();
+    assert_eq!(read.entries[0].id.as_deref(), Some("r1"));
+    assert_eq!(read.entries[2].id, None);
+    assert_eq!(read.entries.len(), 4);
+    assert_eq!(
+        read.distinct().len(),
+        3,
+        "r1 once, and the two id-less ones"
+    );
 }
 
 #[test]

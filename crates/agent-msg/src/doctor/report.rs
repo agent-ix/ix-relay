@@ -399,8 +399,7 @@ impl Report {
 
     /// Writes the report as one JSON line.
     pub(crate) fn write_json(&self, out: &mut impl Write) -> io::Result<()> {
-        serde_json::to_writer(&mut *out, self).map_err(io::Error::other)?;
-        writeln!(out)
+        crate::json::write_line(out, self)
     }
 }
 
@@ -519,10 +518,17 @@ mod tests {
 
     /// Tracing: TC-029-06
     /// ACs: FR-029-AC-6
+    /// Trace: FR-049-AC-1
     #[test]
     fn tc_029_06_the_report_and_check_have_exactly_the_documented_fields() {
         let check = Check::fail(Family::Redis, Code::RedisSlow, Some("x"), "m", "c", "f");
         let report = Report::new(vec![check], false);
+        let mut bytes = Vec::new();
+        report.write_json(&mut bytes).unwrap();
+        assert_eq!(
+            bytes,
+            b"{\"ok\":false,\"strict\":false,\"checks\":[{\"check\":\"redis\",\"code\":\"redis_slow\",\"status\":\"fail\",\"subject\":\"x\",\"message\":\"m\",\"cause\":\"c\",\"fix\":\"f\",\"details\":[]}]}\n"
+        );
         let value = serde_json::to_value(&report).unwrap();
         let keys = |v: &serde_json::Value| {
             let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();

@@ -45,6 +45,7 @@ fn message(recipient: &relay_core::DirectoryRecipient) -> Message {
         to: Target::Agent(recipient.registration.name.clone()),
         text: "one-way network proof".into(),
         sent_at_ms: 1,
+        forwarded: false,
     }
 }
 #[test]

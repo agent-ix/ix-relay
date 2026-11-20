@@ -125,6 +125,7 @@ fn msg(to: &Target, text: &str) -> Message {
         to: to.clone(),
         text: text.to_owned(),
         sent_at_ms: 0,
+        forwarded: false,
     }
 }
 

@@ -62,6 +62,8 @@ struct ProcessInfo {
 struct ForegroundProcess {
     name: String,
     pid: u32,
+    // Native binaries may set their process name to a version string.
+    argv0: Option<String>,
     // Protocol 22 makes argument details optional and nullable.
     argv: Option<Vec<String>>,
 }
@@ -118,10 +120,14 @@ fn process_identity(
         .foreground_processes
         .iter()
         .filter(|p| {
-            p.name == kind
-                || Path::new(&p.name)
-                    .file_name()
-                    .is_some_and(|name| name == kind)
+            [Some(p.name.as_str()), p.argv0.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(|candidate| {
+                    Path::new(candidate)
+                        .file_name()
+                        .is_some_and(|name| name == kind)
+                })
         })
         .collect();
     let [process] = processes.as_slice() else {

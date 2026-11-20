@@ -53,6 +53,7 @@ fn message(n: u32) -> Message {
         to: Target::Agent(lead(1)),
         text: format!("m-{n}"),
         sent_at_ms: i64::from(n),
+        forwarded: false,
     }
 }
 

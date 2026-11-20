@@ -293,7 +293,7 @@ impl Bus for RelayBus {
     }
 
     fn push_hook_health(&mut self, entries: &[HookHealthEntry]) -> relay_core::Result<()> {
-        self.relay.push_hook_health(entries)
+        self.relay.push_hook_health(entries).map(drop)
     }
 }
 
@@ -967,8 +967,11 @@ fn recover<B: Bus>(
 /// spool and is only logged: not recording it keeps a Redis outage from growing
 /// the very file it cannot ship.
 ///
-/// Delivery is at-least-once: a crash between a push and the removal, or a
-/// record appended in between, means the next flush ships some records again.
+/// Each record is shipped at most once (FR-030): it carries an id minted when it was
+/// appended, each chunk is one atomic request that adds only the records whose ids the bus
+/// has not recorded as shipped, and the spool removes what was shipped by id. A crash
+/// between a push and the removal, or a retry after a push that failed after the server
+/// applied it, offers the same ids again and the bus skips them.
 fn flush_health<B: Bus>(bus: &mut B, budget: &Budget<'_>, rec: &mut Recorder<'_>) {
     let Some(spool) = rec.spool else { return };
     if !spool.has_records()
@@ -988,7 +991,7 @@ fn flush_health<B: Bus>(bus: &mut B, budget: &Budget<'_>, rec: &mut Recorder<'_>
             return;
         }
     };
-    let mut shipped = 0;
+    let mut shipped = std::collections::HashSet::new();
     for chunk in flush.entries().chunks(FLUSH_CHUNK) {
         let Some(left) = budget.remaining().filter(|left| *left >= FLUSH_MIN_WINDOW) else {
             break;
@@ -996,6 +999,7 @@ fn flush_health<B: Bus>(bus: &mut B, budget: &Budget<'_>, rec: &mut Recorder<'_>
         let batch: Vec<HookHealthEntry> = chunk
             .iter()
             .map(|entry| HookHealthEntry {
+                id: Some(entry.id.clone()),
                 machine: entry.machine.clone(),
                 lead: entry.lead.clone(),
                 record: entry.json.clone(),
@@ -1010,9 +1014,9 @@ fn flush_health<B: Bus>(bus: &mut B, budget: &Budget<'_>, rec: &mut Recorder<'_>
             ));
             break;
         }
-        shipped += chunk.len();
+        shipped.extend(chunk.iter().map(|entry| entry.id.clone()));
     }
-    match flush.finish(shipped) {
+    match flush.finish(&shipped) {
         Ok(0) => {}
         // Lines that were not records (an id outside its type's rule, or bytes no
         // binary wrote) went with the shipped ones: say so in the spool, which the

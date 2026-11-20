@@ -46,7 +46,8 @@ fn once_never_writes_the_state_file() {
 }
 
 /// Tracing: TC-028-01
-/// ACs: FR-028-AC-1
+/// ACs: FR-028-AC-1, FR-049-AC-4
+/// Trace: FR-049-AC-4
 ///
 /// The running binary publishes its heartbeat with no message sent, keeps it
 /// fresh, carries the expiry the sweep interval gives (30 s at least), and the
@@ -94,6 +95,7 @@ fn a_running_watcher_publishes_a_fresh_heartbeat_with_an_expiry() {
         (first.pid, first.machine.as_str()),
         (child.0.id(), "hbhost")
     );
+    assert_eq!(first.version, env!("CARGO_PKG_VERSION"));
     // Idle, nothing sent: the sweep still refreshes the record.
     let refreshed = loop {
         match read(&mut relay) {
@@ -556,7 +558,8 @@ fn a_bad_otlp_value_in_the_file_is_refused_with_its_line() {
 }
 
 /// Tracing: TC-045-06
-/// ACs: FR-045-AC-6, FR-045-AC-7
+/// ACs: FR-045-AC-6, FR-045-AC-7, FR-049-AC-4
+/// Trace: FR-049-AC-4
 ///
 /// Against a real Redis and a collector the test owns: the running watcher pushes
 /// OTLP JSON with the relay's series and the pane-independent health, the
@@ -593,6 +596,18 @@ fn a_running_watcher_pushes_to_the_collector_and_reports_sending() {
     );
     assert!(body.contains("\"stringValue\":\"otlphost\""), "{body}");
     assert!(body.contains("ix.relay.registrations"), "{body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let attrs = payload["resourceMetrics"][0]["resource"]["attributes"]
+        .as_array()
+        .unwrap();
+    let service_version = attrs
+        .iter()
+        .find(|attr| attr["key"] == "service.version")
+        .expect("service.version resource attribute");
+    assert_eq!(
+        service_version["value"]["stringValue"],
+        env!("CARGO_PKG_VERSION")
+    );
     let mut relay = relay_core::Relay::connect(&url, std::time::Duration::from_secs(2))
         .unwrap()
         .with_prefix(prefix.clone());

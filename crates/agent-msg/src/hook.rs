@@ -180,6 +180,7 @@ mod tests {
                 to: "terra:tl:code".parse().unwrap(),
                 text: text.into(),
                 sent_at_ms: 0,
+                forwarded: false,
             })
             .collect()
     }

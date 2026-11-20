@@ -185,8 +185,7 @@ pub(crate) fn run(
         }
         WorkCommand::Remove { id } => relay.remove_work_agent(&binding, &id)?,
         WorkCommand::Show => {
-            serde_json::to_writer(&mut *out, &relay.work_report(&binding)?)?;
-            writeln!(out)?;
+            crate::json::write_line(out, &relay.work_report(&binding)?)?;
             return Ok(());
         }
     }

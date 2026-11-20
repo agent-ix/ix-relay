@@ -27,14 +27,16 @@ pub mod transcript;
 
 pub use envelope::{Body, Envelope, MAX_LINE_BYTES, wrap};
 pub use receipt::{
-    ControlLine, DriftReason, Ignored, Receipt, Verdict, classify, parse_control_line,
+    ControlLine, DriftReason, Ignored, LineShape, MAX_SHAPE_CHARS, Receipt, Verdict, classify,
+    line_shape, parse_control_line,
 };
 pub use record::{KNOWN_PEER_PROTOCOL, MIN_VERSION, RecordVerdict, SessionRecord, parse_version};
-pub use transcript::{TranscriptMatch, scan};
+pub use transcript::{Scan, TranscriptMatch, scan, scan_detail};
 
 /// The Claude Code version the wire formats in this crate were captured on.
 ///
 /// Formats named "captured" in the docs were observed live on this version;
-/// "derived" ones were read from its installed program text. A running Claude
-/// Code with another version is *unverified*, not necessarily broken.
+/// "derived" ones were read from its installed program text. Whether a running Claude
+/// Code of another version works is told by what the watcher observes of it (drift
+/// signals, FR-046), not by comparing its version to this one.
 pub const CAPTURED_ON: &str = "2.1.283";

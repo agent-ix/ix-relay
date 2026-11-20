@@ -31,6 +31,7 @@ impl FromStr for Since {
 mod tests {
     use super::*;
 
+    /// Trace: FR-057-AC-6
     #[test]
     fn parses_each_unit() {
         for (input, secs) in [("30s", 30), ("15m", 900), ("1h", 3_600), ("2d", 172_800)] {
@@ -41,12 +42,16 @@ mod tests {
         }
     }
 
+    /// Trace: FR-057-AC-6
     #[test]
     fn rejects_missing_unit_number_or_overflow() {
         for bad in [
             "",
             "h",
             "10",
+            " 1h",
+            "1 h",
+            "1h ",
             "1w",
             "-1h",
             "1.5h",

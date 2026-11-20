@@ -10,7 +10,7 @@ mod support;
 
 use std::time::Duration;
 
-use relay_core::{Place, Registration, Relay, moves::PaneReplaced};
+use relay_core::{Message, Place, Registration, Relay, Target, moves::PaneReplaced};
 
 fn registration(last_seen_ms: i64, pane: &str) -> Registration {
     Registration {
@@ -48,6 +48,16 @@ fn tc_032_02_who_shows_a_replaced_pane_until_the_lead_registers_again() {
         .unwrap()
         .with_prefix(prefix.clone());
     relay.register(&registration(1_000, "w1:p3")).unwrap();
+    // Mail waits for the lead: the marker means something while it does.
+    relay
+        .send(&Message {
+            from: "sender".parse().unwrap(),
+            to: Target::Agent("lead-a".parse().unwrap()),
+            text: "hi".into(),
+            sent_at_ms: 1,
+            forwarded: false,
+        })
+        .unwrap();
     assert!(
         !who(&url, &prefix).contains("UNDELIVERABLE"),
         "a healthy lead"
@@ -82,6 +92,70 @@ fn tc_032_02_who_shows_a_replaced_pane_until_the_lead_registers_again() {
             redis::cmd("DEL")
                 .arg(format!("{prefix}agents"))
                 .arg(format!("{prefix}health:replaced"))
+                .arg(format!("{prefix}inbox:lead-a"))
+                .exec(&mut c)
+        })
+        .unwrap();
+}
+
+/// Tracing: TC-053-18
+/// ACs: FR-053-AC-16
+///
+/// Once the watcher has moved a replaced registration's mail, its inbox is empty and
+/// `who` no longer calls it undeliverable; mail sent to it afterwards brings the marker back.
+#[test]
+fn tc_053_18_who_stops_calling_a_registration_undeliverable_once_its_inbox_is_empty() {
+    let Ok(url) = std::env::var("IX_RELAY_TEST_URL") else {
+        eprintln!("skipping: IX_RELAY_TEST_URL unset (run `make test-redis`)");
+        return;
+    };
+    let prefix = format!("test:{}:who-moved-mail:", std::process::id());
+    let mut relay = Relay::connect(&url, Duration::from_secs(2))
+        .unwrap()
+        .with_prefix(prefix.clone());
+    let lead: relay_core::AgentName = "lead-a".parse().unwrap();
+    relay.register(&registration(1_000, "w1:p3")).unwrap();
+    let send = |relay: &mut Relay| {
+        relay
+            .send(&Message {
+                from: "sender".parse().unwrap(),
+                to: Target::Agent("lead-a".parse().unwrap()),
+                text: "hi".into(),
+                sent_at_ms: 1,
+                forwarded: false,
+            })
+            .unwrap();
+    };
+    send(&mut relay);
+    let found = PaneReplaced {
+        pane: "w1:p3".parse().unwrap(),
+        seen_last_seen_ms: 1_000,
+        since_ms: 2_000,
+    };
+    relay.mark_pane_replaced(&lead, &found).unwrap();
+    assert!(who(&url, &prefix).contains("UNDELIVERABLE"), "mail waits");
+
+    relay
+        .pop_inbox(&lead, std::num::NonZeroUsize::new(10).unwrap())
+        .unwrap();
+    assert!(
+        !who(&url, &prefix).contains("UNDELIVERABLE"),
+        "the mail is gone from the inbox"
+    );
+
+    send(&mut relay);
+    assert!(
+        who(&url, &prefix).contains("UNDELIVERABLE"),
+        "new mail waits"
+    );
+
+    let _: () = redis::Client::open(url.as_str())
+        .and_then(|c| c.get_connection())
+        .and_then(|mut c| {
+            redis::cmd("DEL")
+                .arg(format!("{prefix}agents"))
+                .arg(format!("{prefix}health:replaced"))
+                .arg(format!("{prefix}inbox:lead-a"))
                 .exec(&mut c)
         })
         .unwrap();

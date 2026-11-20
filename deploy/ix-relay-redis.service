@@ -1,0 +1,30 @@
+[Unit]
+Description=ix-relay dedicated Redis bus
+Requires=wg-quick@wg0.service
+After=wg-quick@wg0.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ix-relay
+Group=ix-relay
+ExecStart=/usr/bin/redis-server /etc/ix-relay/redis.conf
+# Root-only admin credentials stay unreadable by the Redis service account.
+ExecStartPost=+/usr/local/libexec/ix-relay-wait-ready
+TimeoutStartSec=40
+Restart=always
+RestartSec=2
+StateDirectory=ix-relay
+StateDirectoryMode=0700
+RuntimeDirectory=ix-relay
+RuntimeDirectoryMode=0700
+UMask=0077
+MemoryMax=1G
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -610,6 +610,7 @@ mod tests {
                 to: "receiver".parse().unwrap(),
                 text: "hello".into(),
                 sent_at_ms: 1,
+                forwarded: false,
             })
             .unwrap();
         let receiver: relay_core::AgentName = "receiver".parse().unwrap();
@@ -824,6 +825,7 @@ mod tests {
                     to: to.parse().unwrap(),
                     text: format!("hello {to}"),
                     sent_at_ms: 1,
+                    forwarded: false,
                 })
                 .unwrap();
         }

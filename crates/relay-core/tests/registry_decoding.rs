@@ -322,6 +322,7 @@ fn tc_008_04_every_registry_and_alias_read_tolerates_bytes_that_are_not_utf8() {
             to: Target::All,
             text: "hi".into(),
             sent_at_ms: 1,
+            forwarded: false,
         })
         .expect("a broadcast survives an unreadable registry field");
     assert_eq!(recipients, vec![name("anchor"), name("qsl")]);

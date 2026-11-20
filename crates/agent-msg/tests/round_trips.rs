@@ -235,6 +235,7 @@ fn seeded(url: &str, prefix: &str, queued: usize) -> Relay {
                 to: Target::Agent(name("receiver")),
                 text: format!("message {i}"),
                 sent_at_ms: 1,
+                forwarded: false,
             })
             .unwrap();
     }

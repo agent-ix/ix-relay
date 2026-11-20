@@ -40,6 +40,13 @@ const LOG_CAP: usize = 10_000;
 /// Roughly how many entries the hook health stream keeps (`XADD MAXLEN ~`).
 const HEALTH_HOOKS_CAP: usize = 1_000;
 
+/// How long the bus remembers that a hook failure record was shipped (FR-030): the ids it
+/// answers "already shipped" for, in milliseconds.
+const HEALTH_HOOKS_SHIPPED_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// The most shipped record ids the bus remembers; the oldest go first (NFR-002).
+const HEALTH_HOOKS_SHIPPED_MAX: usize = 2_000;
+
 /// How long a session's remembered name or suppression lasts: 30 days, in
 /// seconds. A harness session id is one-shot (never reused across restarts),
 /// so entries would otherwise accumulate forever with nothing to clean them up.
@@ -60,9 +67,14 @@ mod moves;
 #[cfg(test)]
 mod pop_budget_tests;
 mod scan;
+mod status;
+mod stranded;
+#[cfg(test)]
+mod stranded_fault_tests;
 mod work;
 
 use keys::Keys;
+use status::StatusStore;
 
 pub use commit::{CommitOutcome, IdentityCommit};
 pub use directory::{DIRECTORY_LEASE, DirectoryRead, DirectoryRecipient};
@@ -76,6 +88,8 @@ pub use inflight::{
 };
 pub use moves::{Moves, PanesReplaced, PlaceRefresh};
 pub use scan::ScanCut;
+pub use status::ReplyOutcome;
+pub use stranded::Buried;
 
 /// Largest `text` a single [`Message`] may carry, in bytes. Enforced by
 /// [`Relay::send`]. Keeps one message small enough that a budgeted pop (see
@@ -156,6 +170,135 @@ impl Relay {
             .arg(encode(reg))
             .query(&mut self.conn)?;
         Ok(())
+    }
+
+    /// Sets or clears one lead's lane focus without changing its registration.
+    pub fn set_focus(&mut self, agent: &AgentName, focus: Option<&str>) -> Result<()> {
+        let key = self.keys.lane_focus_key();
+        match focus {
+            Some(focus) => {
+                let item = crate::StatusItem::new(focus.to_owned()).map_err(|error| {
+                    Error::InvalidName {
+                        name: error.to_string(),
+                    }
+                })?;
+                let (seconds, microseconds): (u64, u64) =
+                    redis::cmd("TIME").query(&mut self.conn)?;
+                let set_at_ms = seconds
+                    .checked_mul(1_000)
+                    .and_then(|millis| millis.checked_add(microseconds / 1_000))
+                    .and_then(|millis| i64::try_from(millis).ok())
+                    .ok_or_else(|| Error::InvalidName {
+                        name: "focus timestamp overflow".into(),
+                    })?;
+                let record = crate::FocusRecord {
+                    agent: agent.clone(),
+                    focus: item.as_str().to_owned(),
+                    set_at_ms,
+                };
+                let (): () = self.conn.hset(&key, agent.as_str(), encode(&record))?;
+            }
+            None => {
+                let _: usize = self.conn.hdel(&key, agent.as_str())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads explicitly stored focus values, sorted by lead name.
+    pub fn focus_records(&mut self) -> Result<Vec<crate::FocusRecord>> {
+        let key = self.keys.lane_focus_key();
+        let raw: Vec<(Vec<u8>, Vec<u8>)> = self.conn.hgetall(&key)?;
+        let mut records = raw
+            .into_iter()
+            .map(|(_, value)| decode_bytes::<crate::FocusRecord>(&key, &value))
+            .collect::<Result<Vec<_>>>()?;
+        records.sort_by(|a, b| a.agent.cmp(&b.agent));
+        Ok(records)
+    }
+
+    /// Stores explicitly supplied capacity for one server with a Redis timestamp.
+    pub fn set_server_capacity(
+        &mut self,
+        machine: &MachineName,
+        cores: u32,
+        ram_mib: u64,
+        max_agents: Option<u32>,
+        owner_rules: Vec<String>,
+    ) -> Result<crate::ServerCapacity> {
+        let (seconds, microseconds): (u64, u64) = redis::cmd("TIME").query(&mut self.conn)?;
+        let set_at_ms = seconds
+            .checked_mul(1_000)
+            .and_then(|millis| millis.checked_add(microseconds / 1_000))
+            .and_then(|millis| i64::try_from(millis).ok())
+            .ok_or_else(|| Error::InvalidName {
+                name: "server capacity timestamp overflow".into(),
+            })?;
+        let capacity = crate::ServerCapacity::try_new(
+            machine.clone(),
+            cores,
+            ram_mib,
+            max_agents,
+            owner_rules,
+            set_at_ms,
+        )
+        .map_err(|error| Error::InvalidName {
+            name: error.to_string(),
+        })?;
+        let (): () = self.conn.hset(
+            self.keys.server_capacity_key(),
+            machine.as_str(),
+            encode(&capacity),
+        )?;
+        Ok(capacity)
+    }
+
+    /// Reads explicitly stored server capacity, sorted by server name.
+    pub fn server_capacities(&mut self) -> Result<Vec<crate::ServerCapacity>> {
+        let key = self.keys.server_capacity_key();
+        let raw: Vec<(Vec<u8>, Vec<u8>)> = self.conn.hgetall(&key)?;
+        let mut capacities = raw
+            .into_iter()
+            .map(|(_, value)| decode_bytes::<crate::ServerCapacity>(&key, &value))
+            .collect::<Result<Vec<_>>>()?;
+        capacities.sort_by(|a, b| a.machine.cmp(&b.machine));
+        Ok(capacities)
+    }
+
+    /// Removes an explicit capacity record; no server is inferred to be empty or unlimited.
+    pub fn clear_server_capacity(&mut self, machine: &MachineName) -> Result<()> {
+        let _: usize = self
+            .conn
+            .hdel(self.keys.server_capacity_key(), machine.as_str())?;
+        Ok(())
+    }
+
+    /// Opens a seven-day fixed-form status request for a snapshot of lanes.
+    pub fn create_status_request(
+        &mut self,
+        requester: AgentName,
+        expected_agents: Vec<AgentName>,
+    ) -> std::result::Result<crate::StatusRequest, crate::StatusError> {
+        StatusStore::new(&mut self.conn, &self.keys).create_new(requester, expected_agents)
+    }
+
+    /// Saves the first fixed-form reply from a requested lane.
+    pub fn submit_status_reply(
+        &mut self,
+        reply: crate::StatusReply,
+    ) -> std::result::Result<ReplyOutcome, crate::StatusError> {
+        StatusStore::new(&mut self.conn, &self.keys).submit(reply)
+    }
+
+    /// Returns the request snapshot and replies collected so far.
+    pub fn status_snapshot(
+        &mut self,
+        id: &crate::StatusRequestId,
+    ) -> std::result::Result<
+        Option<(crate::StatusRequest, Vec<crate::StatusReply>)>,
+        crate::StatusError,
+    > {
+        StatusStore::new(&mut self.conn, &self.keys).snapshot(id)
     }
 
     /// Every registered lead that decodes, sorted by name, plus a report of the
@@ -324,14 +467,17 @@ return {suppressed, cached}
     }
 
     /// Appends hook failure records to the capped `<prefix>health:hooks`
-    /// stream, one entry per record, in one pipelined round trip. Each entry
-    /// carries the record's JSON under `rec` and, as plain fields, the
-    /// machine and the lead (when known) it came from, so a reader can
-    /// attribute one without parsing it. The stream keeps roughly the newest
-    /// thousand.
-    ///
-    /// This is at-least-once: a caller that crashes after this returns but
-    /// before clearing its spool sends the same records again.
+    /// stream, one entry per record, in **one atomic request**: only the records
+    /// whose id the bus has not already recorded as shipped are added, and their ids
+    /// are recorded in the same request (FR-030). So a flush that overlaps another, one
+    /// that retries after a failed or partly applied ship, and a crash after shipping and
+    /// before the spool is cleared never put a record on the stream twice, and the
+    /// deduplication costs no round trip beyond the chunk's own. The record of shipped
+    /// ids keeps the ids of the last 24 hours up to 2,000 of them (NFR-002); an entry with
+    /// no id is always added. Each entry carries the record's JSON under `rec` and, as
+    /// plain fields, the machine, the lead (when known) and the id, so a reader can
+    /// attribute and count one without parsing it. The stream keeps roughly the newest
+    /// thousand. Returns how many entries were added.
     ///
     /// Record text is untrusted: a record can carry a lead's message text
     /// (see `agent-msg`'s failed-requeue record), so anything that renders
@@ -339,31 +485,57 @@ return {suppressed, cached}
     ///
     /// # Errors
     ///
-    /// [`Error::Redis`] when Redis fails or times out. Then nothing is known
-    /// to have been appended and the caller keeps its records.
-    pub fn push_hook_health(&mut self, entries: &[HookHealthEntry]) -> Result<()> {
+    /// [`Error::Redis`] when Redis fails or times out, or a key of another type is in
+    /// the way (nothing is written then). Then nothing is known to have been appended
+    /// and the caller keeps its records.
+    pub fn push_hook_health(&mut self, entries: &[HookHealthEntry]) -> Result<usize> {
+        // KEYS: the stream, the shipped ids (a sorted set scored by shipping time).
+        // ARGV: stream cap, window ms, id cap, then per entry: id, machine, lead, rec.
+        // Both keys are checked before anything is written.
+        const SCRIPT: &str = r#"
+for i = 1, 2 do
+    local t = redis.call('TYPE', KEYS[i]).ok
+    if t ~= 'none' and t ~= (i == 1 and 'stream' or 'zset') then
+        return redis.error_reply('WRONGTYPE hook health key ' .. i)
+    end
+end
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local window = tonumber(ARGV[2])
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now - window)
+local added = 0
+for i = 4, #ARGV, 4 do
+    local id = ARGV[i]
+    if id == '' or not redis.call('ZSCORE', KEYS[2], id) then
+        redis.call('XADD', KEYS[1], 'MAXLEN', '~', ARGV[1], '*',
+            'machine', ARGV[i + 1], 'lead', ARGV[i + 2], 'id', id, 'rec', ARGV[i + 3])
+        if id ~= '' then redis.call('ZADD', KEYS[2], now, id) end
+        added = added + 1
+    end
+end
+local over = redis.call('ZCARD', KEYS[2]) - tonumber(ARGV[3])
+if over > 0 then redis.call('ZREMRANGEBYRANK', KEYS[2], 0, over - 1) end
+if redis.call('EXISTS', KEYS[2]) == 1 then redis.call('PEXPIRE', KEYS[2], window) end
+return added
+"#;
         if entries.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
-        let key = self.keys.health_hooks_key();
-        let mut pipe = redis::pipe();
+        let script = redis::Script::new(SCRIPT);
+        let mut call = script.prepare_invoke();
+        call.key(self.keys.health_hooks_key())
+            .key(self.keys.health_hooks_shipped_key())
+            .arg(HEALTH_HOOKS_CAP)
+            .arg(HEALTH_HOOKS_SHIPPED_WINDOW_MS)
+            .arg(HEALTH_HOOKS_SHIPPED_MAX);
         for entry in entries {
-            pipe.cmd("XADD")
-                .arg(&key)
-                .arg("MAXLEN")
-                .arg("~")
-                .arg(HEALTH_HOOKS_CAP)
-                .arg("*")
-                .arg("machine")
+            call.arg(entry.id.as_deref().unwrap_or(""))
                 .arg(entry.machine.as_str())
-                .arg("lead")
                 .arg(entry.lead.as_deref().unwrap_or(""))
-                .arg("rec")
-                .arg(&entry.record)
-                .ignore();
+                .arg(&entry.record);
         }
-        let () = pipe.query(&mut self.conn)?;
-        Ok(())
+        let added: usize = call.invoke(&mut self.conn)?;
+        Ok(added)
     }
 
     /// Up to `max` entries from the hook health stream, oldest first: what
@@ -815,6 +987,7 @@ return {suppressed, cached}
             to: Target::Agent(human.clone()),
             text: text.to_owned(),
             sent_at_ms,
+            forwarded: false,
         };
         let json = encode(&msg);
         let mut pipe = redis::pipe();
@@ -1071,6 +1244,10 @@ pub enum AgentSlot {
 /// One entry of the hook health stream: a failure record and where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookHealthEntry {
+    /// The record's id, minted when it was appended to the spool: unique to the record.
+    /// The bus ships a record once however often it is offered, and readers count one id
+    /// once ([`HookHealth::distinct`]). `None` for an entry written without one.
+    pub id: Option<String>,
     /// The machine that spooled it, normalised.
     pub machine: MachineName,
     /// The lead's bus name, when the hook knew it.
@@ -1109,10 +1286,17 @@ fn hook_health_of(reply: &StreamRangeReply) -> HookHealth {
         // An entry a reader cannot use (a missing field, or a machine outside
         // its type's rule) is counted, never silently dropped.
         let read = (|| {
+            let record = entry.get::<String>("rec")?;
             Some(HookHealthEntry {
+                // The stream's own `id` field, else the record's: the one rule every
+                // reader counts a failure by (FR-030).
+                id: entry
+                    .get::<String>("id")
+                    .filter(|id| !id.is_empty())
+                    .or_else(|| record_id(&record)),
                 machine: entry.get::<String>("machine")?.parse().ok()?,
                 lead: entry.get::<String>("lead").filter(|l| !l.is_empty()),
-                record: entry.get::<String>("rec")?,
+                record,
             })
         })();
         match read {
@@ -1123,6 +1307,29 @@ fn hook_health_of(reply: &StreamRangeReply) -> HookHealth {
     HookHealth {
         entries,
         unreadable,
+    }
+}
+
+/// The `id` member of a failure record's JSON, when it has a non-empty one.
+fn record_id(record: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(record)
+        .ok()?
+        .get("id")?
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
+impl HookHealth {
+    /// The entries with each record id counted once, in order: a second stream entry whose id
+    /// was already seen adds nothing (FR-030). An entry with no id is always kept.
+    #[must_use]
+    pub fn distinct(&self) -> Vec<&HookHealthEntry> {
+        let mut seen = std::collections::HashSet::new();
+        self.entries
+            .iter()
+            .filter(|e| e.id.as_deref().is_none_or(|id| seen.insert(id)))
+            .collect()
     }
 }
 

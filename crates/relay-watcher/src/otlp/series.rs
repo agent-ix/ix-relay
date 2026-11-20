@@ -69,7 +69,7 @@ pub static HOOK_FAILURES: Instrument = Instrument {
     name: "ix.relay.hook.failures.recent",
     unit: "{failure}",
     description: "Hook failures of this machine still in the capped health:hooks stream that \
-                  happened since the watcher started, by stage and error kind. A gauge: it can \
+                  happened since the watcher started, by stage and error kind, each record id counted once. A gauge: it can \
                   fall when the stream drops old entries; it is not a cumulative counter.",
     kind: Kind::Gauge,
 };

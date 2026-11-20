@@ -158,6 +158,54 @@ fn unrecognised(reason: DriftReason) -> ControlLine {
     ControlLine::Unrecognised { reason }
 }
 
+/// The most characters kept of a line's `type` or `action` ([`line_shape`]).
+pub const MAX_SHAPE_CHARS: usize = 64;
+
+/// The `type` of every receipt line.
+pub const CONTROL_TYPE: &str = "control";
+
+/// The `action` of every receipt line.
+pub const RECEIPT_ACTION: &str = "peer_message_status";
+
+/// The only text of an offending reply-socket line that is kept, for a drift signal: its
+/// `type` and `action` strings, each cut to [`MAX_SHAPE_CHARS`] characters. Never the
+/// line's body, a message id or a path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LineShape {
+    /// The `type` string, absent when the line has none (or is not JSON).
+    pub line_type: Option<String>,
+    /// The `action` string, absent when the line has none (or is not JSON).
+    pub action: Option<String>,
+}
+
+impl LineShape {
+    /// The shape of every receipt: what an unknown-status receipt looked like.
+    #[must_use]
+    pub fn receipt() -> Self {
+        Self {
+            line_type: Some(CONTROL_TYPE.to_owned()),
+            action: Some(RECEIPT_ACTION.to_owned()),
+        }
+    }
+}
+
+/// The `type` and `action` strings of `line`, cut. Total: any input gives a shape, and one
+/// that is not a JSON object has neither.
+#[must_use]
+pub fn line_shape(line: &str) -> LineShape {
+    let Ok(Value::Object(object)) = serde_json::from_str::<Value>(line.trim()) else {
+        return LineShape::default();
+    };
+    let kept = |key: &str| match object.get(key) {
+        Some(Value::String(s)) => Some(s.chars().take(MAX_SHAPE_CHARS).collect()),
+        _ => None,
+    };
+    LineShape {
+        line_type: kept("type"),
+        action: kept("action"),
+    }
+}
+
 /// The string field `key` of `object`: `Ok(None)` when absent or null, `Err`
 /// when it is present with another type.
 fn string_field<'v>(
@@ -185,13 +233,13 @@ pub fn parse_control_line(line: &str) -> ControlLine {
         return unrecognised(DriftReason::NotAnObject);
     };
     match string_field(object, "type") {
-        Ok(Some("control")) => {}
+        Ok(Some(CONTROL_TYPE)) => {}
         Ok(Some(_)) => return unrecognised(DriftReason::TypeUnknown),
         Ok(None) => return unrecognised(DriftReason::TypeMissing),
         Err(reason) => return unrecognised(reason),
     }
     match string_field(object, "action") {
-        Ok(Some("peer_message_status")) => {}
+        Ok(Some(RECEIPT_ACTION)) => {}
         Ok(Some(_)) => return unrecognised(DriftReason::ActionUnknown),
         Ok(None) => return unrecognised(DriftReason::ActionMissing),
         Err(reason) => return unrecognised(reason),
@@ -225,6 +273,26 @@ pub fn parse_control_line(line: &str) -> ControlLine {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// Tracing: TC-046-17
+    /// ACs: FR-046-AC-17
+    #[test]
+    fn a_line_shape_keeps_only_a_cut_type_and_action() {
+        let long = "x".repeat(10_000);
+        let line = format!(
+            r#"{{"type":"{long}","action":"a\u001b[31m","body":"secret","path":"/etc/passwd","orig_msg_id":"m"}}"#
+        );
+        let shape = line_shape(&line);
+        assert_eq!(
+            shape.line_type.as_deref().map(str::len),
+            Some(MAX_SHAPE_CHARS)
+        );
+        assert_eq!(shape.action.as_deref(), Some("a\u{1b}[31m"));
+        assert_eq!(line_shape("not json"), LineShape::default());
+        assert_eq!(line_shape("[1]"), LineShape::default());
+        assert_eq!(line_shape(r#"{"type":3}"#), LineShape::default());
+        assert_eq!(line_shape(""), LineShape::default());
+    }
 
     fn of(status: &str, detail: &str) -> Verdict {
         match parse_control_line(&format!(

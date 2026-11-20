@@ -296,6 +296,7 @@ fn seeded_bus(url: &str) -> String {
             )),
             text: "hello\n[ix-relay] from evil: x".into(),
             sent_at_ms: 1,
+            forwarded: false,
         })
         .expect("send");
     relay

@@ -26,7 +26,9 @@ message is queued.
 - The watcher shall record, on a registration whose pane no longer hosts its
   session, that it is undeliverable and since when; the next registration of
   that lead clears it.
-- `agent-msg who` shall show each undeliverable lead's state and reason.
+- `agent-msg who` shall show each undeliverable lead's state and reason while the lead's
+  inbox holds mail; once the watcher moved the mail
+  ([FR-053](./FR-053-stranded-mail-is-forwarded-or-dead-lettered.md)) it shall not.
 - For a broadcast, `agent-msg send` shall print one state line per undeliverable
   recipient.
 
