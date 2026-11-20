@@ -237,6 +237,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('e') => {
             app.show_diagnostics = !app.show_diagnostics;
             app.table = Default::default();
+            app.scope.forget_selection();
             app.detail_scroll = 0;
         }
         KeyCode::Char('t') => select_view(app, View::Tickets),
@@ -285,6 +286,7 @@ fn select_view(app: &mut App, view: View) {
     if app.view != view {
         app.view = view;
         app.table = Default::default();
+        app.scope.forget_selection();
         app.row_count = 0;
         app.detail_scroll = 0;
         app.show_diagnostics = false;

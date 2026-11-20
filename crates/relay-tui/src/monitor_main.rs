@@ -93,9 +93,9 @@ use std::{
 
 use ratatui::{
     Terminal,
-    backend::CrosstermBackend,
+    backend::{Backend, CrosstermBackend},
     crossterm::{
-        event::{self, Event, KeyEventKind},
+        event::{self, Event, KeyEvent, KeyEventKind},
         execute,
         terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
@@ -159,7 +159,7 @@ fn run() -> io::Result<(Outcome, Option<String>)> {
         }
         app.runtime.success(observed, Instant::now());
     }
-    let mut tracker_worker = start_tracker(&args, &mut app, monitor_ops::TrackerWorker::spawn);
+    let tracker_worker = start_tracker(&args, &mut app, monitor_ops::TrackerWorker::spawn);
     // The guard exists before the first terminal mutation, including partial initialization.
     let _guard = TerminalGuard::enter(restore_terminal, || {
         enable_raw_mode()?;
@@ -170,36 +170,94 @@ fn run() -> io::Result<(Outcome, Option<String>)> {
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
 
+    let mut workers = Workers {
+        tracker: tracker_worker,
+        department: department_worker,
+        runtime: runtime_worker,
+    };
+    event_loop(
+        &mut terminal,
+        &mut app,
+        &mut workers,
+        &mut TerminalKeys,
+        &signal,
+        args.report.as_deref(),
+    )?;
+    Ok(quit_outcome(&app))
+}
+
+/// Background source workers the event loop drains and stops.
+struct Workers {
+    tracker: Option<monitor_ops::TrackerWorker>,
+    department: Option<monitor_department_source::DepartmentWorker>,
+    runtime: Option<monitor_runtime::RuntimeWorker>,
+}
+
+/// Where the event loop waits for key presses between draws.
+trait KeySource {
+    /// Waits at most `wait` for one key press.
+    fn next_key(&mut self, wait: Duration) -> io::Result<Option<KeyEvent>>;
+}
+
+/// The real terminal's input queue.
+struct TerminalKeys;
+
+impl KeySource for TerminalKeys {
+    fn next_key(&mut self, wait: Duration) -> io::Result<Option<KeyEvent>> {
+        if event::poll(wait)?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            return Ok(Some(key));
+        }
+        Ok(None)
+    }
+}
+
+/// Draws, drains already-completed source results without waiting, handles one key and
+/// quits. The dashboard and its tests both run exactly this loop.
+fn event_loop<B, K>(
+    terminal: &mut Terminal<B>,
+    app: &mut App,
+    workers: &mut Workers,
+    keys: &mut K,
+    signal: &AtomicBool,
+    report: Option<&std::path::Path>,
+) -> io::Result<()>
+where
+    B: Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
+    K: KeySource,
+{
     loop {
-        terminal.draw(|frame| monitor_ui::render(frame, &mut app, Instant::now()))?;
-        if let Some(active_worker) = &tracker_worker {
+        terminal
+            .draw(|frame| monitor_ui::render(frame, app, Instant::now()))
+            .map_err(io::Error::other)?;
+        if let Some(active_worker) = &workers.tracker {
             while let Ok(refresh) = active_worker.events.try_recv() {
                 app.apply_tracker_refresh(refresh, Instant::now());
             }
         }
-        if let Some(worker) = &department_worker {
+        if let Some(worker) = &workers.department {
             while let Ok(result) = worker.events.try_recv() {
                 app.apply_department_refresh(result, Instant::now());
             }
         }
-        if let Some(worker) = &runtime_worker {
+        if let Some(worker) = &workers.runtime {
             while let Ok(refresh) = worker.events.try_recv() {
                 app.apply_runtime_refresh(refresh);
             }
         }
-        if event::poll(TICK)?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            monitor::handle_key(&mut app, key);
+        if let Some(key) = keys.next_key(TICK)? {
+            monitor::handle_key(app, key);
             if app.refresh_now {
-                if let Some(active_worker) = &tracker_worker {
+                if let Some(active_worker) = &workers.tracker {
                     active_worker.refresh_now();
                 }
-                if let Some(worker) = &department_worker {
+                if let Some(worker) = &workers.department {
                     worker.refresh_now();
                 }
-                if let Some(path) = &args.report {
+                if let Some(path) = report {
                     match monitor_department_source::read_report(path) {
                         Ok(report) => app.department.success(report, Instant::now()),
                         Err(error) => app.department.failure(error.to_string()),
@@ -212,13 +270,13 @@ fn run() -> io::Result<(Outcome, Option<String>)> {
             app.should_quit = true;
         }
         if app.should_quit {
-            if let Some(worker) = runtime_worker.take() {
+            if let Some(worker) = workers.runtime.take() {
                 worker.stop();
             }
-            if let Some(active_worker) = tracker_worker.take() {
+            if let Some(active_worker) = workers.tracker.take() {
                 active_worker.stop();
             }
-            return Ok(quit_outcome(&app));
+            return Ok(());
         }
     }
 }

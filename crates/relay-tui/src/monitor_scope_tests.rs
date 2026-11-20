@@ -792,3 +792,252 @@ fn projects_outside_a_displayed_initiative_are_never_called_unassigned_without_a
     assert!(text.contains(LINKS_UNAVAILABLE), "{text}");
     assert!(!text.contains(NO_SELECTED_INITIATIVE) && !text.contains("unassigned"));
 }
+
+/// The text FR-060 requires in the Scope view at the 80x24 target, whatever the state.
+fn assert_scope_essentials(text: &str, footer_mode: &str) {
+    let lines: Vec<&str> = text.lines().collect();
+    let focus = lines
+        .iter()
+        .position(|l| l.contains("Focus:"))
+        .unwrap_or_else(|| panic!("no Focus line\n{text}"));
+    assert!(lines[focus + 1].trim().is_empty(), "blank row\n{text}");
+    assert!(lines[focus + 2].contains("Initiative/project"), "{text}");
+    assert!(
+        flat(text).contains(&format!("c {footer_mode}")),
+        "footer key and mode\n{text}"
+    );
+}
+
+/// Whitespace-normalized text, so a statement wrapped across rows is still one statement.
+fn flat(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn assert_count_statements(text: &str) {
+    let flat = flat(text);
+    for needed in [
+        "2 completed/canceled projects hidden",
+        "initiative progress includes hidden projects",
+        "1 project with unknown status retained",
+    ] {
+        assert!(flat.contains(needed), "{needed}\n{text}");
+    }
+}
+
+/// Trace: FR-060-AC-4, FR-060-AC-5
+#[trace("FR-060-AC-5")]
+#[test]
+fn hidden_count_and_mixed_unknown_statements_fit_80x24() {
+    let mut app = categorized_app();
+    let text = screen(&mut app, 80, 24);
+    assert_scope_essentials(&text, "hiding completed");
+    assert_count_statements(&text);
+    for shown in ["Live", "Mystery", "Finished tasks"] {
+        assert!(hidden_row(&text, shown), "{shown}\n{text}");
+    }
+    press(&mut app, KeyCode::Char('c'));
+    let showing = screen(&mut app, 80, 24);
+    assert_scope_essentials(&showing, "showing completed");
+    assert!(!showing.contains("hidden"), "{showing}");
+    assert!(flat(&showing).contains("1 project with unknown status retained"));
+}
+
+/// Trace: FR-060-AC-6
+#[trace("FR-060-AC-6")]
+#[test]
+fn an_all_unknown_scope_is_unavailable_at_80x24_and_a_real_summary_hides_nothing() {
+    let mut app = categorized_app();
+    for project in &mut app.tracker.value.as_mut().unwrap().projects {
+        project.status_category = ix_board::ProjectStatusCategory::Unknown;
+    }
+    app.scope.invalidate();
+    let text = screen(&mut app, 80, 24);
+    assert_scope_essentials(&text, "completed filter unavailable");
+    assert!(text.contains(FILTER_UNAVAILABLE), "{text}");
+    for name in ["Live", "Retired", "Dropped", "Mystery", "Finished tasks"] {
+        assert!(hidden_row(&text, name), "{name}\n{text}");
+    }
+    assert!(!text.contains("hidden") && !text.contains("hiding completed"));
+    assert!(!text.contains("unknown status retained"), "{text}");
+}
+
+/// Trace: FR-060-AC-7
+#[trace("FR-060-AC-7")]
+#[test]
+fn error_with_last_snapshot_keeps_rows_counts_footer_mode_and_the_error_at_80x24() {
+    let mut app = categorized_app();
+    app.apply_tracker_refresh(Err(ix_board::Error::MissingApiKey), Instant::now());
+    let text = screen(&mut app, 80, 24);
+    assert_scope_essentials(&text, "hiding completed");
+    assert_count_statements(&text);
+    let flat_text = flat(&text);
+    let counted = flat_text.find("projects hidden").unwrap();
+    assert!(
+        flat_text[counted..].contains("[last snapshot]"),
+        "the count is labeled last snapshot\n{text}"
+    );
+    let error = crate::monitor::display_text(app.tracker.error.as_ref().unwrap(), 20);
+    assert!(text.contains(&error), "the error stays visible\n{text}");
+    assert!(hidden_row(&text, "Live"), "{text}");
+}
+
+/// Trace: FR-060-AC-7
+#[trace("FR-060-AC-7")]
+#[test]
+fn an_aged_snapshot_and_an_ended_session_label_the_count_at_80x24() {
+    let mut aged = categorized_app();
+    aged.tracker.value.as_mut().unwrap().fetched_at -= 2 * 60 * 60;
+    let mut ended = categorized_app();
+    ended.session_ended = true;
+    let mut fresh = categorized_app();
+    let fresh_text = screen(&mut fresh, 80, 24);
+    assert!(!fresh_text.contains("[last snapshot]"), "{fresh_text}");
+    for (name, app) in [("aged", &mut aged), ("ended", &mut ended)] {
+        let text = screen(app, 80, 24);
+        assert_scope_essentials(&text, "hiding completed");
+        assert_count_statements(&text);
+        let flat_text = flat(&text);
+        let counted = flat_text.find("projects hidden").unwrap();
+        assert!(
+            flat_text[counted..].contains("[last snapshot]"),
+            "{name}: the count is labeled\n{text}"
+        );
+        assert!(hidden_row(&text, "Live"), "{name}\n{text}");
+    }
+}
+
+/// Trace: FR-060-AC-4
+#[trace("FR-060-AC-4")]
+#[test]
+fn many_long_stage_names_cannot_push_the_essential_text_out_at_80x24() {
+    let mut app = categorized_app();
+    let snapshot = app.tracker.value.as_mut().unwrap();
+    let template = snapshot.issues[0].clone();
+    for n in 0..8 {
+        let mut issue = template.clone();
+        issue.id = IssueId(format!("stage-{n}"));
+        issue.identifier = format!("SWM-{}", 900 + n);
+        issue.state = format!("Awaiting external vendor review {n:02}");
+        issue.state_name = issue.state.clone();
+        issue.state_type = ix_board::WorkflowStateType::Started;
+        snapshot.issues.push(issue);
+    }
+    app.scope.invalidate();
+    app.apply_tracker_refresh(Err(ix_board::Error::MissingApiKey), Instant::now());
+    let text = screen(&mut app, 80, 24);
+    assert!(text.contains("Tasks:"), "{text}");
+    assert_scope_essentials(&text, "hiding completed");
+    assert_count_statements(&text);
+    assert!(text.contains("[last snapshot]"), "{text}");
+    assert!(hidden_row(&text, "Live") && hidden_row(&text, "Mystery"), "{text}");
+}
+
+/// Distinct hidden and unknown counts come from the projection, never placements.
+#[test]
+fn unknown_projects_are_counted_once_and_only_while_the_category_is_supplied() {
+    use ProjectCompletion::{Nonterminal as Active, Unknown};
+    let v = view(
+        vec![progress("a", "Alpha", 0, 1), progress("b", "Beta", 0, 1)],
+        vec![
+            child("shared-unknown", &["a", "b"], Unknown),
+            child("live", &["a"], Active),
+        ],
+        true,
+    );
+    let p = project(&v, Some(&scope(&["a", "b"], &[], &[])), false);
+    assert_eq!(p.unknown_projects, 1);
+    assert!(
+        p.filter_text()
+            .unwrap()
+            .contains("1 project with unknown status retained")
+    );
+    let unsupplied = view(vec![], vec![child("x", &[], Unknown)], false);
+    let p = project(&unsupplied, None, false);
+    assert_eq!(p.unknown_projects, 0);
+    assert_eq!(p.filter_text().as_deref(), Some(FILTER_UNAVAILABLE));
+}
+
+fn selected_line(text: &str) -> &str {
+    text.lines()
+        .find(|l| l.contains("› "))
+        .unwrap_or_else(|| panic!("no selected row\n{text}"))
+}
+
+fn without_projects(app: &App, names: &[&str]) -> TrackerState {
+    let mut snapshot = app.tracker.value.clone().unwrap();
+    let ids: Vec<ProjectId> = snapshot
+        .projects
+        .iter()
+        .filter(|p| names.contains(&p.name.as_str()))
+        .map(|p| p.id.clone())
+        .collect();
+    snapshot.projects.retain(|p| !ids.contains(&p.id));
+    snapshot
+        .issues
+        .retain(|i| i.project_id.as_ref().is_none_or(|id| !ids.contains(id)));
+    snapshot
+}
+
+/// Trace: FR-060-AC-4
+#[trace("FR-060-AC-4")]
+#[test]
+fn pressing_c_and_shrinking_refreshes_keep_the_selected_placement_through_render() {
+    let mut app = categorized_app();
+    press(&mut app, KeyCode::Char('c'));
+    screen(&mut app, 100, 24);
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    let text = screen(&mut app, 100, 24);
+    assert!(selected_line(&text).contains("Live"), "{text}");
+    assert_eq!(app.table.selected(), Some(3));
+    // Hiding removes one row above Live: the selection follows the placement.
+    press(&mut app, KeyCode::Char('c'));
+    let text = screen(&mut app, 100, 24);
+    assert!(selected_line(&text).contains("Live"), "{text}");
+    assert_eq!(app.table.selected(), Some(2));
+    press(&mut app, KeyCode::Char('c'));
+    let text = screen(&mut app, 100, 24);
+    assert!(selected_line(&text).contains("Live"), "{text}");
+    assert_eq!(app.table.selected(), Some(3));
+    // A shrinking refresh above the selection moves it up with its placement.
+    press(&mut app, KeyCode::Char('j'));
+    let text = screen(&mut app, 100, 24);
+    assert!(selected_line(&text).contains("Mystery"), "{text}");
+    let snapshot = without_projects(&app, &["Finished tasks"]);
+    app.apply_tracker_refresh(Ok(snapshot), Instant::now());
+    let text = screen(&mut app, 100, 24);
+    assert!(selected_line(&text).contains("Mystery"), "{text}");
+    assert_eq!(app.table.selected(), Some(3));
+    // Removing the selected placement clamps to the last remaining row.
+    press(&mut app, KeyCode::Char('j'));
+    let text = screen(&mut app, 100, 24);
+    assert!(selected_line(&text).contains("Retired"), "{text}");
+    let snapshot = without_projects(&app, &["Retired"]);
+    app.apply_tracker_refresh(Ok(snapshot), Instant::now());
+    let text = screen(&mut app, 100, 24);
+    assert!(selected_line(&text).contains("Mystery"), "{text}");
+    assert_eq!(app.table.selected(), Some(3));
+}
+
+/// Trace: FR-060-AC-4
+#[trace("FR-060-AC-4")]
+#[test]
+fn a_view_switch_reset_is_not_undone_by_the_remembered_placement() {
+    let mut app = categorized_app();
+    press(&mut app, KeyCode::Char('c'));
+    screen(&mut app, 100, 24);
+    for _ in 0..4 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert!(selected_line(&screen(&mut app, 100, 24)).contains("Mystery"));
+    press(&mut app, KeyCode::Char('t'));
+    // The scope rebuilds while another view is shown.
+    let report = app.report.value.clone().unwrap();
+    app.report.success(report, Instant::now());
+    screen(&mut app, 100, 24);
+    press(&mut app, KeyCode::Char('p'));
+    let text = screen(&mut app, 100, 24);
+    assert_eq!(app.table.selected(), Some(0), "{text}");
+    assert!(selected_line(&text).contains("Program"), "{text}");
+}

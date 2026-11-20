@@ -105,6 +105,8 @@ pub struct ScopeProjection {
     pub omitted_initiatives: usize,
     /// Whether the shared model supplied the status category.
     pub filter_available: bool,
+    /// Distinct projects whose category the model reports as unknown; always retained.
+    pub unknown_projects: usize,
 }
 
 impl ScopeProjection {
@@ -126,6 +128,13 @@ impl ScopeProjection {
                 "{} {} omitted",
                 self.omitted_initiatives,
                 plural(self.omitted_initiatives, "initiative", "initiatives")
+            ));
+        }
+        if self.unknown_projects > 0 {
+            parts.push(format!(
+                "{} {} with unknown status retained",
+                self.unknown_projects,
+                plural(self.unknown_projects, "project", "projects")
             ));
         }
         (!parts.is_empty()).then(|| parts.join(" · "))
@@ -266,6 +275,14 @@ pub fn project(
         hidden_projects,
         omitted_initiatives,
         filter_available,
+        unknown_projects: if filter_available {
+            view.projects
+                .iter()
+                .filter(|p| p.completion == ProjectCompletion::Unknown)
+                .count()
+        } else {
+            0
+        },
     }
 }
 
@@ -383,6 +400,12 @@ impl ScopeState {
         {
             table.select(Some(index));
         }
+    }
+
+    /// Drops the remembered placement when the table selection is reset, so a later
+    /// rebuild cannot undo that reset.
+    pub fn forget_selection(&mut self) {
+        self.selected = None;
     }
 
     /// Remembers which placement is selected so a later rebuild can find it.

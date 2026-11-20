@@ -9,7 +9,12 @@
 //! the FR-060-AC-8 contract.
 
 use std::{
-    sync::mpsc::{self, TryRecvError},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread,
     time::{Duration, Instant},
 };
 
@@ -157,28 +162,20 @@ fn large_scope_event_sequence_with_pending_source_read() {
     assert_eq!(view.projects.len(), PROJECTS);
     assert!(view.scope.leaf_ids.len() >= 2_000);
 
-    // The real tracker worker with an injected read that stays pending until released.
-    let (entered_tx, entered_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel::<()>();
-    let refreshed: TrackerState = snapshot;
-    let worker = crate::monitor_ops::TrackerWorker::spawn_with_read(move |_| {
-        let _ = entered_tx.send(());
-        let _ = release_rx.recv();
-        Ok(refreshed.clone())
-    })
-    .expect("worker");
-    entered_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("the read is in flight");
+    drop(app);
 
     let events = scripted_events();
     assert!(events.len() > 200);
     for (width, height) in [(80_u16, 24_u16), (200, 60)] {
+        // A fresh app per size, so the cold summary and projection build are timed too.
+        let mut app = large_scope_app();
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        let started = Instant::now();
         monitor::handle_key(&mut app, key(KeyCode::Char('p')));
         draw(&mut app, &mut terminal);
-        let started = Instant::now();
-        let mut draws = 0_usize;
+        let cold = started.elapsed();
+        assert_eq!(counters(&app), (1, 1), "the cold draw builds once");
+        let mut draws = 1_usize;
         for code in &events {
             let before = counters(&app);
             let in_scope = app.view == View::Scope;
@@ -187,7 +184,6 @@ fn large_scope_event_sequence_with_pending_source_read() {
             draw(&mut app, &mut terminal);
             draw(&mut app, &mut terminal);
             draws += 2;
-            assert!(matches!(worker.events.try_recv(), Err(TryRecvError::Empty)));
             let after = counters(&app);
             let toggled = in_scope && *code == KeyCode::Char('c');
             assert_eq!(
@@ -199,29 +195,158 @@ fn large_scope_event_sequence_with_pending_source_read() {
                 break;
             }
         }
-        let elapsed = started.elapsed();
+        let total = started.elapsed();
         assert!(app.should_quit, "the sequence ends with quit");
-        app.should_quit = false;
         eprintln!(
-            "scale-scenario {width}x{height}: events={} draws={draws} wall_ms={:.1}",
+            "scale-scenario {width}x{height}: events={} draws={draws} cold_ms={:.1} steady_ms={:.1} total_ms={:.1}",
             events.len(),
-            elapsed.as_secs_f64() * 1_000.0,
+            cold.as_secs_f64() * 1_000.0,
+            total.saturating_sub(cold).as_secs_f64() * 1_000.0,
+            total.as_secs_f64() * 1_000.0,
         );
     }
+}
 
-    // Releasing the read delivers one source change: one summary and one projection.
-    release_tx.send(()).expect("release");
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
-    draw(&mut app, &mut terminal);
-    let before = counters(&app);
-    let refresh = worker
-        .events
+/// Releases a held source read when dropped, and when the watchdog fires.
+struct HeldRead {
+    release: mpsc::Sender<()>,
+    fired: Arc<AtomicBool>,
+    cancel: Option<mpsc::Sender<()>>,
+}
+
+impl HeldRead {
+    /// The watchdog only bounds a hang: it releases the read after `limit`, which a
+    /// non-blocking loop never needs.
+    fn watch(release: mpsc::Sender<()>, limit: Duration) -> Self {
+        let fired = Arc::new(AtomicBool::new(false));
+        let (cancel, cancelled) = mpsc::channel::<()>();
+        let (watch_release, watch_fired) = (release.clone(), Arc::clone(&fired));
+        thread::spawn(move || {
+            if cancelled.recv_timeout(limit).is_err() {
+                watch_fired.store(true, Ordering::SeqCst);
+                let _ = watch_release.send(());
+            }
+        });
+        Self {
+            release,
+            fired,
+            cancel: Some(cancel),
+        }
+    }
+}
+
+impl Drop for HeldRead {
+    fn drop(&mut self) {
+        drop(self.cancel.take());
+        let _ = self.release.send(());
+    }
+}
+
+/// Scripted input for the production event loop, with a planned mid-sequence release of
+/// the held source read.
+struct ScriptedKeys {
+    events: Vec<KeyCode>,
+    next: usize,
+    release_at: usize,
+    release: mpsc::Sender<()>,
+    read_finished: mpsc::Receiver<()>,
+    released: bool,
+    idle_after_release: usize,
+    fired: Arc<AtomicBool>,
+}
+
+impl crate::KeySource for ScriptedKeys {
+    fn next_key(&mut self, _wait: Duration) -> std::io::Result<Option<KeyEvent>> {
+        if self.next == self.release_at && !self.released {
+            // Everything before this point ran while the read was still pending.
+            assert!(
+                !self.fired.load(Ordering::SeqCst),
+                "input waited for the pending source read"
+            );
+            self.released = true;
+            self.release.send(()).expect("release the read");
+            self.read_finished
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the released read finishes");
+            thread::sleep(Duration::from_millis(50));
+        }
+        if self.released && self.idle_after_release < 3 {
+            // Idle ticks let the loop drain the delivered result.
+            self.idle_after_release += 1;
+            return Ok(None);
+        }
+        let code = self.events.get(self.next).copied();
+        self.next += 1;
+        Ok(code.map(key))
+    }
+}
+
+/// Trace: FR-060-AC-8, FR-060-AC-9
+#[trace("FR-060-AC-8")]
+#[test]
+fn production_event_loop_never_waits_for_a_pending_tracker_read() {
+    let mut app = large_scope_app();
+    let snapshot = app.tracker.value.clone().expect("snapshot");
+    // The real tracker worker with an injected read that stays pending until released.
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let refreshed: TrackerState = snapshot;
+    let worker = crate::monitor_ops::TrackerWorker::spawn_with_read(move |_| {
+        let _ = entered_tx.send(());
+        let _ = release_rx.recv();
+        let _ = finished_tx.send(());
+        Ok(refreshed.clone())
+    })
+    .expect("worker");
+    entered_rx
         .recv_timeout(Duration::from_secs(5))
-        .expect("the released read completes while the worker is running");
-    app.apply_tracker_refresh(refresh, Instant::now());
-    draw(&mut app, &mut terminal);
-    draw(&mut app, &mut terminal);
+        .expect("the read is in flight");
+    let held = HeldRead::watch(release_tx.clone(), Duration::from_secs(60));
+
+    let mut events = scripted_events();
+    events.truncate(events.len() - 1);
+    // A manual refresh while the read is pending must also return immediately.
+    events.insert(100, KeyCode::Char('r'));
+    let release_at = events.len();
+    events.push(KeyCode::Char('c'));
+    events.push(KeyCode::Char('q'));
+    let toggles = events.iter().filter(|c| **c == KeyCode::Char('c')).count();
+    let mut keys = ScriptedKeys {
+        events,
+        next: 0,
+        release_at,
+        release: release_tx,
+        read_finished: finished_rx,
+        released: false,
+        idle_after_release: 0,
+        fired: Arc::clone(&held.fired),
+    };
+    let mut workers = crate::Workers {
+        tracker: Some(worker),
+        department: None,
+        runtime: None,
+    };
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let signal = AtomicBool::new(false);
+    app.view = View::Scope;
+    let before = counters(&app);
+    crate::event_loop(&mut terminal, &mut app, &mut workers, &mut keys, &signal, None)
+        .expect("the loop quits");
+    assert!(keys.released, "the whole script ran before the read finished");
+    assert!(
+        !held.fired.load(Ordering::SeqCst),
+        "the loop waited for the pending read until the watchdog released it"
+    );
+    assert!(app.should_quit);
+    assert!(workers.tracker.is_none(), "quit stops the worker");
+    // The cold draw and the one delivered source change compute the summary; every build
+    // beyond those is exactly one toggle, each pressed while the Scope view was shown.
     let after = counters(&app);
-    assert_eq!((after.0 - before.0, after.1 - before.1), (1, 1));
-    worker.stop();
+    assert_eq!(after.0 - before.0, 2, "cold draw plus the delivered refresh");
+    assert_eq!(
+        after.1 - before.1,
+        2 + toggles,
+        "a projection build per summary and per toggle"
+    );
 }

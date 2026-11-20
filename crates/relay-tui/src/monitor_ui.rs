@@ -108,17 +108,21 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
             task_spans.push(Span::raw(count.to_string()));
             task_spans.push(muted(format!(" {}", display_text(stage, 32))));
         }
+        let mut lines = vec![Line::from(scope_spans)];
+        // The hidden, omitted and filter statements sit on their own line ahead of the
+        // variable-length stage list, so the stage list can never push them out of view.
         if scope_view && let Some(text) = projection.as_ref().and_then(|p| p.filter_text()) {
-            task_spans.push(muted(" · "));
-            task_spans.push(Span::raw(text));
+            let mut filter_spans = vec![Span::raw(text)];
             if snapshot_old {
-                task_spans.push(Span::styled(
+                filter_spans.push(Span::styled(
                     " [last snapshot]",
                     Style::default().fg(WARNING),
                 ));
             }
+            lines.push(Line::from(filter_spans));
         }
-        vec![Line::from(scope_spans), Line::from(task_spans)]
+        lines.push(Line::from(task_spans));
+        lines
     } else if let Some(error) = &scope_error {
         vec![Line::from(Span::styled(
             error.clone(),
@@ -131,14 +135,49 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
             muted(" · waiting for Linear"),
         ])]
     };
-    // Wrapped text in the Scope view gets the rows it needs instead of being clipped.
+    let tracker_error = app.tracker.error.as_ref().map(|error| {
+        app.tracker_retry_at.map_or_else(
+            || error.clone(),
+            |deadline| {
+                let seconds = deadline.saturating_duration_since(now).as_secs();
+                format!(
+                    "{error} · next attempt in {}m {:02}s",
+                    seconds / 60,
+                    seconds % 60
+                )
+            },
+        )
+    });
+    let errors = [
+        scope_error.as_deref(),
+        tracker_error.as_deref(),
+        app.runtime.error.as_deref(),
+        app.report.error.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" · ");
+    let width = usize::from(frame.area().width.max(1));
+    let controls = footer_controls(
+        scope_view.then(|| crate::monitor_scope::footer_mode(projection.as_deref(), app.show_completed)),
+        &errors,
+        width,
+    );
+    let footer_rows = u16::try_from(controls.len()).unwrap_or(1) + u16::from(app.show_status);
+    let focus_rows: u16 = if report.and_then(|r| r.focus.as_ref()).is_some() {
+        2
+    } else {
+        1
+    };
+    // Wrapped Scope text gets the rows it needs, bounded only by what the other panels leave.
     let scope_height = if scope_view {
-        let width = usize::from(frame.area().width.max(1));
-        let needed: usize = summary
-            .iter()
-            .map(|l| l.width().div_ceil(width).max(1))
-            .sum();
-        u16::try_from(needed.clamp(2, 4)).unwrap_or(2)
+        let needed: usize = summary.iter().map(|l| wrapped_rows(l, width)).sum();
+        let spare = frame
+            .area()
+            .height
+            .saturating_sub(2 + focus_rows + footer_rows + 3);
+        u16::try_from(needed).unwrap_or(u16::MAX).clamp(2, spare.max(2))
     } else {
         2
     };
@@ -146,13 +185,9 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(scope_height),
-        Constraint::Length(if report.and_then(|r| r.focus.as_ref()).is_some() {
-            2
-        } else {
-            1
-        }),
+        Constraint::Length(focus_rows),
         Constraint::Min(3),
-        Constraint::Length(if app.show_status { 2 } else { 1 }),
+        Constraint::Length(footer_rows),
     ])
     .areas(frame.area());
     let runtime_fresh = fresh(
@@ -293,69 +328,99 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
         source_age(&app.runtime, now),
         source_age(&app.report, now)
     );
-    let tracker_error = app.tracker.error.as_ref().map(|error| {
-        app.tracker_retry_at.map_or_else(
-            || error.clone(),
-            |deadline| {
-                let seconds = deadline.saturating_duration_since(now).as_secs();
-                format!(
-                    "{error} · next attempt in {}m {:02}s",
-                    seconds / 60,
-                    seconds % 60
-                )
-            },
-        )
-    });
-    let errors = [
-        scope_error.as_deref(),
-        tracker_error.as_deref(),
-        app.runtime.error.as_deref(),
-        app.report.error.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join(" · ");
-    let controls = if errors.is_empty() {
-        let mut spans = vec![
-            Span::styled("↑↓", Style::default().fg(PRIMARY)),
-            Span::raw(" select · "),
-            Span::styled("d", Style::default().fg(PRIMARY)),
-            Span::raw(" details · "),
-            Span::styled("r", Style::default().fg(PRIMARY)),
-            Span::raw(" refresh · "),
-            Span::styled("q", Style::default().fg(PRIMARY)),
-            Span::raw(" quit · "),
-            Span::styled("s", Style::default().fg(PRIMARY)),
-            Span::raw(" status"),
-        ];
-        if scope_view {
-            spans.push(Span::raw(" · "));
-            spans.push(Span::styled("c", Style::default().fg(PRIMARY)));
-            spans.push(Span::raw(format!(
-                " {}",
-                crate::monitor_scope::footer_mode(projection.as_deref(), app.show_completed)
-            )));
-        }
-        Line::from(spans)
-    } else {
-        Line::from(Span::styled(
-            display_text(&errors, usize::from(footer.width)),
-            Style::default().fg(ERROR),
-        ))
-    };
-    let mut footer_lines = Vec::with_capacity(2);
+    let mut footer_lines = Vec::with_capacity(4);
     if app.show_status {
         footer_lines.push(Line::from(display_text(
             &footer_line,
             usize::from(footer.width),
         )));
     }
-    footer_lines.push(controls);
+    footer_lines.extend(controls);
     frame.render_widget(
         Paragraph::new(footer_lines).style(Style::default().fg(MUTED)),
         footer,
     );
+}
+
+/// Footer control lines sized from their real width.
+///
+/// Outside the Scope view an error replaces the controls. In the Scope view the error
+/// line sits above the controls and the `c` key with its mode is never dropped: it joins
+/// the general controls when they fit and otherwise takes a line of its own.
+fn footer_controls(
+    scope_mode: Option<&'static str>,
+    errors: &str,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let error_line = || {
+        Line::from(Span::styled(
+            display_text(errors, width),
+            Style::default().fg(ERROR),
+        ))
+    };
+    let mut general = vec![
+        Span::styled("↑↓", Style::default().fg(PRIMARY)),
+        Span::raw(" select · "),
+        Span::styled("d", Style::default().fg(PRIMARY)),
+        Span::raw(" details · "),
+        Span::styled("r", Style::default().fg(PRIMARY)),
+        Span::raw(" refresh · "),
+        Span::styled("q", Style::default().fg(PRIMARY)),
+        Span::raw(" quit · "),
+        Span::styled("s", Style::default().fg(PRIMARY)),
+        Span::raw(" status"),
+    ];
+    let Some(mode) = scope_mode else {
+        return vec![if errors.is_empty() {
+            Line::from(general)
+        } else {
+            error_line()
+        }];
+    };
+    let mut lines = Vec::with_capacity(3);
+    if !errors.is_empty() {
+        lines.push(error_line());
+    }
+    let toggle = vec![
+        Span::styled("c", Style::default().fg(PRIMARY)),
+        Span::raw(format!(" {mode}")),
+    ];
+    let toggle_width = Line::from(toggle.clone()).width();
+    if Line::from(general.clone()).width() + 3 + toggle_width <= width {
+        general.push(Span::raw(" · "));
+        general.extend(toggle);
+        lines.push(Line::from(general));
+    } else {
+        lines.push(Line::from(general));
+        lines.push(Line::from(toggle));
+    }
+    lines
+}
+
+/// Rows a line occupies when word-wrapped to `width`, counting over-long words split.
+fn wrapped_rows(line: &Line, width: usize) -> usize {
+    let width = width.max(1);
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    let mut rows = 1;
+    let mut used = 0;
+    for word in text.split_whitespace() {
+        let w = Span::raw(word).width();
+        if used == 0 {
+            used = w;
+        } else if used + 1 + w <= width {
+            used += 1 + w;
+            continue;
+        } else {
+            rows += 1;
+            used = w;
+        }
+        if used > width {
+            let extra = used.div_ceil(width) - 1;
+            rows += extra;
+            used -= extra * width;
+        }
+    }
+    rows
 }
 
 fn snapshot_is_stale(fetched_at: i64, now_epoch: i64) -> bool {
