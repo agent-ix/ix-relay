@@ -46,3 +46,9 @@ Automatic Linear reads SHALL run on a 30-minute timer. Rate-limited reads SHALL 
 - Herdr supplies live pane and native process evidence; Redis stores explicit reports.
 - [FR-059](./FR-059-department-monitor-adapter.md) adds department views without
   relaxing the session and process identity requirements for bound activity or reporting.
+- [FR-061](./FR-061-named-focus-definitions.md) through
+  [FR-064](./FR-064-named-focus-dashboard-reader.md) add named, shared focuses and
+  their per-session activation. They leave this requirement's per-session scope,
+  free-text focus and assignments, and `work show` output, unchanged. For a session
+  in named mode only, FR-064 replaces the absent-scope whole-team default of AC-3
+  and AC-9 with "no active focus".
