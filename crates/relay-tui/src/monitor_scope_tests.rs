@@ -205,9 +205,18 @@ fn rendered_rows_keep_counts_prefixes_and_add_no_heading_rows() {
     assert!(lines[focus + 3].contains("1/2"));
     assert!(lines[focus + 4].contains("📁") && lines[focus + 4].contains("Product"));
     assert!(lines[focus + 4].contains("1/2"));
-    assert!(lines[focus + 5].contains("Other") && lines[focus + 5].contains(NO_SELECTED_INITIATIVE));
+    // The shared model supplies no link-completeness marker, so a project without a
+    // displayed initiative is labeled unavailable, never "(no selected initiative)".
+    assert!(
+        lines[focus + 5].contains("Other") && lines[focus + 5].contains(LINKS_UNAVAILABLE),
+        "{text}"
+    );
+    assert!(!text.contains(NO_SELECTED_INITIATIVE), "{text}");
     assert!(lines[focus + 6].trim().is_empty(), "{text}");
-    assert!(text.contains("rows are the lead's reported focus"), "{text}");
+    assert!(
+        text.contains("rows are the lead's reported focus"),
+        "{text}"
+    );
     press(&mut app, KeyCode::Char('t'));
     assert_eq!(app.view, View::Tickets);
 }
@@ -269,11 +278,23 @@ fn missing_partial_and_ambiguous_links_are_never_called_unassigned() {
 #[trace("FR-060-AC-3")]
 #[test]
 fn exactly_one_focus_mode_is_chosen_from_the_reported_scope_only() {
-    assert_eq!(FocusMode::of(Some(&scope(&["i"], &[], &[]))), FocusMode::Focused);
-    assert_eq!(FocusMode::of(Some(&scope(&[], &["p"], &["t"]))), FocusMode::Focused);
-    assert_eq!(FocusMode::of(Some(&scope(&[], &[], &[]))), FocusMode::WholeTeam);
+    assert_eq!(
+        FocusMode::of(Some(&scope(&["i"], &[], &[]))),
+        FocusMode::Focused
+    );
+    assert_eq!(
+        FocusMode::of(Some(&scope(&[], &["p"], &["t"]))),
+        FocusMode::Focused
+    );
+    assert_eq!(
+        FocusMode::of(Some(&scope(&[], &[], &[]))),
+        FocusMode::WholeTeam
+    );
     assert_eq!(FocusMode::of(None), FocusMode::WholeTeam);
-    assert_eq!(FocusMode::of(Some(&scope(&[], &[], &["t"]))), FocusMode::TicketOnly);
+    assert_eq!(
+        FocusMode::of(Some(&scope(&[], &[], &["t"]))),
+        FocusMode::TicketOnly
+    );
     assert!(FocusMode::WholeTeam.text().contains("no focus reported"));
     assert!(FocusMode::WholeTeam.text().contains("whole team"));
     assert!(
@@ -281,7 +302,11 @@ fn exactly_one_focus_mode_is_chosen_from_the_reported_scope_only() {
             .text()
             .contains("no initiative/project focus reported")
     );
-    assert!(!FocusMode::TicketOnly.text().contains("lead's reported focus"));
+    assert!(
+        !FocusMode::TicketOnly
+            .text()
+            .contains("lead's reported focus")
+    );
 }
 
 /// Trace: FR-060-AC-3
@@ -300,14 +325,23 @@ fn reported_initiatives_stay_while_fallback_omits_empty_ones_and_all_hidden_expl
     let fallback = project(&v, None, false);
     assert_eq!(outline(&v, &fallback), ["Beta", "  live"]);
     assert_eq!(fallback.omitted_initiatives, 1);
-    assert!(fallback.filter_text().unwrap().contains("1 initiative omitted"));
+    assert!(
+        fallback
+            .filter_text()
+            .unwrap()
+            .contains("1 initiative omitted")
+    );
     let only = view(vec![], vec![child("old", &[], Done)], true);
     let hidden = project(&only, Some(&scope(&[], &["old"], &[])), false);
     assert!(hidden.rows.is_empty());
     let message = hidden.all_hidden_message().unwrap();
     assert!(message.contains("1 completed/canceled project hidden"));
     assert!(message.contains("press c to show"));
-    assert!(project(&only, Some(&scope(&[], &["old"], &[])), true).all_hidden_message().is_none());
+    assert!(
+        project(&only, Some(&scope(&[], &["old"], &[])), true)
+            .all_hidden_message()
+            .is_none()
+    );
 }
 
 /// Trace: FR-060-AC-4, FR-060-AC-5
@@ -352,7 +386,10 @@ fn only_completed_and_canceled_are_hidden_and_the_others_keep_order_and_progress
     assert_eq!(hiding.hidden_projects, 2);
     assert_eq!(showing.hidden_projects, 0);
     let text = hiding.filter_text().unwrap();
-    assert!(text.contains("2 completed/canceled projects hidden"), "{text}");
+    assert!(
+        text.contains("2 completed/canceled projects hidden"),
+        "{text}"
+    );
     assert!(text.contains("initiative progress includes hidden projects"));
     // Every displayed row presents the shared-model counts of its project.
     for row in &hiding.rows {
@@ -503,7 +540,10 @@ fn pinned_model_renders_unavailable_filter_and_the_key_keeps_its_mode() {
     app.view = View::Scope;
     let before = screen(&mut app, 120, 24);
     assert!(before.contains(FILTER_UNAVAILABLE), "{before}");
-    assert!(before.contains("c completed filter unavailable"), "{before}");
+    assert!(
+        before.contains("c completed filter unavailable"),
+        "{before}"
+    );
     assert!(!before.contains("hiding completed"));
     assert!(!before.contains("hidden"));
     press(&mut app, KeyCode::Char('c'));
@@ -533,7 +573,10 @@ fn fallback_and_ticket_only_scopes_are_labeled_without_inventing_focus() {
     ticket_only.as_mut().unwrap().scope = Some(scope(&[], &[], &["id-12"]));
     app.report.success(ticket_only, Instant::now());
     let text = screen(&mut app, 100, 24);
-    assert!(text.contains("no initiative/project focus reported"), "{text}");
+    assert!(
+        text.contains("no initiative/project focus reported"),
+        "{text}"
+    );
     assert!(!text.contains("lead's reported focus"));
 }
 
@@ -541,12 +584,17 @@ fn fallback_and_ticket_only_scopes_are_labeled_without_inventing_focus() {
 #[trace("FR-060-AC-7")]
 #[test]
 fn source_states_keep_rows_and_never_show_a_zero_count_without_a_model() {
-    let mut app = App::default();
-    app.view = View::Scope;
+    let mut app = App {
+        view: View::Scope,
+        ..App::default()
+    };
     press(&mut app, KeyCode::Char('c'));
     assert!(app.show_completed);
     let waiting = screen(&mut app, 100, 24);
-    assert!(waiting.contains("Scope progress unavailable: waiting for Linear"), "{waiting}");
+    assert!(
+        waiting.contains("Scope progress unavailable: waiting for Linear"),
+        "{waiting}"
+    );
     assert!(!waiting.contains("hidden"));
     assert!(!waiting.contains("📁"));
     app.apply_tracker_refresh(Err(ix_board::Error::MissingApiKey), Instant::now());
@@ -580,11 +628,21 @@ fn shared_summary_is_reused_until_source_report_or_scope_changes() {
     };
     assert_eq!(draw(&mut app), (1, 1));
     assert_eq!(draw(&mut app), (1, 1), "an idle draw changes neither");
-    for code in [KeyCode::Down, KeyCode::Char('j'), KeyCode::PageDown, KeyCode::Up] {
+    for code in [
+        KeyCode::Down,
+        KeyCode::Char('j'),
+        KeyCode::PageDown,
+        KeyCode::Up,
+    ] {
         press(&mut app, code);
         assert_eq!(draw(&mut app), (1, 1), "{code:?}");
     }
-    for code in [KeyCode::Char('t'), KeyCode::Char('a'), KeyCode::Char('p'), KeyCode::Char('d')] {
+    for code in [
+        KeyCode::Char('t'),
+        KeyCode::Char('a'),
+        KeyCode::Char('p'),
+        KeyCode::Char('d'),
+    ] {
         press(&mut app, code);
         assert_eq!(draw(&mut app), (1, 1), "{code:?}");
     }
@@ -603,7 +661,11 @@ fn shared_summary_is_reused_until_source_report_or_scope_changes() {
     app.team = Some("SWM".into());
     assert_eq!(draw(&mut app), (3, 5), "the same effective scope is reused");
     app.team = Some("AGE".into());
-    assert_eq!(draw(&mut app).0, 4, "a team change recomputes the summary once");
+    assert_eq!(
+        draw(&mut app).0,
+        4,
+        "a team change recomputes the summary once"
+    );
     assert_eq!(draw(&mut app).0, 4);
 }
 
@@ -653,7 +715,11 @@ fn categorized_app() -> App {
         ("Retired", Category::Completed, WorkflowStateType::Completed),
         ("Dropped", Category::Canceled, WorkflowStateType::Started),
         ("Mystery", Category::Unknown, WorkflowStateType::Started),
-        ("Finished tasks", Category::Started, WorkflowStateType::Completed),
+        (
+            "Finished tasks",
+            Category::Started,
+            WorkflowStateType::Completed,
+        ),
     ];
     for (n, (name, category, state)) in rows.into_iter().enumerate() {
         let mut project = project_template.clone();
@@ -686,7 +752,10 @@ fn supplied_categories_hide_only_terminal_projects_from_a_real_summary() {
     for hidden in ["Retired", "Dropped"] {
         assert!(!hidden_row(&hiding, hidden), "{hidden}\n{hiding}");
     }
-    assert!(hiding.contains("2 completed/canceled projects hidden"), "{hiding}");
+    assert!(
+        hiding.contains("2 completed/canceled projects hidden"),
+        "{hiding}"
+    );
     assert!(hiding.contains("hiding completed"), "{hiding}");
     assert!(!hiding.contains(FILTER_UNAVAILABLE));
     let summaries = app.scope.summary_computations;
@@ -696,13 +765,21 @@ fn supplied_categories_hide_only_terminal_projects_from_a_real_summary() {
         assert!(showing.contains(shown), "{shown}\n{showing}");
     }
     assert!(showing.contains("showing completed"), "{showing}");
-    assert_eq!(app.scope.summary_computations, summaries, "no recomputation");
+    assert_eq!(
+        app.scope.summary_computations, summaries,
+        "no recomputation"
+    );
     press(&mut app, KeyCode::Char('c'));
-    assert_eq!(screen(&mut app, 130, 30), hiding, "the toggle returns to the same rows");
+    assert_eq!(
+        screen(&mut app, 130, 30),
+        hiding,
+        "the toggle returns to the same rows"
+    );
 }
 
 fn hidden_row(text: &str, name: &str) -> bool {
-    text.lines().any(|line| line.contains("📁") && line.contains(name))
+    text.lines()
+        .any(|line| line.contains("📁") && line.contains(name))
 }
 
 /// Trace: FR-060-AC-2

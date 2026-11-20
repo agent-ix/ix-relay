@@ -9,13 +9,11 @@
 //! the FR-060-AC-8 contract.
 
 use std::{
-    sync::mpsc::{self, RecvTimeoutError, TryRecvError},
+    sync::mpsc::{self, TryRecvError},
     time::{Duration, Instant},
 };
 
-use ix_board::{
-    Initiative, IssueId, Project, ProjectId, ProjectStatusCategory, WorkflowStateType,
-};
+use ix_board::{Initiative, IssueId, Project, ProjectId, ProjectStatusCategory, WorkflowStateType};
 use ix_trace_rs::trace;
 use ratatui::{
     Terminal,
@@ -216,13 +214,10 @@ fn large_scope_event_sequence_with_pending_source_read() {
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
     draw(&mut app, &mut terminal);
     let before = counters(&app);
-    let refresh = loop {
-        match worker.events.recv_timeout(Duration::from_secs(5)) {
-            Ok(refresh) => break refresh,
-            Err(RecvTimeoutError::Timeout) => panic!("the released read never completed"),
-            Err(RecvTimeoutError::Disconnected) => panic!("worker stopped"),
-        }
-    };
+    let refresh = worker
+        .events
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the released read completes while the worker is running");
     app.apply_tracker_refresh(refresh, Instant::now());
     draw(&mut app, &mut terminal);
     draw(&mut app, &mut terminal);

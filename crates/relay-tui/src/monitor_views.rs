@@ -224,27 +224,38 @@ pub(crate) fn render_scope(
             Entry::Project(p) => ("Project", &view.projects[p]),
         })
         .collect();
-    let rows = projection.rows.iter().zip(&entries).map(|(row, (kind, progress))| {
-        let icon = if *kind == "Initiative" { "🎯" } else { "📁" };
-        let mut name = vec![Span::raw(format!(
-            "{}{icon} {}",
-            if row.nested { "  " } else { "" },
-            display_text(&progress.name, 128)
-        ))];
-        if row.shared {
-            name.push(Span::styled(" · shared", Style::default().fg(MUTED)));
-        }
-        if let Some(label) = row.label {
-            name.push(Span::styled(format!(" {label}"), Style::default().fg(MUTED)));
-        }
-        Row::new([
-            Cell::from(Line::from(name)),
-            Cell::from(format!("{}/{}", progress.done, progress.total)),
-            Cell::from(progress.total.saturating_sub(progress.done).to_string()),
-            Cell::from(progress.ready.to_string()),
-            Cell::from(progress.blocked.to_string()),
-        ])
-    });
+    let rows = projection
+        .rows
+        .iter()
+        .zip(&entries)
+        .map(|(row, (kind, progress))| {
+            let icon = if *kind == "Initiative" {
+                "🎯"
+            } else {
+                "📁"
+            };
+            let mut name = vec![Span::raw(format!(
+                "{}{icon} {}",
+                if row.nested { "  " } else { "" },
+                display_text(&progress.name, 128)
+            ))];
+            if row.shared {
+                name.push(Span::styled(" · shared", Style::default().fg(MUTED)));
+            }
+            if let Some(label) = row.label {
+                name.push(Span::styled(
+                    format!(" {label}"),
+                    Style::default().fg(MUTED),
+                ));
+            }
+            Row::new([
+                Cell::from(Line::from(name)),
+                Cell::from(format!("{}/{}", progress.done, progress.total)),
+                Cell::from(progress.total.saturating_sub(progress.done).to_string()),
+                Cell::from(progress.ready.to_string()),
+                Cell::from(progress.blocked.to_string()),
+            ])
+        });
     let [table_area, detail_area] = content_areas(area, app.details);
     frame.render_stateful_widget(
         Table::new(

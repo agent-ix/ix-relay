@@ -49,8 +49,12 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
         team.as_deref().unwrap_or("unknown team"),
         if whole_team { " team" } else { "" }
     );
-    app.scope
-        .refresh(&app.tracker, &app.report, team.as_deref(), app.show_completed);
+    app.scope.refresh(
+        &app.tracker,
+        &app.report,
+        team.as_deref(),
+        app.show_completed,
+    );
     let view = app.scope.view();
     let projection = app.scope.projection();
     let scope_error = app.scope.error().map(str::to_owned);
@@ -130,7 +134,10 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
     // Wrapped text in the Scope view gets the rows it needs instead of being clipped.
     let scope_height = if scope_view {
         let width = usize::from(frame.area().width.max(1));
-        let needed: usize = summary.iter().map(|l| l.width().div_ceil(width).max(1)).sum();
+        let needed: usize = summary
+            .iter()
+            .map(|l| l.width().div_ceil(width).max(1))
+            .sum();
         u16::try_from(needed.clamp(2, 4)).unwrap_or(2)
     } else {
         2
@@ -617,6 +624,7 @@ fn ticket_details(view: &DashboardView, ticket: &TicketSummary) -> String {
 /// Existing populated tracker and binding fixtures for terminal regressions.
 pub(crate) mod tests {
     use super::*;
+    use crate::monitor_tracker::summarize;
     use ix_board::{
         Issue, IssueId, Project, ProjectId, TeamKey, WorkflowStateType, WorkspaceSnapshot,
     };
@@ -625,7 +633,6 @@ pub(crate) mod tests {
         backend::TestBackend,
         crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
     };
-    use crate::monitor_tracker::summarize;
     use relay_core::work::{WorkBinding, WorkReport, WorkScope};
 
     /// Bound SWM lead with a populated structured tracker snapshot.
