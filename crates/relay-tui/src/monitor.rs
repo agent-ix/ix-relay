@@ -18,6 +18,8 @@ pub struct Source<T> {
     pub error: Option<String>,
     /// Compact classified summary, when the source supplies one.
     pub error_summary: Option<String>,
+    /// Incremented whenever `success` replaces the value; lets derived results be reused.
+    pub revision: u64,
 }
 
 impl<T> Default for Source<T> {
@@ -27,6 +29,7 @@ impl<T> Default for Source<T> {
             last_success: None,
             error: None,
             error_summary: None,
+            revision: 0,
         }
     }
 }
@@ -34,6 +37,7 @@ impl<T> Default for Source<T> {
 impl<T> Source<T> {
     /// Replaces the last good value and clears any earlier error.
     pub fn success(&mut self, value: T, now: Instant) {
+        self.revision = self.revision.wrapping_add(1);
         self.value = Some(value);
         self.last_success = Some(now);
         self.error = None;
@@ -116,6 +120,10 @@ pub struct App {
     pub should_quit: bool,
     /// Set by `r` to request an immediate refresh.
     pub refresh_now: bool,
+    /// Whether the Scope view shows completed and canceled projects; process-local.
+    pub show_completed: bool,
+    /// Reused shared summary, Scope projection and Scope selection memory.
+    pub scope: crate::monitor_scope::ScopeState,
 }
 
 impl App {
@@ -234,6 +242,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('t') => select_view(app, View::Tickets),
         KeyCode::Char('a') => select_view(app, View::Agents),
         KeyCode::Char('p') => select_view(app, View::Scope),
+        KeyCode::Char('c') if app.view == View::Scope && key.modifiers.is_empty() => {
+            app.show_completed = !app.show_completed;
+        }
         KeyCode::Char('1') => select_view(app, View::Status),
         KeyCode::Char('2') => select_view(app, View::Health),
         KeyCode::Char('3') => select_view(app, View::Retro),

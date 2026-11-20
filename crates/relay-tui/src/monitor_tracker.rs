@@ -9,13 +9,49 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Tracker source snapshot; its timestamp belongs to the source fetch.
 pub type TrackerState = WorkspaceSnapshot;
 
+/// Whether the shared model considers a project finished, as carried from its status category.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "mapped from the shared model once it supplies a status category"
+    )
+)]
+pub enum ProjectCompletion {
+    /// Completed or canceled.
+    Terminal,
+    /// Any other known category.
+    Nonterminal,
+    /// Unrecognized, absent or not supplied by the shared model.
+    #[default]
+    Unknown,
+}
+
+/// One initiative a project belongs to, as supplied by the shared model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InitiativeRef {
+    /// Stable tracker id, when the model supplies it.
+    pub id: Option<String>,
+    /// Initiative display name.
+    pub name: String,
+}
+
 /// Progress within one scope-associated project or initiative.
 #[derive(Clone, Debug)]
 pub struct ScopeProgress {
+    /// Stable tracker id of the project or initiative.
+    pub id: String,
     /// Project or initiative display name.
     pub name: String,
     /// Associated initiative names for a project row.
     pub initiatives: Vec<String>,
+    /// Initiative relationships of a project row, for hierarchy placement.
+    pub initiative_refs: Vec<InitiativeRef>,
+    /// Whether the model reports the project's initiative links as complete.
+    pub links_complete: bool,
+    /// Finished-ness carried from the shared model's status category.
+    pub completion: ProjectCompletion,
     /// Tracker project status; initiatives have no project workflow status.
     pub status: Option<String>,
     /// Remaining scoped leaves by tracker workflow stage.
@@ -68,6 +104,8 @@ pub struct DashboardView {
     pub tickets: Vec<TicketSummary>,
     /// Ready identifiers in deterministic team order, preserving each team's tracker queue.
     pub ready_queue: Vec<String>,
+    /// Whether the shared model supplied a status category for projects.
+    pub completion_supplied: bool,
 }
 
 /// Uses the same selection representation as the authoritative board library.
@@ -139,7 +177,7 @@ fn summarize_inputs(
     let ready_ids: BTreeSet<_> = ready.iter().map(|q| q.identifier.as_str()).collect();
     let by_id: BTreeMap<_, _> = snapshot.issues.iter().map(|i| (&i.id, i)).collect();
     let mut ticket_roots = BTreeSet::new();
-    let mut initiative_projects: BTreeMap<_, (String, BTreeSet<_>)> = BTreeMap::new();
+    let mut initiative_projects: BTreeMap<&String, (String, BTreeSet<_>)> = BTreeMap::new();
     let mut projects = Vec::new();
     for project in snapshot.projects.iter().filter(|p| {
         scope.project_ids.contains(&p.id)
@@ -173,7 +211,16 @@ fn summarize_inputs(
             &project.name,
             Some(&project.status),
         );
+        project_progress.id = project.id.0.clone();
         project_progress.initiatives = project.initiatives.iter().map(|i| i.name.clone()).collect();
+        project_progress.initiative_refs = project
+            .initiatives
+            .iter()
+            .map(|i| InitiativeRef {
+                id: Some(i.id.clone()),
+                name: i.name.clone(),
+            })
+            .collect();
         projects.push(project_progress);
     }
     for id in &assignment.tickets {
@@ -186,8 +233,8 @@ fn summarize_inputs(
         }
     }
     let mut initiatives: Vec<_> = initiative_projects
-        .into_values()
-        .map(|(name, project_ids)| {
+        .into_iter()
+        .map(|(initiative_id, (name, project_ids))| {
             let leaves: Vec<_> = snapshot
                 .issues
                 .iter()
@@ -199,11 +246,13 @@ fn summarize_inputs(
                             .is_some_and(|id| project_ids.contains(id))
                 })
                 .collect();
-            progress(&by_id, &leaves, &ready_ids, &name, None)
+            let mut initiative = progress(&by_id, &leaves, &ready_ids, &name, None);
+            initiative.id.clone_from(initiative_id);
+            initiative
         })
         .collect();
-    initiatives.sort_by(|a, b| a.name.cmp(&b.name));
-    projects.sort_by(|a, b| a.name.cmp(&b.name));
+    initiatives.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
+    projects.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
     let mut tickets = Vec::new();
     for issue in &snapshot.issues {
         let agents: Vec<_> = agents
@@ -285,6 +334,8 @@ fn summarize_inputs(
         projects,
         tickets,
         ready_queue: ready.into_iter().map(|item| item.identifier).collect(),
+        // The pinned shared model carries no project status category.
+        completion_supplied: false,
     })
 }
 
@@ -313,8 +364,13 @@ fn progress(
         }));
     }
     ScopeProgress {
+        id: String::new(),
         name: name.into(),
         initiatives: Vec::new(),
+        initiative_refs: Vec::new(),
+        // The pinned model lists every initiative of a project and flags no gaps.
+        links_complete: true,
+        completion: ProjectCompletion::Unknown,
         status: status.map(str::to_owned),
         remaining_by_stage,
         done,

@@ -9,6 +9,9 @@ mod monitor_ops;
 mod monitor_runtime;
 #[cfg(test)]
 mod monitor_scale_tests;
+mod monitor_scope;
+#[cfg(test)]
+mod monitor_scope_tests;
 mod monitor_tracker;
 mod monitor_ui;
 mod monitor_views;

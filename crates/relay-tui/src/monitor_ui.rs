@@ -4,7 +4,7 @@
 
 use crate::{
     monitor::{App, Source, View, display_text},
-    monitor_tracker::{DashboardView, TicketSummary, summarize},
+    monitor_tracker::{DashboardView, TicketSummary},
 };
 use ix_board::{Clock, SystemClock};
 use ratatui::{
@@ -49,21 +49,96 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
         team.as_deref().unwrap_or("unknown team"),
         if whole_team { " team" } else { "" }
     );
-    let computed = app
-        .tracker
-        .value
-        .as_ref()
-        .zip(team.as_deref())
-        .map(|(snapshot, team)| summarize(snapshot, report, team))
-        .transpose();
-    let (view, scope_error) = match computed {
-        Ok(view) => (view, None),
-        Err(error) => (None, Some(error.to_string())),
+    app.scope
+        .refresh(&app.tracker, &app.report, team.as_deref(), app.show_completed);
+    let view = app.scope.view();
+    let projection = app.scope.projection();
+    let scope_error = app.scope.error().map(str::to_owned);
+    let snapshot_old = app.tracker.error.is_some()
+        || app.report.error.is_some()
+        || app.session_ended
+        || app
+            .tracker
+            .value
+            .as_ref()
+            .is_some_and(|s| snapshot_is_stale(s.fetched_at, now_epoch));
+    let scope_view = app.view == View::Scope;
+    let summary = if let Some(v) = &view {
+        let mut scope_spans = vec![muted("Scope: "), Span::raw(team_label), muted(" · ")];
+        if v.projects.len() == 1 && v.ticket_roots.is_empty() && v.initiatives.is_empty() {
+            scope_spans.push(Span::raw(display_text(
+                &v.projects[0].name,
+                frame.area().width.saturating_sub(20).into(),
+            )));
+        } else {
+            scope_spans.push(Span::raw(v.projects.len().to_string()));
+            scope_spans.push(muted(" projects"));
+            for (count, label) in [
+                (v.initiatives.len(), " initiatives"),
+                (v.ticket_roots.len(), " ticket roots"),
+            ] {
+                if count > 0 {
+                    scope_spans.push(muted(" · "));
+                    scope_spans.push(Span::raw(count.to_string()));
+                    scope_spans.push(muted(label));
+                }
+            }
+        }
+        if scope_view && let Some(p) = &projection {
+            scope_spans.push(muted(" · "));
+            scope_spans.push(Span::raw(p.mode.text()));
+        }
+        if snapshot_old {
+            scope_spans.push(Span::styled(
+                " [last snapshot]",
+                Style::default().fg(WARNING),
+            ));
+        }
+        let mut task_spans = vec![
+            muted("Tasks: "),
+            Span::raw(format!("{}/{}", v.scope.done, v.scope.leaf_ids.len())),
+            muted(" done"),
+        ];
+        for (stage, count) in &v.scope.remaining_by_stage {
+            task_spans.push(muted(" · "));
+            task_spans.push(Span::raw(count.to_string()));
+            task_spans.push(muted(format!(" {}", display_text(stage, 32))));
+        }
+        if scope_view && let Some(text) = projection.as_ref().and_then(|p| p.filter_text()) {
+            task_spans.push(muted(" · "));
+            task_spans.push(Span::raw(text));
+            if snapshot_old {
+                task_spans.push(Span::styled(
+                    " [last snapshot]",
+                    Style::default().fg(WARNING),
+                ));
+            }
+        }
+        vec![Line::from(scope_spans), Line::from(task_spans)]
+    } else if let Some(error) = &scope_error {
+        vec![Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(ERROR),
+        ))]
+    } else {
+        vec![Line::from(vec![
+            muted("Scope: "),
+            Span::raw(team_label),
+            muted(" · waiting for Linear"),
+        ])]
+    };
+    // Wrapped text in the Scope view gets the rows it needs instead of being clipped.
+    let scope_height = if scope_view {
+        let width = usize::from(frame.area().width.max(1));
+        let needed: usize = summary.iter().map(|l| l.width().div_ceil(width).max(1)).sum();
+        u16::try_from(needed.clamp(2, 4)).unwrap_or(2)
+    } else {
+        2
     };
     let [identity, tabs, scope, focus, work, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
-        Constraint::Length(2),
+        Constraint::Length(scope_height),
         Constraint::Length(if report.and_then(|r| r.focus.as_ref()).is_some() {
             2
         } else {
@@ -127,64 +202,6 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
         tab_spans.push(muted("  "));
     }
     frame.render_widget(Paragraph::new(Line::from(tab_spans)), tabs);
-    let snapshot_old = app.tracker.error.is_some()
-        || app.report.error.is_some()
-        || app.session_ended
-        || app
-            .tracker
-            .value
-            .as_ref()
-            .is_some_and(|s| snapshot_is_stale(s.fetched_at, now_epoch));
-    let summary = if let Some(v) = &view {
-        let mut scope_spans = vec![muted("Scope: "), Span::raw(team_label), muted(" · ")];
-        if v.projects.len() == 1 && v.ticket_roots.is_empty() && v.initiatives.is_empty() {
-            scope_spans.push(Span::raw(display_text(
-                &v.projects[0].name,
-                frame.area().width.saturating_sub(20).into(),
-            )));
-        } else {
-            scope_spans.push(Span::raw(v.projects.len().to_string()));
-            scope_spans.push(muted(" projects"));
-            for (count, label) in [
-                (v.initiatives.len(), " initiatives"),
-                (v.ticket_roots.len(), " ticket roots"),
-            ] {
-                if count > 0 {
-                    scope_spans.push(muted(" · "));
-                    scope_spans.push(Span::raw(count.to_string()));
-                    scope_spans.push(muted(label));
-                }
-            }
-        }
-        if snapshot_old {
-            scope_spans.push(Span::styled(
-                " [last snapshot]",
-                Style::default().fg(WARNING),
-            ));
-        }
-        let mut task_spans = vec![
-            muted("Tasks: "),
-            Span::raw(format!("{}/{}", v.scope.done, v.scope.leaf_ids.len())),
-            muted(" done"),
-        ];
-        for (stage, count) in &v.scope.remaining_by_stage {
-            task_spans.push(muted(" · "));
-            task_spans.push(Span::raw(count.to_string()));
-            task_spans.push(muted(format!(" {}", display_text(stage, 32))));
-        }
-        vec![Line::from(scope_spans), Line::from(task_spans)]
-    } else if let Some(error) = &scope_error {
-        vec![Line::from(Span::styled(
-            error.clone(),
-            Style::default().fg(ERROR),
-        ))]
-    } else {
-        vec![Line::from(vec![
-            muted("Scope: "),
-            Span::raw(team_label),
-            muted(" · waiting for Linear"),
-        ])]
-    };
     frame.render_widget(
         Paragraph::new(summary)
             .style(Style::default().fg(FOREGROUND))
@@ -221,7 +238,21 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
     );
     match app.view {
         View::Agents => crate::monitor_views::render_agents(frame, app, work, runtime_fresh, now),
-        View::Scope => crate::monitor_views::render_scope(frame, app, view.as_ref(), work),
+        View::Scope => {
+            let unavailable = app
+                .tracker
+                .error
+                .clone()
+                .or(scope_error.clone())
+                .unwrap_or_else(|| "waiting for Linear".into());
+            crate::monitor_views::render_scope(
+                frame,
+                app,
+                view.as_deref().zip(projection.as_deref()),
+                &unavailable,
+                work,
+            );
+        }
         View::Tickets => {
             if let Some(view) = &view {
                 render_work(frame, app, view, work, runtime_fresh);
@@ -279,7 +310,7 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
     .collect::<Vec<_>>()
     .join(" · ");
     let controls = if errors.is_empty() {
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled("↑↓", Style::default().fg(PRIMARY)),
             Span::raw(" select · "),
             Span::styled("d", Style::default().fg(PRIMARY)),
@@ -290,7 +321,16 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
             Span::raw(" quit · "),
             Span::styled("s", Style::default().fg(PRIMARY)),
             Span::raw(" status"),
-        ])
+        ];
+        if scope_view {
+            spans.push(Span::raw(" · "));
+            spans.push(Span::styled("c", Style::default().fg(PRIMARY)));
+            spans.push(Span::raw(format!(
+                " {}",
+                crate::monitor_scope::footer_mode(projection.as_deref(), app.show_completed)
+            )));
+        }
+        Line::from(spans)
     } else {
         Line::from(Span::styled(
             display_text(&errors, usize::from(footer.width)),
@@ -585,6 +625,7 @@ pub(crate) mod tests {
         backend::TestBackend,
         crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
     };
+    use crate::monitor_tracker::summarize;
     use relay_core::work::{WorkBinding, WorkReport, WorkScope};
 
     /// Bound SWM lead with a populated structured tracker snapshot.
@@ -1137,6 +1178,7 @@ pub(crate) mod tests {
             scope.projects.push(project.id.0.clone());
             snapshot.projects.push(project);
         }
+        app.scope.invalidate();
         screen(&mut app, 69, 15);
         for _ in 0..21 {
             crate::monitor::handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
