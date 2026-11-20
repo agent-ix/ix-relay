@@ -46,3 +46,13 @@ scope:
   - {id: "FR-059-AC-4", path: "spec/functional/FR-059-department-monitor-adapter.md", role: context_only, excerpt: "TestBackend fixtures at 80x24 and 120x40 switch views with 1/2/3, retain scope, reset selection/scroll, reach the final row and clamp selection after shorter data. Details expose evidence and owner/action; long text and control characters cannot hide diagnostics or inject terminal controls. Existing compact Tickets/Agents/Scope fixtures and their keys retain their outputs."}
   - {id: "FR-059-AC-7", path: "spec/functional/FR-059-department-monitor-adapter.md", role: context_only, excerpt: "Bound-session replacement preserves the explicit restart requirement and prevents replacement activity/report attribution while department data remains navigable. Existing FR-048 reporting isolation and Tickets/Agents/Scope behavior remain unchanged; department reads produce no work-report, registration, tracker or retro-store write."}
 ```
+
+## Dispositions
+
+Round 1 against frozen head 38323b9676bd067826bbb8f9cb2a0b3c9d5aca9e (author fix of 11c226b). Original findings above are unchanged.
+
+| FND | outcome | reason |
+|---|---|---|
+| FND-001 | fixed | New Precedence section (FR-060 lines 23-40) states that FR-060 overrides only FR-048-AC-7 one-row-per-project and the FR-059-AC-4/7 Scope-fixture clauses, retains the other AC-7 items, and adds no heading, group or separator rows (labels are inline), which removes the selectable-label question. FR-060-AC-1 asserts the retained FR-048-AC-7 items. |
+| FND-002 | fixed | Three mutually exclusive modes (Focused, Whole-team fallback, Ticket-only) are selected only from the reported scope; the contradictory precondition is gone, the all-hidden Focused cases are stated, and 'open work' is removed. FR-060-AC-3 covers each mode. |
+| FND-003 | fixed | Old AC-5 is replaced by FR-060-AC-8: fixture of at least 4 initiatives, 34 projects, one shared project and 2,000 leaf tasks with no truncation, a source read held pending, at least 200 scripted events then quit, a build counter, and before/after results in the PR with no fixed time limit. Debug CPU is excluded. |

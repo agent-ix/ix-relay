@@ -45,3 +45,12 @@ scope:
   - {id: "FR-059-AC-4", path: "spec/functional/FR-059-department-monitor-adapter.md", role: context_only, excerpt: "TestBackend fixtures at 80x24 and 120x40 switch views with 1/2/3, retain scope, reset selection/scroll, reach the final row and clamp selection after shorter data. Details expose evidence and owner/action; long text and control characters cannot hide diagnostics or inject terminal controls. Existing compact Tickets/Agents/Scope fixtures and their keys retain their outputs."}
   - {id: "FR-059-AC-7", path: "spec/functional/FR-059-department-monitor-adapter.md", role: context_only, excerpt: "Bound-session replacement preserves the explicit restart requirement and prevents replacement activity/report attribution while department data remains navigable. Existing FR-048 reporting isolation and Tickets/Agents/Scope behavior remain unchanged; department reads produce no work-report, registration, tracker or retro-store write."}
 ```
+
+## Dispositions
+
+Round 1 against frozen head 38323b9676bd067826bbb8f9cb2a0b3c9d5aca9e. Original findings above are unchanged.
+
+| FND | outcome | reason |
+|---|---|---|
+| FND-001 | fixed | '(no selected initiative)' is used only when the model reports links complete; missing, partial or ambiguous links, and duplicate initiative names, give '(initiative links unavailable)' and never unassigned. Parent matching uses the stable id where supplied. FR-060-AC-2 covers it. |
+| FND-002 | fixed | No model gives no rows and no count (never zero) with the toggle mode retained; a failed refresh retains the last snapshot's rows and count with last-snapshot and error labels; a stale source labels the count stale. FR-060-AC-7 covers it. |

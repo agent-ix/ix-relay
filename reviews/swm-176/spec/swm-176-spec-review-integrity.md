@@ -46,3 +46,20 @@ scope:
   - {id: "FR-059-AC-4", path: "spec/functional/FR-059-department-monitor-adapter.md", role: context_only, excerpt: "TestBackend fixtures at 80x24 and 120x40 switch views with 1/2/3, retain scope, reset selection/scroll, reach the final row and clamp selection after shorter data. Details expose evidence and owner/action; long text and control characters cannot hide diagnostics or inject terminal controls. Existing compact Tickets/Agents/Scope fixtures and their keys retain their outputs."}
   - {id: "FR-059-AC-7", path: "spec/functional/FR-059-department-monitor-adapter.md", role: context_only, excerpt: "Bound-session replacement preserves the explicit restart requirement and prevents replacement activity/report attribution while department data remains navigable. Existing FR-048 reporting isolation and Tickets/Agents/Scope behavior remain unchanged; department reads produce no work-report, registration, tracker or retro-store write."}
 ```
+
+## New findings (disposition pass 1)
+
+| ID | Severity | Summary | Refs |
+|---|---|---|---|
+| FND-004 | low | Footer must always show mode 'hiding completed' although with no status category nothing is hidden | spec/functional/FR-060-focused-scope-presentation.md:123 |
+| FND-005 | low | AC-8 'exactly one per input change' on a combined summary-and-hierarchy counter is ambiguous for the toggle | spec/functional/FR-060-focused-scope-presentation.md:179 |
+
+## Dispositions
+
+Round 1 against frozen head 38323b9676bd067826bbb8f9cb2a0b3c9d5aca9e. Original findings above are unchanged. FND-004 and FND-005 are new this round and have no outcome yet.
+
+| FND | outcome | reason |
+|---|---|---|
+| FND-001 | fixed | Hidden count unit is distinct projects, not placements (FR-060 lines 131-133); FR-060-AC-5 asserts a project hidden under two initiatives counts once. |
+| FND-002 | fixed | Key `c` is named, collision-checked against the existing key list, Scope-view only, process-lifetime and unpersisted (lines 123-130); FR-060-AC-4 asserts all existing keys still act. |
+| FND-003 | fixed | Deterministic order is stated (lines 85-89) and FR-060-AC-1 asserts it, including stability across hide and show (AC-5). |

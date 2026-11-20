@@ -125,6 +125,10 @@ Focus is never inferred from open tickets, assignments or activity.
   `Enter`, `s`, `e`, `t`, `a`, `p`, `1`, `2`, `3`, `j`, `k`, arrows, `PageUp`,
   `PageDown`). It has no effect in other views. The footer in the Scope view
   names the key and the current mode ("hiding completed" or "showing completed").
+  While the status category is unavailable (see Classification) nothing is
+  hidden, so the footer SHALL instead show "completed filter unavailable" and
+  SHALL NOT show "hiding completed". The process mode flag and the key remain
+  valid and take effect when the category becomes available.
 - The mode is held for the life of the dashboard process, starts as hidden, and
   survives view changes and refreshes. It is not written to any report, tracker,
   configuration or file.
@@ -150,11 +154,17 @@ Focus is never inferred from open tickets, assignments or activity.
 ### Responsiveness and refresh
 
 - Scroll, selection, view switching, the toggle and quit SHALL NOT wait on source
-  collection. They SHALL NOT trigger recomputation of the shared scoped summary or
-  the hierarchy when its inputs (snapshot, report, scope, toggle) are unchanged.
-  The existing frame render computes the shared summary on every draw; an
-  implementation may reuse the shared result between draws and invalidate it when
-  an input changes, and SHALL NOT alter the shared formulas to do so.
+  collection.
+- Two results are distinguished. The **shared summary** is the ix-board scoped
+  result computed from the snapshot, report and team. The **projection** is the
+  hierarchy, labels, order and visibility derived from the summary and the toggle.
+  The shared summary is invalidated only by a change to the snapshot, the report
+  or the scope; the projection is invalidated by a summary change or a toggle
+  change. Scroll, selection, view switches, quit and idle draws invalidate neither.
+  The toggle SHALL NOT recompute an unchanged shared summary.
+- The existing frame render computes the shared summary on every draw. An
+  implementation may reuse the shared result between draws and SHALL NOT alter the
+  shared formulas to do so.
 - A change to the source, saved report, reported scope or toggle SHALL refresh the
   displayed rows and counts.
 - The live QSL observation (about 2,500 leaf tasks across 34 projects and four
@@ -174,9 +184,9 @@ Focus is never inferred from open tickets, assignments or activity.
 | FR-060-AC-3 | Three reported-scope fixtures select exactly one mode each: initiative/project named is Focused, nothing named is Whole-team fallback with its plain no-focus label, and tickets only is Ticket-only with the fallback label. Open tickets and assignments never create focus. In fallback, an initiative with no displayed project is omitted; in Focused mode a reported initiative whose projects are all hidden is rendered, and a projects-only focus with all hidden shows no rows plus the message line with the count and key. | Test |
 | FR-060-AC-4 | With a fixture whose model supplies status categories for active, completed, canceled, unknown and active-with-all-tasks-done projects, only completed and canceled are hidden by default. Key `c` toggles and re-toggles to the same rows with no write, the footer shows the key and mode in the Scope view only, mode survives view changes and refresh, and every existing key (`q`, `Esc`, `r`, `d`, `Enter`, `s`, `e`, `t`, `a`, `p`, `1`, `2`, `3`, `j`, `k`, arrows, paging) still performs its prior action. Selection stays on the same placement or clamps after a toggle or a shrinking refresh. | Test |
 | FR-060-AC-5 | A project hidden under two initiatives is counted once in the hidden-project count. Every remaining row and initiative has the same shared-model progress with completed projects hidden and shown, the view says initiative progress includes hidden projects, and no new total appears. Hiding or showing preserves the order of the other rows. | Test |
-| FR-060-AC-6 | With a fixture that lacks the status category, as the pinned ix-board `8381a601` does, no project is hidden even when its display name is "Completed" or "Canceled", the scope line says the completed filter is unavailable, and no hidden count is offered. A project with an unrecognized category is retained. No local status-name or done/total rule exists. | Test and Inspection |
+| FR-060-AC-6 | With a fixture that lacks the status category, as the pinned ix-board `8381a601` does, no project is hidden even when its display name is "Completed" or "Canceled", the scope line says the completed filter is unavailable, no hidden count is offered, and the footer shows "completed filter unavailable" and never "hiding completed". Pressing `c` in that state changes the retained mode flag without hiding or showing rows, and the flag applies once a fixture supplies the category. A project with an unrecognized category is retained. No local status-name or done/total rule exists. | Test and Inspection |
 | FR-060-AC-7 | With no model, the Scope view shows unavailable with the source reason, no rows and no zero count, and `c` keeps its mode. After a successful model then a failed refresh, the rows and hidden count of the last snapshot remain with the last-snapshot and error labels, and a stale model labels the count stale. | Test |
-| FR-060-AC-8 | A bounded optimized-build scenario uses a fixture with at least 4 initiatives, 34 projects, one shared project and 2,000 leaf tasks, with no truncation of rows. While a source read is held pending, a scripted sequence of at least 200 scroll, selection, view-switch and `c` events and then quit is processed without waiting for that read. A counter on the shared summary and hierarchy build shows no rebuild for events and idle draws with unchanged inputs, and exactly one per input change. Before (current main) and after results for the same fixture, including wall time for the sequence and CPU, are recorded in the pull request; the debug-build observation is not used and no fixed time limit applies. | Test and Demonstration |
+| FR-060-AC-8 | A bounded optimized-build scenario uses a fixture with at least 4 initiatives, 34 projects, one shared project and 2,000 leaf tasks, with no truncation of rows. While a source read is held pending, a scripted sequence of at least 200 scroll, selection, view-switch and `c` events and then quit is processed without waiting for that read. Two counters, one for shared-summary computation and one for projection build, show these exact deltas: scroll, selection, view-switch, quit and idle draws change neither; one `c` toggle adds one projection build and no summary computation; one snapshot, report or scope change adds one summary computation and one projection build. Before (current main) and after results for the same fixture, including wall time for the sequence and CPU, are recorded in the pull request; the debug-build observation is not used and no fixed time limit applies. | Test and Demonstration |
 | FR-060-AC-9 | Changing the source model, saved report, reported scope or toggle updates the displayed rows and counts. Existing FR-048-AC-1 binding, FR-059 replacement-fence, quit and terminal-restoration fixtures still pass unchanged. | Test |
 
 ## Dependencies
