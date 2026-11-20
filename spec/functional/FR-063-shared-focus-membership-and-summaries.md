@@ -9,6 +9,10 @@ relationships:
     type: "depends_on"
   - target: "ix://agent-ix/ix-relay/FR-062"
     type: "depends_on"
+  - target: "ix://agent-ix/ix-relay/FR-060"
+    type: "depends_on"
+  - target: "ix://agent-ix/ix-board"
+    type: "depends_on"
 ---
 # FR-063: Shared ix-board membership, exclusions and partial summaries for named focuses
 
@@ -21,9 +25,15 @@ adopted selections to it and present the result. ix-relay SHALL NOT contain a
 second membership, progress, readiness or classification engine, and SHALL NOT
 read Linear by another path to build one.
 
-This requirement states the behavior relay needs from that shared interface and
-the boundary between the two. The interface does not exist in the pinned
-revision; the section "Required shared interface" lists what is missing.
+This requirement states the behavior the relay needs from the shared library and
+checks at its boundary. It does not define the library's types or API: the
+ix-board owner defines them in the ix-board repository, and this requirement
+neither restates nor duplicates that contract. Until the owning ix-board
+requirement exists, the dependency is declared on the repository alone, and the
+requirement identifiers are added as edges when ix-board assigns them.
+
+It also adds the option `--members` to `agent-msg focuses show` of
+[FR-061](./FR-061-named-focus-definitions.md).
 
 ## Inputs
 
@@ -41,12 +51,16 @@ revision; the section "Required shared interface" lists what is missing.
   rows, and per-row done, total, remaining by stage, ready and blocked counts.
 - Marks: **shared** (a row appears in more than one active focus or under more
   than one initiative) and **partial** (the row's counts cover only part of the
-  Linear object, with the reason: a milestone-only or ticket-only inclusion, or an
-  exclusion).
+  Linear object). A partial mark carries its reason, one or more of: a
+  milestone-only or ticket-only inclusion, an exclusion, or the team boundary
+  (leaf tasks of another team were left out). Initiative rows and project rows
+  carry the mark by the same rule.
 - The union of leaf tasks for the combined request, per team group, with a single
   count of each leaf.
 - Typed reference states for each member: resolved, missing, moved to another team,
   and any ix-board classification of a snapshot that is partial, stale or failed.
+- For `agent-msg focuses show <focus> --members`, the same rows and states for the
+  one definition's current revision, computed on demand and never stored.
 
 ## Behavior
 
@@ -78,9 +92,10 @@ revision; the section "Required shared interface" lists what is missing.
   result "no active focus" with no rows and no totals.
 - Progress counts the non-canceled, non-duplicate leaf tasks with the existing
   meaning of done, remaining by stage, ready and blocked. Parent tickets do not
-  inflate totals. A project row's counts are restricted to the focus's leaves and
-  are marked partial when exclusions or milestone-only or ticket-only inclusion
-  leave some of the project outside the focus.
+  inflate totals. A project row's or an initiative row's counts are restricted to
+  the focus's leaves and are marked partial, with the reason, when exclusions,
+  milestone-only or ticket-only inclusion, or the team boundary leave some of the
+  Linear object outside the focus.
 - Tickets and activity never create focus. Open tickets, assignments and agent
   reports never add a leaf to a focus.
 
@@ -107,62 +122,63 @@ revision; the section "Required shared interface" lists what is missing.
 - Computation is repeatable from the same snapshot and selections, and its inputs
   are recorded as a key of focus ID, adopted revision and snapshot fetch time.
 
-### Required shared interface
+### What the relay needs from the shared library
 
-The pinned ix-board revision `8381a601` provides `FocusSelection` and
-`ScopeSelection` (inclusion lists only), `FocusRecord` and `FocusMember` (four
-member kinds, a schema version, no team, no exclusions), and `ScopeSummary` (leaf
-IDs, done and remaining for one selection). It treats an empty selector set with a
-team as the whole team. The relay needs the following, to be provided by the
-ix-board owner; this requirement does not claim they exist:
+The relay consumes the library; it does not specify it. Conditions the relay
+checks at its boundary, and treats as the library's obligations:
 
-1. Exclusion lists for the same four member kinds, in `FocusSelection` and the
-   scope selection, and in `FocusRecord`, with a schema version change.
-2. An entry point that treats an explicitly empty named selection as empty, not as
-   the whole team, distinct from the whole-team selection.
-3. A milestone member qualified by its owning project, validated on resolution.
-4. A multi-selection entry point returning, per selection and for the combination
-   by team group: the leaf set, the union of leaf IDs, per-initiative and
-   per-project partial summaries with ready and blocked counts and the shared and
-   partial marks above, in deterministic order.
-5. Typed per-member resolution and reference states (resolved, missing, wrong team,
-   mismatched milestone), and the existing failure classification.
-6. The project status category already required by
-   [FR-060](./FR-060-focused-scope-presentation.md).
+- One computation per refresh returns the per-focus results and the per-team-group
+  union for all active selections, in deterministic order, so that an individual
+  view and the combined view come from one result.
+- An explicitly empty named selection yields an empty result, distinct from the
+  whole-team selection that legacy scope uses.
+- Exclusions, milestone qualification by project, dynamic initiative membership,
+  the team boundary and the marks above are evaluated by the library, and a member
+  it cannot resolve is reported with a typed state.
+- A snapshot read can be bounded by a deadline and returns a typed timeout, so a
+  command or a refresh never waits unboundedly and a timeout publishes nothing.
+- The project status category already required by
+  [FR-060](./FR-060-focused-scope-presentation.md) is available. It blocks only
+  the hiding of completed projects.
 
 The relay may keep a bounded cache of results (see
 [FR-064](./FR-064-named-focus-dashboard-reader.md)). It SHALL NOT edit the shared
-library's selection, summary or classification rules.
+library's selection, summary or classification rules, and consumes one accepted
+library revision through one dependency update.
 
 ## Acceptance Criteria
 
 | ID | Criteria | Verification |
 |----|----------|--------------|
-| FR-063-AC-1 | Given a fixture with initiative I containing projects P1 and P2, a focus including I and excluding P2 selects only P1's leaves. A leaf in P1 that the focus also excludes by ticket is absent, and a leaf in P2 included by ticket in the same focus is still absent (exclusion wins). | Test |
-| FR-063-AC-2 | Given focuses A (includes P) and B (includes P, excludes ticket T in P), A keeps T and B does not; the combined result includes T once. | Test |
-| FR-063-AC-3 | Given initiative I with project P1 and a later snapshot where project P2 joins I, the same revision of a focus including I selects P1, then P1 and P2, with no new revision. | Test |
-| FR-063-AC-4 | Given project P with milestones M4 and M5, a focus including P/M4 counts only M4's leaves and marks the P row partial; a milestone ID paired with the wrong project is unresolved; a same-named milestone of another project is not selected. | Test |
-| FR-063-AC-5 | Given a focus of team X that includes an initiative containing tasks of teams X and Y, only X's leaves are counted; a ticket of team Y is unresolved. | Test |
-| FR-063-AC-6 | Given an empty inclusion list, the result is an empty focus with no rows and zero leaves, not the whole team; with zero active focuses, the combined result is "no active focus". | Test |
-| FR-063-AC-7 | Given a ticket-only focus with a ticket whose parent project is not included, the ticket and its descendants appear as direct-ticket rows with their project partial, and the focus never turns into a project or team focus. | Test |
-| FR-063-AC-8 | Given two focuses sharing project P and one sharing a leaf under different initiatives, the combined result counts each leaf once; each per-focus row keeps its own counts; P's row carries the shared mark in every placement; no summed total exists in any output. | Test |
-| FR-063-AC-9 | Given active focuses of teams X and Y, results form separate team groups with no cross-team total. | Test |
-| FR-063-AC-10 | Given a stale, partial or failed snapshot, an unresolved member, and an unknown project category, the result labels each, counts are unavailable or partial, and none is reported as healthy, complete or zero; after a failed refresh the last good result keeps its original fetch time with the error. | Test |
-| FR-063-AC-11 | Given the same snapshot and selections, repeated computation returns identical order and counts; an open ticket, an assignment or a work report never adds a leaf. | Test |
-| FR-063-AC-12 | Inspection of the relay confirms it contains no membership, exclusion, deduplication, progress or readiness calculation for named focuses and no Linear reader beyond the shared library's read service. | Inspection |
-| FR-063-AC-13 | Given initiative I with projects P1 and P2 and a later snapshot where P1 leaves I, the same revision of a focus including I selects P1 and P2, then P2 only, with no new revision. | Test |
+| FR-063-AC-1 | A focus including initiative I (projects P1 and P2) and excluding P2 selects only P1's leaves; a P1 leaf that the focus also excludes by ticket is absent; a P2 leaf included by ticket in the same focus is still absent, because exclusion wins. | Test |
+| FR-063-AC-2 | Of focuses A (includes P) and B (includes P, excludes ticket T in P), A keeps T and B does not, and the combined result includes T once. | Test |
+| FR-063-AC-3 | With initiative I holding P1 and a later snapshot in which P2 joins I, the same revision of a focus including I selects P1 and, after the refresh, P1 and P2, with no new revision. | Test |
+| FR-063-AC-4 | With initiative I holding P1 and P2 and a later snapshot in which P1 leaves I, the same revision of a focus including I selects P1 and P2 and, after the refresh, P2 only, with no new revision. | Test |
+| FR-063-AC-5 | With project P holding milestones M4 and M5, a focus including P/M4 counts only M4's leaves and marks the P row partial with the milestone reason; a milestone ID paired with the wrong project is unresolved; a same-named milestone of another project is not selected. | Test |
+| FR-063-AC-6 | A focus of team X including an initiative that contains tasks of teams X and Y counts only X's leaves, marks both the initiative row and each project row that lost other-team tasks partial with the team-boundary reason, and treats a ticket of team Y as unresolved. | Test |
+| FR-063-AC-7 | A focus excluding one project of an initiative marks the initiative row partial with the exclusion reason, and the initiative's counts equal the leaves of its remaining projects only. | Test |
+| FR-063-AC-8 | An empty inclusion list gives an empty focus with no rows and zero leaves, not the whole team; zero active focuses gives the combined result "no active focus". | Test |
+| FR-063-AC-9 | A ticket-only focus whose ticket's parent project is not included shows the ticket and its descendants as direct-ticket rows with their project partial, and the focus never becomes a project or team focus. | Test |
+| FR-063-AC-10 | With two focuses sharing project P and one leaf shared under different initiatives, the combined result counts each leaf once, each per-focus row keeps its own counts, P's row carries the shared mark in every placement, and no output holds a summed total. | Test |
+| FR-063-AC-11 | With active focuses of teams X and Y, results form separate team groups with no cross-team total. | Test |
+| FR-063-AC-12 | A stale, partial or failed snapshot, an unresolved member and an unknown project category are each labeled, counts are unavailable or partial, and none is reported as healthy, complete or zero. | Test |
+| FR-063-AC-13 | After a failed refresh the last good result keeps its original fetch time and the error. | Test |
+| FR-063-AC-14 | The same snapshot and selections give identical order and counts on repeat, and an open ticket, an assignment or a work report never adds a leaf. | Test |
+| FR-063-AC-15 | `agent-msg focuses show <focus> --members` prints the rows and states of the current revision from one snapshot read bounded as in FR-061, stores nothing, and with a failed read prints the definition with `source_unavailable` and its reason and exit status 1. | Test |
+| FR-063-AC-16 | Inspection of the relay confirms it contains no membership, exclusion, deduplication, progress or readiness calculation for named focuses, no Linear reader beyond the shared library's read service, and no restatement of the library's selection types. | Inspection |
 
 ## Dependencies
 
 - [FR-061](./FR-061-named-focus-definitions.md) stores the selections and
-  [FR-062](./FR-062-session-active-focuses-and-adoption.md) pins the adopted
-  revision. [FR-048](./FR-048-session-work-monitor.md) AC-3 and AC-9 define the
+  [FR-062](./FR-062-session-active-focuses-and-adoption.md) holds the adopted
+  snapshot. [FR-048](./FR-048-session-work-monitor.md) AC-3 and AC-9 define the
   existing progress meaning and team boundary for legacy scope, which this
   requirement does not change.
-- ix-board owns the interface in "Required shared interface". The relay waits for
-  that accepted contract and, once it exists, one dependency update; it does not
-  pin intermediate revisions. The project status category is tracked separately
-  (see [FR-060](./FR-060-focused-scope-presentation.md)) and blocks only the hiding
-  of completed projects.
+- The shared ix-board library owns the interface the relay consumes, including
+  exclusions, explicit empty selection, milestone qualification, the multi-focus
+  result, typed member states and a deadline-bounded read. The relay waits for the
+  accepted ix-board contract and then makes one dependency update; it does not pin
+  intermediate revisions. The project status category is tracked separately (see
+  [FR-060](./FR-060-focused-scope-presentation.md)).
 - Out of scope: the whole-team slow snapshot read, a second raw tracker reader,
   department metrics, spend and drift measures, and any Linear write.
