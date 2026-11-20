@@ -10,10 +10,15 @@ relationships:
 
 ## Description
 
-The monitor SHALL bind an explicit Herdr address to one measured native harness
-session and process incarnation. Scope, current focus, and agent assignments
+When session-bound monitoring is requested, the monitor SHALL bind an explicit
+Herdr address to one measured native harness session and process incarnation.
+Scope, current focus, and agent assignments
 SHALL be reported explicitly by the lead. Open tracker tickets alone do not
 prove that an agent is working on them.
+
+Explicit department scope and saved-report startup are governed by
+[FR-059](./FR-059-department-monitor-adapter.md). An unbound department view does
+not establish a session binding or authorize a work report.
 
 ## Acceptance Criteria
 
@@ -39,3 +44,5 @@ Automatic Linear reads SHALL run on a 30-minute timer. Rate-limited reads SHALL 
 
 - ix-board owns structured scope selection, leaf progress and snapshot queue computation.
 - Herdr supplies live pane and native process evidence; Redis stores explicit reports.
+- [FR-059](./FR-059-department-monitor-adapter.md) adds department views without
+  relaxing the session and process identity requirements for bound activity or reporting.
