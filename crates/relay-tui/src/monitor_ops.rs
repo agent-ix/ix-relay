@@ -254,13 +254,15 @@ mod tests {
     fn injected_saved_credential_factory_succeeds_without_an_environment_override() {
         let factory_calls = std::cell::Cell::new(0);
         let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let directory = tempfile::tempdir().unwrap();
+        let cache_path = directory.path().join("tracker.sqlite");
         let snapshot = read_tracker_with_factory(false, || {
             factory_calls.set(factory_calls.get() + 1);
             ReadService::open(
                 FixtureSource {
                     reads: std::sync::Arc::clone(&reads),
                 },
-                std::path::Path::new(":memory:"),
+                &cache_path,
             )
         })
         .unwrap();

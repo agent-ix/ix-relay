@@ -34,3 +34,4 @@ ix-cli-kit.workspace = true
 
 [dev-dependencies]
 redis.workspace = true
+tempfile.workspace = true

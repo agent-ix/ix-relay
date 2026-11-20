@@ -2646,6 +2646,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook",
+ "tempfile",
 ]
 
 [[package]]
