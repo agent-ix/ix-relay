@@ -622,14 +622,13 @@ Monitor an explicit department scope or lead session
 Usage: team-leader-dashboard [OPTIONS]
 
 Options:
-      --lead <LEAD>        Lead Herdr address, e.g. hub:TEAM:code
-      --team <TEAM>        Linear team key; defaults to the bound lead workspace label
-      --project <PROJECT>  Source-native project ID; repeat for several projects
-      --report <REPORT>    Saved ix-board retro snapshot JSON, snapshots JSONL or delta JSON
-      --retro-config <RETRO_CONFIG>
-                           Retro configuration containing department policies and sources
-      --session <SESSION>  Native session expected at that address
-  -h, --help               Print help
+      --lead <LEAD>                  Lead Herdr address, e.g. hub:TEAM:code
+      --team <TEAM>                  Linear team key; defaults to the bound lead workspace label
+      --project <PROJECT>            Source-native project ID. Repeat to select several projects
+      --report <REPORT>              Saved ix-board retro snapshot JSON, snapshots JSONL or delta JSON, with a department envelope
+      --retro-config <RETRO_CONFIG>  Existing ix-board retro configuration JSON containing department policies and sources
+      --session <SESSION>            Native session expected at that address
+  -h, --help                         Print help
 ```
 
 `--report` conflicts with live scope, lead/session and retro configuration options. Department keys are `1` Status, `2` Health and `3` Retro. Lead views use `t`, `a` and `p`. See [Monitor a department](department-monitor.md) for examples, evidence details and collection outcomes.
