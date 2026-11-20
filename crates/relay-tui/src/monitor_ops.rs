@@ -262,8 +262,6 @@ mod tests {
         }
     }
 
-    /// Trace: FR-059-AC-6
-    #[trace("FR-059-AC-6")]
     #[test]
     fn injected_read_service_factory_populates_tracker_without_live_sources() {
         let factory_calls = std::cell::Cell::new(0);
