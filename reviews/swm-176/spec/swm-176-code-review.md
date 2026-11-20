@@ -56,3 +56,7 @@ Round 1 against frozen head 38323b9676bd067826bbb8f9cb2a0b3c9d5aca9e (author fix
 | FND-001 | fixed | New Precedence section (FR-060 lines 23-40) states that FR-060 overrides only FR-048-AC-7 one-row-per-project and the FR-059-AC-4/7 Scope-fixture clauses, retains the other AC-7 items, and adds no heading, group or separator rows (labels are inline), which removes the selectable-label question. FR-060-AC-1 asserts the retained FR-048-AC-7 items. |
 | FND-002 | fixed | Three mutually exclusive modes (Focused, Whole-team fallback, Ticket-only) are selected only from the reported scope; the contradictory precondition is gone, the all-hidden Focused cases are stated, and 'open work' is removed. FR-060-AC-3 covers each mode. |
 | FND-003 | fixed | Old AC-5 is replaced by FR-060-AC-8: fixture of at least 4 initiatives, 34 projects, one shared project and 2,000 leaf tasks with no truncation, a source read held pending, at least 200 scripted events then quit, a build counter, and before/after results in the PR with no fixed time limit. Debug CPU is excluded. |
+
+## Round 2 check
+
+Round 2 against frozen head 7771d0b8ba02c947ea09fe53c9f9ad77f39ed5df. Every finding in this file has a latest outcome of fixed (round 1). The round 2 fix text was re-read for regressions against this file's findings and none was found, so no new Dispositions rows are added. Original findings and round 1 rows are unchanged.

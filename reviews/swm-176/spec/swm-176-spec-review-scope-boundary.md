@@ -52,3 +52,7 @@ Round 1 against frozen head 38323b9676bd067826bbb8f9cb2a0b3c9d5aca9e. The origin
 | FND | outcome | reason |
 |---|---|---|
 | FND-001 | fixed | Classification section assigns the completed/canceled decision to the ix-board status category only, forbids display-string, name-list and done/total rules, records that the pinned 8381a601 does not supply the category, and declares a shared-model release plus relay dependency update as explicit prerequisites. Until then every project is unknown, nothing is hidden and the filter is labeled unavailable (AC-6). No API is invented and no API implementation is demanded of this spec; other behavior does not wait on it. The root-verified public model evidence agrees (Project.status is a string, no public category). |
+
+## Round 2 check
+
+Round 2 against frozen head 7771d0b8ba02c947ea09fe53c9f9ad77f39ed5df. Every finding in this file has a latest outcome of fixed (round 1). The round 2 fix text was re-read for regressions against this file's findings and none was found, so no new Dispositions rows are added. Original findings and round 1 rows are unchanged.

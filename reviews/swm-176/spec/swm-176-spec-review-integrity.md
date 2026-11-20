@@ -63,3 +63,12 @@ Round 1 against frozen head 38323b9676bd067826bbb8f9cb2a0b3c9d5aca9e. Original f
 | FND-001 | fixed | Hidden count unit is distinct projects, not placements (FR-060 lines 131-133); FR-060-AC-5 asserts a project hidden under two initiatives counts once. |
 | FND-002 | fixed | Key `c` is named, collision-checked against the existing key list, Scope-view only, process-lifetime and unpersisted (lines 123-130); FR-060-AC-4 asserts all existing keys still act. |
 | FND-003 | fixed | Deterministic order is stated (lines 85-89) and FR-060-AC-1 asserts it, including stability across hide and show (AC-5). |
+
+## Dispositions (round 2)
+
+Round 2 against frozen head 7771d0b8ba02c947ea09fe53c9f9ad77f39ed5df. Findings and round 1 rows above are unchanged. FND-001, FND-002 and FND-003 stay fixed (latest row, round 1) and were re-checked against the current text with no regression.
+
+| FND | outcome | reason |
+|---|---|---|
+| FND-004 | fixed | The Completed projects section now requires the footer to show 'completed filter unavailable' and never 'hiding completed' while the status category is unavailable, with the mode flag and key retained for when it becomes available. FR-060-AC-6 asserts the footer text, that `c` changes only the retained flag without altering rows, and that the flag applies once a fixture supplies the category. |
+| FND-005 | fixed | The Responsiveness section separates the shared summary (invalidated only by snapshot, report or scope) from the projection (summary or toggle), and says the toggle SHALL NOT recompute an unchanged summary. FR-060-AC-8 uses two counters with exact deltas: nothing for scroll, selection, view-switch, quit and idle draws; one projection build and no summary computation per `c`; one of each per snapshot, report or scope change. |
