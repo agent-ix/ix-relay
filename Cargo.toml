@@ -40,7 +40,7 @@ toml = "1.1.6"
 # malformed-file-with-line/column reporting (AGE-2017). Follow main; Cargo.lock
 # records the resolved commit (see agent-ix/ix-cli-kit README, "Consuming this crate").
 ix-cli-kit = { git = "https://github.com/agent-ix/ix-cli-kit", branch = "main" }
-ix-board = { git = "https://github.com/agent-ix/ix-board", rev = "c7850b6034bf06f81ebc326e0af8996a62e8cd6c" }
+ix-board = { git = "https://github.com/agent-ix/ix-board", rev = "4213e89eb6d4474d5496f838c9c1be13fe2c44f1" }
 
 [workspace.lints.rust]
 missing_docs = "deny"

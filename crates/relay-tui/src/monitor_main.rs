@@ -3,6 +3,8 @@
 //! Entry point for the read-only team-leader dashboard (SWM-21).
 
 mod monitor;
+mod monitor_department;
+mod monitor_department_source;
 mod monitor_ops;
 mod monitor_runtime;
 mod monitor_tracker;
@@ -10,22 +12,68 @@ mod monitor_ui;
 mod monitor_views;
 
 use clap::Parser;
+use ix_cli_kit::{
+    exit::Outcome,
+    streams::{ColorChoice, DiagnosticFields, Record},
+};
 
 #[derive(Parser)]
 #[command(
     name = "team-leader-dashboard",
-    about = "Monitor one explicitly assigned lead session"
+    about = "Monitor an explicit department scope or lead session"
 )]
 struct Args {
     /// Lead Herdr address, e.g. hub:TEAM:code.
     #[arg(long)]
-    lead: String,
+    lead: Option<String>,
     /// Linear team key; defaults to the bound lead workspace label.
     #[arg(long)]
     team: Option<String>,
-    /// Native session expected at that address.
+    /// Source-native project ID. Repeat to select several projects.
     #[arg(long)]
+    project: Vec<String>,
+    /// Saved ix-board retro snapshot JSON, snapshots JSONL or delta JSON, with a department envelope.
+    #[arg(long, conflicts_with_all = ["team", "project", "lead", "session", "retro_config"])]
+    report: Option<std::path::PathBuf>,
+    /// Existing ix-board retro configuration JSON containing department policies and sources.
+    #[arg(long)]
+    retro_config: Option<std::path::PathBuf>,
+    /// Native session expected at that address.
+    #[arg(long, requires = "lead")]
     session: Option<relay_core::SessionId>,
+}
+
+impl Args {
+    fn explicit_scope(&self) -> bool {
+        self.team.is_some() || !self.project.is_empty()
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        if self.report.is_some()
+            && (self.explicit_scope()
+                || self.lead.is_some()
+                || self.session.is_some()
+                || self.retro_config.is_some())
+        {
+            return Err(io::Error::other(
+                "--report conflicts with live scope, lead/session and --retro-config",
+            ));
+        }
+        if !self.explicit_scope() && self.report.is_none() && self.lead.is_none() {
+            return Err(io::Error::other(
+                "select --team, --project, --report or --lead; see --help",
+            ));
+        }
+        if self.team.as_ref().is_some_and(|v| v.trim().is_empty())
+            || self.project.iter().any(|v| v.trim().is_empty())
+            || self.lead.as_ref().is_some_and(|v| v.trim().is_empty())
+        {
+            return Err(io::Error::other(
+                "scope and lead selectors must not be empty",
+            ));
+        }
+        Ok(())
+    }
 }
 
 use std::{
@@ -54,51 +102,69 @@ const TICK: Duration = Duration::from_millis(100);
 
 fn main() -> ExitCode {
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok((outcome, diagnostic)) => {
+            if let Some(diagnostic) = diagnostic {
+                eprintln!("{diagnostic}");
+            }
+            outcome.into()
+        }
         Err(error) => {
-            eprintln!("team-leader-dashboard: {error}");
-            ExitCode::FAILURE
+            let message = format!("team-leader-dashboard: {error}");
+            let record =
+                Record::error("DashboardStartup", &message).with_fields(DiagnosticFields {
+                    remedy: Some("Check --help and the selected report or source access"),
+                    ..DiagnosticFields::default()
+                });
+            eprintln!(
+                "{}",
+                monitor::display_text(&record.render_human(false), 4096)
+            );
+            Outcome::Invalid.into()
         }
     }
 }
 
-fn run() -> io::Result<()> {
+fn run() -> io::Result<(Outcome, Option<String>)> {
     let args = Args::parse();
-    let settings = relay_core::config::load_core(Default::default()).map_err(io::Error::other)?;
-    let observed = relay_ops::work::resolve_work_target(
-        &herdr_cli::RealProcessRunner,
-        Some(&args.lead),
-        &settings.machine.value,
-    )
-    .map_err(io::Error::other)?;
-    if args
-        .session
-        .is_some_and(|id| id != observed.binding.session)
-    {
-        return Err(io::Error::other(
-            "target session changed; explicitly rebind",
-        ));
+    args.validate()?;
+    let department_config = args
+        .retro_config
+        .as_deref()
+        .map(|path| {
+            monitor_department_source::load_config(path, args.team.as_deref(), &args.project)
+        })
+        .transpose()?;
+    let (mut app, observed_binding) =
+        prepare_app(&args, monitor_department_source::read_report, bind_lead)?;
+    app.color_enabled = ColorChoice::Auto.decide(
+        ix_cli_kit::streams::stdout_is_terminal(),
+        std::env::var_os("NO_COLOR").is_some(),
+    );
+    if args.report.is_none() && department_config.is_none() {
+        app.department.failure("Department health/retro unavailable: supply --retro-config with department policies matching the selected scope, or open --report");
     }
-    let mut runtime_worker = Some(monitor_runtime::RuntimeWorker::spawn(
-        observed.binding.clone(),
-        settings,
-    )?);
-    enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
+    let department_worker = department_config
+        .map(monitor_department_source::DepartmentWorker::spawn)
+        .transpose()?;
+    let mut runtime_worker = None;
+    if let Some((observed, settings)) = observed_binding {
+        match monitor_runtime::RuntimeWorker::spawn(observed.binding.clone(), settings) {
+            Ok(worker) => runtime_worker = Some(worker),
+            Err(error) => app.runtime.failure(error.to_string()),
+        }
+        app.runtime.success(observed, Instant::now());
+    }
+    let mut tracker_worker = start_tracker(&args, &mut app, monitor_ops::TrackerWorker::spawn);
+    // The guard exists before the first terminal mutation, including partial initialization.
+    let _guard = TerminalGuard::enter(restore_terminal, || {
+        enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen)
+    })?;
     install_panic_hook();
-    let _guard = TerminalGuard;
     let signal = install_signal_handlers()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
 
-    let mut tracker_worker = Some(monitor_ops::TrackerWorker::spawn()?);
-    let mut app = App {
-        team: args.team.map(|team| team.to_ascii_uppercase()),
-        lead_name: args.lead,
-        binding: Some(observed.binding.clone()),
-        ..App::default()
-    };
-    app.runtime.success(observed, Instant::now());
     loop {
         terminal.draw(|frame| monitor_ui::render(frame, &mut app, Instant::now()))?;
         if let Some(active_worker) = &tracker_worker {
@@ -106,30 +172,20 @@ fn run() -> io::Result<()> {
                 app.apply_tracker_refresh(refresh, Instant::now());
             }
         }
+        if let Some(worker) = &department_worker {
+            while let Ok(result) = worker.events.try_recv() {
+                match result {
+                    Ok(report) => app.department.success(report, Instant::now()),
+                    Err(error) => {
+                        app.collection_failed = true;
+                        app.department.failure(error);
+                    }
+                }
+            }
+        }
         if let Some(worker) = &runtime_worker {
             while let Ok(refresh) = worker.events.try_recv() {
-                match refresh {
-                    monitor_runtime::RuntimeRefresh::Observation(result, read_at) => match result {
-                        Ok(observation) if !app.session_ended => {
-                            app.runtime.success(observation, read_at)
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            if matches!(
-                                error,
-                                relay_ops::OpsError::WorkSessionReplaced
-                                    | relay_ops::OpsError::WorkAgentAbsent
-                            ) {
-                                app.session_ended = true;
-                            }
-                            app.runtime.failure(error.to_string());
-                        }
-                    },
-                    monitor_runtime::RuntimeRefresh::Report(result, read_at) => match result {
-                        Ok(report) => app.report.success(report, read_at),
-                        Err(error) => app.report.failure(error.to_string()),
-                    },
-                }
+                app.apply_runtime_refresh(refresh);
             }
         }
         if event::poll(TICK)?
@@ -140,6 +196,15 @@ fn run() -> io::Result<()> {
             if app.refresh_now {
                 if let Some(active_worker) = &tracker_worker {
                     active_worker.refresh_now();
+                }
+                if let Some(worker) = &department_worker {
+                    worker.refresh_now();
+                }
+                if let Some(path) = &args.report {
+                    match monitor_department_source::read_report(path) {
+                        Ok(report) => app.department.success(report, Instant::now()),
+                        Err(error) => app.department.failure(error.to_string()),
+                    }
                 }
                 app.refresh_now = false;
             }
@@ -154,9 +219,117 @@ fn run() -> io::Result<()> {
             if let Some(active_worker) = tracker_worker.take() {
                 active_worker.stop();
             }
-            return Ok(());
+            return Ok(quit_outcome(&app));
         }
     }
+}
+
+fn quit_outcome(app: &App) -> (Outcome, Option<String>) {
+    if app.collection_failed {
+        let diagnostic = [&app.tracker.error, &app.department.error]
+            .into_iter()
+            .flatten()
+            .map(|error| monitor::display_text(error, 4096))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        (
+            Outcome::Partial,
+            Some(if diagnostic.is_empty() {
+                "Requested live collection failed".into()
+            } else {
+                diagnostic
+            }),
+        )
+    } else {
+        (Outcome::Ok, None)
+    }
+}
+
+type ObservedBinding = (
+    relay_ops::work::WorkObservation,
+    relay_core::config::CoreSettings,
+);
+
+fn start_tracker<T>(
+    args: &Args,
+    app: &mut App,
+    spawn: impl FnOnce() -> io::Result<T>,
+) -> Option<T> {
+    if args.report.is_some() {
+        return None;
+    }
+    match spawn() {
+        Ok(worker) => Some(worker),
+        Err(error) => {
+            app.tracker.failure(error.to_string());
+            app.collection_failed = true;
+            None
+        }
+    }
+}
+
+fn prepare_app(
+    args: &Args,
+    read_report: impl FnOnce(&std::path::Path) -> io::Result<ix_board::retro::department::Delta>,
+    bind: impl FnOnce(&str, Option<relay_core::SessionId>) -> io::Result<ObservedBinding>,
+) -> io::Result<(App, Option<ObservedBinding>)> {
+    args.validate()?;
+    let mut app = App {
+        team: args.team.as_ref().map(|team| team.to_ascii_uppercase()),
+        projects: args.project.clone(),
+        lead_name: args
+            .lead
+            .clone()
+            .unwrap_or_else(|| "identity unknown".into()),
+        view: if args.explicit_scope() || args.report.is_some() {
+            monitor::View::Status
+        } else {
+            monitor::View::Tickets
+        },
+        ..App::default()
+    };
+    if let Some(path) = &args.report {
+        app.department.success(read_report(path)?, Instant::now());
+        return Ok((app, None));
+    }
+    let observed = if let Some(lead) = &args.lead {
+        match bind(lead, args.session.clone()) {
+            Ok(binding) => {
+                app.binding = Some(binding.0.binding.clone());
+                Some(binding)
+            }
+            Err(error) if args.explicit_scope() => {
+                app.runtime.failure(error.to_string());
+                None
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+    Ok((app, observed))
+}
+
+fn bind_lead(
+    lead: &str,
+    session: Option<relay_core::SessionId>,
+) -> io::Result<(
+    relay_ops::work::WorkObservation,
+    relay_core::config::CoreSettings,
+)> {
+    let settings = relay_core::config::load_core(Default::default()).map_err(io::Error::other)?;
+    let observed = relay_ops::work::resolve_work_target(
+        &herdr_cli::RealProcessRunner,
+        Some(lead),
+        &settings.machine.value,
+    )
+    .map_err(io::Error::other)?;
+    if session.is_some_and(|id| id != observed.binding.session) {
+        return Err(io::Error::other(
+            "target session changed; explicitly rebind",
+        ));
+    }
+    Ok((observed, settings))
 }
 
 fn install_signal_handlers() -> io::Result<Arc<AtomicBool>> {
@@ -179,10 +352,143 @@ fn restore_terminal() {
     let _ = execute!(io::stdout(), LeaveAlternateScreen);
 }
 
-struct TerminalGuard;
+struct TerminalGuard<Restore: FnMut()> {
+    restore: Restore,
+}
 
-impl Drop for TerminalGuard {
+impl<Restore: FnMut()> TerminalGuard<Restore> {
+    fn enter(restore: Restore, initialize: impl FnOnce() -> io::Result<()>) -> io::Result<Self> {
+        let guard = Self { restore };
+        initialize()?;
+        Ok(guard)
+    }
+}
+
+impl<Restore: FnMut()> Drop for TerminalGuard<Restore> {
     fn drop(&mut self) {
-        restore_terminal();
+        (self.restore)();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn args(values: &[&str]) -> Args {
+        Args::try_parse_from(std::iter::once("dashboard").chain(values.iter().copied())).unwrap()
+    }
+
+    /// Trace: FR-059-AC-1, FR-059-AC-2
+    #[test]
+    fn explicit_scopes_and_saved_input_need_no_native_binding_or_live_factory() {
+        for values in [vec!["--team", "SWM"], vec!["--project", "native-project"]] {
+            let (app, binding) = prepare_app(
+                &args(&values),
+                |_| panic!("saved reader called in live mode"),
+                |_, _| panic!("native binding called without lead"),
+            )
+            .unwrap();
+            assert_eq!(app.view, monitor::View::Status);
+            assert!(app.binding.is_none());
+            assert!(binding.is_none());
+        }
+        let offline = args(&["--report", "supplied.json"]);
+        let (mut app, binding) = prepare_app(
+            &offline,
+            |_| Ok(monitor_department::tests::fixture()),
+            |_, _| panic!("Herdr/relay setup called in saved mode"),
+        )
+        .unwrap();
+        let tracker: Option<()> = start_tracker(&offline, &mut app, || {
+            panic!("credential/network factory called in saved mode")
+        });
+        assert!(tracker.is_none());
+        assert!(binding.is_none());
+        for code in ['1', '2', '3', 'q'] {
+            monitor::handle_key(
+                &mut app,
+                ratatui::crossterm::event::KeyEvent::new(
+                    ratatui::crossterm::event::KeyCode::Char(code),
+                    ratatui::crossterm::event::KeyModifiers::NONE,
+                ),
+            );
+        }
+        assert!(app.should_quit);
+        assert!(!app.collection_failed);
+        assert_eq!(
+            app.department.value.unwrap().current.scope.teams[0].id,
+            "SWM"
+        );
+    }
+
+    /// Trace: FR-059-AC-1
+    #[test]
+    fn missing_and_ambiguous_requested_leads_keep_explicit_scope_but_refuse_legacy_startup() {
+        for reason in ["native agent absent", "ambiguous native process"] {
+            let scoped = args(&["--lead", "host:workspace:code", "--team", "SWM"]);
+            let (app, binding) = prepare_app(
+                &scoped,
+                |_| panic!("saved reader called"),
+                |_, _| Err(io::Error::other(reason)),
+            )
+            .unwrap();
+            assert_eq!(app.view, monitor::View::Status);
+            assert_eq!(app.runtime.error.as_deref(), Some(reason));
+            assert!(app.binding.is_none());
+            assert!(binding.is_none());
+            let legacy = args(&["--lead", "host:workspace:code"]);
+            assert!(
+                prepare_app(
+                    &legacy,
+                    |_| panic!("saved reader called"),
+                    |_, _| Err(io::Error::other(reason))
+                )
+                .is_err()
+            );
+        }
+    }
+
+    /// Trace: FR-059-AC-2
+    #[test]
+    fn invalid_options_refuse_before_source_access() {
+        let absent = args(&[]);
+        assert!(
+            prepare_app(
+                &absent,
+                |_| panic!("saved access"),
+                |_, _| panic!("binding access")
+            )
+            .is_err()
+        );
+        for flag in ["--team", "--project", "--lead", "--retro-config"] {
+            assert!(
+                Args::try_parse_from(["dashboard", "--report", "file", flag, "value"]).is_err()
+            );
+        }
+        assert!(Args::try_parse_from(["dashboard", "--session", "invalid"]).is_err());
+    }
+
+    /// Trace: FR-059-AC-6
+    #[test]
+    fn terminal_guard_restores_after_quit_initialization_and_render_failures() {
+        let restored = Cell::new(0);
+        {
+            let _guard =
+                TerminalGuard::enter(|| restored.set(restored.get() + 1), || Ok(())).unwrap();
+        }
+        assert_eq!(restored.get(), 1);
+        let failed = TerminalGuard::enter(
+            || restored.set(restored.get() + 1),
+            || Err(io::Error::other("alternate screen init failed")),
+        );
+        assert!(failed.is_err());
+        assert_eq!(restored.get(), 2);
+        let render = || -> io::Result<()> {
+            let _guard = TerminalGuard::enter(|| restored.set(restored.get() + 1), || Ok(()))?;
+            Err(io::Error::other("render failed"))
+        };
+        assert!(render().is_err());
+        assert_eq!(restored.get(), 3);
     }
 }

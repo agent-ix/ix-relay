@@ -174,6 +174,8 @@ agent-msg work focus "Reviewing credentials" --ticket <ticket>
 agent-msg work agent <id> --ticket <ticket> --role reviewer --status running
 ```
 
-`team-leader-dashboard --lead <address>` monitors one lead session and never consumes inboxes or changes tracker state. It reads Herdr, Linear (with `LINEAR_API_KEY`) and the lead's work reports. `--session <native-session-id>` refuses an unexpected occupant at start-up. The monitor keeps the original session and process binding, so restart it to follow a replacement.
+`team-leader-dashboard --lead <address>` monitors one lead session. It reads Herdr, Linear and the lead's work reports. Linear accepts an approved saved credential or the `LINEAR_API_KEY` override. `--session <native-session-id>` refuses an unexpected occupant at startup. The monitor keeps the original session and process binding, so restart it to follow a replacement.
 
 The dashboard has three views: `t` for tickets, `a` for agents and `p` for scope. Scroll with the arrows or `j` and `k`, open details with `d` or Enter, force a Linear refresh with `r`, show source timestamps with `s` and quit with `q`. Linear refreshes every 30 minutes, and Herdr and the reports refresh every minute. Native internal subagents appear only when the lead reports them. Scope counts are limited to the reported scope, and overlapping initiative and project counts must not be added.
+
+Department monitoring also starts with `--team <team>`, repeatable `--project <project-id>` or `--report <path>`. These inputs open Status without a native session. The department keys are `1` for Status, `2` for Health and `3` for Retro. Health shows severity and completeness separately; details carry evidence and configured owner actions. See [Monitor a department](department-monitor.md) for startup and saved reports.

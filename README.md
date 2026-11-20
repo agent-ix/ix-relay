@@ -107,7 +107,7 @@ agent-msg resolve <id> "<decision>"
 |---|---|
 | `crates/agent-msg` | The `agent-msg` CLI and the Claude and Codex hook handler. |
 | `crates/relay-watcher` | One process per machine. Delivers to idle leads, publishes the directory and pushes OTLP metrics. |
-| `crates/relay-tui` | `relay-tui`, the operator's escalation inbox, and `team-leader-dashboard`, a monitor for one lead session. |
+| `crates/relay-tui` | `relay-tui`, the escalation inbox, and `team-leader-dashboard`, the scoped department and lead monitor. |
 | `crates/relay-core` | Redis store, message, registration, directory and escalation types. |
 | `crates/relay-ops` | Operations shared by the binaries: enrollment, escalation, Herdr checks and Linear posting. |
 | `crates/claude-wire` | Typed Claude Code cross-session wire formats, with drift detection and no I/O. |

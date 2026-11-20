@@ -26,6 +26,10 @@ const ERROR: Color = Color::Rgb(240, 163, 163);
 
 /// Renders one bound session, retaining visibly labeled snapshots on source failure.
 pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
+    if matches!(app.view, View::Status | View::Health | View::Retro) {
+        crate::monitor_department::render(frame, app);
+        return;
+    }
     let now_epoch = SystemClock.now_epoch_seconds();
     let report = app.report.value.as_ref().and_then(Option::as_ref);
     let team = app.team.clone().or_else(|| {
@@ -226,6 +230,7 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
                 frame.render_widget(Paragraph::new("Tickets unavailable until Linear loads. Agents are available with a.\nNo assignment or focus is inferred from open tickets.").style(Style::default().fg(MUTED)).wrap(Wrap { trim: true }), work);
             }
         }
+        View::Status | View::Health | View::Retro => {}
     }
     let linear = app.tracker.value.as_ref().map_or_else(
         || "Linear: no data".into(),
@@ -311,7 +316,7 @@ fn snapshot_is_stale(fetched_at: i64, now_epoch: i64) -> bool {
     u64::try_from(age).unwrap_or(0) >= crate::monitor_ops::TRACKER_REFRESH_INTERVAL.as_secs()
 }
 
-fn fresh<T>(source: &Source<T>, now: Instant, max_age: std::time::Duration) -> bool {
+pub(crate) fn fresh<T>(source: &Source<T>, now: Instant, max_age: std::time::Duration) -> bool {
     source.error.is_none()
         && source
             .last_success

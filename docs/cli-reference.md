@@ -614,19 +614,25 @@ Options:
 
 ## team-leader-dashboard
 
-`team-leader-dashboard` monitors one lead session. It is built from the `relay-tui` crate.
+`team-leader-dashboard` is a read-only department and lead monitor. Select a team, project, saved report or lead to start.
 
 ```text
-Monitor one explicitly assigned lead session
+Monitor an explicit department scope or lead session
 
-Usage: team-leader-dashboard [OPTIONS] --lead <LEAD>
+Usage: team-leader-dashboard [OPTIONS]
 
 Options:
       --lead <LEAD>        Lead Herdr address, e.g. hub:TEAM:code
       --team <TEAM>        Linear team key; defaults to the bound lead workspace label
+      --project <PROJECT>  Source-native project ID; repeat for several projects
+      --report <REPORT>    Saved ix-board retro snapshot JSON, snapshots JSONL or delta JSON
+      --retro-config <RETRO_CONFIG>
+                           Retro configuration containing department policies and sources
       --session <SESSION>  Native session expected at that address
   -h, --help               Print help
 ```
+
+`--report` conflicts with live scope, lead/session and retro configuration options. Department keys are `1` Status, `2` Health and `3` Retro. Lead views use `t`, `a` and `p`. See [Monitor a department](department-monitor.md) for examples, evidence details and collection outcomes.
 
 ## relay-admin
 
