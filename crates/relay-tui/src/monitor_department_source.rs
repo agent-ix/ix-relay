@@ -162,6 +162,9 @@ fn collect_from_sources(
 }
 
 #[cfg(test)]
+mod auth_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use ix_trace_rs::trace;
