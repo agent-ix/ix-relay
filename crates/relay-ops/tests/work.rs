@@ -1,5 +1,8 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 Agent-IX
 //! Measured monitor binding through the external command seam.
 use herdr_cli::{Output, ProcessError, ProcessRunner};
+use ix_trace_rs::trace;
 use relay_ops::{
     OpsError,
     work::{observe_work_binding, resolve_work_target},
@@ -226,4 +229,130 @@ fn optional_process_details_preserve_native_binding_and_refuse_missing_evidence(
         resolve_work_target(&invalid, Some("luna:SWM:code"), &machine),
         Err(OpsError::Herdr(ProcessError::BadOutput { .. }))
     ));
+}
+
+struct ClaudeProcesses {
+    processes: serde_json::Value,
+    session: serde_json::Value,
+}
+
+impl ClaudeProcesses {
+    fn new(processes: serde_json::Value) -> Self {
+        Self {
+            processes,
+            session: serde_json::json!({"agent":"claude", "kind":"id", "value":"session-a"}),
+        }
+    }
+}
+
+impl ProcessRunner for ClaudeProcesses {
+    fn run(&self, program: &str, args: &[&str], _: Duration) -> Result<Output, ProcessError> {
+        assert_eq!(program, "herdr");
+        let result = if args == ["api", "snapshot"] {
+            serde_json::json!({"snapshot": {
+                "panes": [{"pane_id":"w1:p1", "workspace_id":"w1", "tab_id":"w1:t1",
+                    "agent":"claude", "agent_status":"working", "agent_session":self.session}],
+                "workspaces":[{"workspace_id":"w1", "label":"SWM"}],
+                "tabs":[{"tab_id":"w1:t1", "label":"plan"}]
+            }})
+        } else {
+            assert_eq!(args, ["pane", "process-info", "--pane", "w1:p1"]);
+            serde_json::json!({"process_info":{"foreground_processes":self.processes}})
+        };
+        Ok(Output {
+            status_code: 0,
+            success: true,
+            stdout: serde_json::json!({"result":result})
+                .to_string()
+                .into_bytes(),
+            stderr: vec![],
+        })
+    }
+}
+
+#[test]
+#[trace("FR-048-AC-1", "FR-048-AC-10")]
+fn claude_binding_matches_exact_executable_basename_with_optional_arguments() {
+    let machine = "draco".parse().unwrap();
+    for process in [
+        serde_json::json!({"name":"2.1.329", "argv0":"claude", "pid":42, "argv":["claude"]}),
+        serde_json::json!({"name":"2.1.329", "argv0":"/Users/test/.local/bin/claude", "pid":42}),
+        serde_json::json!({"name":"2.1.329", "argv0":"claude", "pid":42, "argv":null}),
+        serde_json::json!({"name":"claude", "pid":42}),
+        serde_json::json!({"name":"/Users/test/.local/bin/claude", "pid":42, "argv0":null, "argv":null}),
+    ] {
+        let runner = ClaudeProcesses::new(serde_json::json!([
+            {"name":"caffeinate", "argv0":"/usr/bin/caffeinate", "pid":43},
+            process,
+            {"name":"filament-mcp", "argv":["filament-mcp", "claude"], "pid":44}
+        ]));
+        let observed = resolve_work_target(&runner, Some("draco:SWM:plan"), &machine).unwrap();
+        assert_eq!(observed.binding.session.as_str(), "session-a");
+        assert_eq!(observed.binding.process_id, 42);
+        assert_eq!(observed.binding.kind, "claude");
+        assert_eq!(observed.binding.address, "draco:SWM:plan");
+    }
+}
+
+#[test]
+#[trace("FR-048-AC-1", "FR-048-AC-10")]
+fn claude_binding_refuses_helpers_ambiguous_candidates_and_zero_pid() {
+    let machine = "draco".parse().unwrap();
+    let process = serde_json::json!({"name":"2.1.329", "argv0":"claude", "pid":42});
+    for processes in [
+        serde_json::json!([]),
+        serde_json::json!([process, process]),
+        serde_json::json!([process, {"name":"/bin/claude", "pid":43}]),
+        serde_json::json!([{"name":"2.1.329", "argv0":"claude", "pid":0}]),
+        serde_json::json!([{"name":"2.1.329", "pid":42, "argv":["claude"]}]),
+        serde_json::json!([{"name":"2.1.329", "argv0":null, "pid":42, "argv":["claude"]}]),
+        serde_json::json!([{"name":"helper", "argv0":"helper", "pid":42, "argv":["helper", "claude"]}]),
+        serde_json::json!([{"name":"claude-helper", "argv0":"/claude/helper", "pid":42}]),
+    ] {
+        assert!(matches!(
+            resolve_work_target(
+                &ClaudeProcesses::new(processes),
+                Some("draco:SWM:plan"),
+                &machine
+            ),
+            Err(OpsError::WorkProcessAmbiguous)
+        ));
+    }
+    let runner = ClaudeProcesses {
+        session: serde_json::Value::Null,
+        ..ClaudeProcesses::new(serde_json::json!([process]))
+    };
+    assert!(matches!(
+        resolve_work_target(&runner, Some("draco:SWM:plan"), &machine),
+        Err(OpsError::WorkSessionUnavailable)
+    ));
+    let runner = ClaudeProcesses {
+        session: serde_json::json!({"agent":"codex", "kind":"id", "value":"session-a"}),
+        ..runner
+    };
+    assert!(matches!(
+        resolve_work_target(&runner, Some("draco:SWM:plan"), &machine),
+        Err(OpsError::WorkIdentityConflict)
+    ));
+}
+
+#[test]
+#[trace("FR-048-AC-10")]
+fn claude_binding_refuses_malformed_optional_argument_types() {
+    let machine = "draco".parse().unwrap();
+    for process in [
+        serde_json::json!({"name":"claude", "pid":42, "argv0":42}),
+        serde_json::json!({"name":"claude", "pid":42, "argv0":["claude"]}),
+        serde_json::json!({"name":"claude", "pid":42, "argv":"claude"}),
+        serde_json::json!({"name":"claude", "pid":42, "argv":[42]}),
+    ] {
+        assert!(matches!(
+            resolve_work_target(
+                &ClaudeProcesses::new(serde_json::json!([process])),
+                Some("draco:SWM:plan"),
+                &machine,
+            ),
+            Err(OpsError::Herdr(ProcessError::BadOutput { .. }))
+        ));
+    }
 }
