@@ -89,8 +89,30 @@ pub fn summarize(
     let whole_team = WorkScope::default();
     let assignment = report.and_then(|r| r.scope.as_ref()).unwrap_or(&whole_team);
     let agents = report.map_or(&[][..], |r| r.agents.as_slice());
+    summarize_inputs(snapshot, assignment, agents, Some(team))
+}
+
+/// Resolves explicit department selectors through the same authoritative scope path.
+pub fn summarize_department(
+    snapshot: &TrackerState,
+    team: Option<&str>,
+    projects: &[String],
+) -> Result<DashboardView, ix_board::Error> {
+    let assignment = WorkScope {
+        projects: projects.to_vec(),
+        ..WorkScope::default()
+    };
+    summarize_inputs(snapshot, &assignment, &[], team)
+}
+
+fn summarize_inputs(
+    snapshot: &TrackerState,
+    assignment: &WorkScope,
+    agents: &[AgentWork],
+    team: Option<&str>,
+) -> Result<DashboardView, ix_board::Error> {
     let mut selectors = selection(assignment);
-    selectors.team = Some(TeamKey(team.to_owned()));
+    selectors.team = team.map(|team| TeamKey(team.to_owned()));
     let narrowed = !assignment.initiatives.is_empty()
         || !assignment.projects.is_empty()
         || !assignment.tickets.is_empty();

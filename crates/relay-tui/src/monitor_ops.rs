@@ -14,6 +14,46 @@ use std::{
 
 use crate::monitor_tracker::TrackerState;
 use ix_board::{LinearGraphQlSource, ReadService};
+use ix_cli_kit::streams::{DiagnosticFields, Record};
+
+/// Compact source classification suitable for a single diagnostic line.
+pub(crate) fn source_summary(error: &ix_board::Error) -> &'static str {
+    match error {
+        ix_board::Error::MissingApiKey => "Authentication unavailable; ix-board auth login",
+        ix_board::Error::Credential(_) => {
+            "Saved credential access denied; contact credential owner"
+        }
+        ix_board::Error::LinearRateLimited { .. } => "Linear rate limited",
+        _ => "Structured tracker read failed; inspect source availability",
+    }
+}
+
+/// Safe, actionable presentation of the approved SDK's typed authentication errors.
+pub(crate) fn source_diagnostic(error: &ix_board::Error) -> String {
+    let (kind, message, remedy) = match error {
+        ix_board::Error::MissingApiKey => (
+            "MissingAuthentication",
+            "Linear authentication is unavailable",
+            "Configure an approved saved credential with ix-board auth login, or open --report",
+        ),
+        ix_board::Error::Credential(_) => (
+            "CredentialAccessDenied",
+            "Linear saved credential could not be accessed",
+            "Ask the credential owner to restore approved access, or open --report",
+        ),
+        _ => (
+            "TrackerReadFailed",
+            "Structured tracker read failed",
+            "Inspect source availability with ix-board, or open --report",
+        ),
+    };
+    let record = Record::error(kind, message).with_fields(DiagnosticFields {
+        reason: Some(kind),
+        remedy: Some(remedy),
+        ..DiagnosticFields::default()
+    });
+    format!("{} · {}", record.render_human(false), remedy)
+}
 
 /// Automatic Linear tracker reads run every 30 minutes.
 pub const TRACKER_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
@@ -186,8 +226,16 @@ fn next_interval(success: bool, previous: Duration, refresh: Duration, cap: Dura
 }
 
 fn read_tracker(force: bool) -> Result<TrackerState, ix_board::Error> {
-    let source = LinearGraphQlSource::from_env()?;
-    let mut service = ReadService::open_default(source)?;
+    read_tracker_with_factory(force, || {
+        ReadService::open_default(LinearGraphQlSource::from_env()?)
+    })
+}
+
+fn read_tracker_with_factory<S: ix_board::WorkspaceSource>(
+    force: bool,
+    factory: impl FnOnce() -> Result<ReadService<S>, ix_board::Error>,
+) -> Result<TrackerState, ix_board::Error> {
+    let mut service = factory()?;
     if force {
         service.force_refresh_workspace()
     } else {
@@ -197,9 +245,83 @@ fn read_tracker(force: bool) -> Result<TrackerState, ix_board::Error> {
 
 #[cfg(test)]
 mod tests {
+    use ix_trace_rs::trace;
     use std::{sync::mpsc, thread, time::Duration};
 
     use super::*;
+
+    struct FixtureSource {
+        reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ix_board::WorkspaceSource for FixtureSource {
+        fn fetch_workspace(&self) -> Result<TrackerState, ix_board::Error> {
+            self.reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(TrackerState::default())
+        }
+    }
+
+    #[test]
+    fn injected_read_service_factory_populates_tracker_without_live_sources() {
+        let factory_calls = std::cell::Cell::new(0);
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let directory = tempfile::tempdir().unwrap();
+        let cache_path = directory.path().join("tracker.sqlite");
+        let snapshot = read_tracker_with_factory(false, || {
+            factory_calls.set(factory_calls.get() + 1);
+            ReadService::open(
+                FixtureSource {
+                    reads: std::sync::Arc::clone(&reads),
+                },
+                &cache_path,
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            factory_calls.get(),
+            1,
+            "dashboard must use the injected authenticated factory"
+        );
+        assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 1);
+        let mut app = crate::monitor::App::default();
+        app.apply_tracker_refresh(Ok(snapshot), std::time::Instant::now());
+        assert!(app.tracker.value.is_some());
+        assert!(app.tracker.error.is_none());
+        assert!(!app.collection_failed);
+    }
+
+    /// Trace: FR-059-AC-6
+    #[trace("FR-059-AC-6")]
+    #[test]
+    fn injected_authentication_denial_is_classified_and_quit_retains_collection_failure() {
+        let result = read_tracker_with_factory::<FixtureSource>(false, || {
+            Err(ix_board::Error::Credential(
+                ix_cli_kit::secrets::SecretError::Locked,
+            ))
+        });
+        let mut app = crate::monitor::App::default();
+        app.apply_tracker_refresh(result, std::time::Instant::now());
+        assert!(app.collection_failed);
+        let diagnostic = app.tracker.error.as_deref().unwrap();
+        assert!(diagnostic.contains("saved credential could not be accessed"));
+        assert!(diagnostic.contains("credential owner"));
+        crate::monitor::handle_key(
+            &mut app,
+            ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Char('q'),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            ),
+        );
+        assert!(app.should_quit);
+        assert!(app.collection_failed);
+        let (outcome, final_diagnostic) = crate::quit_outcome(&app);
+        assert_eq!(outcome, ix_cli_kit::exit::Outcome::Partial);
+        assert!(final_diagnostic.unwrap().contains("credential owner"));
+        let missing = source_diagnostic(&ix_board::Error::MissingApiKey);
+        assert!(missing.contains("ix-board auth login"));
+        assert!(missing.contains("--report"));
+    }
 
     #[test]
     fn stopping_does_not_wait_for_an_in_flight_linear_read() {
