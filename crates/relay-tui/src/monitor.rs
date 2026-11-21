@@ -182,6 +182,9 @@ pub struct App {
     pub tracker: Source<crate::monitor_tracker::TrackerState>,
     /// Next scheduled retry after a rate-limited Linear read.
     pub tracker_retry_at: Option<Instant>,
+    /// The tracker snapshot is shown, but nothing confirms when its source read happened or
+    /// that a refresh failed; it is not certified fresh and no failure is reported.
+    pub tracker_freshness_unconfirmed: bool,
     /// Human-readable identity of the current team lead.
     pub lead_name: String,
     /// Set by `q` or Escape.
@@ -277,25 +280,26 @@ impl App {
         self.collection_failed |= tracker.is_err();
         match tracker {
             Ok(read) => {
-                // A snapshot the service kept after a failed refresh keeps its source
-                // timestamp; the failure shows beside it until a refresh succeeds. The
-                // service reports no typed cause here, so the notice names none.
-                let retained = read
-                    .retained()
-                    .map(|freshness| freshness.rate_limit_until.is_some());
+                use crate::monitor_ops::{
+                    Provenance, refresh_failed_diagnostic, refresh_failed_summary,
+                };
+                // A snapshot kept after a failed refresh keeps its source timestamp; the
+                // failure shows beside it until a refresh succeeds. Unconfirmed provenance
+                // is not a failure and only marks the snapshot as not certified fresh.
+                let provenance = read.provenance();
                 self.tracker.success(read.snapshot, now);
                 self.tracker_retry_at = None;
-                if let Some(cooldown) = retained {
+                self.tracker_freshness_unconfirmed = provenance == Provenance::Unconfirmed;
+                if let Provenance::RefreshFailed { cooldown } = provenance {
                     self.collection_failed = true;
                     if cooldown {
                         self.tracker_retry_at =
                             now.checked_add(crate::monitor_ops::TRACKER_REFRESH_INTERVAL);
-                        self.tracker
-                            .failure("Linear rate limited; showing the last snapshot");
+                        self.tracker.failure(refresh_failed_summary(cooldown));
                     } else {
                         self.tracker.failure_with_summary(
-                            "Linear refresh failed; showing the last snapshot",
-                            "Linear refresh failed; showing the last snapshot. Inspect source availability with ix-board, or open --report",
+                            refresh_failed_summary(cooldown),
+                            refresh_failed_diagnostic(),
                         );
                     }
                 }

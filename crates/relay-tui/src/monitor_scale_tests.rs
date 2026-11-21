@@ -296,10 +296,9 @@ fn production_event_loop_never_waits_for_a_pending_tracker_read() {
         let _ = entered_tx.send(());
         let _ = release_rx.recv();
         let _ = finished_tx.send(());
-        Ok(crate::monitor_ops::TrackerRead {
-            snapshot: refreshed.clone(),
-            freshness: None,
-        })
+        Ok(crate::monitor_ops::TrackerRead::unreported(
+            refreshed.clone(),
+        ))
     })
     .expect("worker");
     entered_rx

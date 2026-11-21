@@ -796,10 +796,7 @@ mod tests {
                 let _ = tracker_entered.send(());
                 let _ = tracker_held.recv();
                 let _ = tracker_done.send(());
-                Ok(monitor_ops::TrackerRead {
-                    snapshot: snapshot.clone(),
-                    freshness: None,
-                })
+                Ok(monitor_ops::TrackerRead::unreported(snapshot.clone()))
             })
         })
         .expect("tracker worker");
