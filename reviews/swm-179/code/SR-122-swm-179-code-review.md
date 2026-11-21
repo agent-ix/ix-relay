@@ -118,3 +118,43 @@ Changed crate: relay-tui (one binary, `team-leader-dashboard`). API and docs: ne
 ## Verdict after disposition pass 1
 
 Not run. Dispositions are reserved for this same session after the fix round.
+
+## Dispositions (round 1, all 12)
+
+Disposition pass 1 at frozen fix 7584112 (base c2f3dff), judged from the current source in the sole tree, not from the author notes (`code-fix1-ready.md`, `saved-empty-code-ready.md` and the spec-ready files were read as data). I ran no command; every outcome below is a reading of source and is conditional on the root's pending compile, clippy and test results, which are not claimed green here.
+
+| FND | Outcome | Reason |
+|---|---|---|
+| FND-001 | fixed | `monitor_ui.rs:749` is now `pub(crate) fn muted`; a grep of `fn muted` under crates/relay-tui/src finds only that definition. |
+| FND-002 | fixed | `not_configured_instruction` (monitor_department.rs:630) names `--team {team}` with `--retro-config <file>` for the lead-derived selection and says the file's team must be that team with no projects. A new test, `the_lead_derived_instruction_is_what_startup_configuration_matching_accepts` (1654), runs the real `load_config`: refused with no team and no projects, accepted with `Some("SWM")` and none. The AC-9 fixture also asserts the lead-derived text (1580). |
+| FND-003 | fixed | `status_rows` (monitor_department.rs:436-441) now says "No retro configuration supplied" and "Nothing is being collected" for `NotConfigured`, "Waiting for the first read" for `Configured`, with no failure row; fixture `status_without_a_report_says_why_and_never_awaits_a_collection_that_is_not_configured` (1478). A residual defect in the same row is new FND-013. |
+| FND-004 | fixed | `live_popups_start_no_read_whether_the_reads_are_held_or_finish_during_the_script` (monitor_main.rs:868) runs one held and one released run; the control `a_refresh_key_outside_any_popup_does_start_a_second_read_in_the_same_harness` (914) expects 2 tracker and 2 department reads. I checked `RefreshWait::receive` (monitor_ops.rs:202-212): after a success a refresh reads at once, so the control can fail and the oracle is not blind. |
+| FND-005 | fixed | The tests now carry the FR-065 literals as `RELATION` and `PURPOSE` (monitor_department.rs:1316-1319) with the comment "written out so a reworded constant fails". |
+| FND-006 | fixed | The saved test (monitor_main.rs:692) uses the real reader and asserts `app.department.revision` stays 1, with an `r`-only control reaching revision 2; the comment states the adapters are unreachable from the loop. The misleading counter is gone. |
+| FND-007 | fixed | The reachability test (monitor_nav.rs:568) asserts the exact last line `✓ F1, ?  open or close this help`, shows an 80x12 first frame cuts it, that PageDown reaches it, and that a resize gives `Help { scroll: 0 }`; it also asserts no `FR-`, `requirement`, `owner` or `Views:` text. |
+| FND-008 | fixed | `enum EvidenceSeverity { Failure, RateLimit, Stale, Fact }` with `Ord` (monitor_ui.rs:331) and an exhaustive colour match (523-525); no catch-all arm remains. |
+| FND-009 | fixed | The duplicate `flat` is removed (`use crate::monitor_ui::tests::flat;` at monitor_department.rs:785, monitor_main.rs:584 and monitor_nav.rs:321 import the shared helpers); `monitor_nav` and `monitor_main` use `screen` and `frame_text`. Remaining `screen`/`draw` copies in monitor_department, monitor_scope_tests and monitor_scale_tests predate the PR; I judged them outside this finding. |
+| FND-010 | fixed | No `/// Trace: FR-065` line and no FR-065 comment remains under crates/relay-tui/src (grep); only `#[trace]` attributes. The root's matrix stderr reports zero FR-065 warnings, as supplied; legacy warnings are outside this assessment. |
+| FND-011 | fixed | docs/department-monitor.md now has a five-row state table (lines 35-43) and a saved-report "Fields absent" sentence (64). Docs-style issues in the page are new FND-014. |
+| FND-012 | fixed | `startup(args, retro_config_supplied, read_report, bind)` (monitor_main.rs:375) wraps `prepare_app` plus the input mapping; `run` calls it (143) and the fixtures call it (702, 771); `startup_maps_the_options_to_how_the_department_report_is_supplied` (933) checks the mapping. The one argument `department_config.is_some()` in `run` is still not executed by a test; I accept that as trivial. |
+
+## New findings (disposition pass 1)
+
+Next unused ids FND-013 and FND-014. Both are low and are to be fixed in this PR.
+
+| ID | Severity | Summary | Refs |
+|---|---|---|---|
+| FND-013 | low | The Status row for no retro configuration says to start with `--retro-config <file>` without `--team`, so in lead-only startup it gives the unactionable instruction that FND-002 removed from Health and Retro | crates/relay-tui/src/monitor_department.rs:439 |
+| FND-014 | low | docs/department-monitor.md has docs-style defects: a negation-list sentence that restates the table (line 46), two contrast-framed sentences (74 and 93), a table cell that promises `--team` for every start (39) | docs/department-monitor.md:46 |
+
+### FND-013 (low) The Status Not configured row omits `--team`
+
+Rule: code-review: one fact in one place, and the same instruction must be actionable wherever it is shown. `status_rows` (monitor_department.rs:437-441) says `Start with --retro-config <file> to read capacity and lane activity. Nothing is being collected; ...` for `DepartmentInput::NotConfigured`. In a lead-only start `app.team` and `app.projects` are empty, and `load_config` compares the configuration's team and projects with `--team` and `--project` only (the fact `not_configured_instruction` documents at 628-629 and the new `load_config` test proves). So a user who follows the Status row alone supplies a configuration that is refused, which is the FND-002 defect on the view the dashboard opens in. Confidence medium: the lead-only case is the one affected and I did not run it. Fix: build the Status detail from `not_configured_instruction(app)` (or the same two branches), keep "Nothing is being collected", and add a lead-only assertion to the Status fixture.
+
+### FND-014 (low) docs/department-monitor.md style defects
+
+Checked against the docs-style catalog (`/Users/peter/.codex/plugins/cache/agent-ix/dev-tools/0.3.2/skills/docs-style/rules/catalog.yaml`), now available. Line 46, `Not configured, waiting and fields absent are plain states. They show no failed-source row, no zero or green value, and they start no collection.`, is a negation list (rule negation-lists) that restates the table above it. Line 74, `An open popup receives every key. Pressing `q` then does not quit, and the view underneath stays as it was.`, and line 93, `Status, Health and Retro name the department selection instead: the explicit team and projects, the saved report's scope, or the team derived from the lead's workspace across all its projects.`, use the contrast-framing pattern (rule contrast-framing, error severity); line 93 is also over 30 words (sentence-too-long). Line 39 says the Not configured message names "the `--team` and `--retro-config <file>` to start with", but only the lead-derived message names `--team` (monitor_department.rs:632-636 omits it for an explicit selection), so the cell is inaccurate for explicit starts. I did not run the docs-style tool; this is a reading of the rules. Fix: state what the states show in positive terms in one sentence, or drop line 46 in favour of the table; rewrite lines 74 and 93 without the contrast; correct the line 39 cell.
+
+## Current verdict (after disposition pass 1)
+
+**CONDITIONAL** - all 12 initial findings are fixed on the source as read, and 2 new low findings (FND-013, FND-014) are open, so the artifact stays CONDITIONAL until they are fixed. No high finding. This is a reading of source; the pass does not establish that the fix compiles or that the tests pass. Pending root checks: the final clippy exit status (the log shows `Finished` and no diagnostics but no exit code), the TUI test run (the earlier wrapper was cancelled with exit 143 before compilation; it is not a failure), and the aggregate. A spec delta in FR-065 is reviewed in SR-124.

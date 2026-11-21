@@ -36,14 +36,14 @@ Health and Retro each show one message when they have no values:
 
 | State | What you see |
 |---|---|
-| No configuration | "Not configured", with the `--team` and `--retro-config <file>` to start with |
+| No configuration | "Not configured", naming `--retro-config <file>` and, for a lead-only start, `--team` |
 | Configuration read pending | "Waiting for the first read of the retro configuration" |
 | Read succeeded without the fields | "Fields absent", naming the view's fields |
 | Read failed, nothing retained | "unavailable" with the classified reason, plus a failed-source row |
 | Read failed, report retained | The retained values with a last-snapshot label |
 
 Retro's not-configured message also says that previous and baseline comparisons need a retained snapshot history.
-Not configured, waiting and fields absent are plain states. They show no failed-source row, no zero or green value, and they start no collection.
+The first three states are plain messages in the work area, and the dashboard collects nothing until a configuration is supplied.
 Status shows the same reason on its "Capacity / lane activity" row.
 
 ## Open a saved report
@@ -52,7 +52,7 @@ Status shows the same reason on its "Capacity / lane activity" row.
 team-leader-dashboard --report <saved-report.json>
 ```
 
-Accepted formats are an ix-board retro snapshot JSON, a snapshots JSONL history, or a retro delta JSON.
+Accepted formats are an ix-board retro snapshot JSON, a snapshots JSON Lines (JSONL) history, or a retro delta JSON.
 The selected snapshot must contain a supported department envelope.
 History uses the shared previous and baseline selection rules.
 One snapshot has unavailable previous and baseline comparisons.
@@ -69,9 +69,10 @@ Every view shows the same header: the monitored lead, then a `View` selector wit
 Press `v` to open the View dropdown and see all six views: Tickets, Agents, Scope, Status, Health and Retro.
 Use Up, Down, `j` or `k` to move the highlight and Enter to select.
 Escape or `v` closes the dropdown without changing anything.
-Press F1 or `?` for help. It lists every key with its action, marks the keys that work in the current view, and names the views for keys that do not work everywhere.
+Press F1 or `?` for help. It lists every key with its action and marks the keys that work in the current view.
+Keys that work in only some views name those views.
 Scroll help with Up, Down, PageUp and PageDown. F1, `?` or Escape closes it.
-An open popup receives every key. Pressing `q` then does not quit, and the view underneath stays as it was.
+An open popup receives every key. The view underneath keeps its state until the popup closes.
 Source refreshes continue while a popup is open.
 
 The footer shows `v View`, `F1 Help` and, when the width allows, `q Quit`.
@@ -90,7 +91,9 @@ Press `r` to refresh and `q` or Escape to quit when no popup is open.
 
 Tickets and Scope describe the lead's reported focus, or say that no lead is bound.
 Agents lists every reported assignment and is not limited by scope.
-Status, Health and Retro name the department selection instead: the explicit team and projects, the saved report's scope, or the team derived from the lead's workspace across all its projects.
+Status, Health and Retro name the department selection.
+The selection is the explicit team and projects, the saved report's scope, or the team derived from the lead's workspace.
+A derived team covers all of its projects.
 The department selection is chosen independently of the lead's reported focus; see Scope (`p`).
 Status also shows a short purpose line.
 

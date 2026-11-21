@@ -92,3 +92,25 @@ AC-12 requires existing fixtures to differ only by the Permitted presentation di
 ## Verdict after disposition pass 1
 
 Not run. Dispositions are reserved for this same session after the fix round.
+
+## Dispositions (round 1, all 7)
+
+Disposition pass 1 at frozen fix 7584112, judged from the current tests and source, not from the author notes, against the current FR-065 (all 13 AC ids unchanged by the developer-directed copy delta). I ran no command and claim no test green; each outcome is conditional on the root's pending test run.
+
+| FND | Outcome | Reason |
+|---|---|---|
+| FND-001 | fixed | `APPLIES` (monitor_nav.rs:508-520) writes the Help table's views as a literal 11-by-6 grid. `help_marks_exactly_the_keys_that_apply_in_each_view` (524) compares `applicable_keys(view)` with it for all six views, which makes 66 cells including the row-selection row, and checks each drawn row's mark. `help_rows_state_views_only_where_a_key_does_not_apply_everywhere` (548) asserts the eleven row texts. |
+| FND-002 | fixed | `rate_limit_replaced_session_stale_source_and_active_filter_fit_at_80x24` (monitor_scope_tests.rs:1045) holds a rate limit, a replaced session, a stale source and a real active filter at 80x24 with `Tracker stale` asserted; `department_overflow_keeps_labels_marker_count_and_full_text_through_e_then_d` (monitor_department.rs:1274) drives department overflow, `e` then `d` and the small sizes. The AC text lists all five conditions at once, and four evidence rows cannot hold five labels plus the footer, so two fixtures is the reasonable reading; I accept the split. |
+| FND-003 | fixed | `identity_row_is_the_same_in_all_six_views` (monitor_ui.rs:1859) now covers verified, replaced, ambiguous, explicit scope with no lead and saved-report startup at 80x24 and 120x40 with exact prefixes. |
+| FND-004 | fixed | FR-065 now owns the fifth state as **Fields absent** (spec lines 248-252) with AC-9 and AC-10 wording; `empty_message` has distinct saved and configured texts and the AC-9 test covers all six states plus the lead-derived case. The new spec text is reviewed in SR-124. |
+| FND-005 | fixed | The AC-1 test (monitor_nav.rs:339) asserts `team`, `projects`, `show_completed` and `department_input` are preserved and selects Retro and Health from `App::default()`, which shows "Not configured". |
+| FND-006 | fixed | `the_purpose_line_leaves_every_other_status_row_as_it_was` (monitor_department.rs:1408) asserts the eight other rows as literals. |
+| FND-007 | fixed | FR-065 Permitted item 4 now allows warning-palette stale and rate-limit rows and AC-12 says "pinned by test"; `rate_limit_and_stale_rows_use_the_existing_warning_palette` (monitor_ui.rs:2093) pins WARNING for them and the error colour for Herdr failed. |
+
+## New findings (disposition pass 1)
+
+None. The Fields absent state, its spec text and tests were checked against each other in the dispositions of FND-004 and in SR-124; the one defect found in the spec copy is recorded there.
+
+## Current verdict (after disposition pass 1)
+
+**PASS** for the 7 gap findings: all fixed on the source as read, no new gap. The coverage reading remains conditional on the root's pending results: the TUI tests have not executed (the earlier wrapper was cancelled with exit 143 before compilation, which is not a failure), and the root's code-fix1 matrix reports FR-065 AC-1 to AC-12 tagged, AC-13 Inspection and zero FR-065 warnings, as supplied and not recomputed by me. I claim no run of my own.

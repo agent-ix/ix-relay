@@ -121,11 +121,13 @@ Escape quitting when no popup is open, is retained.
   without changing any view state.
 - While help is open, Up, Down, PageUp and PageDown SHALL scroll it; every line is
   reachable at 80x24.
-- Help SHALL list each key below with its action, as one row per entry, and SHALL
-  state the views only for entries that apply in some views and not all. The
-  operator-facing Help SHALL NOT show requirement identifiers, owner names or
-  requirement text. The Owner column is traceability for this specification only.
-  Help SHALL NOT mark a key as applicable in a view where it has no visible effect.
+- The owner references in the table's `Action (owner)` column are traceability for
+  this specification only.
+- Help SHALL list each key in the table below with its action.
+- Help SHALL show one row per entry.
+- Help SHALL name the views only for entries that apply in some views and not all.
+- Help SHALL NOT show requirement identifiers, owner names or requirement text.
+- Help SHALL NOT mark a key as applicable in a view where it has no visible effect.
 
   | Keys | Action (owner) | Views |
   |---|---|---|

@@ -427,27 +427,31 @@ fn status_rows(app: &App) -> Vec<DisplayRow> {
         }
     } else {
         // Say why there is no report; wait only for a collection that was configured.
-        let (value, detail) = if app.department.error.is_some() {
+        let (value, detail): (&str, String) = if app.department.error.is_some() {
             (
                 "Department read failed; see the evidence row",
-                "No retained report exists; capacity and liveness are not inferred.",
+                "No retained report exists; capacity and liveness are not inferred.".into(),
             )
         } else {
             match app.department_input {
                 DepartmentInput::NotConfigured => (
                     "No retro configuration supplied",
-                    "Start with --retro-config <file> to read capacity and lane activity. \
-                     Nothing is being collected; capacity and liveness are not inferred.",
+                    format!(
+                        "{} Nothing is being collected; capacity and liveness are not inferred.",
+                        not_configured_instruction(app)
+                    ),
                 ),
                 DepartmentInput::Configured => (
                     "Waiting for the first read",
                     "Awaiting the first read of the retro configuration; capacity and \
-                     liveness are not inferred.",
+                     liveness are not inferred."
+                        .into(),
                 ),
                 DepartmentInput::Saved => (
                     "No department report in the saved input",
                     "Open a saved report that contains a department section; capacity \
-                     and liveness are not inferred.",
+                     and liveness are not inferred."
+                        .into(),
                 ),
             }
         };
@@ -455,7 +459,7 @@ fn status_rows(app: &App) -> Vec<DisplayRow> {
             "Capacity / lane activity",
             "unavailable",
             value.into(),
-            detail.into(),
+            detail,
         ));
     }
     rows
@@ -1502,7 +1506,38 @@ pub(crate) mod tests {
             .find(|row| row.name == "Capacity / lane activity")
             .unwrap()
             .detail;
+        // No selectors and no lead: the instruction cannot name a derived team.
         assert!(detail.contains("--retro-config <file>"), "{detail}");
+        // Lead-only start: the Status guidance names --team so startup accepts the file.
+        let derived = App {
+            department_input: DepartmentInput::NotConfigured,
+            ..crate::monitor_ui::tests::app()
+        };
+        let detail = status_rows(&derived)
+            .into_iter()
+            .find(|row| row.name == "Capacity / lane activity")
+            .unwrap()
+            .detail;
+        assert!(
+            detail.starts_with("Start with --team SWM and --retro-config <file>."),
+            "{detail}"
+        );
+        assert!(detail.contains("department team must be SWM with no projects"));
+        assert!(detail.contains("Nothing is being collected"), "{detail}");
+        // An explicit selection keeps the explicit-selection guidance.
+        let explicit = App {
+            team: Some("SWM".into()),
+            ..App::default()
+        };
+        let detail = status_rows(&explicit)
+            .into_iter()
+            .find(|row| row.name == "Capacity / lane activity")
+            .unwrap()
+            .detail;
+        assert!(
+            detail.contains("matches the selection shown above (team SWM)"),
+            "{detail}"
+        );
         let (text, failures) = text_for(DepartmentInput::Configured, None);
         assert!(text.contains("Waiting for the first read"), "{text}");
         assert_eq!(failures, 0);
