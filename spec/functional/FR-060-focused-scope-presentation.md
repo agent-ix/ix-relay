@@ -203,3 +203,7 @@ Focus is never inferred from open tickets, assignments or activity.
 - Out of scope: shared planner publication and follower adoption, new metrics or
   readiness arithmetic, a second model or renderer, credential or token access,
   dependency changes in this change, and trace repairs for existing requirements.
+- Named focuses: for a session in named mode only, the Scope view follows
+  [FR-064](./FR-064-named-focus-dashboard-reader.md), which states exactly which
+  statements of this requirement it takes precedence over. Without a named record
+  this requirement applies unchanged.
