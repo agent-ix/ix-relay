@@ -457,7 +457,7 @@ impl Relay {
         let reply = self.focus_script(
             &scripts::plain(scripts::LIST),
             &[self.keys.focus_index_key()],
-            &[self.keys.focus_stem().into_bytes()],
+            &[self.keys.focus_stem_arg()],
         )?;
         match status(&reply) {
             "ok" => {}
@@ -558,7 +558,7 @@ impl Relay {
                 number(MAX_DEFINITIONS as u64),
                 now_ms.to_string().into_bytes(),
                 ARCHIVE_RETENTION_MS.to_string().into_bytes(),
-                self.keys.focus_stem().into_bytes(),
+                self.keys.focus_stem_arg(),
             ];
             args.extend(candidates.iter().map(|c| c.to_string().into_bytes()));
             let keys = [
@@ -1185,6 +1185,13 @@ impl Relay {
             let Ok(parsed) = incarnation.parse::<Incarnation>() else {
                 continue;
             };
+            // A value this build cannot read is an unknown pin: kept, whatever its field says.
+            let Ok(value) = serde_json::from_slice::<PinValue>(raw) else {
+                continue;
+            };
+            if value.incarnation != incarnation {
+                continue;
+            }
             if evidence
                 .state_of(&parsed.machine, &parsed.session, None)
                 .is_gone()

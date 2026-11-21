@@ -63,6 +63,11 @@ impl Keys {
         format!("{}focus:def:", self.prefix)
     }
 
+    /// [`Keys::focus_stem`] as a script argument.
+    pub(super) fn focus_stem_arg(&self) -> Vec<u8> {
+        self.focus_stem().into_bytes()
+    }
+
     /// The index of definitions by focus ID, archived ones included.
     pub(super) fn focus_index_key(&self) -> String {
         format!("{}focus:index", self.prefix)
@@ -225,6 +230,10 @@ mod tests {
         vec![
             ("focus_key", relay.focus_key(&focus)),
             ("focus_stem", relay.focus_stem()),
+            (
+                "focus_stem_arg",
+                String::from_utf8(relay.focus_stem_arg()).unwrap(),
+            ),
             ("focus_index_key", relay.focus_index_key()),
             ("focus_names_key", relay.focus_names_key()),
             (
@@ -279,6 +288,7 @@ mod tests {
                 "p:focus:def:foc-00000000000000000000000000000001",
             ),
             ("focus_stem", "p:focus:def:"),
+            ("focus_stem_arg", "p:focus:def:"),
             ("focus_index_key", "p:focus:index"),
             ("focus_names_key", "p:focus:names"),
             ("directory_committed_key", "p:directory-committed:node-a"),
@@ -348,6 +358,7 @@ mod tests {
         let moved = [
             other.focus_key(&focus),
             other.focus_stem(),
+            String::from_utf8(other.focus_stem_arg()).unwrap(),
             other.focus_index_key(),
             other.focus_names_key(),
             other.directory_committed_key(&machine),

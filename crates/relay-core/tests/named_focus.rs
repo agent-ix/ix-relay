@@ -771,6 +771,9 @@ fn a_write_by_the_former_owner_after_a_transfer_is_refused_inside_the_atomic_ope
         bus.relay.focus_commit(&transfer_plan).unwrap(),
         Committed::Applied
     );
+    // A target whose process was measured keeps that fact.
+    let stored = bus.relay.focus_get(&check(), &id).unwrap().summary.owner;
+    assert_eq!(stored.binding.process_id, Some(12));
     let after = dump(&mut bus);
 
     for stale in [&*update_plan, &archive_plan] {
@@ -842,7 +845,15 @@ fn a_transfer_moves_ownership_and_a_stale_epoch_or_a_missing_target_changes_noth
         return;
     };
     let owner = binding("sess-a", 11, T0);
-    let successor = binding("sess-b", 12, T0);
+    // A transfer target from the registry has no measured process yet (FR-061: it is known
+    // when the target next writes), so the binding says so.
+    let successor = OwnerBinding::new(
+        &machine("terra"),
+        &session("sess-b"),
+        None,
+        "terra:QSL:sess-b",
+        T0,
+    );
     let id = create(&mut bus, "Handed", &owner, T0).meta.focus_id;
     let target = Resolved::by_id(id.clone());
 
