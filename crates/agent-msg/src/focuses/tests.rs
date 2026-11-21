@@ -50,6 +50,7 @@ struct ManualClock {
     epoch: Arc<AtomicI64>,
     base: Instant,
     elapsed: Arc<Mutex<Duration>>,
+    step: Arc<Mutex<Duration>>,
 }
 
 impl ManualClock {
@@ -58,7 +59,14 @@ impl ManualClock {
             epoch: Arc::new(AtomicI64::new(epoch)),
             base: Instant::now(),
             elapsed: Arc::new(Mutex::new(Duration::ZERO)),
+            step: Arc::new(Mutex::new(Duration::ZERO)),
         }
+    }
+
+    /// Makes every reading of the monotonic time cost `step`, so work that checks the
+    /// deadline as it goes (the resolution scans) sees time pass without any waiting.
+    fn each_reading_costs(&self, step: Duration) {
+        *self.step.lock().unwrap() = step;
     }
 
     fn epoch(&self) -> i64 {
@@ -84,7 +92,11 @@ impl Clock for ManualClock {
     }
 
     fn monotonic_now(&self) -> Instant {
-        self.base + self.elapsed()
+        let step = *self.step.lock().unwrap();
+        let mut elapsed = self.elapsed.lock().unwrap();
+        let now = self.base + *elapsed;
+        *elapsed += step;
+        now
     }
 }
 
@@ -150,18 +162,6 @@ impl WorkspaceSource for FakeSource {
                     deadline: deadline.limit(),
                 })
             }
-        }
-    }
-}
-
-/// A snapshot that is handed out as it is, whatever its age.
-struct Fixed(Result<WorkspaceSnapshot, fn() -> Error>);
-
-impl SnapshotSource for Fixed {
-    fn snapshot(&mut self, _policy: &ix_board::ReadPolicy) -> Result<WorkspaceSnapshot, Error> {
-        match &self.0 {
-            Ok(snapshot) => Ok(snapshot.clone()),
-            Err(make) => Err(make()),
         }
     }
 }
@@ -313,19 +313,27 @@ struct Harness {
 
 impl Harness {
     fn new(case: &str) -> Option<Self> {
+        Self::with_workspace(case, workspace())
+    }
+
+    fn with_workspace(case: &str, snapshot: WorkspaceSnapshot) -> Option<Self> {
         let bus = Bus::connect(case)?;
         let dir = tempfile::tempdir().unwrap();
         let clock = ManualClock::new(START);
         let source = FakeSource {
-            snapshot: workspace(),
+            snapshot,
             clock: clock.clone(),
             behavior: Arc::new(Mutex::new(Behavior::Succeed)),
             reads: Arc::new(AtomicUsize::new(0)),
             timeouts: Arc::new(Mutex::new(Vec::new())),
         };
         let service = ServiceSnapshots(
-            ReadService::with_clock(source.clone(), &dir.path().join("cache.sqlite3"), clock.clone())
-                .unwrap(),
+            ReadService::with_clock(
+                source.clone(),
+                &dir.path().join("cache.sqlite3"),
+                clock.clone(),
+            )
+            .unwrap(),
         );
         Some(Self {
             bus,
@@ -472,22 +480,39 @@ fn create_resolves_names_to_canonical_ids_and_show_reproduces_the_file_shape() {
     assert_eq!(def["team"], "SWM");
     assert_eq!(def["description"], "the plan");
     assert_eq!(def["include"]["initiatives"][0]["ref"], "i-1");
-    assert_eq!(def["include"]["initiatives"][0]["label"], "Completion");
+    assert_eq!(
+        def["include"]["initiatives"][0]["label"], "i-1",
+        "the label is the canonical ID"
+    );
     assert_eq!(def["include"]["projects"][0]["ref"], "p-gamma");
     assert_eq!(def["include"]["milestones"][0]["ref"], "m-beta");
     assert_eq!(def["include"]["milestones"][0]["project"], "p-alpha");
     assert_eq!(def["include"]["tickets"][0]["ref"], "t-2");
     assert_eq!(def["exclude"]["tickets"][0]["ref"], "t-1");
     assert_eq!(shown["empty_selection"], false);
-    assert_eq!(shown["owner"]["state"], "absent", "no live registration of the owner");
+    assert_eq!(
+        shown["owner"]["state"], "absent",
+        "no live registration of the owner"
+    );
 
     // The printed definition is itself a valid update file, and updating with it changes nothing.
     let saved = h.file("saved.json", def);
     let before = h.focus_keys();
     let same = h
-        .run(&["--json", "update", &id, "--file", &saved, "--expected-revision", "1"])
+        .run(&[
+            "--json",
+            "update",
+            &id,
+            "--file",
+            &saved,
+            "--expected-revision",
+            "1",
+        ])
         .out();
-    assert_eq!(same, json!({"focus_id": id, "revision": 1, "changed": false}));
+    assert_eq!(
+        same,
+        json!({"focus_id": id, "revision": 1, "changed": false})
+    );
     assert_eq!(h.focus_keys(), before);
 }
 
@@ -502,11 +527,29 @@ fn the_plain_text_forms_print_the_same_facts() {
     assert_eq!(made.status, 0, "{}", made.stderr);
     assert!(made.stdout.starts_with("created foc-"), "{}", made.stdout);
     let shown = h.run(&["show", "Plan"]);
-    assert!(shown.stdout.contains("revision 1 of 1 (active)"), "{}", shown.stdout);
-    assert!(shown.stdout.contains("owner: terra/sess-a epoch 1 (absent)"), "{}", shown.stdout);
-    assert!(shown.stdout.contains("include milestone m-beta in p-alpha (Beta)"));
+    assert!(
+        shown.stdout.contains("revision 1 of 1 (active)"),
+        "{}",
+        shown.stdout
+    );
+    assert!(
+        shown
+            .stdout
+            .contains("owner: terra/sess-a epoch 1 (absent)"),
+        "{}",
+        shown.stdout
+    );
+    assert!(
+        shown
+            .stdout
+            .contains("include milestone m-beta in p-alpha (m-beta)")
+    );
     let listed = h.run(&["list"]);
-    assert!(listed.stdout.contains("\"Plan\" r1 active owner terra/sess-a epoch 1"));
+    assert!(
+        listed
+            .stdout
+            .contains("\"Plan\" r1 active owner terra/sess-a epoch 1")
+    );
 }
 
 // --- AC-2: unresolved references --------------------------------------------------------------
@@ -519,13 +562,21 @@ fn references_that_do_not_resolve_are_refused_naming_the_reference_and_write_not
     };
     let cases = [
         ("an ambiguous name", json!({"projects": ["Twin"]}), "Twin"),
-        ("a zero-match reference", json!({"projects": ["Nowhere"]}), "Nowhere"),
+        (
+            "a zero-match reference",
+            json!({"projects": ["Nowhere"]}),
+            "Nowhere",
+        ),
         (
             "a milestone of another project",
             json!({"milestones": [{"ref": "Beta", "project": "Gamma"}]}),
             "Beta",
         ),
-        ("a ticket of another team", json!({"tickets": ["OTH-1"]}), "OTH-1"),
+        (
+            "a ticket of another team",
+            json!({"tickets": ["OTH-1"]}),
+            "OTH-1",
+        ),
     ];
     for (what, include, reference) in cases {
         let file = h.file(
@@ -562,7 +613,11 @@ fn a_file_with_a_focus_reference_two_teams_or_an_unknown_member_is_invalid_and_r
     }
     let unreadable = h.run(&["--json", "create", "--file", "/nonexistent/definition.json"]);
     assert_eq!(unreadable.code(), "invalid_argument");
-    assert_eq!(h.source.reads(), 0, "nothing was read before the file was accepted");
+    assert_eq!(
+        h.source.reads(),
+        0,
+        "nothing was read before the file was accepted"
+    );
     assert!(h.keys().is_empty());
 }
 
@@ -584,7 +639,10 @@ fn an_empty_inclusion_list_creates_and_is_never_described_as_the_whole_team() {
     let text = h.run(&["show", id]);
     assert!(text.stdout.contains("selects nothing"), "{}", text.stdout);
     let lowered = text.stdout.to_lowercase();
-    assert!(!lowered.contains("whole") && !lowered.contains("all team"), "{lowered}");
+    assert!(
+        !lowered.contains("whole") && !lowered.contains("all team"),
+        "{lowered}"
+    );
 }
 
 // --- AC-19: the snapshot's age and state ------------------------------------------------------
@@ -605,12 +663,24 @@ fn a_snapshot_four_minutes_old_resolves_without_a_refresh() {
     let second = h.file("b.json", &definition("B"));
     let made = h.run(&["--json", "create", "--file", &second]).out();
     assert_eq!(made["revision"], 1);
-    assert_eq!(h.source.reads(), 1, "no refresh: the cached snapshot was used");
+    assert_eq!(
+        h.source.reads(),
+        1,
+        "no refresh: the cached snapshot was used"
+    );
 
     let id = made["focus_id"].as_str().unwrap().to_owned();
     let update = h.file("c.json", &definition("B2"));
     let updated = h
-        .run(&["--json", "update", &id, "--file", &update, "--expected-revision", "1"])
+        .run(&[
+            "--json",
+            "update",
+            &id,
+            "--file",
+            &update,
+            "--expected-revision",
+            "1",
+        ])
         .out();
     assert_eq!(updated["revision"], 2);
     assert_eq!(h.source.reads(), 1);
@@ -634,7 +704,11 @@ fn a_missing_stale_partial_or_failed_snapshot_is_source_unavailable_and_writes_n
         let error = out.error();
         assert_eq!(error["code"], "source_unavailable", "{reason}");
         assert_eq!(error["reason"], reason);
-        assert_eq!(h.keys(), BTreeMap::new(), "{reason}: the store is untouched");
+        assert_eq!(
+            h.keys(),
+            BTreeMap::new(),
+            "{reason}: the store is untouched"
+        );
     }
 
     // Older than five minutes in the cache: it is refreshed, and a failing refresh never falls
@@ -649,33 +723,95 @@ fn a_missing_stale_partial_or_failed_snapshot_is_source_unavailable_and_writes_n
     assert_eq!(out.error()["reason"], "failed");
     assert_eq!(h.keys(), before);
 
-    // A snapshot that reaches the command older than five minutes is stale.
-    let mut old = workspace();
-    old.fetched_at = START - 301;
-    let mut stale = Fixed(Ok(old));
-    let out = execute(
-        &mut h.bus,
-        &h.caller,
-        &mut stale,
-        START * 1_000,
-        &["--json", "create", "--file", &again],
-    );
+    // With the source healthy again the stale entry is refreshed under the same call.
+    let reads = h.source.reads();
+    h.source.behave(Behavior::Succeed);
+    h.run(&["--json", "create", "--file", &again]).out();
+    assert_eq!(h.source.reads(), reads + 1, "exactly one refresh");
+}
+
+#[test]
+#[trace("FR-061-AC-19", "FR-061-AC-20")]
+fn expensive_name_resolution_on_a_cache_hit_times_out_under_the_one_deadline() {
+    let Some(mut h) = Harness::with_workspace("cli-expensive-resolution", crowded_workspace())
+    else {
+        return;
+    };
+    // Warm the shared cache with a light selection; resolution then needs no source read.
+    let warm = h.file("warm.json", &light("Warm"));
+    h.run(&["--json", "create", "--file", &warm]).out();
+    assert_eq!(h.source.reads(), 1);
+
+    // Same cache entry, same policy, same clock for every run below: each reading of the
+    // monotonic time costs 50 ms. The cache lookup and decode take a handful of readings
+    // whatever the selection is, so a light selection finishes well inside 20 seconds.
+    // The costly selection (12 ticket names, each scanning ~110 issues, more than a thousand
+    // checks) can only exceed 20 seconds in the resolution scans themselves. The unbounded
+    // `canonicalize_named_selection` of the earlier integration never reads this clock and
+    // would let it resolve, so this fails if the integration regresses to it.
+    h.clock.each_reading_costs(Duration::from_millis(50));
+    let fast = h.file("fast.json", &light("Fast"));
+    h.run(&["--json", "create", "--file", &fast, "--read-timeout", "20"])
+        .out();
+    let before = h.keys();
+    let slow = h.file("slow.json", &costly("Slow"));
+    let out = h.run(&["--json", "create", "--file", &slow, "--read-timeout", "20"]);
     let error = out.error();
     assert_eq!(error["code"], "source_unavailable");
-    assert_eq!(error["reason"], "stale");
-    assert_eq!(h.keys(), before);
-
-    let mut four_minutes = workspace();
-    four_minutes.fetched_at = START - 240;
-    let mut fresh = Fixed(Ok(four_minutes));
-    let out = execute(
-        &mut h.bus,
-        &h.caller,
-        &mut fresh,
-        START * 1_000,
-        &["--json", "create", "--file", &again],
+    assert_eq!(error["reason"], "timeout");
+    assert_eq!(
+        h.source.reads(),
+        1,
+        "a cache hit: no source read, no second read"
     );
-    out.out();
+    assert_eq!(
+        h.keys(),
+        before,
+        "no definition, name, index or pin was written"
+    );
+
+    // Control: the same costly input, cache and per-reading cost resolve under a generous
+    // deadline, so the refusal above was the resolution running out of budget.
+    let made = h
+        .run(&["--json", "create", "--file", &slow, "--read-timeout", "600"])
+        .out();
+    assert_eq!(made["revision"], 1);
+    assert_eq!(h.source.reads(), 1, "still the one warm read");
+}
+
+/// The standard workspace plus 100 filler tickets and 12 `WANT-n` tickets after them, so a
+/// ticket lookup scans every issue before it matches.
+fn crowded_workspace() -> WorkspaceSnapshot {
+    let mut value = serde_json::to_value(workspace()).unwrap();
+    let issues = value["issues"].as_array_mut().unwrap();
+    for n in 0..100 {
+        issues.push(issue(
+            &format!("t-fill-{n}"),
+            &format!("FILL-{n}"),
+            "SWM",
+            Some("p-alpha"),
+        ));
+    }
+    for n in 0..12 {
+        issues.push(issue(
+            &format!("t-want-{n}"),
+            &format!("WANT-{n}"),
+            "SWM",
+            Some("p-gamma"),
+        ));
+    }
+    serde_json::from_value(value).unwrap()
+}
+
+/// One project reference: little resolution work.
+fn light(name: &str) -> Value {
+    json!({"team": "SWM", "name": name, "include": {"projects": ["Gamma"]}})
+}
+
+/// Twelve ticket references by identifier: a full issue scan each.
+fn costly(name: &str) -> Value {
+    let tickets: Vec<String> = (0..12).map(|n| format!("WANT-{n}")).collect();
+    json!({"team": "SWM", "name": name, "include": {"tickets": tickets}})
 }
 
 // --- AC-20: the deadline -----------------------------------------------------------------------
@@ -699,12 +835,27 @@ fn a_source_that_never_completes_times_out_within_the_deadline_and_changes_nothi
         assert_eq!(error["reason"], "timeout", "{deadline}");
         // The time the read consumed never exceeds the deadline: each request is bounded by
         // the time that remains, and the single request is the only one made.
-        assert!(h.clock.elapsed() <= Duration::from_secs(deadline), "{deadline}");
+        assert!(
+            h.clock.elapsed() <= Duration::from_secs(deadline),
+            "{deadline}"
+        );
         let timeouts = h.source.timeouts.lock().unwrap().clone();
-        assert_eq!(timeouts, [Duration::from_secs(deadline.min(30))], "{deadline}");
+        assert_eq!(
+            timeouts,
+            [Duration::from_secs(deadline.min(30))],
+            "{deadline}"
+        );
         assert_eq!(h.source.reads(), 1, "no retry and no background read");
-        assert_eq!(h.keys(), BTreeMap::new(), "{deadline}: the store is untouched");
-        assert_eq!(h.source.reads(), 1, "still one read after the command returned");
+        assert_eq!(
+            h.keys(),
+            BTreeMap::new(),
+            "{deadline}: the store is untouched"
+        );
+        assert_eq!(
+            h.source.reads(),
+            1,
+            "still one read after the command returned"
+        );
     }
 }
 
@@ -734,25 +885,58 @@ fn update_writes_the_next_revision_conflicts_on_a_stale_expectation_and_renames(
     let id = created(&mut h, "Plan");
     let renamed = h.file("renamed.json", &definition("Renamed"));
     let ok = h
-        .run(&["--json", "update", &id, "--file", &renamed, "--expected-revision", "1"])
+        .run(&[
+            "--json",
+            "update",
+            &id,
+            "--file",
+            &renamed,
+            "--expected-revision",
+            "1",
+        ])
         .out();
     assert_eq!(ok, json!({"focus_id": id, "revision": 2, "changed": true}));
 
-    let stale = h.run(&["--json", "update", &id, "--file", &renamed, "--expected-revision", "1"]);
+    let stale = h.run(&[
+        "--json",
+        "update",
+        &id,
+        "--file",
+        &renamed,
+        "--expected-revision",
+        "1",
+    ]);
     let error = stale.error();
     assert_eq!(error["code"], "revision_conflict");
     assert_eq!(error["current_revision"], 2);
     assert_eq!(error["focus_id"], id.as_str());
 
     // The old name is free and the new one resolves to the same ID.
-    assert_eq!(h.run(&["--json", "show", "Renamed"]).out()["focus_id"], id.as_str());
+    assert_eq!(
+        h.run(&["--json", "show", "Renamed"]).out()["focus_id"],
+        id.as_str()
+    );
     assert_eq!(h.run(&["--json", "show", "Plan"]).code(), "not_found");
     created(&mut h, "Plan");
-    let taken = h.run(&["--json", "update", "Plan", "--file", &renamed, "--expected-revision", "1"]);
+    let taken = h.run(&[
+        "--json",
+        "update",
+        "Plan",
+        "--file",
+        &renamed,
+        "--expected-revision",
+        "1",
+    ]);
     assert_eq!(taken.code(), "name_taken");
 
-    assert_eq!(h.run(&["--json", "show", &id, "--revision", "1"]).out()["revision"], 1);
-    assert_eq!(h.run(&["--json", "show", &id, "--revision", "9"]).code(), "not_found");
+    assert_eq!(
+        h.run(&["--json", "show", &id, "--revision", "1"]).out()["revision"],
+        1
+    );
+    assert_eq!(
+        h.run(&["--json", "show", &id, "--revision", "9"]).code(),
+        "not_found"
+    );
 }
 
 #[test]
@@ -765,19 +949,42 @@ fn a_different_session_cannot_write_and_the_error_names_the_owner() {
     let before = h.focus_keys();
     h.as_session("sess-b");
     let file = h.file("next.json", &definition("Next"));
-    let update = h.run(&["--json", "update", &id, "--file", &file, "--expected-revision", "1"]);
+    let update = h.run(&[
+        "--json",
+        "update",
+        &id,
+        "--file",
+        &file,
+        "--expected-revision",
+        "1",
+    ]);
     let error = update.error();
     assert_eq!(error["code"], "not_owner");
     assert_eq!(error["current_owner_id"], "terra/sess-a");
     assert_eq!(error["current_owner_epoch"], 1);
-    assert_eq!(h.run(&["--json", "archive", &id, "--expected-revision", "1"]).code(), "not_owner");
+    assert_eq!(
+        h.run(&["--json", "archive", &id, "--expected-revision", "1"])
+            .code(),
+        "not_owner"
+    );
     assert_eq!(h.focus_keys(), before);
 
     // Reads need no binding.
-    assert_eq!(h.run(&["--json", "show", &id]).out()["focus_id"], id.as_str());
+    assert_eq!(
+        h.run(&["--json", "show", &id]).out()["focus_id"],
+        id.as_str()
+    );
     // `--session` naming a different native session than the pane hosts is refused.
     h.as_session("sess-a");
-    let wrong = h.run(&["--json", "--session", "other", "archive", &id, "--expected-revision", "1"]);
+    let wrong = h.run(&[
+        "--json",
+        "--session",
+        "other",
+        "archive",
+        &id,
+        "--expected-revision",
+        "1",
+    ]);
     assert_eq!(wrong.code(), "invalid_argument");
     assert_eq!(h.focus_keys(), before);
 }
@@ -799,12 +1006,38 @@ fn claim_needs_a_gone_owner_and_force_needs_a_reason() {
 
     // `--force` and `--reason` come together.
     for args in [
-        ["--json", "claim", &id, "--expected-owner-epoch", "1", "--force"].as_slice(),
-        ["--json", "claim", &id, "--expected-owner-epoch", "1", "--reason", "why"].as_slice(),
+        [
+            "--json",
+            "claim",
+            &id,
+            "--expected-owner-epoch",
+            "1",
+            "--force",
+        ]
+        .as_slice(),
+        [
+            "--json",
+            "claim",
+            &id,
+            "--expected-owner-epoch",
+            "1",
+            "--reason",
+            "why",
+        ]
+        .as_slice(),
     ] {
         assert_eq!(h.run(args).status, 2);
     }
-    let stale = h.run(&["--json", "claim", &id, "--expected-owner-epoch", "5", "--force", "--reason", "x"]);
+    let stale = h.run(&[
+        "--json",
+        "claim",
+        &id,
+        "--expected-owner-epoch",
+        "5",
+        "--force",
+        "--reason",
+        "x",
+    ]);
     assert_eq!(stale.code(), "owner_epoch_conflict");
 
     let forced = h
@@ -828,7 +1061,9 @@ fn claim_needs_a_gone_owner_and_force_needs_a_reason() {
     // Now sess-b owns it; with sess-b absent, sess-a's registration is irrelevant to a claim by
     // a third session without force: the owner is gone.
     h.as_session("sess-c");
-    let claimed = h.run(&["--json", "claim", &id, "--expected-owner-epoch", "2"]).out();
+    let claimed = h
+        .run(&["--json", "claim", &id, "--expected-owner-epoch", "2"])
+        .out();
     assert_eq!(claimed["owner_epoch"], 3);
     assert_eq!(claimed["change"]["kind"], "claim");
 }
@@ -844,23 +1079,55 @@ fn transfer_goes_only_to_exactly_one_verified_live_session() {
 
     // Zero sessions; a partial address; a registered session without verified placement.
     for to in ["terra:QSL:nobody", "QSL:sess-b", "nonsense"] {
-        let out = h.run(&["--json", "transfer", &id, "--to", to, "--expected-owner-epoch", "1"]);
+        let out = h.run(&[
+            "--json",
+            "transfer",
+            &id,
+            "--to",
+            to,
+            "--expected-owner-epoch",
+            "1",
+        ]);
         assert_eq!(out.code(), "invalid_argument", "{to}");
     }
     let mut unplaced = live("sess-b");
     unplaced.place = None;
     h.bus.relay.register(&unplaced).unwrap();
-    let out = h.run(&["--json", "transfer", &id, "--to", "terra:QSL:sess-b", "--expected-owner-epoch", "1"]);
+    let out = h.run(&[
+        "--json",
+        "transfer",
+        &id,
+        "--to",
+        "terra:QSL:sess-b",
+        "--expected-owner-epoch",
+        "1",
+    ]);
     assert_eq!(out.code(), "invalid_argument");
     assert_eq!(h.focus_keys(), before, "nothing changed");
 
     h.bus.relay.register(&live("sess-b")).unwrap();
-    let stale = h.run(&["--json", "transfer", &id, "--to", "terra:QSL:sess-b", "--expected-owner-epoch", "4"]);
+    let stale = h.run(&[
+        "--json",
+        "transfer",
+        &id,
+        "--to",
+        "terra:QSL:sess-b",
+        "--expected-owner-epoch",
+        "4",
+    ]);
     assert_eq!(stale.code(), "owner_epoch_conflict");
     assert_eq!(h.focus_keys(), before);
 
     let moved = h
-        .run(&["--json", "transfer", &id, "--to", "terra:QSL:sess-b", "--expected-owner-epoch", "1"])
+        .run(&[
+            "--json",
+            "transfer",
+            &id,
+            "--to",
+            "terra:QSL:sess-b",
+            "--expected-owner-epoch",
+            "1",
+        ])
         .out();
     assert_eq!(moved["owner_id"], "terra/sess-b");
     assert_eq!(moved["owner_epoch"], 2);
@@ -868,10 +1135,26 @@ fn transfer_goes_only_to_exactly_one_verified_live_session() {
 
     // The old owner can no longer write; the new one can.
     let file = h.file("next.json", &definition("Next"));
-    let old = h.run(&["--json", "update", &id, "--file", &file, "--expected-revision", "1"]);
+    let old = h.run(&[
+        "--json",
+        "update",
+        &id,
+        "--file",
+        &file,
+        "--expected-revision",
+        "1",
+    ]);
     assert_eq!(old.code(), "not_owner");
     h.as_session("sess-b");
-    let new = h.run(&["--json", "update", &id, "--file", &file, "--expected-revision", "1"]);
+    let new = h.run(&[
+        "--json",
+        "update",
+        &id,
+        "--file",
+        &file,
+        "--expected-revision",
+        "1",
+    ]);
     assert_eq!(new.out()["revision"], 2);
 }
 
@@ -890,7 +1173,12 @@ fn a_transfer_to_an_address_held_by_several_live_sessions_changes_nothing() {
     }
     let registered = h.bus.relay.agents().unwrap();
     assert_eq!(registered.registrations.len(), 2);
-    assert!(registered.registrations.iter().all(|r| r.full_address().is_some()));
+    assert!(
+        registered
+            .registrations
+            .iter()
+            .all(|r| r.full_address().is_some())
+    );
     let before = h.keys();
     let out = h.run(&[
         "--json",
@@ -915,14 +1203,28 @@ fn an_archived_definition_is_readable_listed_on_request_and_releases_its_name() 
         return;
     };
     let id = created(&mut h, "Plan");
-    let archived = h.run(&["--json", "archive", &id, "--expected-revision", "1"]).out();
+    let archived = h
+        .run(&["--json", "archive", &id, "--expected-revision", "1"])
+        .out();
     assert_eq!(archived["state"], "archived");
     assert_eq!(archived["latest_revision"], 1);
 
     let file = h.file("next.json", &definition("Plan"));
-    let update = h.run(&["--json", "update", &id, "--file", &file, "--expected-revision", "1"]);
+    let update = h.run(&[
+        "--json",
+        "update",
+        &id,
+        "--file",
+        &file,
+        "--expected-revision",
+        "1",
+    ]);
     assert_eq!(update.code(), "archived");
-    assert_eq!(h.run(&["--json", "archive", &id, "--expected-revision", "1"]).code(), "archived");
+    assert_eq!(
+        h.run(&["--json", "archive", &id, "--expected-revision", "1"])
+            .code(),
+        "archived"
+    );
 
     assert_eq!(h.run(&["--json", "show", &id]).out()["state"], "archived");
     let hidden = h.run(&["--json", "list"]).out();
@@ -935,7 +1237,10 @@ fn an_archived_definition_is_readable_listed_on_request_and_releases_its_name() 
     assert_ne!(again, id, "the name is reusable");
     let listed = h.run(&["--json", "list", "--team", "swm"]).out();
     assert_eq!(listed["definitions"].as_array().unwrap().len(), 1);
-    assert_eq!(h.run(&["--json", "list", "--team", "OTH"]).out()["definitions"], json!([]));
+    assert_eq!(
+        h.run(&["--json", "list", "--team", "OTH"]).out()["definitions"],
+        json!([])
+    );
 }
 
 // --- AC-18: unavailable definitions are listed by ID ------------------------------------------
@@ -959,21 +1264,38 @@ fn an_unreadable_definition_is_listed_with_its_reason_and_refuses_writes() {
     let listed = h.run(&["--json", "list"]).out();
     let rows = listed["definitions"].as_array().unwrap();
     assert_eq!(rows.len(), 2);
-    assert!(rows.iter().any(|r| r["focus_id"] == good.as_str() && r["name"] == "Good"));
+    assert!(
+        rows.iter()
+            .any(|r| r["focus_id"] == good.as_str() && r["name"] == "Good")
+    );
     let unavailable = rows.iter().find(|r| r["focus_id"] == bad.as_str()).unwrap();
     assert_eq!(unavailable["available"], false);
     assert_eq!(unavailable["reason"], "undecodable");
     let text = h.run(&["list"]);
-    assert!(text.stdout.contains(&format!("{bad} unavailable_definition: undecodable")));
+    assert!(
+        text.stdout
+            .contains(&format!("{bad} unavailable_definition: undecodable"))
+    );
 
     let before = h.focus_keys();
     let file = h.file("next.json", &definition("Next"));
-    let write = h.run(&["--json", "update", &bad, "--file", &file, "--expected-revision", "1"]);
+    let write = h.run(&[
+        "--json",
+        "update",
+        &bad,
+        "--file",
+        &file,
+        "--expected-revision",
+        "1",
+    ]);
     let error = write.error();
     assert_eq!(error["code"], "unavailable_definition");
     assert_eq!(error["reason"], "undecodable");
     assert_eq!(h.focus_keys(), before, "never overwritten");
-    assert_eq!(h.run(&["--json", "show", &bad]).code(), "unavailable_definition");
+    assert_eq!(
+        h.run(&["--json", "show", &bad]).code(),
+        "unavailable_definition"
+    );
 }
 
 // --- AC-21: the output contract and what the commands leave alone ----------------------------
@@ -988,17 +1310,36 @@ fn the_commands_touch_no_inbox_no_registration_and_print_one_compact_line() {
     h.bus.relay.register(&live("sess-b")).unwrap();
     let outside = |h: &mut Harness| -> BTreeMap<String, Vec<u8>> {
         let own = h.bus.key("focus:");
-        h.keys().into_iter().filter(|(k, _)| !k.starts_with(&own)).collect()
+        h.keys()
+            .into_iter()
+            .filter(|(k, _)| !k.starts_with(&own))
+            .collect()
     };
     let before = outside(&mut h);
 
     let id = created(&mut h, "Plan");
     let file = h.file("next.json", &definition("Next"));
     let outputs = [
-        h.run(&["--json", "update", &id, "--file", &file, "--expected-revision", "1"]),
+        h.run(&[
+            "--json",
+            "update",
+            &id,
+            "--file",
+            &file,
+            "--expected-revision",
+            "1",
+        ]),
         h.run(&["--json", "show", &id]),
         h.run(&["--json", "list"]),
-        h.run(&["--json", "transfer", &id, "--to", "terra:QSL:sess-b", "--expected-owner-epoch", "1"]),
+        h.run(&[
+            "--json",
+            "transfer",
+            &id,
+            "--to",
+            "terra:QSL:sess-b",
+            "--expected-owner-epoch",
+            "1",
+        ]),
     ];
     for out in &outputs {
         out.out();
@@ -1008,7 +1349,11 @@ fn the_commands_touch_no_inbox_no_registration_and_print_one_compact_line() {
             out.stdout
         );
     }
-    assert_eq!(outside(&mut h), before, "no inbox, registration or other key changed");
+    assert_eq!(
+        outside(&mut h),
+        before,
+        "no inbox, registration or other key changed"
+    );
 }
 
 #[test]
@@ -1017,19 +1362,41 @@ fn every_failure_is_a_typed_object_with_a_code_from_the_stable_list() {
     use relay_core::named_focus::{SourceReason, UnavailableReason};
     let focus = "foc-00000000000000000000000000000001".parse().unwrap();
     let errors = [
-        FocusError::RevisionConflict { focus: focus_id(), latest: 3 },
-        FocusError::OwnerEpochConflict { focus: focus_id(), owner_id: "m/s".into(), epoch: 2 },
-        FocusError::NotOwner { focus: focus_id(), owner_id: "m/s".into(), epoch: 2, detail: "d".into() },
-        FocusError::NameTaken { team: "T".into(), name: "n".into(), holder: None },
+        FocusError::RevisionConflict {
+            focus: focus_id(),
+            latest: 3,
+        },
+        FocusError::OwnerEpochConflict {
+            focus: focus_id(),
+            owner_id: "m/s".into(),
+            epoch: 2,
+        },
+        FocusError::NotOwner {
+            focus: focus_id(),
+            owner_id: "m/s".into(),
+            epoch: 2,
+            detail: "d".into(),
+        },
+        FocusError::NameTaken {
+            team: "T".into(),
+            name: "n".into(),
+            holder: None,
+        },
         FocusError::Archived { focus: focus_id() },
         FocusError::limit("name bytes", 128),
-        FocusError::UnresolvedReference { reference: "r".into(), message: "m".into() },
+        FocusError::UnresolvedReference {
+            reference: "r".into(),
+            message: "m".into(),
+        },
         FocusError::SourceUnavailable {
             reason: SourceReason::Timeout,
             origin: "ix-board workspace snapshot".into(),
             message: "m".into(),
         },
-        FocusError::UnavailableDefinition { focus, reason: UnavailableReason::Undecodable },
+        FocusError::UnavailableDefinition {
+            focus,
+            reason: UnavailableReason::Undecodable,
+        },
         FocusError::NotFound { focus: "x".into() },
         FocusError::invalid("file", "bad"),
     ];
@@ -1052,7 +1419,10 @@ fn every_failure_is_a_typed_object_with_a_code_from_the_stable_list() {
         let mut line = Vec::new();
         output::failure(&mut line, true, error);
         let text = String::from_utf8(line).unwrap();
-        assert!(text.ends_with('\n') && text.matches('\n').count() == 1, "{text}");
+        assert!(
+            text.ends_with('\n') && text.matches('\n').count() == 1,
+            "{text}"
+        );
         let value: Value = serde_json::from_str(&text).unwrap();
         assert!(stable.contains(&value["code"].as_str().unwrap()), "{value}");
         assert!(value["message"].as_str().is_some_and(|m| !m.is_empty()));
@@ -1090,7 +1460,12 @@ fn the_file_parser_is_strict_and_bounded() {
         b"not json",
     ] {
         let error = file::parse_definition(bad).unwrap_err();
-        assert_eq!(error.code().as_str(), "invalid_argument", "{}", String::from_utf8_lossy(bad));
+        assert_eq!(
+            error.code().as_str(),
+            "invalid_argument",
+            "{}",
+            String::from_utf8_lossy(bad)
+        );
     }
 
     let many: Vec<String> = (0..129).map(|n| format!("p{n}")).collect();
@@ -1118,11 +1493,23 @@ fn the_singular_focus_and_work_commands_are_unchanged_and_focuses_is_separate() 
     ));
     assert!(matches!(
         parse(&["agent-msg", "focus", "--clear"]),
-        Ok(Cmd::Focus { focus: None, clear: true })
+        Ok(Cmd::Focus {
+            focus: None,
+            clear: true
+        })
     ));
-    assert!(matches!(parse(&["agent-msg", "work", "focus", "summary"]), Ok(Cmd::Work(_))));
-    assert!(matches!(parse(&["agent-msg", "work", "show"]), Ok(Cmd::Work(_))));
-    assert!(matches!(parse(&["agent-msg", "focuses", "list"]), Ok(Cmd::Focuses(_))));
+    assert!(matches!(
+        parse(&["agent-msg", "work", "focus", "summary"]),
+        Ok(Cmd::Work(_))
+    ));
+    assert!(matches!(
+        parse(&["agent-msg", "work", "show"]),
+        Ok(Cmd::Work(_))
+    ));
+    assert!(matches!(
+        parse(&["agent-msg", "focuses", "list"]),
+        Ok(Cmd::Focuses(_))
+    ));
     // The plural family does not accept the singular's free text, nor the reverse.
     assert!(parse(&["agent-msg", "focuses", "phase 2"]).is_err());
     assert!(parse(&["agent-msg", "focus", "list", "--json"]).is_err());

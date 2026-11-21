@@ -78,7 +78,9 @@ impl FromStr for FocusId {
         } else {
             Err(FocusError::invalid(
                 "focus",
-                format!("{text:?} is not a focus ID (`foc-` and 32 lowercase hexadecimal characters)"),
+                format!(
+                    "{text:?} is not a focus ID (`foc-` and 32 lowercase hexadecimal characters)"
+                ),
             ))
         }
     }
@@ -251,7 +253,12 @@ fn normalize_members(list: &str, members: Vec<Member>) -> FocusResult<Vec<Member
     type Key = (MemberKind, String, Option<String>);
     let mut seen: BTreeMap<Key, String> = BTreeMap::new();
     for member in members {
-        let id = checked_line(&format!("{list} member id"), member.id, SELECTOR_BOUND, true)?;
+        let id = checked_line(
+            &format!("{list} member id"),
+            member.id,
+            SELECTOR_BOUND,
+            true,
+        )?;
         let project = match (member.kind, member.project_id) {
             (MemberKind::Milestone, Some(project)) => Some(checked_line(
                 &format!("{list} milestone project id"),
@@ -273,7 +280,8 @@ fn normalize_members(list: &str, members: Vec<Member>) -> FocusResult<Vec<Member
             }
             (_, None) => None,
         };
-        let label = cut_utf8(&text::sanitise_line(&member.label), MAX_MEMBER_LABEL_BYTES);
+        let line = text::sanitise_line(&member.label);
+        let label = cut_utf8(&line, MAX_MEMBER_LABEL_BYTES);
         seen.entry((member.kind, id, project))
             .or_insert_with(|| label.to_owned());
     }
@@ -415,7 +423,8 @@ impl Revision {
         owner_epoch: u64,
         written_at_ms: i64,
     ) -> Self {
-        let wire = |members: &[Member]| Value::Array(members.iter().map(Member::wire_value).collect());
+        let wire =
+            |members: &[Member]| Value::Array(members.iter().map(Member::wire_value).collect());
         Self {
             focus_id: focus.clone(),
             revision: number,
@@ -446,7 +455,10 @@ impl Revision {
         let bytes = serde_json::to_vec(self)
             .map_err(|error| FocusError::invalid("revision", error.to_string()))?;
         if bytes.len() > MAX_REVISION_BYTES {
-            return Err(FocusError::limit("encoded revision bytes", MAX_REVISION_BYTES));
+            return Err(FocusError::limit(
+                "encoded revision bytes",
+                MAX_REVISION_BYTES,
+            ));
         }
         Ok(bytes)
     }
@@ -472,7 +484,10 @@ impl Revision {
         };
         let same = |stored: &[Member], wanted: &[Member]| {
             stored.len() == wanted.len()
-                && stored.iter().zip(wanted).all(|(a, b)| a.identity() == b.identity())
+                && stored
+                    .iter()
+                    .zip(wanted)
+                    .all(|(a, b)| a.identity() == b.identity())
         };
         self.team == content.team
             && self.name == content.name
@@ -500,7 +515,8 @@ fn parse_members(
                     .map(str::to_owned)
                     .ok_or(UnavailableReason::Undecodable)
             };
-            let kind = MemberKind::from_wire(&text("kind")?).ok_or(UnavailableReason::Undecodable)?;
+            let kind =
+                MemberKind::from_wire(&text("kind")?).ok_or(UnavailableReason::Undecodable)?;
             Ok(Member {
                 kind,
                 id: text("id")?,
@@ -891,9 +907,17 @@ mod tests {
         assert_eq!(normalized.include[0].label.len(), 64);
         assert!(normalized.include[0].label.chars().all(|c| c == 'é'));
         let mut odd = content();
-        odd.include = vec![Member::new(MemberKind::Project, "p1", format!("x{}", "é".repeat(40)))];
+        odd.include = vec![Member::new(
+            MemberKind::Project,
+            "p1",
+            format!("x{}", "é".repeat(40)),
+        )];
         let normalized = odd.normalize().unwrap();
-        assert_eq!(normalized.include[0].label.len(), 63, "a half character is dropped");
+        assert_eq!(
+            normalized.include[0].label.len(),
+            63,
+            "a half character is dropped"
+        );
     }
 
     #[trace("FR-061-AC-1")]
@@ -933,7 +957,9 @@ mod tests {
         other.description = "changed".into();
         assert!(!revision.holds(&other));
         let mut other = wanted.clone();
-        other.include.push(Member::new(MemberKind::Project, "p2", "x"));
+        other
+            .include
+            .push(Member::new(MemberKind::Project, "p2", "x"));
         assert!(!revision.holds(&other.normalize().unwrap()));
         // A label only displays: a different label is the same content.
         let mut relabelled = wanted.clone();
@@ -943,7 +969,10 @@ mod tests {
         let mut broken = revision;
         broken.selection = json!({"schema_version": 3, "include": "nope", "exclude": []});
         assert!(!broken.holds(&wanted));
-        assert_eq!(broken.members().unwrap_err(), UnavailableReason::Undecodable);
+        assert_eq!(
+            broken.members().unwrap_err(),
+            UnavailableReason::Undecodable
+        );
     }
 
     #[trace("FR-061-AC-6")]
@@ -965,7 +994,13 @@ mod tests {
         assert_eq!(incarnation.process_id, 4242);
         assert_eq!(incarnation.session_key(), "terra/sess-a");
         assert_eq!(incarnation.to_string(), "terra/sess-a/4242");
-        for bad in ["", "terra", "terra/sess-a", "terra/sess-a/x", "terra/sess-a/-1"] {
+        for bad in [
+            "",
+            "terra",
+            "terra/sess-a",
+            "terra/sess-a/x",
+            "terra/sess-a/-1",
+        ] {
             assert!(bad.parse::<Incarnation>().is_err(), "{bad:?}");
         }
     }

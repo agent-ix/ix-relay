@@ -32,15 +32,13 @@ impl CallerSource for HerdrCaller<'_> {
         session: Option<&SessionId>,
         now_ms: i64,
     ) -> FocusResult<OwnerBinding> {
-        let observation =
-            resolve_work_target(&herdr_cli::RealProcessRunner, lead, self.machine).map_err(
-                |error| {
-                    FocusError::invalid(
-                        "lead",
-                        format!("the calling session could not be verified: {error}"),
-                    )
-                },
-            )?;
+        let observation = resolve_work_target(&herdr_cli::RealProcessRunner, lead, self.machine)
+            .map_err(|error| {
+                FocusError::invalid(
+                    "lead",
+                    format!("the calling session could not be verified: {error}"),
+                )
+            })?;
         let binding = observation.binding;
         if session.is_some_and(|expected| *expected != binding.session) {
             return Err(FocusError::invalid(

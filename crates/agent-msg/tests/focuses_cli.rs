@@ -42,7 +42,11 @@ fn command(args: &[&str], dir: &support::Scratch, url: Option<&str>, prefix: &st
 }
 
 fn typed_error(run: &support::Run) -> Value {
-    assert_eq!(run.status, 1, "stdout: {} stderr: {}", run.stdout, run.stderr);
+    assert_eq!(
+        run.status, 1,
+        "stdout: {} stderr: {}",
+        run.stdout, run.stderr
+    );
     assert!(run.stdout.is_empty(), "{}", run.stdout);
     assert!(
         run.stderr.ends_with('\n') && run.stderr.matches('\n').count() == 1,
@@ -66,10 +70,19 @@ fn an_unreachable_relay_is_a_typed_error_on_standard_error_with_exit_status_1() 
         assert_eq!(error["code"], "source_unavailable");
         assert_eq!(error["reason"], "failed");
     }
-    let text = command(&["focuses", "list"], &dir, None, "test:focuses-unreachable:");
+    let text = command(
+        &["focuses", "list"],
+        &dir,
+        None,
+        "test:focuses-unreachable:",
+    );
     assert_eq!(text.status, 1);
     assert!(text.stdout.is_empty());
-    assert!(text.stderr.starts_with("agent-msg: source_unavailable: "), "{}", text.stderr);
+    assert!(
+        text.stderr.starts_with("agent-msg: source_unavailable: "),
+        "{}",
+        text.stderr
+    );
 }
 
 #[test]
@@ -145,7 +158,13 @@ fn an_invalid_definition_file_is_refused_before_any_credential_or_snapshot_is_us
         let file = dir.join("definition.json");
         fs::write(&file, body).unwrap();
         let run = command(
-            &["focuses", "--json", "create", "--file", file.to_str().unwrap()],
+            &[
+                "focuses",
+                "--json",
+                "create",
+                "--file",
+                file.to_str().unwrap(),
+            ],
             &dir,
             Some(&url),
             &prefix,
@@ -177,7 +196,14 @@ fn the_read_timeout_outside_one_to_six_hundred_is_a_usage_error() {
     let dir = support::Scratch::new("focuses-cli-");
     for bad in ["0", "601"] {
         let run = command(
-            &["focuses", "create", "--file", "/nonexistent.json", "--read-timeout", bad],
+            &[
+                "focuses",
+                "create",
+                "--file",
+                "/nonexistent.json",
+                "--read-timeout",
+                bad,
+            ],
             &dir,
             None,
             "test:focuses-usage:",

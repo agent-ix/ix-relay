@@ -23,11 +23,11 @@ pub use error::{FocusError, FocusErrorCode, FocusResult, SourceReason, Unavailab
 pub use liveness::{LivenessEvidence, SessionState};
 pub use model::{
     ChangeKind, Definition, DefinitionState, FOCUS_ID_PREFIX, FocusContent, FocusId, Incarnation,
-    Labels, ListEntry, Member, MemberKind, Meta, NewPin, Owner, OwnerBinding, OwnerChange, PinEntry,
-    PinValue, Revision, SelectionCheck, Summary, VersionOnlyCheck,
+    Labels, ListEntry, Member, MemberKind, Meta, NewPin, Owner, OwnerBinding, OwnerChange,
+    PinEntry, PinValue, Revision, SelectionCheck, Summary, VersionOnlyCheck,
 };
-pub(crate) use plan::{PlanKind, ResolvedName, contended};
 pub use plan::{
     Applied, Caller, ClaimRequest, Committed, CreateOutcome, Planned, Resolved, UpdateOutcome,
     WritePlan,
 };
+pub(crate) use plan::{PlanKind, ResolvedName, contended};

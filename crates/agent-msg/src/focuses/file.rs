@@ -104,7 +104,7 @@ fn object<'a>(path: &str, value: &'a Value) -> FocusResult<&'a Map<String, Value
 fn only_keys(path: &str, map: &Map<String, Value>, allowed: &[&str]) -> FocusResult<()> {
     match map.keys().find(|key| !allowed.contains(&key.as_str())) {
         Some(key) => refuse(
-            &format!("{path}.{key}").trim_start_matches('.').to_owned(),
+            format!("{path}.{key}").trim_start_matches('.'),
             format!(
                 "is not a member the relay defines (allowed here: {}); a focus reference, a \
                  second team or a misspelled key is refused",
@@ -148,7 +148,11 @@ fn member(path: &str, value: &Value, milestone: bool) -> FocusResult<FileMember>
 
 fn members(path: &str, value: &Value) -> FocusResult<FileMembers> {
     let map = object(path, value)?;
-    only_keys(path, map, &["initiatives", "projects", "milestones", "tickets"])?;
+    only_keys(
+        path,
+        map,
+        &["initiatives", "projects", "milestones", "tickets"],
+    )?;
     let list = |key: &str, milestone: bool| -> FocusResult<Vec<FileMember>> {
         let Some(value) = map.get(key) else {
             return Ok(Vec::new());
@@ -175,7 +179,11 @@ pub(crate) fn parse_definition(bytes: &[u8]) -> FocusResult<DefinitionFile> {
     let value: Value = serde_json::from_slice(bytes)
         .map_err(|error| FocusError::invalid("file", format!("not valid JSON: {error}")))?;
     let root = object("", &value)?;
-    only_keys("", root, &["team", "name", "description", "include", "exclude"])?;
+    only_keys(
+        "",
+        root,
+        &["team", "name", "description", "include", "exclude"],
+    )?;
     let required = |key: &str| {
         root.get(key)
             .ok_or_else(|| FocusError::invalid(format!("file {key}"), "is required"))

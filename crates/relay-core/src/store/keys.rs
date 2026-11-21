@@ -274,7 +274,10 @@ mod tests {
     #[test]
     fn the_keys_are_the_documented_ones() {
         let want = [
-            ("focus_key", "p:focus:def:foc-00000000000000000000000000000001"),
+            (
+                "focus_key",
+                "p:focus:def:foc-00000000000000000000000000000001",
+            ),
             ("focus_stem", "p:focus:def:"),
             ("focus_index_key", "p:focus:index"),
             ("focus_names_key", "p:focus:names"),

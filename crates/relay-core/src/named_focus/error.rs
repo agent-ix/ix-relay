@@ -126,7 +126,9 @@ impl fmt::Display for SourceReason {
 #[derive(Debug, thiserror::Error)]
 pub enum FocusError {
     /// The expected revision is not the latest; nothing was written.
-    #[error("revision conflict on {focus}: the latest revision is {latest}; reread before retrying")]
+    #[error(
+        "revision conflict on {focus}: the latest revision is {latest}; reread before retrying"
+    )]
     RevisionConflict {
         /// The definition.
         focus: FocusId,
@@ -134,9 +136,7 @@ pub enum FocusError {
         latest: u64,
     },
     /// The expected owner epoch (or, for a claim, the observed owner) is not current.
-    #[error(
-        "owner epoch conflict on {focus}: the current owner is {owner_id} at epoch {epoch}"
-    )]
+    #[error("owner epoch conflict on {focus}: the current owner is {owner_id} at epoch {epoch}")]
     OwnerEpochConflict {
         /// The definition.
         focus: FocusId,

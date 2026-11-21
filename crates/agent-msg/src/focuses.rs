@@ -199,11 +199,7 @@ fn io_error(error: &io::Error) -> FocusError {
 }
 
 /// Runs one command, printing its result on `out`.
-pub(crate) fn run<W: Write>(
-    args: &FocusesArgs,
-    env: &mut Env<'_>,
-    out: &mut W,
-) -> FocusResult<()> {
+pub(crate) fn run<W: Write>(args: &FocusesArgs, env: &mut Env<'_>, out: &mut W) -> FocusResult<()> {
     let json = args.json;
     match &args.command {
         FocusesCommand::Create { file, read_timeout } => {
@@ -285,7 +281,7 @@ fn create<W: Write>(
 ) -> FocusResult<()> {
     let definition = file::read_definition(file)?;
     let binding = verify(args, env)?;
-    let content = resolve::resolve(&definition, &mut *env.snapshots, read_timeout, env.now_ms)?;
+    let content = resolve::resolve(&definition, &mut *env.snapshots, read_timeout)?;
     let evidence = env.relay.focus_evidence();
     let created = env
         .relay
@@ -312,7 +308,7 @@ fn update<W: Write>(
     let target = env.relay.focus_resolve(focus)?;
     let current = env.relay.focus_get(env.check, &target.id)?;
     ensure_owner(&current, &binding)?;
-    let content = resolve::resolve(&definition, &mut *env.snapshots, read_timeout, env.now_ms)?;
+    let content = resolve::resolve(&definition, &mut *env.snapshots, read_timeout)?;
     let evidence = env.relay.focus_evidence();
     let caller = Caller {
         binding: &binding,
@@ -481,11 +477,13 @@ fn list<W: Write>(
             ListEntry::Available(summary) => {
                 let wanted = team.is_none_or(|team| summary.meta.team.eq_ignore_ascii_case(team))
                     && (archived
-                        || summary.meta.state != relay_core::named_focus::DefinitionState::Archived);
+                        || summary.meta.state
+                            != relay_core::named_focus::DefinitionState::Archived);
                 wanted.then(|| {
                     ListRow::Available(
                         summary,
-                        evidence.owner_state(&summary.owner.owner_id, &summary.owner.binding.address),
+                        evidence
+                            .owner_state(&summary.owner.owner_id, &summary.owner.binding.address),
                     )
                 })
             }

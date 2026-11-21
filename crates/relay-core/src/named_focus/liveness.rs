@@ -244,9 +244,16 @@ mod tests {
     #[test]
     fn an_owner_id_that_does_not_parse_is_unknown() {
         let none = LivenessEvidence::complete(Vec::new());
-        assert_eq!(none.owner_state("terra/a", "terra:QSL:a"), SessionState::Absent);
+        assert_eq!(
+            none.owner_state("terra/a", "terra:QSL:a"),
+            SessionState::Absent
+        );
         for bad in ["", "terra", "/a", "terra/"] {
-            assert_eq!(none.owner_state(bad, "terra:QSL:a"), SessionState::Unknown, "{bad:?}");
+            assert_eq!(
+                none.owner_state(bad, "terra:QSL:a"),
+                SessionState::Unknown,
+                "{bad:?}"
+            );
         }
         assert_eq!(SessionState::Replaced.to_string(), "replaced");
     }

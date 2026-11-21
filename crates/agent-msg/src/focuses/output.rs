@@ -253,7 +253,7 @@ pub(crate) fn list(out: &mut impl Write, json: bool, rows: &[ListRow<'_>]) -> io
                 ListRow::Unavailable(focus, reason) => ListItemJson::Unavailable {
                     focus_id: focus,
                     available: false,
-                    reason: *reason,
+                    reason,
                 },
             })
             .collect();
@@ -356,7 +356,10 @@ pub(crate) fn updated(
     if changed {
         writeln!(out, "updated {focus} to revision {revision}")
     } else {
-        writeln!(out, "{focus} already holds this content at revision {revision}; nothing written")
+        writeln!(
+            out,
+            "{focus} already holds this content at revision {revision}; nothing written"
+        )
     }
 }
 
@@ -381,7 +384,11 @@ pub(crate) fn archived(out: &mut impl Write, json: bool, meta: &Meta) -> io::Res
             },
         );
     }
-    writeln!(out, "archived {} at revision {}", meta.focus_id, meta.latest_revision)
+    writeln!(
+        out,
+        "archived {} at revision {}",
+        meta.focus_id, meta.latest_revision
+    )
 }
 
 #[derive(Serialize)]
@@ -416,7 +423,11 @@ pub(crate) fn owned(
         ChangeKind::ForcedClaim => "claimed by force by",
         ChangeKind::Transfer => "transferred to",
     };
-    writeln!(out, "{focus} {how} {} at epoch {}", owner.owner_id, owner.epoch)
+    writeln!(
+        out,
+        "{focus} {how} {} at epoch {}",
+        owner.owner_id, owner.epoch
+    )
 }
 
 /// A typed error object: the stable code, a message and whatever is relevant to it.

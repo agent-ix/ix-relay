@@ -19,13 +19,13 @@ use crate::{
     Error,
     named_focus::{
         Applied, Caller, ChangeKind, ClaimRequest, Committed, CreateOutcome, Definition,
-        DefinitionState, FocusContent, FocusError, FocusId, FocusResult, Incarnation,
-        LivenessEvidence, ListEntry, Meta, NewPin, Owner, OwnerBinding, OwnerChange, PinEntry,
-        PinValue, PlanKind, Planned, Resolved, ResolvedName, Revision, SelectionCheck,
-        UnavailableReason, UpdateOutcome, WritePlan, contended,
+        DefinitionState, FocusContent, FocusError, FocusId, FocusResult, Incarnation, ListEntry,
+        LivenessEvidence, Meta, NewPin, Owner, OwnerBinding, OwnerChange, PinEntry, PinValue,
+        PlanKind, Planned, Resolved, ResolvedName, Revision, SelectionCheck, UnavailableReason,
+        UpdateOutcome, WritePlan, contended,
         limits::{
             ARCHIVE_RETENTION_MS, KEPT_REVISIONS, MAX_ACTIVE_DEFINITIONS, MAX_DEFINITIONS,
-            MAX_FIELD_BYTES, MAX_INDEX_ENTRIES, MAX_PINS, MAX_PIN_BYTES, MAX_REASON_BYTES,
+            MAX_FIELD_BYTES, MAX_INDEX_ENTRIES, MAX_PIN_BYTES, MAX_PINS, MAX_REASON_BYTES,
             MAX_WRITE_ATTEMPTS, REMOVAL_EXAMINED,
         },
         model::{decode_revision, decode_summary},
@@ -101,7 +101,11 @@ fn unavailable(focus: &FocusId, reason: UnavailableReason) -> FocusError {
 }
 
 /// The refusal a script answered with, built from the state its comparison saw.
-fn refusal(plan_focus: &FocusId, reply: &[Vec<u8>], moved: Option<&(String, String)>) -> FocusError {
+fn refusal(
+    plan_focus: &FocusId,
+    reply: &[Vec<u8>],
+    moved: Option<&(String, String)>,
+) -> FocusError {
     let focus = plan_focus.clone();
     match status(reply) {
         "not_found" => FocusError::NotFound {
@@ -110,15 +114,12 @@ fn refusal(plan_focus: &FocusId, reply: &[Vec<u8>], moved: Option<&(String, Stri
         "undecodable" => unavailable(&focus, UnavailableReason::Undecodable),
         "archived" => FocusError::Archived { focus },
         other => {
-            let state = reply
-                .get(1)
-                .zip(reply.get(2))
-                .and_then(|(meta, owner)| {
-                    Some((
-                        serde_json::from_slice::<Meta>(meta).ok()?,
-                        serde_json::from_slice::<Owner>(owner).ok()?,
-                    ))
-                });
+            let state = reply.get(1).zip(reply.get(2)).and_then(|(meta, owner)| {
+                Some((
+                    serde_json::from_slice::<Meta>(meta).ok()?,
+                    serde_json::from_slice::<Owner>(owner).ok()?,
+                ))
+            });
             let Some((meta, owner)) = state else {
                 return unavailable(&focus, UnavailableReason::Undecodable);
             };
@@ -257,7 +258,10 @@ fn owner_gate(def: &Definition, caller: &Caller<'_>) -> FocusResult<()> {
 
 fn validate_reason(reason: &str) -> FocusResult<String> {
     if reason.trim().is_empty() {
-        return Err(FocusError::invalid("reason", "a forced claim needs a reason"));
+        return Err(FocusError::invalid(
+            "reason",
+            "a forced claim needs a reason",
+        ));
     }
     if reason != text::sanitise_line(reason) {
         return Err(FocusError::invalid(
@@ -296,7 +300,7 @@ impl Relay {
         for arg in args {
             call.arg(arg.as_slice());
         }
-        call.invoke(&mut self.conn)
+        call.invoke(&mut self.conn).map_err(Error::from)
     }
 
     /// Reads the definitions index: every definition's ID and, when it decodes, its entry.
@@ -326,12 +330,11 @@ impl Relay {
                 reply
                     .get(1..)
                     .unwrap_or_default()
-                    .chunks_exact(2)
-                    .filter_map(|pair| match pair {
-                        [field, value] => {
-                            Some((String::from_utf8_lossy(field).into_owned(), value.clone()))
-                        }
-                        _ => None,
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|[field, value]| {
+                        (String::from_utf8_lossy(field).into_owned(), value.clone())
                     })
                     .collect(),
             )),
@@ -387,7 +390,11 @@ impl Relay {
     /// [`FocusError::NotFound`] for an ID that is not stored and
     /// [`FocusError::UnavailableDefinition`] for a record that cannot be used, which a read
     /// never overwrites.
-    pub fn focus_get(&mut self, check: &dyn SelectionCheck, id: &FocusId) -> FocusResult<Definition> {
+    pub fn focus_get(
+        &mut self,
+        check: &dyn SelectionCheck,
+        id: &FocusId,
+    ) -> FocusResult<Definition> {
         match self.focus_read_raw(id)? {
             RawRead::Missing => Err(FocusError::NotFound {
                 focus: id.to_string(),
@@ -458,10 +465,7 @@ impl Relay {
         }
         let mut usable = Vec::new();
         let mut unusable = Vec::new();
-        for group in reply.get(1..).unwrap_or_default().chunks_exact(4) {
-            let [id, meta, owner, revision] = group else {
-                continue;
-            };
+        for [id, meta, owner, revision] in reply.get(1..).unwrap_or_default().as_chunks::<4>().0 {
             let Some(id) = std::str::from_utf8(id)
                 .ok()
                 .and_then(|id| id.parse::<FocusId>().ok())
@@ -601,12 +605,18 @@ impl Relay {
                     ));
                 }
                 "undecodable" => {
-                    return Err(unexpected("focus-create", "the definitions index is damaged"));
+                    return Err(unexpected(
+                        "focus-create",
+                        "the definitions index is damaged",
+                    ));
                 }
                 other => return Err(unexpected("focus-create", other)),
             }
         }
-        Err(unexpected("focus-create", "a generated focus ID already exists"))
+        Err(unexpected(
+            "focus-create",
+            "a generated focus ID already exists",
+        ))
     }
 
     /// The archived definitions `create` may remove, oldest archived first: only when the
@@ -687,10 +697,13 @@ impl Relay {
         if def.summary.latest.holds(&content) {
             return Ok(Planned::Unchanged(Box::new(def.summary.latest)));
         }
-        let next = meta.latest_revision.checked_add(1).ok_or(FocusError::Limit {
-            bound: "revision number",
-            max: u64::MAX,
-        })?;
+        let next = meta
+            .latest_revision
+            .checked_add(1)
+            .ok_or(FocusError::Limit {
+                bound: "revision number",
+                max: u64::MAX,
+            })?;
         let revision = Revision::build(
             &target.id,
             next,
@@ -974,8 +987,13 @@ impl Relay {
         evidence: &LivenessEvidence,
     ) -> FocusResult<UpdateOutcome> {
         for _ in 0..MAX_WRITE_ATTEMPTS {
-            match self.focus_plan_update(check, target, expected_revision, content.clone(), caller)?
-            {
+            match self.focus_plan_update(
+                check,
+                target,
+                expected_revision,
+                content.clone(),
+                caller,
+            )? {
                 Planned::Unchanged(current) => return Ok(UpdateOutcome::Unchanged(current)),
                 Planned::Write(plan) => {
                     self.focus_reclaim_pins(&target.id, evidence)?;
