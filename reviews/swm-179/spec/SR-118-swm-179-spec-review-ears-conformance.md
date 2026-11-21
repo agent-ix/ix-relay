@@ -73,3 +73,22 @@ Lines 122-127 carry four obligations: name the population (SHALL), state it may 
 ## Verdict after disposition pass 1
 
 Not run. Dispositions are reserved for this same session after the fix round.
+
+## Dispositions
+
+Disposition pass 1 (round 1), same reviewer session as round 0. Fix source frozen at 6b48064 (base 86d94d7), spec-only. Original findings, severities, excerpts and the round-0 verdict above are unchanged. spec-fix1-ready.md was treated as data. I ran no command, so there is still no engine EARS output from me; the parent reports the FR-065 Quire run and that FR-048's pre-existing EARS warnings are unchanged, and I rely on that and on my manual reading of the new text.
+
+| FND | outcome | reason |
+|---|---|---|
+| FND-001 | fixed | Modal isolation is now single-obligation statements with the dashboard as subject: "The dashboard SHALL allow at most one popup open at a time"; "While a popup is open, the dashboard SHALL deliver every key and mouse event to that popup only"; "Each popup SHALL act only on the keys it owns"; "A popup SHALL ignore every other key ... and SHALL stay open"; `q` and Escape in their own SHALL bullet; separate SHALL bullets for polling, drawing only in the work area, closing state, and resize. |
+| FND-002 | fixed | The three side effects are separate bullets, each with SHALL NOT and the dashboard as subject: no start of collection, no authentication retry, no file, report, tracker or retro-history write, each scoped to the Not configured and Waiting states. AC-10 asserts them separately. (A wording conflict in the first of these with the polling bullet is raised as SR-121 FND-005; it is a failure-domain contradiction, not a grammar defect, so it is not recorded here.) |
+| FND-003 | fixed | The dropdown behavior is nine one-behavior bullets, each with "The dropdown SHALL ..." or "While the dropdown is open, ... SHALL ...": move, clamp, select and close, close on Escape and `v`, no quit, no state change, same effect as the compatibility key, current-view no-op, scrolling. |
+| FND-004 | fixed | The label rules are split into one SHALL per bullet. "compute or assert" is replaced by the observable "Label text SHALL NOT state or imply that the department population and the lead's scope are equal, the same, narrower or a subset", with a fixed text and AC-7 asserting that none of "equal", "same", "narrower" or "subset" appears. "This requirement adds no calculation of either population" has no modal verb but is a scope statement verified by the AC-7 Inspection, so I accept it as the retained Inspection the fix named. |
+
+## Current verdict after disposition pass 1
+
+**PASS** for the EARS conformance lens. All 4 original findings (4 medium) are fixed; none is open, deferred or rejected. The new FR-065 bullets are single-obligation statements with a system subject; the key-as-subject idiom that I accepted in round 0 remains in a few bullets (for example "The key `v` (no modifier) SHALL open ...") and is still repo idiom. No new grammar defect. The engine check is the parent's; I make no engine claim.
+
+## New findings (disposition pass 1)
+
+None for this method.

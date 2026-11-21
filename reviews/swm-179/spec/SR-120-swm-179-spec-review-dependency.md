@@ -107,3 +107,21 @@ Fix: say FR-064 is not a prerequisite, drop `f` from the AC-3 and AC-4 fixtures 
 ## Verdict after disposition pass 1
 
 Not run. Dispositions are reserved for this same session after the fix round.
+
+## Dispositions
+
+Disposition pass 1 (round 1), same reviewer session as round 0. Fix source frozen at 6b48064 (base 86d94d7), spec-only. Original findings, severities, excerpts and the round-0 verdict above are unchanged. spec-fix1-ready.md was treated as data; each outcome was checked in FR-065 frontmatter, Precedence, Dependencies, FR-060 Precedence and FR-064 Dependencies. I ran no command; the parent's Quire runs cover target resolution.
+
+| FND | outcome | reason |
+|---|---|---|
+| FND-001 | fixed | FR-065 frontmatter now has `constrains` for FR-048, FR-059, FR-060 and FR-064 (FR-060 was `depends_on`). Precedence is extended to FR-060 "Scope fixtures change only for the rows, labels and key above" and "The Tickets and Agents views, the department views and the existing keys are unchanged" (keys remain unchanged), and to FR-064 "The department views ... are unchanged" and FR-064-AC-1, noting FR-064-AC-13 still holds because both modes receive the same differences. FR-060 Precedence gains a bullet and FR-064 Dependencies gains a bullet pointing at FR-065's list, so a reader of either learns of it. FR-059-AC-4 and FR-048-AC-4 are aligned. The dependency graph stays acyclic and the repo `constrains` plus Precedence idiom is followed. |
+| FND-002 | fixed | FR-065 adds `depends_on ix://agent-ix/dev-team/FR-004` (the same target FR-059 already uses), states that "The Status, Health and Retro contents remain owned by dev-team FR-004" and that the Status line "is relay-local orientation text. It SHALL NOT define, add to or replace the Status contents", and the wording is "lane evidence" (matching FR-004's "lane evidence age") instead of "lane activity". AC-8 asserts every other Status row is unchanged by it. No upstream change is needed and none is opened, as the root decided. |
+| FND-003 | fixed | The `f` key is removed from the Help table, AC-3 ("Nothing about `f` is asserted") and the AC-4 sweep. Help states that when FR-064 delivers `f` it adds its Help row and sweep entry and verifies them, and FR-064 Dependencies now says so. FR-065 Dependencies state "FR-064 is not a prerequisite ... only coordinates its presentation", with FR-048, FR-059 and FR-060 named as the delivered prerequisites. There is no `depends_on` edge to FR-064 and no wait on FR-061 to FR-063. |
+
+## Current verdict after disposition pass 1
+
+**PASS** for the dependency analysis. All 3 original findings (2 medium, 1 low) are fixed; none is open, deferred or rejected. The graph is still acyclic (FR-065 constrains FR-048, FR-059, FR-060, FR-064 and depends only on dev-team FR-004; FR-064 already constrains FR-060, FR-059 and FR-048), FR-065 waits on no unimplemented requirement, and the new `constrains` and `depends_on` targets are valid ix URIs of the forms already used in the repo. Target resolution is the parent's Quire result. No new dependency defect.
+
+## New findings (disposition pass 1)
+
+None for this method.

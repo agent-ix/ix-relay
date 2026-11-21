@@ -102,3 +102,24 @@ AC-9 requires that the credential, network, Herdr and Redis adapters "record no 
 ## Verdict after disposition pass 1
 
 Not run. Dispositions are reserved for this same session after the fix round.
+
+## Dispositions
+
+Disposition pass 1 (round 1), same reviewer session as round 0. Fix source frozen at 6b48064 (base 86d94d7), spec-only. Original findings, severities, excerpts and the round-0 verdict above are unchanged. spec-fix1-ready.md was treated as data; each outcome was checked against the current FR-065. I ran no command; Quire results come from the parent. The four-row evidence budget, keyboard-only access and `v`/`?` are accepted by the root as implementation choices and were not treated as owner exceptions.
+
+| FND | outcome | reason |
+|---|---|---|
+| FND-001 | fixed | Modal isolation now states that each popup acts only on the keys it owns (dropdown: Up, Down, `j`, `k`, Enter, Escape, `v`; help: Up, Down, PageUp, PageDown, Escape, F1, `?`) and ignores every other key, including the key that would open the other popup, staying open. Help closes on F1, `?` and Escape. AC-4 is a per-popup sweep with a fresh popup per non-owned key and states the unchanged set, with owned keys asserted by AC-1 to AC-3. The contradiction with Enter, `j`, `k` and the arrows is gone; `?` in the dropdown, `v` and `?` in help, and paging in the dropdown are defined. |
+| FND-002 | fixed | A new Evidence rows section bounds the rule: at most 4 rows at 80x24; labels (source, state, reason class, filter, countdown, binding) never truncated; free-form detail may be truncated with a visible marker; overflow shows highest severity first with a count of sources not shown; the full text stays reachable through `e` and `d` in Status, Health and Retro, with Tickets, Agents and Scope accepting truncated detail; 80x24 is the minimum and below it the dashboard truncates without panic; `v View` and `F1 Help` are not dropped at 80 columns or more. AC-5 adds the long multi-source fixture and the below-minimum fixture. This is now satisfiable. |
+| FND-003 | fixed | A resize bullet in Modal isolation (re-lay out, stay open, clamp highlight or scroll) is covered by AC-2 (120x40 to 80x24 with the dropdown open), AC-3 (help open) and AC-11. |
+| FND-004 | fixed | The mouse bullet is now "SHALL NOT add a mouse capture mode" with click behavior only if a later change delivers mouse events; the click-away sentence is removed from AC-4; new AC-13 is an Inspection that the terminal setup is unchanged and enables no capture, with click behavior verified only when mouse events exist. |
+| FND-005 | fixed | AC-6 now lists a verified lead; a missing or ambiguous lead with explicit scope; a replaced session; explicit scope with no `--lead`; and a saved-report startup. |
+| FND-006 | fixed | New AC-10 splits the oracle: saved-report case with fail-if-called credential, network, Herdr and Redis adapters, and live case with worker clocks held and call counts, files and report, tracker and history stores equal before and after, no authentication retry. The "caused by" wording is gone from the ACs. (A residual wording conflict in the normative bullets is recorded as SR-121 FND-005.) |
+
+## Current verdict after disposition pass 1
+
+**PASS** for the base spec-review. All 6 original findings (2 medium, 4 low) are fixed; none is open, deferred, rejected or accepted-no-change. The checklist items still hold on the new text: AC ids FR-065-AC-1 to AC-13 are sequential and unique, Verification cells name a method only, and FR-065 contains no hash, digest, pin, manifest or ledger instruction. I found no new base-checklist defect. The one regression I found sits in the failure-domain lens (SR-121 FND-005). This is a text reading; I ran no command and `quire matrix` coverage of AC-1 to AC-13 is not claimed by me.
+
+## New findings (disposition pass 1)
+
+None for this method.

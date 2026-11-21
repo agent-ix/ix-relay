@@ -76,12 +76,41 @@ Fix: say in the bullet that the not-configured state is not a source failure: it
 
 ### FND-003 (low) A configured source awaiting its first read has no state
 
-When `--retro-config` is supplied, startup spawns the department worker (monitor_main.rs:135-141, 151-153), and until its first result `department.value` and `department.error` are both empty. The renderer then falls back to "Unavailable: no shared department report" (monitor_department.rs:581-589). FR-065's empty-state rule is for "no retro configuration or saved report supplies" the fields, and its distinct set is not configured, failed and stale; a configured source that has not yet answered is none of them. Implemented as written, the pending window shows either the not-configured instruction (false, the user did supply a config) or the old unavailable text (unspecific). Fix: add a fourth state, waiting for the first read, that names the configuration being read and is distinct from the other three, with an AC-9 fixture before the first result.
+When `--retro-config` is supplied, startup spawns the department worker (monitor_main.rs:135-141, 151-153), and until its first result `department.value` and `department.error` are both empty. The renderer then falls back to "Unavailable: no shared department report" (monitor_department.rs:581-589). FR-065's empty-state rule is for "no retro configuration or saved report supplies" the fields, and its distinct set is not configured, failed and stale; a configured source that has not yet answered is none of them. Implemented as written, the pending window shows either the not-configured instruction (false, the user did supply a config) or the old unspecific text. Fix: add a fourth state, waiting for the first read, that names the configuration being read and is distinct from the other three, with an AC-9 fixture before the first result.
 
 ### FND-004 (low) Unchanged state versus refresh behind a popup
 
-Lines 97-98: closing a popup by Escape "leaves the underlying view, selection, scroll, details and filter state as they were before it opened". Lines 99-101 say refresh results continue behind the popup, and FR-059 and FR-060 require selection and scroll to clamp when a refresh changes the rows. If rows shrink while a popup is open, the state after closing cannot be "as they were before it opened". AC-2 and AC-4 are static fixtures and would not show it, and AC-10 does not assert the selection after a refresh behind a popup. Fix: say the popup and its keys change none of that state, and that refresh-driven clamping applies as it does with no popup; assert the clamped selection in AC-10.
+Lines 97-98: closing a popup by Escape "leaves the underlying view, selection, scroll, details and filter state as they were before it opened". Lines 99-101 say refresh results continue behind the popup, and FR-059 and FR-060 require selection and scroll to clamp when a refresh changes the rows. If rows shrink while a popup is open, the state after closing cannot be "as they were before it opened". AC-2 and AC-4 are static fixtures and would not show it, and AC-10 does not assert the selection after a refresh behind a popup. Fix: say the popup and its keys change none of that state, and that refresh-driven clamping applies as with no popup; assert the clamped selection in AC-10.
 
 ## Verdict after disposition pass 1
 
 Not run. Dispositions are reserved for this same session after the fix round.
+
+## Dispositions
+
+Disposition pass 1 (round 1), same reviewer session as round 0. Fix source frozen at 6b48064 (base 86d94d7), spec-only. Original findings, severities, excerpts and the round-0 verdict above are unchanged. spec-fix1-ready.md was treated as data; each outcome was checked against the current FR-065 and against the code facts I read in round 0 (monitor_main.rs:148-150, monitor_department.rs:426-452, 581-589, 603-632). I ran no command. The four-row evidence budget is an accepted root implementation choice.
+
+| FND | outcome | reason |
+|---|---|---|
+| FND-001 | fixed | Modal isolation now says "A popup SHALL draw only within the work area. It SHALL NOT cover the header rows, the evidence rows or the controls footer row", and Terms define the work area as excluding the identity row with the selector, the scope label, the evidence rows and the footer row. The "behind it, if applicable" wording is removed. AC-5 asserts the evidence labels and footer hints at 80x24; AC-11 asserts a failing refresh, a rate-limit countdown and a session replacement all appear in the evidence rows and footer with help open at 80x24, with the popup inside the work area. |
+| FND-002 | fixed | Empty Health and Retro now say the Not configured and Waiting states "SHALL NOT be stored, labeled or styled as a source failure", SHALL NOT appear in the source-failure rows or the `e` source list, SHALL NOT be described as an authentication failure and "SHALL NOT by themselves affect the exit status"; FR-059's rules for real collection failures are unchanged. AC-9 asserts the same for the no-configuration, saved-report and waiting fixtures. This closes the gap that let the existing `department.failure(...)` storage pass. Implementation must change that storage and its pinned test text; that is an implementation consequence, not a spec gap. |
+| FND-003 | fixed | Health and Retro now choose one of four states: Not configured, Waiting (a configuration was supplied and its first read has not returned, with a message that names the retro configuration), Failed (classified reason, no retained model) and Stale (retained values with the stale or last-snapshot label). AC-9 has a fixture for configuration supplied before its first read. |
+| FND-004 | fixed | Closing a popup now restores state "except for changes from refresh results or terminal resize received while it was open", which apply the existing FR-059 and FR-060 clamping as if no popup were open. AC-11 asserts that a refresh that shrinks rows while a popup is open clamps the selection and that closing leaves exactly that state. |
+
+## Current verdict after disposition pass 1
+
+**CONDITIONAL** for the failure-domain analysis. All 4 original findings (2 medium, 2 low) are fixed. One new low finding (FND-005, below) is a regression I found in the new text: it is open and needs a one-sentence fix before this method is PASS. It is not high, so the method is not a FAIL.
+
+## New findings (disposition pass 1)
+
+### Findings
+
+| ID | Severity | Summary | Refs |
+|---|---|---|---|
+| FND-005 | low | The new bullet "SHALL NOT start collection" while a popup is open or Health or Retro is Not configured or Waiting contradicts the retained rule that source polling continues while a popup is open | spec/functional/FR-065-dashboard-view-selector-and-help.md:256 |
+
+### FND-005 (low) The no-collection rule contradicts the polling rule
+
+The Modal isolation bullet at lines 158-159 says "Source polling, refresh results and the terminal lifecycle SHALL continue while a popup is open". The Empty Health and Retro bullet at lines 256-257 says "While Health or Retro shows Not configured or Waiting, and while either popup is open, the dashboard SHALL NOT start collection." Read literally, scheduled polling (the FR-048 Linear, Herdr and Redis timers, and the department worker's own reads while Waiting) is both required to continue and forbidden to start while a popup is open or Health or Retro shows Not configured, and in the Status view the tracker reads that feed it must go on in the Not configured state. AC-10 avoids the conflict by holding the worker clocks and comparing counts, so the test is sound; the normative text is not. This is the same "caused by" ambiguity as SR-117 FND-006, reintroduced as an absolute in the fix. Evidence: lines 158-159 and 256-257 of the fixed FR-065.
+
+Fix: say that the empty state and opening or closing a popup SHALL NOT cause or trigger a collection, authentication attempt or write, and that scheduled polling is unchanged (FR-048 and FR-059). This is a wording edit to one bullet; no new requirement.

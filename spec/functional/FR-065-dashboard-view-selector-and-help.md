@@ -253,11 +253,14 @@ Escape quitting when no popup is open, is retained.
   unchanged.
 - The dashboard SHALL NOT show zero, green or complete values for missing, waiting,
   failed or not-configured data.
-- While Health or Retro shows Not configured or Waiting, and while either popup is
-  open, the dashboard SHALL NOT start collection.
-- In the same states, the dashboard SHALL NOT retry authentication.
-- In the same states, the dashboard SHALL NOT write any file, report, tracker or
-  retro history.
+- Showing the Not configured or Waiting state, and opening or closing either popup,
+  SHALL NOT cause the dashboard to start collection.
+- Showing those states, and opening or closing either popup, SHALL NOT cause the
+  dashboard to retry authentication.
+- Showing those states, and opening or closing either popup, SHALL NOT cause the
+  dashboard to write any file, report, tracker or retro history.
+- Scheduled source polling and completed refreshes continue as FR-048 and FR-059
+  state, and are unchanged by these states and popups.
 
 ## Acceptance Criteria
 

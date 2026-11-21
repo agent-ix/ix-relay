@@ -93,3 +93,23 @@ The View selector shows "the key that opens it" in the header (line 49-50). FR-0
 ## Verdict after disposition pass 1
 
 Not run. Dispositions are reserved for this same session after the fix round.
+
+## Dispositions
+
+Disposition pass 1 (round 1), same reviewer session as round 0. Fix source frozen at 6b48064 (base 86d94d7), spec-only. Original findings, severities, excerpts and the round-0 verdict above are unchanged. spec-fix1-ready.md was treated as data; each outcome was checked against the current FR-065, FR-048-AC-4, FR-059-AC-4, FR-060 Precedence and FR-064 Dependencies. I ran no command.
+
+| FND | outcome | reason |
+|---|---|---|
+| FND-001 | fixed | Scope labels are now per mode: in Tickets and Scope the label is the FR-060 population label for the current mode (Focused, whole-team fallback, ticket-only) verbatim, and in named mode follows FR-064; if no lead is bound, Tickets, Agents and Scope say so and do not say or imply a reported lead focus. The generic "lead's reported scope" caption is gone. AC-7 asserts the exact caption per case, including the no-lead-bound case. |
+| FND-002 | fixed | Agents is labeled as listing every reported assignment, not limited by scope (FR-048-AC-6), and "SHALL NOT call the population a scope"; named mode defers to FR-064 for Tickets and Scope. AC-7 has one fixture per label case, with Agents separate. |
+| FND-003 | fixed | One "Permitted presentation differences" list of eight items (selector row and key styling, identity row including department views, footer, evidence rows, population labels, Status purpose line, Health and Retro state display replacing the placeholder table and "Unavailable: no shared department report", removal of tab strips) is referenced by Precedence, FR-059-AC-4 ("the presentation differences that FR-065 lists"), AC-12, and the FR-060 and FR-064 clauses. The earlier narrow lists in Precedence and AC-10 are replaced. |
+| FND-004 | fixed | The department selection is one of explicit team and projects, the saved report's scope, or, with a lead only and no team or project, the team derived from the bound lead's workspace across all projects, labeled "derived from lead workspace" (matching `department_team()`, monitor.rs:146-156). The Not configured message names the population shown in the label, so it has no dependence on explicit selectors. AC-7 includes the lead-only fixture. |
+| FND-005 | fixed | A Styling section says the key hint in the selector, dropdown, help popup and footer uses the bright primary blue, descriptions and separators muted, nothing else uses it for a key; FR-048-AC-4 now reads "Only footer, View selector, dropdown and help hotkeys use the bright primary blue"; AC-12 asserts it. Text and spec agree. |
+
+## Current verdict after disposition pass 1
+
+**PASS** for the integrity analysis. All 5 original findings (4 medium, 1 low) are fixed; none is open, deferred or rejected. I checked the new label rules against FR-060's three modes, FR-048-AC-6 and FR-064 and found no conflict, and the department selection now covers all three sources the code uses. No new integrity defect. The SR-121 FND-005 wording conflict is a failure-domain matter and does not change this verdict.
+
+## New findings (disposition pass 1)
+
+None for this method.

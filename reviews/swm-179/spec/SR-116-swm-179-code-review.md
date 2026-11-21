@@ -84,3 +84,20 @@ Fix: write AC-4 as "every key defined by FR-048, FR-059 and FR-060, and by FR-06
 ## Verdict after disposition pass 1
 
 Not run. Dispositions are reserved for this same session after the fix round.
+
+## Dispositions
+
+Disposition pass 1 (round 1), same reviewer session as round 0. Fix source frozen at 6b48064 (base 86d94d7), spec-only. Original findings, severities, excerpts and the round-0 verdict above are unchanged. The author's spec-fix1-ready.md was treated as data; every outcome below was checked against the current FR-065 and the FR-048, FR-059, FR-060 and FR-064 clauses. I ran no command (Read, Glob, Grep, Edit, Write only); the parent's Quire runs are the validation evidence.
+
+| FND | outcome | reason |
+|---|---|---|
+| FND-001 | fixed | FR-065 Help now carries a table naming each key's owner and views: `s` Tickets, Agents, Scope; `e` Status, Health, Retro; Left/Right Status, Health, Retro with details open; `c` Scope; `d`, Enter, `r`, navigation, `q` and Escape all views. It adds "Help SHALL NOT mark a key as applicable in a view where it has no visible effect" and "This requirement SHALL NOT change what `s`, `e`, Left or Right do in any view", matching the code reading (monitor.rs:236-257, monitor_ui.rs:336, monitor_department.rs:542,598). FR-065-AC-3 asserts that each view's marked keys equal that view's table column. |
+| FND-002 | fixed | The Help table names each key once, by owning requirement, and FR-065-AC-4 now draws its sweep from "the keys defined by FR-048, FR-059 and FR-060 plus F1, `?` and `v`", with no literal list in the AC. `f` is no longer carried (see SR-120 FND-003). The older FR-060 and FR-064 lists remain as they were and are not duplicated further. |
+
+## Current verdict after disposition pass 1
+
+**PASS** for the code-review method. Both original findings (1 medium, 1 low) are fixed; none is open, deferred or rejected. I found no regression of the kind this method covers: the new Help applicability claims match the source I read, and FR-065 still adds no hash, digest, pin or ceremony and no cross-repo copy. A separate low regression in the popup rules is recorded in SR-121 and does not change this method's verdict. This is a source and text reading, not a validation; the Quire results come from the parent.
+
+## New findings (disposition pass 1)
+
+None for this method.
