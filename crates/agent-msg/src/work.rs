@@ -234,14 +234,9 @@ mod tests {
     use ix_board::{Clock, Deadline, Error, ReadService, WorkspaceSnapshot, WorkspaceSource};
     use ix_trace_rs::trace;
 
-    use super::{SNAPSHOT_MAX_AGE, fresh_snapshot};
+    use super::{READ_DEADLINE, SNAPSHOT_MAX_AGE, fresh_snapshot};
 
     const START: i64 = 1_800_000_000;
-
-    /// The five-minute bound, in the clock's seconds.
-    fn max_age_seconds() -> i64 {
-        i64::try_from(SNAPSHOT_MAX_AGE.as_secs()).unwrap()
-    }
 
     /// A wall clock that moves only when a test says so.
     #[derive(Clone)]
@@ -328,13 +323,16 @@ mod tests {
         }
     }
 
-    /// A snapshot read four minutes ago is inside the five-minute bound and is used without
-    /// another source read, even while the source is down.
+    /// The contract is five minutes of age and a 120-second read, whatever the code derives.
+    /// A snapshot read four minutes ago is inside the bound and is used without another
+    /// source read, even while the source is down.
     #[trace("FR-048-AC-3")]
     #[test]
     fn work_accepts_a_snapshot_read_within_five_minutes_without_a_refresh() {
+        assert_eq!(SNAPSHOT_MAX_AGE, std::time::Duration::from_secs(300));
+        assert_eq!(READ_DEADLINE, std::time::Duration::from_secs(120));
         let mut seeded = Seeded::new();
-        seeded.pass(max_age_seconds() - 60);
+        seeded.pass(240);
         seeded.down.store(true, Ordering::SeqCst);
         fresh_snapshot(&mut seeded.service).expect("a fresh cache entry is accepted");
         assert_eq!(seeded.reads(), 1, "no refresh was needed");
@@ -347,7 +345,7 @@ mod tests {
     #[test]
     fn work_fails_closed_when_a_snapshot_older_than_five_minutes_cannot_be_refreshed() {
         let mut seeded = Seeded::new();
-        seeded.pass(max_age_seconds() + 1);
+        seeded.pass(301);
         seeded.down.store(true, Ordering::SeqCst);
         let refused = fresh_snapshot(&mut seeded.service).expect_err("no stale stand-in");
         assert!(matches!(refused, Error::GraphQl { .. }), "{refused}");

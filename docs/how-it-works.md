@@ -174,7 +174,7 @@ agent-msg work focus "Reviewing credentials" --ticket <ticket>
 agent-msg work agent <id> --ticket <ticket> --role reviewer --status running
 ```
 
-`work scope`, `work focus` and `work agent` read Linear before they write. The read finishes within 120 seconds. It uses a snapshot at most five minutes old. If a refresh fails or times out, the command exits with that error. It writes no report and does not fall back to an older snapshot.
+`work scope`, `work focus` and `work agent` read Linear before they write. The 120 seconds start once the credentials are ready. A wait for the keychain is not counted. The read finishes within that time. It uses a snapshot at most five minutes old. If a refresh fails or times out, the command exits with that error. It writes no report and does not fall back to an older snapshot.
 
 `team-leader-dashboard --lead <address>` monitors one lead session. It reads Herdr, Linear and the lead's work reports. Linear accepts an approved saved credential or the `LINEAR_API_KEY` override. `--session <native-session-id>` refuses an unexpected occupant at startup. The monitor keeps the original session and process binding, so restart it to follow a replacement.
 
