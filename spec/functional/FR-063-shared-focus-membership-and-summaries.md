@@ -17,6 +17,8 @@ relationships:
     type: "depends_on"
   - target: "ix://agent-ix/ix-board/FR-016"
     type: "depends_on"
+  - target: "ix://agent-ix/ix-board/FR-004"
+    type: "depends_on"
 ---
 # FR-063: Shared ix-board membership, exclusions and partial summaries for named focuses
 
@@ -148,9 +150,22 @@ relay checks at its boundary, and treats as the library's obligations:
 - Exclusions, milestone qualification by project, dynamic initiative membership,
   the team boundary and the marks above are evaluated by the library, and a member
   it cannot resolve is reported with a typed state.
-- A snapshot read can be bounded by a deadline and returns a typed timeout, so a
-  command or a refresh never waits unboundedly and a timeout publishes nothing.
-  This is a need handed to the ix-board owner; the relay defines no SDK API for it.
+- Readiness uses the library's existing readiness and blocker closure. A
+  prerequisite that a focus excludes remains evidence of a blocker only: an
+  exclusion removes a leaf from the focus's counts, and SHALL NOT make an
+  included leaf ready or hide the blocker.
+- An entity that the workspace snapshot cannot show (for example an initiative
+  with no project association, or an empty project) is classified from the
+  library's catalog evidence, or reported **Unavailable**. The relay SHALL NOT
+  guess that such an entity is Missing from project associations.
+- A snapshot read can be bounded by cache age and an operation-wide deadline and
+  returns a typed timeout, so a command or a refresh never waits unboundedly and a
+  timeout publishes nothing. The owning lane verified that the current shared read
+  has a fixed five-minute cache, a 30-second per-request timeout and no overall
+  budget, and owns additive support that preserves existing defaults and typed
+  errors ([ix-board FR-004](ix://agent-ix/ix-board/FR-004), under SWM-178). The
+  relay defines no SDK API for it, adds no raw client and runs no detached
+  thread it cannot cancel.
 - The project status category required by
   [FR-060](./FR-060-focused-scope-presentation.md) is already available.
 
@@ -177,7 +192,9 @@ library revision through one dependency update.
 | FR-063-AC-12 | A stale, partial or failed snapshot, an unresolved member and an unknown project category are each labeled, counts are unavailable or partial, and none is reported as healthy, complete or zero. | Test |
 | FR-063-AC-13 | After a failed refresh the last good result keeps its original fetch time and the error. | Test |
 | FR-063-AC-14 | The same snapshot and selections give identical order and counts on repeat, and an open ticket, an assignment or a work report never adds a leaf. | Test |
-| FR-063-AC-15 | `agent-msg focuses show <focus> --members` prints the rows and states of the current revision from one snapshot read bounded as in FR-061, stores nothing, and with a failed read prints the definition with `source_unavailable` and its reason and exit status 1. | Test |
+| FR-063-AC-15 | `agent-msg focuses show <focus> --members` prints the rows and states of the current revision from one snapshot read bounded as in FR-061, stores nothing, and with a failed read prints the definition with `source_unavailable` and its reason and exit status 1. This criterion is blocked until the bounded shared read of SWM-178 exists. | Test |
+| FR-063-AC-17 | A leaf whose only prerequisite is excluded by the focus remains blocked by that prerequisite, and the excluded prerequisite is not counted in the focus; no exclusion makes an included leaf ready. | Test |
+| FR-063-AC-18 | An initiative or project that the snapshot cannot show is reported Unavailable or from the library's catalog evidence, and the relay reports it Missing in no case from project associations alone. | Test |
 | FR-063-AC-16 | Inspection of the relay confirms it contains no membership, exclusion, deduplication, progress or readiness calculation for named focuses, no Linear reader beyond the shared library's read service, and no restatement of the library's selection types. | Inspection |
 
 ## Dependencies
@@ -191,7 +208,10 @@ library revision through one dependency update.
   FR-010, FR-012 and FR-016 above). The extension is specified by the single
   ix-board ticket SWM-178, which follows the accepted relay contract and is an
   explicit implementation prerequisite of the relay adapter work. The relay then
-  makes one dependency update and does not pin intermediate revisions. A
-  deadline-bounded read is a separate need handed to the ix-board owner.
+  makes one dependency update and does not pin intermediate revisions. The
+  bounded shared read (ix-board FR-004 cache age and operation-wide deadline) is
+  carried by the same ticket and is an explicit implementation prerequisite of
+  FR-063-AC-15 and FR-061-AC-19 and AC-20. Sequence: SWM-176 delivery and this
+  accepted contract, then the accepted SWM-178 extension, then the relay work.
 - Out of scope: the whole-team slow snapshot read, a second raw tracker reader,
   department metrics, spend and drift measures, and any Linear write.

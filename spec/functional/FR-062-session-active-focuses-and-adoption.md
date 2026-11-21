@@ -47,35 +47,43 @@ not a prefix of, and not one letter from, the existing `agent-msg work focus
 
 ### Named mode and the active record
 
-- A session is in **named mode** while its active record has the mode `named`.
-  The record is created by the first `work named` change and set to `legacy` by
-  `work named reset`. A session with no record is in legacy mode.
-- In named mode the active set may hold zero focuses. An empty active set means
-  **no active focus**. It SHALL NOT mean the whole team and SHALL NOT fall back
-  to the session's legacy scope.
-- A session holds at most 16 active focuses (one per focus ID). Different teams
-  may be active together; a focus of each team is a separate group
+- The relay SHALL treat a session as in **named mode** exactly while that
+  session's active record has the mode `named`, and as in legacy mode while the
+  record has the mode `legacy` or does not exist.
+- The first `work named` change of an incarnation SHALL create its active record
+  with the mode `named`, and `work named reset` SHALL set the mode to `legacy`.
+- In named mode the relay SHALL allow the active set to hold zero focuses. An
+  empty active set SHALL mean **no active focus**; it SHALL NOT mean the whole
+  team and SHALL NOT fall back to the session's legacy scope.
+- The relay SHALL hold at most 16 active focuses per session, one per focus ID,
+  and SHALL allow focuses of different teams to be active together, each team's
+  focuses forming a separate group
   ([FR-063](./FR-063-shared-focus-membership-and-summaries.md)).
-- **Layout.** The active record is one record per session incarnation
-  (`<machine>/<native session ID>/<process ID>`, the FR-048 key), separate from
-  the work-report hash. It holds the field `mode`, the field `seq` (incremented by
-  every write) and one field `focus:<focus-id>` per active focus. A focus field
-  holds the focus ID, the adopted revision number, the full adopted revision
-  content as a snapshot, and the times of activation and adoption. A revision is
-  at most 56 KiB (FR-061), so a focus field is at most 58 KiB and under the 64 KiB
-  per-field bound. A read of the record reads at most 18 fields, about 1 MiB in
-  the worst case, once per refresh.
-- The snapshot SHALL be copied into the session's own record, so it stays
-  readable if the definition changes, is archived, is removed or becomes
-  unavailable.
-- The active record has no time-to-live. A session that is alive does not lose
-  named mode to the passing of time, and a missing record never means anything
-  other than "never in named mode, or reset, superseded or reclaimed" (see
-  FR-064). Growth is bounded by the limit of 64 active records per relay and by
-  reclamation below.
-- Entering named mode does not delete or change the session's legacy scope,
-  free-text focus or assignments. They remain stored and are still reported by
-  `agent-msg work show`, whose output does not change.
+- The relay SHALL store the active record as one record per session incarnation,
+  keyed `<machine>/<native session ID>/<process ID>` (the FR-048 key) and separate
+  from the work-report hash. The record SHALL hold the field `mode`, the field
+  `seq` (incremented by every write of the record) and one field
+  `focus:<focus-id>` per active focus. Each focus field SHALL hold the focus ID,
+  the adopted revision number, the full adopted revision content as a snapshot,
+  and the times of activation and adoption.
+- The relay SHALL keep every focus field at most 58 KiB (a revision of at most 56
+  KiB under FR-061 plus its entry fields), so that no field reaches the 64 KiB
+  per-field bound. A read of the record SHALL read at most 18 fields, about 1 MiB
+  in the worst case, once per refresh.
+- The relay SHALL copy the adopted snapshot into the session's own record, so
+  that it stays readable if the definition changes, is archived, is removed or
+  becomes unavailable.
+- The relay SHALL NOT give the active record a time-to-live and SHALL NOT delete
+  it because of age, so a live session never loses named mode to the passing of
+  time. The relay SHALL remove a record only by `reset` (which sets the mode and
+  clears entries, keeping the record), by supersession, or by reclamation below;
+  a missing record therefore means only that the session was never in named
+  mode, or that its record was superseded or reclaimed (see FR-064).
+- The relay SHALL bound growth by at most 64 active records per relay, and SHALL
+  restore the bound by the supersession and reclamation below, never by expiry.
+- Entering named mode SHALL NOT delete or change the session's legacy scope,
+  free-text focus or assignments. They SHALL remain stored and SHALL still be
+  reported by `agent-msg work show`, whose output SHALL NOT change.
 
 ### Operations
 

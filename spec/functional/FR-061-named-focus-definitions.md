@@ -21,6 +21,8 @@ relationships:
     type: "depends_on"
   - target: "ix://agent-ix/ix-board/FR-016"
     type: "depends_on"
+  - target: "ix://agent-ix/ix-board/FR-004"
+    type: "depends_on"
 ---
 # FR-061: Durable, revisioned named focus definitions with one owner
 
@@ -132,6 +134,16 @@ assignments of [FR-048](./FR-048-session-work-monitor.md), the lane focus text o
   handling or cache. A snapshot fetched at most five minutes before the command
   resolves its references is accepted. An older, missing, partial or failed
   snapshot SHALL NOT validate a selection.
+- The bounded shared read is an **explicit implementation prerequisite** of
+  FR-061-AC-19 and FR-061-AC-20 and of FR-063-AC-15, carried by the single ix-board
+  specification ticket SWM-178 and by
+  [ix-board FR-004](ix://agent-ix/ix-board/FR-004) (cache and polling). The
+  owning lane has verified that the current shared read has a fixed five-minute
+  cache, a 30-second per-request timeout and no overall budget, and owns an
+  additive cache-age and deadline support that keeps existing defaults and typed
+  errors. The relay defines no SDK API for it, adds no raw Linear client and runs
+  no detached thread it cannot cancel. Until that support exists these criteria
+  are blocked, not satisfied by relay-side workarounds.
 - The read has an overall deadline: 120 seconds from the start of the command by
   default, adjustable with `--read-timeout <seconds>` from 1 to 600. The
   deadline is enforced at the source boundary of the shared read, which returns a
@@ -169,19 +181,30 @@ assignments of [FR-048](./FR-048-session-work-monitor.md), the lane focus text o
   replacement, and refreshes the stored binding in the same atomic operation. A
   caller with a different native session, an unverifiable binding, or only a
   matching address SHALL be refused.
-- Every operation that changes a definition (`update`, `archive`, `claim`,
-  `transfer`) SHALL carry the caller's `owner_id` and the owner epoch it
-  verified, and the atomic server-side operation SHALL compare both with the
-  stored owner record before any write. A claim or transfer that lands between
-  the caller's check and the write therefore makes the displaced owner's write
-  fail with `not_owner` or `owner_epoch_conflict`, changing nothing.
+- Every restricted operation SHALL be one atomic server-side operation that
+  re-reads the stored owner record and compares before any write:
+  - `update`, `archive` and `transfer` SHALL carry the caller's `owner_id` and the
+    owner epoch the caller verified, and the operation SHALL compare both with
+    the stored `owner_id` and epoch. A mismatch of `owner_id` refuses with
+    `not_owner`; a mismatch of epoch refuses with `owner_epoch_conflict`; nothing
+    is written. A claim or transfer that lands between the caller's check and the
+    write therefore makes the displaced owner's write fail.
+  - `claim` is made by a caller who is not the stored owner, so it SHALL NOT
+    compare the caller's `owner_id` with the stored one. The CLI SHALL read the
+    definition, validate the evidence below, and carry the **observed stored
+    `owner_id`** from that read together with `--expected-owner-epoch`. The
+    operation SHALL compare both with the stored owner record and, only if both
+    match, assign the caller as owner with the epoch increased by 1. A mismatch
+    of the observed `owner_id` or of the epoch refuses with `owner_epoch_conflict`
+    carrying the current owner and epoch, and nothing is written. The observed
+    `owner_id` comes from the validated read, so the CLI needs no new flag.
 - The creator becomes the owner. The definition, its revisions and its owner
   record do not depend on the owner's session remaining alive. When the owner's
   session ends or is replaced, the definition remains readable and its owner
   state reads absent or replaced. Nothing grants authority to the replacement
   session.
 - `claim` makes the verified caller the owner. It SHALL carry the expected
-  owner epoch. Without `--force` it succeeds only when the owner's session is
+  owner epoch and the observed stored owner ID as above. Without `--force` it succeeds only when the owner's session is
   **absent** or **replaced** by the evidence rule below. When the owner is live
   or unknown, the claim is refused unless `--force --reason <text>` is given. A
   forced claim records its reason in the owner `change`. This is the operator
@@ -383,8 +406,8 @@ keep their meanings and no subcommand is placed under either existing name.
 | FR-061-AC-5 | An empty inclusion list creates successfully, `show` reports an empty selection, and no output describes it as whole-team; a definition file with a focus reference field, two teams or an unknown member is refused with `invalid_argument`. | Test |
 | FR-061-AC-6 | After the owner's session exits, the definition, revisions and owner record stay readable with owner state absent; a different session's update, archive and transfer are refused with `not_owner`; a caller with the same address and a different native session is refused; a resumed process of the owner's native session updates successfully and refreshes `process_id`, `address` and `verified_at` without changing `owner_id` or the epoch. | Test |
 | FR-061-AC-7 | A claim with the expected epoch succeeds without `--force` and makes epoch 2 when the owner session is absent (no registration, clean registry read) or replaced (the owner's address belongs to a registration with a different native session ID); the same native session ID resumed in a new process is live and the claim is refused; a live owner and each unknown case (failed read, skipped record, placement not `Verified`, a registration on another machine with unverified placement) are refused without `--force`; with `--force --reason` the claim succeeds and the reason is stored in `change`. | Test |
-| FR-061-AC-8 | Of two simultaneous claims with epoch 1, one wins and the other receives `owner_epoch_conflict`. | Test |
-| FR-061-AC-9 | An `update`, `archive` or `transfer` by the former owner that reaches the store after a claim or transfer has made another session the owner is refused inside the atomic operation with `not_owner` or `owner_epoch_conflict`, and the definition, revisions and owner record are unchanged. | Test |
+| FR-061-AC-8 | Of two simultaneous claims by different sessions, both carrying the observed owner ID and epoch 1, one wins at epoch 2 and the other receives `owner_epoch_conflict` carrying the new owner and epoch; a claim whose observed owner ID differs from the stored owner ID is refused with `owner_epoch_conflict` even when the epoch matches; the claimer's own ID is never compared with the stored owner ID; and the fences of AC-7 (absent, replaced, live, unknown, same-session resume) still apply. | Test |
+| FR-061-AC-9 | An `update`, `archive` or `transfer` by the former owner that reaches the store after a claim or transfer has made another session the owner is refused inside the atomic operation, with `not_owner` for the changed owner ID or `owner_epoch_conflict` for a changed epoch, and the definition, revisions and owner record are unchanged; a `transfer` racing a `claim` of the same epoch yields exactly one new owner. | Test |
 | FR-061-AC-10 | After a transfer to a verified live session the epoch increments, the new owner can update and the old owner cannot; a target that resolves to zero or several sessions, or a stale epoch, changes nothing; the target's active focuses are unchanged. | Test |
 | FR-061-AC-11 | For an archived definition, `update`, transfer and new pin are refused with `archived`; `show` and `list --archived` still read it; its name is reusable. | Test |
 | FR-061-AC-12 | Boundary-sized valid input (128 selectors of 128-byte IDs with milestone project IDs, a 128-byte name, a 512-byte description, 64-byte labels, an encoded revision of exactly 56 KiB) is accepted; one extra selector, one extra byte of any bounded field, or one extra encoded byte is refused with `limit` naming the bound and no change; no stored field exceeds 64 KiB. | Test |
@@ -395,7 +418,7 @@ keep their meanings and no subcommand is placed under either existing name.
 | FR-061-AC-17 | `create` at the 256-definition limit removes at most 8 archived definitions, oldest first, only those archived at least 90 days with no pin after reclamation; an archived definition younger than 90 days, one with a live or unknown pin, and every non-archived definition is kept; a removed ID reads as `not_found`; with no removable definition the create is refused with `limit`. | Test |
 | FR-061-AC-18 | A stored record with an unknown member is read with its known members intact and keeps the unknown member after an update of that record; an undecodable record and a selection with an unsupported embedded `schema_version` are each listed as `unavailable_definition` by ID with their reason, other definitions are still listed, and a write to them is refused without overwriting. | Test |
 | FR-061-AC-19 | With a snapshot fetched four minutes earlier, `create` and `update` resolve without a refresh; a missing, older than five minutes, partial or failed snapshot is refused with `source_unavailable` and the matching `reason`, exit status 1, and no store change. | Test |
-| FR-061-AC-20 | Given a source that never completes, `create` exits with status 1 and `source_unavailable` with reason `timeout` within the deadline plus one request timeout (the default and a `--read-timeout` of 1 and 600 both honored), starts no background read, and leaves the store byte-identical. | Test |
+| FR-061-AC-20 | Given a source that never completes, `create` exits with status 1 and `source_unavailable` with reason `timeout` within the deadline plus one request timeout (the default and a `--read-timeout` of 1 and 600 both honored), starts no background read, and leaves the store byte-identical. This criterion and AC-19 are blocked until the bounded shared read of SWM-178 exists. | Test |
 | FR-061-AC-21 | `focuses` commands in `--json` mode print exactly one compact JSON value and one newline on success and a typed error object with a code from the stable list on standard error on failure, with exit status 1; no `focuses` command consumes an inbox, changes a registration or writes to Linear. | Test |
 | FR-061-AC-22 | `agent-msg focus`, `agent-msg work focus` and `agent-msg work show` keep their previous behavior and bytes, and `agent-msg focuses` is a separate command family. | Test |
 
@@ -419,9 +442,11 @@ keep their meanings and no subcommand is placed under either existing name.
   an explicit empty named selection and the batch result are **future ix-board
   extensions**, not available today; they are tracked by the single ix-board
   specification ticket SWM-178, which is an implementation prerequisite of the
-  relay work. A read that stops at a deadline with a typed timeout is a further
-  need that root hands to the ix-board owner; this requirement defines no SDK
-  API for it. See [FR-063](./FR-063-shared-focus-membership-and-summaries.md) for
+  relay work. The bounded read (cache age and an operation-wide deadline with a
+  typed timeout, [ix-board FR-004](ix://agent-ix/ix-board/FR-004)) is an explicit
+  SWM-178 prerequisite of FR-061-AC-19 and FR-061-AC-20, as stated under
+  "Reference resolution and the bounded snapshot read"; this requirement defines
+  no SDK API for it. See [FR-063](./FR-063-shared-focus-membership-and-summaries.md) for
   what the relay needs. No intermediate dependency pin is specified here.
 - Out of scope: following another session's active set, planner publication,
   worker budgets and goal thresholds (an optional monitor policy, never required
