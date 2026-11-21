@@ -6,7 +6,7 @@ use crate::{
     monitor::{App, DepartmentInput, View, display_text},
     monitor_ui::{
         FOREGROUND, MUTED, SELECTION, WARNING, evidence_items, evidence_lines, footer_controls,
-        identity_line, selector_line, wrapped_rows,
+        identity_line, muted, selector_line, wrapped_rows,
     },
     monitor_views::{content_areas, select_row},
 };
@@ -426,11 +426,36 @@ fn status_rows(app: &App) -> Vec<DisplayRow> {
             }
         }
     } else {
+        // Say why there is no report; wait only for a collection that was configured.
+        let (value, detail) = if app.department.error.is_some() {
+            (
+                "Department read failed; see the evidence row",
+                "No retained report exists; capacity and liveness are not inferred.",
+            )
+        } else {
+            match app.department_input {
+                DepartmentInput::NotConfigured => (
+                    "No retro configuration supplied",
+                    "Start with --retro-config <file> to read capacity and lane activity. \
+                     Nothing is being collected; capacity and liveness are not inferred.",
+                ),
+                DepartmentInput::Configured => (
+                    "Waiting for the first read",
+                    "Awaiting the first read of the retro configuration; capacity and \
+                     liveness are not inferred.",
+                ),
+                DepartmentInput::Saved => (
+                    "No department report in the saved input",
+                    "Open a saved report that contains a department section; capacity \
+                     and liveness are not inferred.",
+                ),
+            }
+        };
         rows.push(row(
             "Capacity / lane activity",
             "unavailable",
-            "No department report".into(),
-            "Awaiting shared collection; capacity and liveness are not inferred.".into(),
+            value.into(),
+            detail.into(),
         ));
     }
     rows
@@ -521,10 +546,6 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App, now: Instant) {
     crate::monitor_nav::render_popup(frame, app, body);
 }
 
-fn muted(text: impl Into<std::borrow::Cow<'static, str>>) -> Span<'static> {
-    Span::styled(text, Style::default().fg(MUTED))
-}
-
 /// Source windows and ages of the shared report, age first so the evidence row can be
 /// truncated at its end without hiding the age.
 pub(crate) fn evidence_windows(delta: &Delta) -> String {
@@ -603,6 +624,27 @@ fn label_lines(app: &App) -> Vec<Line<'static>> {
     lines
 }
 
+/// How to supply the retro configuration so startup accepts it. Startup compares the file's
+/// department team and projects with `--team` and `--project` only, so a lead-derived
+/// selection must also be passed as `--team`.
+fn not_configured_instruction(app: &App) -> String {
+    if app.team.is_some() || !app.projects.is_empty() {
+        return format!(
+            "Start with --retro-config <file> whose department team and project population \
+             matches the selection shown above ({}).",
+            department_selection(app)
+        );
+    }
+    let team = app
+        .department_team()
+        .as_deref()
+        .map_or_else(|| "<KEY>".to_owned(), safe);
+    format!(
+        "Start with --team {team} and --retro-config <file>. The file's department team must \
+         be {team} with no projects, matching those selectors."
+    )
+}
+
 /// The one concise message for Health or Retro when no values can be shown, chosen from
 /// their own fields. Not configured and Waiting are not source failures.
 fn empty_message(app: &App) -> Option<String> {
@@ -613,8 +655,8 @@ fn empty_message(app: &App) -> Option<String> {
     };
     let saved_lacks = || {
         format!(
-            "Not configured: this saved report does not supply the {name} fields. \
-             Open a report that contains them with --report <file>."
+            "Fields absent: this saved report does not supply the {name} fields. \
+             A report containing them is required; open one with --report <file>."
         )
     };
     match &app.department.value {
@@ -628,7 +670,10 @@ fn empty_message(app: &App) -> Option<String> {
                 if app.department_input == DepartmentInput::Saved {
                     saved_lacks()
                 } else {
-                    format!("The retained report supplies no {name} fields; nothing is shown.")
+                    format!(
+                        "Fields absent: the retro configuration read succeeded but does not \
+                         supply the {name} fields. Nothing is shown for them."
+                    )
                 }
             })
         }
@@ -643,10 +688,8 @@ fn empty_message(app: &App) -> Option<String> {
                  No {name} values are shown until it returns."
             ),
             (None, DepartmentInput::NotConfigured) => format!(
-                "Not configured: {name} needs a department retro configuration. Start with \
-                 --retro-config <file> whose department team and project population matches \
-                 the selection shown above ({}).{}",
-                department_selection(app),
+                "Not configured: {name} needs a department retro configuration. {}{}",
+                not_configured_instruction(app),
                 if app.view == View::Retro {
                     " Previous and baseline comparisons also need a retained snapshot history."
                 } else {
@@ -739,6 +782,7 @@ fn render_content(frame: &mut Frame, app: &mut App, body: Rect) {
 pub(crate) mod tests {
     use super::*;
     use crate::monitor::handle_key;
+    use crate::monitor_ui::tests::flat;
     use ix_board::retro::{
         Direction, Status,
         department::{
@@ -1190,7 +1234,6 @@ pub(crate) mod tests {
         assert_eq!(app.department_team().as_deref(), Some("SWM"));
     }
 
-    /// Trace: FR-065-AC-12
     #[trace("FR-065-AC-12")]
     #[test]
     fn department_evidence_keeps_the_existing_color_policy() {
@@ -1226,9 +1269,54 @@ pub(crate) mod tests {
         }
     }
 
-    fn flat(text: &str) -> String {
-        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    #[trace("FR-065-AC-5")]
+    #[test]
+    fn department_overflow_keeps_labels_marker_count_and_full_text_through_e_then_d() {
+        let long = format!("source unavailable {}", "detail ".repeat(40));
+        let mut app = App {
+            view: View::Status,
+            ..App::default()
+        };
+        app.department.failure(long.clone());
+        app.apply_tracker_refresh(Err(ix_board::Error::MissingApiKey), Instant::now());
+        app.runtime.failure("ambiguous requested lead");
+        app.report.failure("Redis unavailable");
+        app.session_ended = true;
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = screen(&mut app, width, height);
+            for label in [
+                "Binding: session replaced",
+                "Department failed",
+                "Tracker failed",
+            ] {
+                assert!(text.contains(label), "{label}\n{text}");
+            }
+            assert!(text.contains('…'), "detail truncated with a marker\n{text}");
+            assert!(text.contains("+2 more sources not shown"), "{text}");
+            assert!(!text.contains("Reports failed"), "{text}");
+            let evidence = text.lines().filter(|l| l.contains(" failed")).count();
+            assert!(evidence <= 4, "{text}");
+            let footer = text.lines().last().unwrap();
+            assert!(footer.contains("v View") && footer.contains("F1 Help"));
+        }
+        // The full text stays reachable: `e` lists the sources and `d` opens the diagnostic.
+        key(&mut app, KeyCode::Char('e'));
+        screen(&mut app, 80, 24);
+        app.table.select(Some(0));
+        app.detail_scroll = 0;
+        let detail = painted_details(&mut app, 80, 24);
+        assert!(detail.contains(&flat(&long)), "{detail}");
+        // Below the supported size the dashboard truncates without panic.
+        for (width, height) in [(40, 10), (60, 16)] {
+            screen(&mut app, width, height);
+        }
     }
+
+    /// The exact texts the specification fixes, written out so a reworded constant fails.
+    const RELATION: &str =
+        "Department scope, chosen independently of the lead's reported focus; see Scope (p).";
+    const PURPOSE: &str =
+        "Status: progress, blockers and lane evidence for the selected department scope.";
 
     fn labels(app: &App) -> String {
         label_lines(app)
@@ -1243,7 +1331,6 @@ pub(crate) mod tests {
             .join("\n")
     }
 
-    /// Trace: FR-065-AC-7
     #[trace("FR-065-AC-7")]
     #[test]
     fn department_views_name_their_selection_and_state_the_fixed_relation() {
@@ -1278,21 +1365,20 @@ pub(crate) mod tests {
                     text.contains(&format!("Department selection: {selection}")),
                     "{name}\n{text}"
                 );
-                assert!(text.contains(DEPARTMENT_RELATION), "{name}\n{text}");
+                assert!(text.contains(RELATION), "{name}\n{text}");
                 let lower = text.to_lowercase();
                 for word in ["equal", "same", "narrower", "subset"] {
                     assert!(!lower.contains(word), "{name} {word}\n{text}");
                 }
                 for (width, height) in [(80, 24), (120, 40)] {
                     let drawn = flat(&screen(app, width, height));
-                    assert!(drawn.contains(DEPARTMENT_RELATION), "{name}\n{drawn}");
+                    assert!(drawn.contains(RELATION), "{name}\n{drawn}");
                     assert!(drawn.contains(&format!("Department selection: {selection}")));
                 }
             }
         }
     }
 
-    /// Trace: FR-065-AC-8
     #[trace("FR-065-AC-8")]
     #[test]
     fn status_states_its_purpose_without_hiding_evidence_or_rows() {
@@ -1305,19 +1391,130 @@ pub(crate) mod tests {
             app.department.failure("source unavailable");
             app.runtime.failure("ambiguous requested lead");
             let text = flat(&screen(&mut app, width, height));
-            assert!(text.contains(STATUS_PURPOSE), "{text}");
+            assert!(text.contains(PURPOSE), "{text}");
             assert!(text.contains("Department failed:"), "{text}");
             assert!(text.contains("Binding / Herdr failed:"), "{text}");
             assert!(text.contains("Bound activity"), "{text}");
             for view in [View::Health, View::Retro] {
                 app.view = view;
                 let other = flat(&screen(&mut app, width, height));
-                assert!(!other.contains(STATUS_PURPOSE), "{view:?}");
+                assert!(!other.contains(PURPOSE), "{view:?}");
             }
         }
     }
 
-    /// Trace: FR-065-AC-9
+    #[trace("FR-065-AC-8")]
+    #[test]
+    fn the_purpose_line_leaves_every_other_status_row_as_it_was() {
+        // The rows below are the Status rows for the shared fixture before the purpose line
+        // existed: the line is label text and contributes no row.
+        let mut app = App {
+            view: View::Status,
+            ..App::default()
+        };
+        app.department.success(fixture(), Instant::now());
+        let rows: Vec<(String, String, String)> = status_rows(&app)
+            .into_iter()
+            .map(|row| (row.name, row.state, row.value))
+            .collect();
+        let expected = [
+            (
+                "Plan / progress / blockers",
+                "unavailable",
+                "No structured tracker snapshot",
+            ),
+            ("Bound activity", "unknown", "No verified native identity"),
+            (
+                "Next owned action",
+                "unavailable",
+                "No explicit focus reported",
+            ),
+            ("wip_active", "ok", "17"),
+            (
+                "wip_capacity_ratio",
+                "unavailable",
+                "Field absent from saved/shared report",
+            ),
+            (
+                "host_slots_used",
+                "unavailable",
+                "Field absent from saved/shared report",
+            ),
+            (
+                "host_slots_free",
+                "unavailable",
+                "Field absent from saved/shared report",
+            ),
+            (
+                "lane_execution_state",
+                "unavailable",
+                "Field absent from saved/shared report",
+            ),
+        ];
+        assert_eq!(rows.len(), expected.len(), "{rows:?}");
+        for (row, (name, state, value)) in rows.iter().zip(expected) {
+            assert_eq!(
+                (row.0.as_str(), row.1.as_str(), row.2.as_str()),
+                (name, state, value)
+            );
+        }
+        // Drawn, the table holds the same first column with and without the label rows.
+        let drawn = flat(&screen(&mut app, 120, 40));
+        for (name, _, _) in expected {
+            assert!(drawn.contains(name), "{name}\n{drawn}");
+        }
+        // Selection starts on the first real row, not on the label text.
+        assert_eq!(app.table.selected(), Some(0));
+        // With no department report the line still shows.
+        let mut empty = App {
+            view: View::Status,
+            ..App::default()
+        };
+        assert!(flat(&screen(&mut empty, 80, 24)).contains(PURPOSE));
+    }
+
+    #[trace("FR-065-AC-9")]
+    #[test]
+    fn status_without_a_report_says_why_and_never_awaits_a_collection_that_is_not_configured() {
+        let text_for = |input: DepartmentInput, error: Option<&str>| {
+            let mut app = App {
+                view: View::Status,
+                department_input: input,
+                ..App::default()
+            };
+            if let Some(error) = error {
+                app.department.failure(error);
+            }
+            let text = flat(&screen(&mut app, 120, 40));
+            (text, diagnostic_rows(&app).len())
+        };
+        let (text, failures) = text_for(DepartmentInput::NotConfigured, None);
+        assert!(text.contains("No retro configuration supplied"), "{text}");
+        assert!(!text.contains("Awaiting"), "{text}");
+        assert_eq!(failures, 0, "Not configured is no source failure");
+        // The detail text names the configuration flag.
+        let open = App {
+            view: View::Status,
+            ..App::default()
+        };
+        let detail = status_rows(&open)
+            .into_iter()
+            .find(|row| row.name == "Capacity / lane activity")
+            .unwrap()
+            .detail;
+        assert!(detail.contains("--retro-config <file>"), "{detail}");
+        let (text, failures) = text_for(DepartmentInput::Configured, None);
+        assert!(text.contains("Waiting for the first read"), "{text}");
+        assert_eq!(failures, 0);
+        let (text, failures) = text_for(DepartmentInput::Configured, Some("source unreachable"));
+        assert!(text.contains("Department read failed"), "{text}");
+        assert!(
+            text.contains("Department failed: source unreachable"),
+            "{text}"
+        );
+        assert_eq!(failures, 1);
+    }
+
     #[trace("FR-065-AC-9")]
     #[test]
     fn health_and_retro_show_one_concise_state_and_never_a_failure_or_a_value() {
@@ -1365,11 +1562,52 @@ pub(crate) mod tests {
             saved.department.success(lacking, Instant::now());
             let text = flat(&screen(&mut saved, 80, 24));
             assert!(
-                text.contains(&format!("does not supply the {name} fields")),
+                text.contains(&format!(
+                    "Fields absent: this saved report does not supply the {name} fields. \
+                     A report containing them is required"
+                )),
                 "{text}"
             );
             assert!(text.contains("--report <file>"), "{text}");
+            assert!(!text.contains("Not configured"), "{text}");
             assert!(diagnostic_rows(&saved).is_empty());
+
+            // Lead-only startup: the instruction names --team so startup accepts the file.
+            let mut derived = crate::monitor_ui::tests::app();
+            derived.view = view;
+            let text = flat(&screen(&mut derived, 120, 40));
+            assert!(
+                text.contains("Start with --team SWM and --retro-config <file>"),
+                "{text}"
+            );
+            assert!(text.contains("department team must be SWM with no projects"));
+            assert_eq!(text.matches("Not configured").count(), 1, "{text}");
+
+            // A successful configured read that lacks the fields is Fields absent.
+            let mut absent = App {
+                view,
+                department_input: DepartmentInput::Configured,
+                ..App::default()
+            };
+            let mut lacking = fixture();
+            lacking.current.classes.clear();
+            lacking.current.measurements.clear();
+            lacking.current.loops.clear();
+            absent.department.success(lacking, Instant::now());
+            let text = flat(&screen(&mut absent, 80, 24));
+            assert!(
+                text.contains(&format!(
+                    "Fields absent: the retro configuration read succeeded but does not supply \
+                     the {name} fields"
+                )),
+                "{text}"
+            );
+            assert!(!text.contains("Not configured"), "{text}");
+            assert!(diagnostic_rows(&absent).is_empty());
+            let lower = text.to_lowercase();
+            for forbidden in ["failed", "authentication", "green", "measure / class"] {
+                assert!(!lower.contains(forbidden), "{forbidden}\n{text}");
+            }
 
             let mut waiting = App {
                 view,
@@ -1409,6 +1647,36 @@ pub(crate) mod tests {
             assert!(text.contains("last snapshot"), "{text}");
             assert!(text.contains("Measure / class"), "{text}");
         }
+    }
+
+    #[trace("FR-065-AC-9")]
+    #[test]
+    fn the_lead_derived_instruction_is_what_startup_configuration_matching_accepts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("retro.json");
+        let value = serde_json::json!({
+            "team": "SWM", "linear_teams": ["SWM"], "projects": [], "gate_tickets": [], "repos": [],
+            "department": {"version": 1, "policy_id": "fixture-policy", "scope": {"teams": [{"id": "SWM", "label": "Fixture"}]}, "freshness_seconds": {"linear": 3600}, "clock_tolerance_seconds": 60}
+        });
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        // A lead-only start passes no --team or --project, so startup refuses the file ...
+        let refused = crate::monitor_department_source::load_config(&path, None, &[]);
+        assert!(refused.is_err(), "lead-only selectors must not match");
+        // ... and the instruction's selectors, --team SWM with no projects, accept it.
+        assert!(crate::monitor_department_source::load_config(&path, Some("SWM"), &[]).is_ok());
+        let derived = crate::monitor_ui::tests::app();
+        assert!(not_configured_instruction(&derived).contains("--team SWM and --retro-config"));
+        // With an explicit selection the instruction points at that selection instead.
+        let explicit = App {
+            team: Some("SWM".into()),
+            ..App::default()
+        };
+        let text = not_configured_instruction(&explicit);
+        assert!(
+            text.contains("matches the selection shown above (team SWM)"),
+            "{text}"
+        );
+        assert!(!text.contains("--team SWM and"), "{text}");
     }
 
     /// State-only companion to the production event-loop fixtures in `monitor_main`.

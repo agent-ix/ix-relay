@@ -76,7 +76,7 @@ pub enum View {
 }
 
 impl View {
-    /// Every view in the fixed order the View selector lists them (FR-065).
+    /// Every view in the fixed order the View selector lists them.
     pub const ALL: [View; 6] = [
         View::Tickets,
         View::Agents,
@@ -111,7 +111,7 @@ impl View {
     }
 }
 
-/// The one popup that may be open over the work area (FR-065).
+/// The one popup that may be open over the work area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Popup {
     /// View dropdown; `highlight` indexes `View::ALL` and `offset` is its first visible entry.

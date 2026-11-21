@@ -30,10 +30,21 @@ team-leader-dashboard --team SWM --retro-config <retro-config.json>
 ```
 
 The configuration's department team and project populations must exactly match the command's selectors.
-Without a configuration or saved report, Health and Retro show one "Not configured" message that names `--retro-config <file>`.
-Retro also states that its previous and baseline comparisons need a retained snapshot history.
-Before the first read of a supplied configuration they say they are waiting for it.
-Neither state is a source failure or an authentication failure, neither starts a collection, and neither shows a zero or green value.
+A lead-only start passes no selectors, so add `--team <KEY>` and use a configuration for that team with no projects.
+
+Health and Retro each show one message when they have no values:
+
+| State | What you see |
+|---|---|
+| No configuration | "Not configured", with the `--team` and `--retro-config <file>` to start with |
+| Configuration read pending | "Waiting for the first read of the retro configuration" |
+| Read succeeded without the fields | "Fields absent", naming the view's fields |
+| Read failed, nothing retained | "unavailable" with the classified reason, plus a failed-source row |
+| Read failed, report retained | The retained values with a last-snapshot label |
+
+Retro's not-configured message also says that previous and baseline comparisons need a retained snapshot history.
+Not configured, waiting and fields absent are plain states. They show no failed-source row, no zero or green value, and they start no collection.
+Status shows the same reason on its "Capacity / lane activity" row.
 
 ## Open a saved report
 
@@ -50,6 +61,7 @@ Saved mode reads the supplied file without live authentication, network, Herdr o
 Use `--report` by itself; live scope, lead, session and retro configuration options conflict with it.
 Invalid data reports the path and decoding problem, leaves the bytes unchanged and exits nonzero.
 Plan fields absent from a saved report remain unavailable.
+A saved report without Health or Retro fields shows "Fields absent" and asks for a report that contains them.
 
 ## Navigate and inspect evidence
 
@@ -57,15 +69,16 @@ Every view shows the same header: the monitored lead, then a `View` selector wit
 Press `v` to open the View dropdown and see all six views: Tickets, Agents, Scope, Status, Health and Retro.
 Use Up, Down, `j` or `k` to move the highlight and Enter to select.
 Escape or `v` closes the dropdown without changing anything.
-Press F1 or `?` for help, which lists every key and the views where it applies.
-Scroll help with Up, Down, PageUp and PageDown; F1, `?` or Escape closes it.
-While a popup is open it receives every key, so `q` does not quit and nothing underneath changes.
+Press F1 or `?` for help. It lists every key with its action, marks the keys that work in the current view, and names the views for keys that do not work everywhere.
+Scroll help with Up, Down, PageUp and PageDown. F1, `?` or Escape closes it.
+An open popup receives every key. Pressing `q` then does not quit, and the view underneath stays as it was.
 Source refreshes continue while a popup is open.
 
-The footer shows only `v View`, `F1 Help` and, when the width allows, `q Quit`.
-The Scope view also shows its completed-projects key.
+The footer shows `v View`, `F1 Help` and, when the width allows, `q Quit`.
+The Scope view adds its completed-projects key.
 Source failures, stale snapshots, rate-limit countdowns and a replaced session appear in up to four evidence rows above the footer.
-Each row keeps its label; long detail is cut with `…`, and a count shows any sources not shown.
+Failures are red, and rate-limit and stale rows use the warning color.
+Each row keeps its label. Long detail ends with `…`, and a count shows the sources not shown.
 
 The shortcuts remain: `1`, `2` or `3` for Status, Health or Retro, and `t`, `a` or `p` for Tickets, Agents or Scope.
 Use arrows or `j` and `k` to select a row; `d` or Enter opens details.

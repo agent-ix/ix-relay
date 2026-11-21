@@ -140,14 +140,16 @@ fn run() -> io::Result<(Outcome, Option<String>)> {
             monitor_department_source::load_config(path, args.team.as_deref(), &args.project)
         })
         .transpose()?;
-    let (mut app, observed_binding) =
-        prepare_app(&args, monitor_department_source::read_report, bind_lead)?;
+    let (mut app, observed_binding) = startup(
+        &args,
+        department_config.is_some(),
+        monitor_department_source::read_report,
+        bind_lead,
+    )?;
     app.color_enabled = ColorChoice::Auto.decide(
         ix_cli_kit::streams::stdout_is_terminal(),
         std::env::var_os("NO_COLOR").is_some(),
     );
-    // A missing retro configuration is a state of the Health and Retro views, not a source failure.
-    app.department_input = department_input(&args, department_config.is_some());
     let department_worker = department_config
         .map(monitor_department_source::DepartmentWorker::spawn)
         .transpose()?;
@@ -368,6 +370,19 @@ fn prepare_app(
     Ok((app, observed))
 }
 
+/// Builds the dashboard state exactly as a real start does. A missing retro configuration
+/// is a state of the Health and Retro views, never a stored source failure.
+fn startup(
+    args: &Args,
+    retro_config_supplied: bool,
+    read_report: impl FnOnce(&std::path::Path) -> io::Result<ix_board::retro::department::Delta>,
+    bind: impl FnOnce(&str, Option<relay_core::SessionId>) -> io::Result<ObservedBinding>,
+) -> io::Result<(App, Option<ObservedBinding>)> {
+    let (mut app, observed) = prepare_app(args, read_report, bind)?;
+    app.department_input = department_input(args, retro_config_supplied);
+    Ok((app, observed))
+}
+
 /// How the department report is supplied, from the startup options.
 fn department_input(args: &Args, configured: bool) -> monitor::DepartmentInput {
     if args.report.is_some() {
@@ -566,47 +581,77 @@ mod tests {
         assert_eq!(restored.get(), 3);
     }
 
-    /// Scripted key presses; `None` is an idle tick that lets the loop drain workers.
-    struct Script(std::vec::IntoIter<Option<ratatui::crossterm::event::KeyCode>>);
+    use crate::monitor_ui::tests::{flat, frame_text};
+    use ratatui::{backend::TestBackend, crossterm::event::KeyCode};
+
+    /// Scripted key presses; `None` is an idle tick that lets the loop drain workers. An
+    /// optional hook runs once, when the loop asks for key number `hook_at`.
+    struct Script {
+        keys: std::vec::IntoIter<Option<KeyCode>>,
+        calls: usize,
+        hook_at: usize,
+        hook: Option<Box<dyn FnOnce()>>,
+    }
+
+    impl Script {
+        fn new(keys: Vec<Option<KeyCode>>) -> Self {
+            Self {
+                keys: keys.into_iter(),
+                calls: 0,
+                hook_at: usize::MAX,
+                hook: None,
+            }
+        }
+
+        fn with_hook(mut self, hook_at: usize, hook: impl FnOnce() + 'static) -> Self {
+            self.hook_at = hook_at;
+            self.hook = Some(Box::new(hook));
+            self
+        }
+    }
 
     impl KeySource for Script {
         fn next_key(&mut self, _wait: Duration) -> io::Result<Option<KeyEvent>> {
+            if self.calls == self.hook_at
+                && let Some(hook) = self.hook.take()
+            {
+                hook();
+            }
+            self.calls += 1;
             Ok(self
-                .0
+                .keys
                 .next()
                 .flatten()
                 .map(|code| KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE)))
         }
     }
 
-    /// Opens and closes both popups, presses keys they do not own, then quits.
-    fn popup_script() -> Script {
-        use ratatui::crossterm::event::KeyCode::{Char, Down, Esc, F, PageDown};
-        Script(
-            vec![
-                Some(Char('2')),
-                Some(Char('v')),
-                Some(Char('q')),
-                Some(Char('r')),
-                Some(Down),
-                Some(Esc),
-                Some(F(1)),
-                Some(Char('q')),
-                Some(Char('r')),
-                Some(PageDown),
-                Some(Char('?')),
-                None,
-                None,
-                Some(Char('3')),
-                Some(Char('v')),
-                Some(Esc),
-                Some(F(1)),
-                Some(Esc),
-                None,
-                Some(Char('q')),
-            ]
-            .into_iter(),
-        )
+    /// Opens and closes both popups and presses keys they do not own (including `q` and
+    /// `r`), then idles and quits. The last four entries are three idle ticks and `q`.
+    fn popup_keys() -> Vec<Option<KeyCode>> {
+        use KeyCode::{Char, Down, Esc, F, PageDown};
+        vec![
+            Some(Char('2')),
+            Some(Char('v')),
+            Some(Char('q')),
+            Some(Char('r')),
+            Some(Down),
+            Some(Esc),
+            Some(F(1)),
+            Some(Char('q')),
+            Some(Char('r')),
+            Some(PageDown),
+            Some(Char('?')),
+            Some(Char('3')),
+            Some(Char('v')),
+            Some(Esc),
+            Some(F(1)),
+            Some(Esc),
+            None,
+            None,
+            None,
+            Some(Char('q')),
+        ]
     }
 
     fn files(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
@@ -624,181 +669,284 @@ mod tests {
         found
     }
 
-    fn last_frame(terminal: &Terminal<ratatui::backend::TestBackend>) -> String {
-        let buffer = terminal.backend().buffer();
-        let text = (0..buffer.area.height)
-            .map(|y| {
-                (0..buffer.area.width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    /// Writes a saved snapshot whose department section lacks the Health and Retro fields.
+    fn write_saved_report(path: &std::path::Path) {
+        let mut department = monitor_department::tests::fixture().current;
+        department.classes.clear();
+        department.measurements.clear();
+        department.loops.clear();
+        let record = ix_board::retro::Record {
+            schema_version: 2,
+            kind: ix_board::retro::RecordKind::Snapshot,
+            taken_at: "2026-11-19T00:00:00Z".into(),
+            team: "SWM".into(),
+            window: "24h".into(),
+            metrics: Default::default(),
+            department: Some(department),
+        };
+        std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
     }
 
-    /// Trace: FR-065-AC-10
     #[trace("FR-065-AC-10")]
     #[test]
-    fn saved_report_popups_run_the_real_loop_without_any_adapter_call_or_write() {
+    fn saved_report_popups_never_reach_the_loops_reader_or_any_adapter() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("saved.json");
-        std::fs::write(&path, b"saved report bytes").unwrap();
+        write_saved_report(&path);
         let before = files(directory.path());
         let opened = args(&["--report", path.to_str().unwrap()]);
-        let reads = Cell::new(0);
-        let mut lacking = monitor_department::tests::fixture();
-        lacking.current.classes.clear();
-        lacking.current.measurements.clear();
-        lacking.current.loops.clear();
-        let (mut app, binding) = prepare_app(
-            &opened,
-            |_| {
-                reads.set(reads.get() + 1);
-                Ok(lacking)
-            },
-            |_, _| panic!("Herdr or relay setup called in saved mode"),
-        )
-        .unwrap();
-        let tracker: Option<()> = start_tracker(&opened, &mut app, || {
-            panic!("credential or network factory called in saved mode")
-        });
-        assert!(binding.is_none() && tracker.is_none());
-        assert_eq!(reads.get(), 1, "the one startup read");
-        let mut workers = Workers {
-            tracker: None,
-            department: None,
-            runtime: None,
+        let run = |keys: Vec<Option<KeyCode>>| {
+            // The loop's refresh path calls the real saved reader, so the department
+            // revision counts every read. Herdr, credential and network adapters are
+            // unreachable from the loop by construction: it is given no worker at all.
+            let (mut app, binding) = startup(
+                &opened,
+                false,
+                monitor_department_source::read_report,
+                |_, _| panic!("Herdr or relay setup called in saved mode"),
+            )
+            .unwrap();
+            let tracker: Option<()> = start_tracker(&opened, &mut app, || {
+                panic!("credential or network factory called in saved mode")
+            });
+            assert!(binding.is_none() && tracker.is_none());
+            assert_eq!(app.department.revision, 1, "the one startup read");
+            let mut workers = Workers {
+                tracker: None,
+                department: None,
+                runtime: None,
+            };
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            event_loop(
+                &mut terminal,
+                &mut app,
+                &mut workers,
+                &mut Script::new(keys),
+                &AtomicBool::new(false),
+                Some(&path),
+            )
+            .unwrap();
+            (app, flat(&frame_text(&terminal)))
         };
-        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
-        event_loop(
-            &mut terminal,
-            &mut app,
-            &mut workers,
-            &mut popup_script(),
-            &AtomicBool::new(false),
-            Some(&path),
-        )
-        .unwrap();
+        let (app, frame) = run(popup_keys());
         assert!(app.should_quit && app.popup.is_none());
         assert_eq!(app.view, monitor::View::Retro);
-        assert_eq!(reads.get(), 1, "no saved re-read: refresh never fired");
-        assert_eq!(files(directory.path()), before, "no file written");
-        assert!(!app.collection_failed);
+        assert_eq!(app.department.revision, 1, "no saved re-read happened");
         assert!(app.department.error.is_none() && app.tracker.error.is_none());
-        let frame = last_frame(&terminal);
+        assert!(!app.collection_failed);
+        assert_eq!(files(directory.path()), before, "no file written");
         assert!(
-            frame.contains("Not configured: this saved report does not supply the Retro fields"),
+            frame.contains("Fields absent: this saved report does not supply the Retro fields"),
             "{frame}"
         );
         assert!(!frame.to_lowercase().contains("authentication"), "{frame}");
         let (outcome, diagnostic) = quit_outcome(&app);
         assert!(matches!(outcome, Outcome::Ok) && diagnostic.is_none());
+        // Control: the same loop does re-read when `r` is pressed with no popup open.
+        let (control, _) = run(vec![Some(KeyCode::Char('r')), Some(KeyCode::Char('q'))]);
+        assert_eq!(control.department.revision, 2);
+        assert_eq!(files(directory.path()), before);
     }
 
-    /// Trace: FR-065-AC-10
+    /// What one live run of the production loop left behind.
+    struct LiveRun {
+        app: App,
+        tracker_calls: usize,
+        department_calls: usize,
+        frame: String,
+        before: Vec<(String, Vec<u8>)>,
+        after: Vec<(String, Vec<u8>)>,
+    }
+
+    /// Runs the real startup and loop with a tracker worker and, when `configured`, a
+    /// department worker, both on injected reads that block until released. `released`
+    /// lets them finish when the loop asks for key `hook_at`, then waits long enough for a
+    /// refresh queued earlier to start a second read.
+    fn run_live(configured: bool, released: Option<usize>, keys: Vec<Option<KeyCode>>) -> LiveRun {
+        use std::sync::{atomic::AtomicUsize, mpsc};
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("retro-config.json"), b"{}").unwrap();
+        let before = files(directory.path());
+        let live = args(&["--team", "SWM"]);
+        let (mut app, binding) = startup(
+            &live,
+            configured,
+            |_| panic!("saved reader called in live mode"),
+            |_, _| panic!("native binding called without a lead"),
+        )
+        .unwrap();
+        assert!(binding.is_none());
+        let snapshot = crate::monitor_ui::tests::app()
+            .tracker
+            .value
+            .clone()
+            .unwrap();
+        let tracker_calls = Arc::new(AtomicUsize::new(0));
+        let department_calls = Arc::new(AtomicUsize::new(0));
+        let (tracker_entered, tracker_entry) = mpsc::channel();
+        let (tracker_done, tracker_finished) = mpsc::channel();
+        let (tracker_release, tracker_held) = mpsc::channel::<()>();
+        let (department_entered, department_entry) = mpsc::channel();
+        let (department_done, department_finished) = mpsc::channel();
+        let (department_release, department_held) = mpsc::channel::<()>();
+        let calls = Arc::clone(&tracker_calls);
+        let tracker = start_tracker(&live, &mut app, move || {
+            monitor_ops::TrackerWorker::spawn_with_read(move |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let _ = tracker_entered.send(());
+                let _ = tracker_held.recv();
+                let _ = tracker_done.send(());
+                Ok(snapshot.clone())
+            })
+        })
+        .expect("tracker worker");
+        tracker_entry
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the tracker read is held in flight");
+        let department = configured.then(|| {
+            let calls = Arc::clone(&department_calls);
+            let worker = monitor_department_source::DepartmentWorker::spawn_with_read(move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let _ = department_entered.send(());
+                let _ = department_held.recv();
+                let _ = department_done.send(());
+                Ok(monitor_department::tests::fixture())
+            })
+            .unwrap();
+            department_entry
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the department read is held in flight");
+            worker
+        });
+        let mut workers = Workers {
+            tracker: Some(tracker),
+            department,
+            runtime: None,
+        };
+        let mut script = Script::new(keys);
+        if let Some(hook_at) = released {
+            let (tracker_go, department_go) = (tracker_release.clone(), department_release.clone());
+            script = script.with_hook(hook_at, move || {
+                let _ = tracker_go.send(());
+                tracker_finished
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("the released tracker read finishes");
+                if configured {
+                    let _ = department_go.send(());
+                    department_finished
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("the released department read finishes");
+                }
+                std::thread::sleep(Duration::from_millis(300));
+            });
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        event_loop(
+            &mut terminal,
+            &mut app,
+            &mut workers,
+            &mut script,
+            &AtomicBool::new(false),
+            None,
+        )
+        .unwrap();
+        let run = LiveRun {
+            tracker_calls: tracker_calls.load(Ordering::SeqCst),
+            department_calls: department_calls.load(Ordering::SeqCst),
+            frame: flat(&frame_text(&terminal)),
+            after: files(directory.path()),
+            before,
+            app,
+        };
+        // Let any read still held finish; nothing was waiting on it.
+        drop((tracker_release, department_release));
+        run
+    }
+
     #[trace("FR-065-AC-10")]
     #[test]
-    fn live_popups_run_the_real_loop_with_held_reads_and_no_new_calls_or_writes() {
-        use std::sync::{atomic::AtomicUsize, mpsc};
+    fn live_popups_start_no_read_whether_the_reads_are_held_or_finish_during_the_script() {
         for configured in [false, true] {
-            let directory = tempfile::tempdir().unwrap();
-            std::fs::write(directory.path().join("retro-config.json"), b"{}").unwrap();
-            let before = files(directory.path());
-            let live = args(&["--team", "SWM"]);
-            let (mut app, binding) = prepare_app(
-                &live,
-                |_| panic!("saved reader called in live mode"),
-                |_, _| panic!("native binding called without a lead"),
-            )
-            .unwrap();
-            assert!(binding.is_none());
-            app.department_input = department_input(&live, configured);
-            let tracker_calls = Arc::new(AtomicUsize::new(0));
-            let department_calls = Arc::new(AtomicUsize::new(0));
-            let (tracker_entered, tracker_entry) = mpsc::channel();
-            let (department_entered, department_entry) = mpsc::channel();
-            let (tracker_release, tracker_held) = mpsc::channel::<()>();
-            let (department_release, department_held) = mpsc::channel::<()>();
-            let calls = Arc::clone(&tracker_calls);
-            let tracker = start_tracker(&live, &mut app, move || {
-                monitor_ops::TrackerWorker::spawn_with_read(move |_| {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    let _ = tracker_entered.send(());
-                    let _ = tracker_held.recv();
-                    Err(ix_board::Error::MissingApiKey)
-                })
-            })
-            .expect("tracker worker");
-            tracker_entry
-                .recv_timeout(Duration::from_secs(5))
-                .expect("the tracker read is held in flight");
-            let department = configured.then(|| {
-                let calls = Arc::clone(&department_calls);
-                let worker =
-                    monitor_department_source::DepartmentWorker::spawn_with_read(move || {
-                        calls.fetch_add(1, Ordering::SeqCst);
-                        let _ = department_entered.send(());
-                        let _ = department_held.recv();
-                        Err("released".into())
-                    })
-                    .unwrap();
-                department_entry
-                    .recv_timeout(Duration::from_secs(5))
-                    .expect("the department read is held in flight");
-                worker
-            });
-            let mut workers = Workers {
-                tracker: Some(tracker),
-                department,
-                runtime: None,
-            };
-            let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
-            event_loop(
-                &mut terminal,
-                &mut app,
-                &mut workers,
-                &mut popup_script(),
-                &AtomicBool::new(false),
-                None,
-            )
-            .unwrap();
-            assert!(app.should_quit && app.popup.is_none());
-            assert_eq!(
-                tracker_calls.load(Ordering::SeqCst),
-                1,
-                "no new tracker read"
-            );
-            assert_eq!(
-                department_calls.load(Ordering::SeqCst),
-                usize::from(configured),
-                "no new department read"
-            );
-            assert!(!app.refresh_now && !app.collection_failed);
-            assert!(app.department.value.is_none() && app.department.error.is_none());
-            assert_eq!(app.department.revision, 0);
-            assert!(app.tracker.value.is_none() && app.tracker.error.is_none());
-            assert_eq!(
-                files(directory.path()),
-                before,
-                "no file or history written"
-            );
-            let frame = last_frame(&terminal);
-            assert!(!frame.to_lowercase().contains("authentication"), "{frame}");
-            assert!(!frame.contains("Department failed"), "{frame}");
+            let keys = popup_keys();
+            let hook_at = keys.len() - 4;
+            // Held for the whole script: the loop never waits for the pending reads.
+            let held = run_live(configured, None, keys);
+            assert!(held.app.should_quit && held.app.popup.is_none());
+            assert_eq!(held.tracker_calls, 1);
+            assert_eq!(held.department_calls, usize::from(configured));
+            assert!(held.app.tracker.value.is_none() && held.app.tracker.error.is_none());
+            assert!(held.app.department.value.is_none() && held.app.department.error.is_none());
+            assert_eq!(held.before, held.after, "no file or history written");
+            assert!(!held.frame.to_lowercase().contains("authentication"));
+            assert!(!held.frame.contains("Department failed"));
             if configured {
                 assert!(
-                    frame.contains("Waiting for the first read of the retro configuration"),
-                    "{frame}"
+                    held.frame
+                        .contains("Waiting for the first read of the retro configuration"),
+                    "{}",
+                    held.frame
                 );
             } else {
-                assert!(frame.contains("--retro-config <file>"), "{frame}");
+                assert!(
+                    held.frame.contains("--retro-config <file>"),
+                    "{}",
+                    held.frame
+                );
             }
-            let (outcome, _) = quit_outcome(&app);
-            assert!(matches!(outcome, Outcome::Ok));
-            // Release the held reads only now; nothing was waiting on them.
-            let _ = tracker_release.send(());
-            let _ = department_release.send(());
+            // Released before the end: a refresh that leaked from a popup would have been
+            // queued on the workers and would now start a second read.
+            let done = run_live(configured, Some(hook_at), popup_keys());
+            assert_eq!(done.tracker_calls, 1, "configured={configured}");
+            assert_eq!(done.department_calls, usize::from(configured));
+            assert_eq!(done.app.tracker.revision, 1);
+            assert!(done.app.tracker.value.is_some() && done.app.tracker.error.is_none());
+            assert_eq!(done.app.department.revision, u64::from(configured));
+            assert_eq!(done.app.department.value.is_some(), configured);
+            assert!(!done.app.collection_failed && !done.app.refresh_now);
+            assert_eq!(done.before, done.after, "no file or history written");
+            assert!(!done.frame.to_lowercase().contains("authentication"));
+            assert!(matches!(quit_outcome(&done.app).0, Outcome::Ok));
         }
+    }
+
+    #[trace("FR-065-AC-10")]
+    #[test]
+    fn a_refresh_key_outside_any_popup_does_start_a_second_read_in_the_same_harness() {
+        // Control for the test above: `r` with no popup open queues a refresh, and the
+        // released reads then run again. If this ever stops holding, the oracle is blind.
+        use KeyCode::Char;
+        let keys = vec![
+            Some(Char('2')),
+            Some(Char('r')),
+            None,
+            None,
+            None,
+            Some(Char('q')),
+        ];
+        let run = run_live(true, Some(2), keys);
+        assert_eq!(run.tracker_calls, 2);
+        assert_eq!(run.department_calls, 2);
+    }
+
+    #[trace("FR-065-AC-10")]
+    #[test]
+    fn startup_maps_the_options_to_how_the_department_report_is_supplied() {
+        use monitor::DepartmentInput::{Configured, NotConfigured, Saved};
+        let unreachable_read = |_: &std::path::Path| -> io::Result<_> { panic!("no read") };
+        let live = args(&["--team", "SWM"]);
+        for (configured, expected) in [(false, NotConfigured), (true, Configured)] {
+            let (app, _) = startup(&live, configured, unreachable_read, |_, _| panic!()).unwrap();
+            assert_eq!(app.department_input, expected);
+            assert!(app.department.error.is_none(), "never a stored failure");
+        }
+        let saved = args(&["--report", "supplied.json"]);
+        let (app, _) = startup(
+            &saved,
+            false,
+            |_| Ok(monitor_department::tests::fixture()),
+            |_, _| panic!(),
+        )
+        .unwrap();
+        assert_eq!(app.department_input, Saved);
     }
 }

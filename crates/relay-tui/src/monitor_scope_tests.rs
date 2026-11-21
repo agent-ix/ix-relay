@@ -26,7 +26,7 @@ use crate::{
     monitor_tracker::{
         DashboardView, InitiativeRef, ProjectCompletion, ScopeProgress, TrackerState,
     },
-    monitor_ui,
+    monitor_ui::{self, tests::flat},
 };
 
 fn progress(id: &str, name: &str, done: usize, total: usize) -> ScopeProgress {
@@ -808,11 +808,6 @@ fn assert_scope_essentials(text: &str, footer_mode: &str) {
     );
 }
 
-/// Whitespace-normalized text, so a statement wrapped across rows is still one statement.
-fn flat(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 fn assert_count_statements(text: &str) {
     let flat = flat(text);
     for needed in [
@@ -1043,4 +1038,53 @@ fn a_view_switch_reset_is_not_undone_by_the_remembered_placement() {
     let text = screen(&mut app, 100, 24);
     assert_eq!(app.table.selected(), Some(0), "{text}");
     assert!(selected_line(&text).contains("Program"), "{text}");
+}
+
+#[trace("FR-065-AC-5")]
+#[test]
+fn rate_limit_replaced_session_stale_source_and_active_filter_fit_at_80x24() {
+    let evidence_rows = |text: &str, labels: &[&str]| {
+        text.lines()
+            .filter(|line| labels.iter().any(|label| line.contains(label)))
+            .count()
+    };
+    let footer_holds = |text: &str| {
+        let footer = text.lines().last().unwrap();
+        footer.contains("v View") && footer.contains("F1 Help") && footer.contains("c hiding")
+    };
+    // A rate-limit countdown, a failed source and a replaced session, with the filter active.
+    let mut limited = categorized_app();
+    limited.apply_tracker_refresh(
+        Err(ix_board::Error::LinearRateLimited {
+            retry_after: std::time::Duration::from_secs(3600),
+        }),
+        Instant::now(),
+    );
+    limited.report.failure("Redis unavailable");
+    limited.session_ended = true;
+    let text = screen(&mut limited, 80, 24);
+    let labels = [
+        "Binding: session replaced",
+        "Reports failed",
+        "Tracker rate-limited (next attempt in",
+    ];
+    for label in labels {
+        assert!(text.contains(label), "{label}\n{text}");
+    }
+    assert!(evidence_rows(&text, &labels) <= 4, "{text}");
+    assert_count_statements(&text);
+    assert!(footer_holds(&text), "{text}");
+    // A stale snapshot and a failed source, with the filter active.
+    let mut stale = categorized_app();
+    stale.tracker.value.as_mut().unwrap().fetched_at -= 2 * 60 * 60;
+    stale.runtime.failure("Herdr unreachable");
+    let text = screen(&mut stale, 80, 24);
+    let labels = ["Tracker stale", "Herdr failed"];
+    for label in labels {
+        assert!(text.contains(label), "{label}\n{text}");
+    }
+    assert!(evidence_rows(&text, &labels) <= 4, "{text}");
+    assert_count_statements(&text);
+    assert!(footer_holds(&text), "{text}");
+    assert!(hidden_row(&text, "Live"), "{text}");
 }

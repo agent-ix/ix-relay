@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Agent-IX
-//! The one View selector dropdown and the F1 help popup of the dashboard (FR-065).
+//! The one View selector dropdown and the F1 help popup of the dashboard.
 //!
 //! Popups own their keys exclusively while open, draw only inside the work area and
 //! read no source: they only present and change in-memory view state.
@@ -16,7 +16,7 @@ use ratatui::{
 
 use crate::{
     monitor::{App, Popup, View, select_view},
-    monitor_ui::{FOREGROUND, MUTED, PRIMARY, SELECTION},
+    monitor_ui::{FOREGROUND, MUTED, PRIMARY, SELECTION, muted},
 };
 
 /// Outer width of the dropdown, borders included.
@@ -24,13 +24,12 @@ const DROPDOWN_WIDTH: u16 = 26;
 /// Lines moved by PageUp and PageDown in help.
 const PAGE: u16 = 5;
 /// Lines before the first help entry.
-const HELP_HEADER_LINES: usize = 3;
+const HELP_HEADER_LINES: usize = 1;
 
-/// One row of the help table (FR-065): keys, action, owner and where it has a visible effect.
+/// One row of the help table: keys, action and where it has a visible effect.
 struct HelpEntry {
     keys: &'static str,
     action: &'static str,
-    owner: &'static str,
     views: &'static [View],
     note: &'static str,
 }
@@ -42,78 +41,67 @@ const DEPARTMENT_VIEWS: &[View] = &[View::Status, View::Health, View::Retro];
 const HELP: [HelpEntry; 11] = [
     HelpEntry {
         keys: "v",
-        action: "View selector",
-        owner: "FR-065",
+        action: "open the View selector",
         views: ALL_VIEWS,
         note: "",
     },
     HelpEntry {
         keys: "t, a, p, 1, 2, 3",
-        action: "view shortcuts",
-        owner: "FR-048, FR-059",
+        action: "switch view",
         views: ALL_VIEWS,
         note: "",
     },
     HelpEntry {
         keys: "Up, Down, j, k, PageUp, PageDown",
-        action: "row selection and paging",
-        owner: "FR-048",
+        action: "select rows and page",
         views: ALL_VIEWS,
         note: "",
     },
     HelpEntry {
         keys: "d, Enter",
-        action: "details",
-        owner: "FR-048",
+        action: "show or hide details",
         views: ALL_VIEWS,
         note: "",
     },
     HelpEntry {
         keys: "Left, Right",
         action: "scroll details",
-        owner: "FR-059",
         views: DEPARTMENT_VIEWS,
         note: "with details open",
     },
     HelpEntry {
         keys: "r",
-        action: "refresh",
-        owner: "FR-048",
+        action: "refresh sources",
         views: ALL_VIEWS,
         note: "",
     },
     HelpEntry {
         keys: "s",
-        action: "source timestamps",
-        owner: "FR-048",
+        action: "show source timestamps",
         views: LEAD_VIEWS,
         note: "",
     },
     HelpEntry {
         keys: "e",
-        action: "source errors",
-        owner: "FR-059",
+        action: "list source errors",
         views: DEPARTMENT_VIEWS,
         note: "",
     },
     HelpEntry {
         keys: "c",
-        action: "completed projects",
-        owner: "FR-060",
+        action: "show or hide completed projects",
         views: &[View::Scope],
         note: "",
     },
     HelpEntry {
         keys: "q, Escape",
-        action: "quit, when no popup is open",
-        owner: "FR-048",
+        action: "quit when no popup is open",
         views: ALL_VIEWS,
         note: "",
     },
     HelpEntry {
         keys: "F1, ?",
-        action: "help",
-        owner: "FR-065",
+        action: "open or close this help",
         views: ALL_VIEWS,
         note: "",
     },
@@ -128,25 +116,16 @@ pub(crate) fn applicable_keys(view: View) -> Vec<&'static str> {
         .collect()
 }
 
-fn muted(text: impl Into<std::borrow::Cow<'static, str>>) -> Span<'static> {
-    Span::styled(text, Style::default().fg(MUTED))
-}
-
-/// Every help line for `view`; entries that apply in it carry a check mark.
+/// Every help line for `view`: one row per key, with a check mark where it applies. The
+/// views are named only for keys that apply in some views and not all.
 pub(crate) fn help_lines(view: View) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        Line::from(muted(format!(
-            "✓ marks the keys that apply in {}.",
-            view.label()
-        ))),
-        Line::from(muted(
-            "Each key names the requirement that owns its action.",
-        )),
-        Line::default(),
-    ];
+    let mut lines = vec![Line::from(muted(format!(
+        "✓ marks the keys that apply in {}.",
+        view.label()
+    )))];
     for entry in &HELP {
         let applies = entry.views.contains(&view);
-        lines.push(Line::from(vec![
+        let mut spans = vec![
             Span::styled(
                 if applies { "✓ " } else { "  " },
                 Style::default().fg(FOREGROUND),
@@ -154,29 +133,28 @@ pub(crate) fn help_lines(view: View) -> Vec<Line<'static>> {
             Span::styled(entry.keys, Style::default().fg(PRIMARY)),
             muted("  "),
             muted(entry.action),
-            muted(format!(" ({})", entry.owner)),
-        ]));
-        let views = if entry.views.len() == View::ALL.len() {
-            "all".to_owned()
-        } else {
-            entry
-                .views
-                .iter()
-                .map(|v| v.label())
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        lines.push(Line::from(muted(if entry.note.is_empty() {
-            format!("    Views: {views}")
-        } else {
-            format!("    Views: {views}, {}", entry.note)
-        })));
+        ];
+        if entry.views.len() < View::ALL.len() {
+            spans.push(muted(format!(
+                " · {}",
+                entry
+                    .views
+                    .iter()
+                    .map(|v| v.label())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+            if !entry.note.is_empty() {
+                spans.push(muted(format!(" ({})", entry.note)));
+            }
+        }
+        lines.push(Line::from(spans));
     }
     lines
 }
 
 fn last_help_line() -> u16 {
-    let count = HELP_HEADER_LINES + HELP.len() * 2;
+    let count = HELP_HEADER_LINES + HELP.len();
     u16::try_from(count.saturating_sub(1)).unwrap_or(u16::MAX)
 }
 
@@ -338,45 +316,35 @@ fn render_help(frame: &mut Frame, view: View, scroll: u16, area: Rect) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::monitor::handle_key;
+    use crate::{
+        monitor::{DepartmentInput, handle_key},
+        monitor_ui::tests::{app, flat, screen},
+    };
     use ix_trace_rs::trace;
-    use ratatui::{Terminal, backend::TestBackend, crossterm::event::KeyModifiers};
+    use ratatui::crossterm::event::KeyModifiers;
 
     fn press(app: &mut App, code: KeyCode) {
         handle_key(app, KeyEvent::new(code, KeyModifiers::NONE));
     }
 
-    fn draw(app: &mut App, width: u16, height: u16) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| crate::monitor_ui::render(frame, app, std::time::Instant::now()))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        (0..height)
-            .map(|y| {
-                (0..width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+    fn text_of(line: &Line) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
     }
 
-    /// Trace: FR-065-AC-1
     #[trace("FR-065-AC-1")]
     #[test]
     fn dropdown_lists_every_view_and_selects_like_the_compatibility_key() {
         for (width, height) in [(80, 24), (120, 40)] {
             for start in View::ALL {
-                let mut app = crate::monitor_ui::tests::app();
+                let mut app = app();
                 app.view = start;
                 press(&mut app, KeyCode::Char('v'));
-                let screen = draw(&mut app, width, height);
-                for view in View::ALL {
-                    assert!(screen.contains(view.label()), "{start:?}\n{screen}");
-                }
-                assert!(screen.contains("View: "), "{screen}");
-                assert!(screen.contains("(current)"), "{screen}");
+                let drawn = screen(&mut app, width, height);
+                assert!(drawn.contains("View: "), "{drawn}");
+                assert!(drawn.contains("(current)"), "{drawn}");
                 for entry in [
                     "t  Tickets",
                     "a  Agents",
@@ -385,7 +353,7 @@ mod tests {
                     "2  Health",
                     "3  Retro",
                 ] {
-                    assert!(screen.contains(entry), "{entry}\n{screen}");
+                    assert!(drawn.contains(entry), "{entry}\n{drawn}");
                 }
                 assert_eq!(
                     app.popup,
@@ -396,13 +364,17 @@ mod tests {
                 );
             }
         }
-        // Selection and scroll are reset exactly as the compatibility key does.
-        let mut keyed = crate::monitor_ui::tests::app();
-        let mut picked = crate::monitor_ui::tests::app();
+        // Selection and scroll reset exactly as the compatibility key does; scope is kept.
+        let mut keyed = app();
+        let mut picked = app();
         for app in [&mut keyed, &mut picked] {
             app.table.select(Some(2));
             app.detail_scroll = 3;
             app.row_count = 5;
+            app.team = Some("SWM".into());
+            app.projects = vec!["native-project".into()];
+            app.show_completed = true;
+            app.department_input = DepartmentInput::Configured;
         }
         press(&mut keyed, KeyCode::Char('2'));
         press(&mut picked, KeyCode::Char('v'));
@@ -427,6 +399,12 @@ mod tests {
         assert_eq!(picked.table.selected(), keyed.table.selected());
         assert_eq!(picked.detail_scroll, keyed.detail_scroll);
         assert_eq!(picked.row_count, keyed.row_count);
+        assert_eq!(picked.table.selected(), None);
+        assert_eq!(picked.detail_scroll, 0);
+        assert_eq!(picked.team.as_deref(), Some("SWM"));
+        assert_eq!(picked.projects, ["native-project"]);
+        assert!(picked.show_completed);
+        assert_eq!(picked.department_input, DepartmentInput::Configured);
         assert!(picked.popup.is_none());
         // Selecting the current view changes nothing else.
         picked.table.select(Some(1));
@@ -434,14 +412,29 @@ mod tests {
         press(&mut picked, KeyCode::Enter);
         assert_eq!(picked.view, View::Health);
         assert_eq!(picked.table.selected(), Some(1));
+        // Health and Retro are selectable with no data at all.
+        for (downs, view) in [(4, View::Health), (5, View::Retro)] {
+            let mut empty = App::default();
+            press(&mut empty, KeyCode::Char('v'));
+            for _ in 0..downs {
+                press(&mut empty, KeyCode::Down);
+            }
+            press(&mut empty, KeyCode::Enter);
+            assert_eq!(empty.view, view);
+            let drawn = screen(&mut empty, 80, 24);
+            assert!(
+                drawn.contains(&format!("View: {}", view.label())),
+                "{drawn}"
+            );
+            assert!(flat(&drawn).contains("Not configured"), "{drawn}");
+        }
     }
 
-    /// Trace: FR-065-AC-2
     #[trace("FR-065-AC-2")]
     #[test]
     fn cancel_preserves_state_clamps_and_never_quits() {
         for closer in [KeyCode::Esc, KeyCode::Char('v')] {
-            let mut app = crate::monitor_ui::tests::app();
+            let mut app = app();
             app.view = View::Scope;
             app.details = true;
             app.show_completed = true;
@@ -475,86 +468,107 @@ mod tests {
             assert_eq!(app.detail_scroll, 2);
             assert!(app.details && app.show_completed);
         }
-        let mut app = crate::monitor_ui::tests::app();
+        let mut app = app();
         press(&mut app, KeyCode::Esc);
         assert!(app.should_quit, "Escape with no popup still quits");
     }
 
-    /// Trace: FR-065-AC-2
     #[trace("FR-065-AC-2")]
     #[test]
     fn a_short_work_area_scrolls_the_dropdown_and_resize_keeps_it_open() {
-        let mut app = crate::monitor_ui::tests::app();
+        let mut app = app();
         press(&mut app, KeyCode::Char('v'));
-        // 24 rows leave room for all six entries; a short pane must scroll to the last.
         for _ in 0..5 {
             press(&mut app, KeyCode::Down);
         }
-        let tall = draw(&mut app, 120, 40);
+        let tall = screen(&mut app, 120, 40);
         assert!(tall.contains("Retro"), "{tall}");
-        let short = draw(&mut app, 80, 12);
+        let short = screen(&mut app, 80, 12);
         assert!(short.contains("Retro"), "highlight stays visible\n{short}");
         let Some(Popup::Dropdown { highlight, offset }) = app.popup else {
             panic!("dropdown stays open across a resize");
         };
         assert_eq!(highlight, 5);
-        assert!(offset <= highlight && highlight < offset + 6);
-        let screen = draw(&mut app, 80, 24);
+        assert!(offset > 0 && highlight < offset + 6);
+        let drawn = screen(&mut app, 80, 24);
         for view in View::ALL {
-            assert!(screen.contains(view.label()), "{screen}");
+            assert!(drawn.contains(view.label()), "{drawn}");
         }
+        assert_eq!(
+            app.popup,
+            Some(Popup::Dropdown {
+                highlight: 5,
+                offset: 0
+            })
+        );
     }
 
-    /// Trace: FR-065-AC-3
+    /// The Help table's views, written out: one row per key, one column per view in the
+    /// order Tickets, Agents, Scope, Status, Health, Retro.
+    const APPLIES: [(&str, [bool; 6]); 11] = [
+        ("v", [true; 6]),
+        ("t, a, p, 1, 2, 3", [true; 6]),
+        ("Up, Down, j, k, PageUp, PageDown", [true; 6]),
+        ("d, Enter", [true; 6]),
+        ("Left, Right", [false, false, false, true, true, true]),
+        ("r", [true; 6]),
+        ("s", [true, true, true, false, false, false]),
+        ("e", [false, false, false, true, true, true]),
+        ("c", [false, false, true, false, false, false]),
+        ("q, Escape", [true; 6]),
+        ("F1, ?", [true; 6]),
+    ];
+
     #[trace("FR-065-AC-3")]
     #[test]
     fn help_marks_exactly_the_keys_that_apply_in_each_view() {
-        let table = [
-            (View::Tickets, "s", true),
-            (View::Agents, "s", true),
-            (View::Scope, "s", true),
-            (View::Status, "s", false),
-            (View::Health, "e", true),
-            (View::Tickets, "e", false),
-            (View::Scope, "c", true),
-            (View::Retro, "c", false),
-            (View::Status, "Left, Right", true),
-            (View::Scope, "Left, Right", false),
-        ];
-        for (view, keys, applies) in table {
-            assert_eq!(
-                applicable_keys(view).contains(&keys),
-                applies,
-                "{view:?} {keys}"
-            );
-        }
-        for view in View::ALL {
-            let applicable = applicable_keys(view);
-            for always in [
-                "v",
-                "t, a, p, 1, 2, 3",
-                "r",
-                "d, Enter",
-                "q, Escape",
-                "F1, ?",
-            ] {
-                assert!(applicable.contains(&always), "{view:?} {always}");
-            }
-            let marked = help_lines(view)
+        for (column, view) in View::ALL.into_iter().enumerate() {
+            let expected: Vec<&str> = APPLIES
                 .iter()
-                .filter(|line| line.spans.first().is_some_and(|s| s.content == "✓ "))
-                .count();
-            assert_eq!(marked, applicable.len(), "{view:?}");
+                .filter(|(_, applies)| applies[column])
+                .map(|(keys, _)| *keys)
+                .collect();
+            assert_eq!(applicable_keys(view), expected, "{view:?}");
+            // The drawn marks agree with the literal table, row by row.
+            let lines = help_lines(view);
+            assert_eq!(lines.len(), 1 + APPLIES.len(), "{view:?}: one row per key");
+            for (line, (keys, applies)) in lines[1..].iter().zip(APPLIES) {
+                let text = text_of(line);
+                let mark = if applies[column] { "✓ " } else { "  " };
+                assert!(
+                    text.starts_with(&format!("{mark}{keys}  ")),
+                    "{view:?}: {text:?}"
+                );
+            }
         }
     }
 
-    /// Trace: FR-065-AC-3
     #[trace("FR-065-AC-3")]
     #[test]
-    fn every_help_line_is_reachable_at_80x24_and_f1_question_and_escape_close_it() {
+    fn help_rows_state_views_only_where_a_key_does_not_apply_everywhere() {
+        let rows: Vec<String> = help_lines(View::Tickets)[1..].iter().map(text_of).collect();
+        let expected = [
+            "✓ v  open the View selector",
+            "✓ t, a, p, 1, 2, 3  switch view",
+            "✓ Up, Down, j, k, PageUp, PageDown  select rows and page",
+            "✓ d, Enter  show or hide details",
+            "  Left, Right  scroll details · Status, Health, Retro (with details open)",
+            "✓ r  refresh sources",
+            "✓ s  show source timestamps · Tickets, Agents, Scope",
+            "  e  list source errors · Status, Health, Retro",
+            "  c  show or hide completed projects · Scope",
+            "✓ q, Escape  quit when no popup is open",
+            "✓ F1, ?  open or close this help",
+        ];
+        assert_eq!(rows, expected);
+    }
+
+    #[trace("FR-065-AC-3")]
+    #[test]
+    fn every_help_line_is_reachable_and_the_frame_shows_no_requirement_text() {
         for opener in [KeyCode::F(1), KeyCode::Char('?')] {
             for closer in [KeyCode::F(1), KeyCode::Char('?'), KeyCode::Esc] {
-                let mut app = crate::monitor_ui::tests::app();
+                let mut app = app();
                 app.table.select(Some(1));
                 press(&mut app, opener);
                 assert!(matches!(app.popup, Some(Popup::Help { .. })));
@@ -564,34 +578,46 @@ mod tests {
             }
         }
         for view in View::ALL {
+            let lines: Vec<String> = help_lines(view).iter().map(text_of).collect();
+            let last = lines.last().unwrap().clone();
+            assert_eq!(last, "✓ F1, ?  open or close this help");
+            let mut app = app();
+            app.view = view;
+            press(&mut app, KeyCode::F(1));
+            // At 80x24 the whole help fits, so every line is on the first frame.
+            let wide = flat(&screen(&mut app, 80, 24));
+            for line in &lines {
+                assert!(wide.contains(&flat(line)), "{view:?}: {line}\n{wide}");
+            }
+            // In a short pane the first frame cuts the end off; paging reaches the last line.
             let mut app = crate::monitor_ui::tests::app();
             app.view = view;
             press(&mut app, KeyCode::F(1));
-            let mut seen = String::new();
-            for _ in 0..40 {
-                seen.push_str(&draw(&mut app, 80, 24));
+            let first = flat(&screen(&mut app, 80, 12));
+            assert!(first.contains(&flat(&lines[0])), "{view:?}\n{first}");
+            assert!(!first.contains(&flat(&last)), "{view:?}\n{first}");
+            for _ in 0..4 {
                 press(&mut app, KeyCode::PageDown);
             }
-            for entry in &HELP {
-                assert!(seen.contains(entry.keys), "{view:?} {}", entry.keys);
-                assert!(seen.contains(entry.owner), "{view:?} {}", entry.owner);
-            }
-            assert!(!seen.contains("named focus"), "nothing about f is asserted");
-            draw(&mut app, 80, 24);
+            let end = flat(&screen(&mut app, 80, 12));
+            assert!(end.contains(&flat(&last)), "{view:?}\n{end}");
             let Some(Popup::Help { scroll }) = app.popup else {
                 panic!("help stays open");
             };
-            // A resize re-lays the popup out with the scroll in range.
-            let tall = draw(&mut app, 120, 40);
-            assert!(tall.contains("Help"));
-            let Some(Popup::Help { scroll: after }) = app.popup else {
-                panic!("help stays open across a resize");
-            };
-            assert!(after <= scroll);
+            assert!(scroll > 0);
+            // A resize re-lays help out, keeps it open and clamps the scroll to the new range.
+            let tall = flat(&screen(&mut app, 120, 40));
+            assert!(tall.contains(&flat(&lines[0])) && tall.contains(&flat(&last)));
+            assert_eq!(app.popup, Some(Popup::Help { scroll: 0 }));
+            // The operator-facing text carries no requirement ids, owners or repeated "all".
+            let everything = format!("{} {tall} {wide} {end}", lines.join(" "));
+            for forbidden in ["FR-", "requirement", "owner", "Views:", "named focus"] {
+                assert!(!everything.contains(forbidden), "{view:?}: {forbidden}");
+            }
+            assert!(!lines.iter().any(|line| line.ends_with(" · all")));
         }
     }
 
-    /// Trace: FR-065-AC-4
     #[trace("FR-065-AC-4")]
     #[test]
     fn a_popup_ignores_every_key_it_does_not_own_and_q_does_not_quit() {
@@ -623,7 +649,7 @@ mod tests {
         ];
         for open in [KeyCode::Char('v'), KeyCode::F(1)] {
             for code in codes {
-                let mut app = crate::monitor_ui::tests::app();
+                let mut app = app();
                 app.view = View::Scope;
                 app.table.select(Some(1));
                 app.detail_scroll = 4;

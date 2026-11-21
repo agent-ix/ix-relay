@@ -321,12 +321,29 @@ const MAX_EVIDENCE_ROWS: usize = 4;
 
 /// One source state shown outside any popup. The label is never truncated.
 pub(crate) struct Evidence {
-    severity: u8,
+    severity: EvidenceSeverity,
     label: String,
     detail: String,
 }
 
-fn item(severity: u8, label: impl Into<String>, detail: impl Into<String>) -> Evidence {
+/// How urgent an evidence row is; the declaration order is the display order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum EvidenceSeverity {
+    /// A failed source or a replaced binding.
+    Failure,
+    /// A rate-limit countdown.
+    RateLimit,
+    /// A stale source or retained last snapshot.
+    Stale,
+    /// A plain source fact.
+    Fact,
+}
+
+fn item(
+    severity: EvidenceSeverity,
+    label: impl Into<String>,
+    detail: impl Into<String>,
+) -> Evidence {
     Evidence {
         severity,
         label: label.into(),
@@ -357,24 +374,32 @@ pub(crate) fn evidence_items(
     };
     let mut items = Vec::new();
     if app.session_ended {
-        items.push(item(0, "Binding: session replaced", "restart to rebind"));
+        items.push(item(
+            EvidenceSeverity::Failure,
+            "Binding: session replaced",
+            "restart to rebind",
+        ));
     }
     if department_view {
         if let Some(error) = &app.department.error {
             items.push(item(
-                0,
+                EvidenceSeverity::Failure,
                 "Department failed",
                 text(&app.department.error_summary, error),
             ));
         }
     } else if let Some(error) = scope_error {
-        items.push(item(0, "Scope failed", display_text(error, 4096)));
+        items.push(item(
+            EvidenceSeverity::Failure,
+            "Scope failed",
+            display_text(error, 4096),
+        ));
     }
     if let Some(error) = &app.tracker.error {
         if let Some(deadline) = app.tracker_retry_at {
             let seconds = deadline.saturating_duration_since(now).as_secs();
             items.push(item(
-                1,
+                EvidenceSeverity::RateLimit,
                 format!(
                     "Tracker rate-limited (next attempt in {}m {:02}s)",
                     seconds / 60,
@@ -384,7 +409,7 @@ pub(crate) fn evidence_items(
             ));
         } else {
             items.push(item(
-                0,
+                EvidenceSeverity::Failure,
                 "Tracker failed",
                 text(&app.tracker.error_summary, error),
             ));
@@ -393,7 +418,7 @@ pub(crate) fn evidence_items(
         && snapshot_is_stale(snapshot.fetched_at, now_epoch)
     {
         items.push(item(
-            2,
+            EvidenceSeverity::Stale,
             "Tracker stale",
             format!(
                 "snapshot {} old",
@@ -408,7 +433,7 @@ pub(crate) fn evidence_items(
         .filter(|error| error.as_str() != crate::monitor::SESSION_REPLACED)
     {
         items.push(item(
-            0,
+            EvidenceSeverity::Failure,
             if department_view {
                 "Binding / Herdr failed"
             } else {
@@ -424,7 +449,7 @@ pub(crate) fn evidence_items(
         .filter(|error| error.as_str() != crate::monitor::SESSION_REPLACED)
     {
         items.push(item(
-            0,
+            EvidenceSeverity::Failure,
             "Reports failed",
             text(&app.report.error_summary, error),
         ));
@@ -433,7 +458,11 @@ pub(crate) fn evidence_items(
         if let Some(delta) = &app.department.value {
             let stale = app.department.error.is_some();
             items.push(item(
-                if stale { 2 } else { 3 },
+                if stale {
+                    EvidenceSeverity::Stale
+                } else {
+                    EvidenceSeverity::Fact
+                },
                 if stale {
                     "Department evidence · last snapshot"
                 } else {
@@ -444,7 +473,7 @@ pub(crate) fn evidence_items(
         }
         if let Some(snapshot) = &app.tracker.value {
             items.push(item(
-                3,
+                EvidenceSeverity::Fact,
                 "Tracker evidence",
                 format!("epoch {}", snapshot.fetched_at),
             ));
@@ -491,9 +520,9 @@ pub(crate) fn evidence_lines(
                 Color::Reset
             } else {
                 match evidence.severity {
-                    0 => failure,
-                    1 | 2 => WARNING,
-                    _ => MUTED,
+                    EvidenceSeverity::Failure => failure,
+                    EvidenceSeverity::RateLimit | EvidenceSeverity::Stale => WARNING,
+                    EvidenceSeverity::Fact => MUTED,
                 }
             };
             let label = Span::styled(
@@ -716,7 +745,8 @@ pub(crate) fn age_ms(timestamp: i64) -> String {
     )
 }
 
-fn muted<'a>(text: impl Into<std::borrow::Cow<'a, str>>) -> Span<'a> {
+/// The muted style used for descriptions and separators, shared by every view and popup.
+pub(crate) fn muted<'a>(text: impl Into<std::borrow::Cow<'a, str>>) -> Span<'a> {
     Span::styled(text, Style::default().fg(MUTED))
 }
 
@@ -1525,20 +1555,31 @@ pub(crate) mod tests {
         assert_eq!(app.table.selected(), None);
     }
 
-    fn screen(app: &mut App, width: u16, height: u16) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal
-            .draw(|frame| render(frame, app, Instant::now()))
-            .unwrap();
+    /// The drawn cells of a test terminal, one line per row.
+    pub(crate) fn frame_text(terminal: &Terminal<TestBackend>) -> String {
         let buffer = terminal.backend().buffer();
-        (0..height)
+        (0..buffer.area.height)
             .map(|y| {
-                (0..width)
+                (0..buffer.area.width)
                     .map(|x| buffer[(x, y)].symbol())
                     .collect::<String>()
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Whitespace-normalized text, so a statement wrapped across rows is one statement.
+    pub(crate) fn flat(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// One frame of the production renderer at `width` by `height`.
+    pub(crate) fn screen(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| render(frame, app, Instant::now()))
+            .unwrap();
+        frame_text(&terminal)
     }
 
     /// Trace: FR-048-AC-3, FR-048-AC-4, FR-048-AC-5
@@ -1734,7 +1775,6 @@ pub(crate) mod tests {
         assert!(!waiting.contains("Scope: not reported"));
     }
 
-    /// Trace: FR-065-AC-5
     #[trace("FR-065-AC-5")]
     #[test]
     fn every_view_has_the_same_compact_footer_selector_and_no_tab_strip() {
@@ -1767,7 +1807,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// Trace: FR-065-AC-5
     #[trace("FR-065-AC-5")]
     #[test]
     fn evidence_rows_keep_labels_intact_and_bound_themselves_at_80x24() {
@@ -1815,7 +1854,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// Trace: FR-065-AC-6
     #[trace("FR-065-AC-6")]
     #[test]
     fn identity_row_is_the_same_in_all_six_views() {
@@ -1823,31 +1861,67 @@ pub(crate) mod tests {
         let mut replaced = app();
         replaced.session_ended = true;
         replaced.runtime.failure(crate::monitor::SESSION_REPLACED);
-        let mut unbound = app();
-        unbound.binding = None;
-        unbound.report.value = Some(None);
-        unbound.lead_name = "identity unknown".into();
-        unbound.team = Some("SWM".into());
-        unbound.runtime.failure("ambiguous requested lead");
-        for (name, mut app) in [
-            ("verified", verified),
-            ("replaced", replaced),
-            ("unbound", unbound),
+        let mut ambiguous = app();
+        ambiguous.binding = None;
+        ambiguous.report.value = Some(None);
+        ambiguous.lead_name = "host:workspace:code".into();
+        ambiguous.team = Some("SWM".into());
+        ambiguous.runtime.failure("ambiguous requested lead");
+        let mut explicit = app();
+        explicit.binding = None;
+        explicit.report.value = Some(None);
+        explicit.lead_name = "identity unknown".into();
+        explicit.team = Some("SWM".into());
+        let mut saved = App {
+            department_input: crate::monitor::DepartmentInput::Saved,
+            lead_name: "identity unknown".into(),
+            ..App::default()
+        };
+        saved
+            .department
+            .success(crate::monitor_department::tests::fixture(), Instant::now());
+        // Each case with the exact text its identity row must carry in every view.
+        for (name, mut app, expected) in [
+            ("verified", verified, "luna:SWM:code · codex"),
+            (
+                "replaced",
+                replaced,
+                "luna:SWM:code · codex · session ended/replaced · restart to rebind",
+            ),
+            (
+                "ambiguous",
+                ambiguous,
+                "host:workspace:code · no lead bound · ambiguous requested lead",
+            ),
+            ("explicit", explicit, "identity unknown · no lead bound"),
+            ("saved", saved, "identity unknown · no lead bound"),
         ] {
-            let mut rows = Vec::new();
-            for view in View::ALL {
-                app.view = view;
-                rows.push(screen(&mut app, 120, 40).lines().next().unwrap().to_owned());
-            }
-            assert!(rows.iter().all(|row| row == &rows[0]), "{name} {rows:?}");
-            if name == "unbound" {
-                assert!(rows[0].contains("no lead bound"), "{rows:?}");
-                assert!(rows[0].contains("ambiguous requested lead"), "{rows:?}");
+            for (width, height) in [(80_u16, 24_u16), (120, 40)] {
+                let mut rows = Vec::new();
+                for view in View::ALL {
+                    app.view = view;
+                    rows.push(
+                        screen(&mut app, width, height)
+                            .lines()
+                            .next()
+                            .unwrap()
+                            .trim_end()
+                            .to_owned(),
+                    );
+                }
+                assert!(
+                    rows.iter().all(|row| row == &rows[0]),
+                    "{name} {width}x{height}: {rows:?}"
+                );
+                assert!(
+                    rows[0].starts_with(expected),
+                    "{name} {width}x{height}: {:?}",
+                    rows[0]
+                );
             }
         }
     }
 
-    /// Trace: FR-065-AC-7
     #[trace("FR-065-AC-7")]
     #[test]
     fn lead_views_name_their_real_population() {
@@ -1899,7 +1973,6 @@ pub(crate) mod tests {
         assert!(screen(&mut unbound, 200, 30).contains("no lead bound"));
     }
 
-    /// Trace: FR-065-AC-11
     #[trace("FR-065-AC-11")]
     #[test]
     fn help_stays_inside_the_work_area_and_a_shrinking_refresh_clamps_selection() {
@@ -1950,7 +2023,6 @@ pub(crate) mod tests {
         assert_eq!(app.table.selected(), Some(2));
     }
 
-    /// Trace: FR-065-AC-12
     #[trace("FR-065-AC-12")]
     #[test]
     fn key_hints_use_the_primary_blue_and_descriptions_and_separators_are_muted() {
@@ -2010,9 +2082,61 @@ pub(crate) mod tests {
         assert_eq!((buffer[(6, y)].symbol(), buffer[(6, y)].fg), ("T", MUTED));
         app.popup = Some(crate::monitor::Popup::Help { scroll: 0 });
         let terminal = draw(&mut app);
-        let y = row_of(&terminal, "View selector (FR-065)");
+        let y = row_of(&terminal, "open the View selector");
         let buffer = terminal.backend().buffer();
         assert_eq!((buffer[(3, y)].symbol(), buffer[(3, y)].fg), ("v", PRIMARY));
-        assert_eq!((buffer[(6, y)].symbol(), buffer[(6, y)].fg), ("V", MUTED));
+        assert_eq!((buffer[(6, y)].symbol(), buffer[(6, y)].fg), ("o", MUTED));
+    }
+
+    #[trace("FR-065-AC-12")]
+    #[test]
+    fn rate_limit_and_stale_rows_use_the_existing_warning_palette() {
+        fn label_color(app: &mut App, label: &str) -> Color {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|frame| render(frame, app, Instant::now()))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let row = (0..24)
+                .find(|y| {
+                    (0..80)
+                        .map(|x| buffer[(x, *y)].symbol())
+                        .collect::<String>()
+                        .starts_with(label)
+                })
+                .unwrap_or_else(|| panic!("no evidence row starts with {label}"));
+            buffer[(0, row)].fg
+        }
+        // Lead views: failures keep the error colour; rate-limit and stale rows are amber.
+        let mut limited = app();
+        limited.apply_tracker_refresh(
+            Err(ix_board::Error::LinearRateLimited {
+                retry_after: std::time::Duration::from_secs(3600),
+            }),
+            Instant::now(),
+        );
+        limited.runtime.failure("Herdr unreachable");
+        assert_eq!(label_color(&mut limited, "Tracker rate-limited"), WARNING);
+        assert_eq!(label_color(&mut limited, "Herdr failed"), ERROR);
+        let mut stale = app();
+        stale.tracker.value.as_mut().unwrap().fetched_at -= 2 * 60 * 60;
+        assert_eq!(label_color(&mut stale, "Tracker stale"), WARNING);
+        // Department views, colour enabled: failure light red, last snapshot amber, fact muted.
+        let mut department = app();
+        department.view = View::Status;
+        department.color_enabled = true;
+        department
+            .department
+            .success(crate::monitor_department::tests::fixture(), Instant::now());
+        department.department.failure("source unavailable");
+        assert_eq!(
+            label_color(&mut department, "Department failed"),
+            Color::LightRed
+        );
+        assert_eq!(
+            label_color(&mut department, "Department evidence · last snapshot"),
+            WARNING
+        );
+        assert_eq!(label_color(&mut department, "Tracker evidence"), MUTED);
     }
 }
