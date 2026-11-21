@@ -929,7 +929,10 @@ fn many_long_stage_names_cannot_push_the_essential_text_out_at_80x24() {
     assert_scope_essentials(&text, "hiding completed");
     assert_count_statements(&text);
     assert!(text.contains("[last snapshot]"), "{text}");
-    assert!(hidden_row(&text, "Live") && hidden_row(&text, "Mystery"), "{text}");
+    assert!(
+        hidden_row(&text, "Live") && hidden_row(&text, "Mystery"),
+        "{text}"
+    );
 }
 
 /// Distinct hidden and unknown counts come from the projection, never placements.

@@ -160,7 +160,8 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
     .join(" · ");
     let width = usize::from(frame.area().width.max(1));
     let controls = footer_controls(
-        scope_view.then(|| crate::monitor_scope::footer_mode(projection.as_deref(), app.show_completed)),
+        scope_view
+            .then(|| crate::monitor_scope::footer_mode(projection.as_deref(), app.show_completed)),
         &errors,
         width,
     );
@@ -177,7 +178,9 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
             .area()
             .height
             .saturating_sub(2 + focus_rows + footer_rows + 3);
-        u16::try_from(needed).unwrap_or(u16::MAX).clamp(2, spare.max(2))
+        u16::try_from(needed)
+            .unwrap_or(u16::MAX)
+            .clamp(2, spare.max(2))
     } else {
         2
     };
@@ -918,6 +921,12 @@ pub(crate) mod tests {
                 ),
                 (5, vec![("Tickets: ", MUTED), ("SWM-12", FOREGROUND)]),
             ] {
+                // The Scope view's filter statement takes its own row after the scope line.
+                let y = if view == View::Scope && y >= 3 {
+                    y + 1
+                } else {
+                    y
+                };
                 let mut x = 0;
                 for (text, color) in pieces {
                     for character in text.chars() {

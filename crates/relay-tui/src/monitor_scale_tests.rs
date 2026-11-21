@@ -150,7 +150,7 @@ fn draw(app: &mut App, terminal: &mut Terminal<TestBackend>) {
 #[test]
 #[ignore = "bounded large-scope scenario; run with --release --ignored --nocapture"]
 fn large_scope_event_sequence_with_pending_source_read() {
-    let mut app = large_scope_app();
+    let app = large_scope_app();
     let snapshot = app.tracker.value.clone().expect("snapshot");
     let view = summarize(
         &snapshot,
@@ -331,9 +331,19 @@ fn production_event_loop_never_waits_for_a_pending_tracker_read() {
     let signal = AtomicBool::new(false);
     app.view = View::Scope;
     let before = counters(&app);
-    crate::event_loop(&mut terminal, &mut app, &mut workers, &mut keys, &signal, None)
-        .expect("the loop quits");
-    assert!(keys.released, "the whole script ran before the read finished");
+    crate::event_loop(
+        &mut terminal,
+        &mut app,
+        &mut workers,
+        &mut keys,
+        &signal,
+        None,
+    )
+    .expect("the loop quits");
+    assert!(
+        keys.released,
+        "the whole script ran before the read finished"
+    );
     assert!(
         !held.fired.load(Ordering::SeqCst),
         "the loop waited for the pending read until the watchdog released it"
@@ -343,7 +353,11 @@ fn production_event_loop_never_waits_for_a_pending_tracker_read() {
     // The cold draw and the one delivered source change compute the summary; every build
     // beyond those is exactly one toggle, each pressed while the Scope view was shown.
     let after = counters(&app);
-    assert_eq!(after.0 - before.0, 2, "cold draw plus the delivered refresh");
+    assert_eq!(
+        after.0 - before.0,
+        2,
+        "cold draw plus the delivered refresh"
+    );
     assert_eq!(
         after.1 - before.1,
         2 + toggles,
