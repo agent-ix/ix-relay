@@ -12,6 +12,7 @@
 mod budget;
 mod doctor;
 mod find;
+mod focuses;
 mod hook;
 mod hook_run;
 mod identity;
@@ -85,6 +86,9 @@ struct Cli {
 enum Cmd {
     /// Report session scope, focus and agent assignments for the dashboard.
     Work(work::WorkArgs),
+    /// Durable, revisioned named focus definitions with one owner: create, list, show,
+    /// update, archive, claim and transfer. Not `focus`, which sets this lane's free-text focus.
+    Focuses(focuses::FocusesArgs),
     /// Send a message to one lead, or to `all`.
     Send {
         /// Full server:workspace:tab, :workspace:tab, :tab, or all.
@@ -414,6 +418,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // `focuses` reports every failure as a typed error (one JSON object with `--json`), so it
+    // connects for itself.
+    if let Cmd::Focuses(args) = &cli.cmd {
+        return focuses::main(args, &settings);
+    }
     match run(cli, &settings) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -845,7 +854,9 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 None => writeln!(out, "not a lead")?,
             }
         }
-        Cmd::Hook { .. } | Cmd::Doctor { .. } => unreachable!("handled in main"),
+        Cmd::Hook { .. } | Cmd::Doctor { .. } | Cmd::Focuses(_) => {
+            unreachable!("handled in main")
+        }
     }
     Ok(())
 }

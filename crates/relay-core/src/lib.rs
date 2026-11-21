@@ -18,6 +18,7 @@ pub mod lane_registry;
 mod message;
 pub mod moves;
 mod name;
+pub mod named_focus;
 mod resolve;
 pub mod socket_status;
 pub mod status;
