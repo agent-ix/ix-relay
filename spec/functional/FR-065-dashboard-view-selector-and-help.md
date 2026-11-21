@@ -47,7 +47,9 @@ fixture of FR-048, FR-059, FR-060 or FR-064 may differ only in:
 1. the header View selector row, and its key styling;
 2. the identity row, including in the department views;
 3. the controls footer row;
-4. the placement and bounding of the evidence rows;
+4. the placement and bounding of the evidence rows, where new stale and rate-limit
+   evidence rows use the existing warning palette and change no canonical metric
+   severity, classification or color;
 5. the population labels stated under Scope labels;
 6. the Status purpose line;
 7. the Health and Retro state display stated under Empty Health and Retro,
@@ -119,9 +121,13 @@ Escape quitting when no popup is open, is retained.
   without changing any view state.
 - While help is open, Up, Down, PageUp and PageDown SHALL scroll it; every line is
   reachable at 80x24.
-- Help SHALL name each key by the requirement that owns its action, with the views
-  where it has a visible effect, as follows. Help SHALL NOT mark a key as applicable
-  in a view where it has no visible effect.
+- The owner references in the table's `Action (owner)` column are traceability for
+  this specification only.
+- Help SHALL list each key in the table below with its action.
+- Help SHALL show one row per entry.
+- Help SHALL name the views only for entries that apply in some views and not all.
+- Help SHALL NOT show requirement identifiers, owner names or requirement text.
+- Help SHALL NOT mark a key as applicable in a view where it has no visible effect.
 
   | Keys | Action (owner) | Views |
   |---|---|---|
@@ -234,20 +240,24 @@ Escape quitting when no popup is open, is retained.
 
 - Health and Retro SHALL each choose one state from their own fields and show it as
   one concise message in the work area, not a table of placeholders:
-  - **Not configured**: no retro configuration or saved report supplies the fields.
-    For a live startup, the message names `--retro-config <file>` whose department
-    team and project population must match the department selection shown in the
-    label. For Retro it also names that previous and baseline comparisons need a
-    retained snapshot history. For a saved report, it says the report does not
-    supply the fields and that a report containing them is required.
+  - **Not configured**: neither a retro configuration nor a saved report was
+    supplied. The message names `--retro-config <file>` whose department team and
+    project population must match the department selection shown in the label. For
+    Retro it also names that previous and baseline comparisons need a retained
+    snapshot history.
   - **Waiting**: a configuration was supplied and its first read has not returned.
     The message says it is waiting for the first read of the retro configuration.
+  - **Fields absent**: a configured read or saved report succeeded but does not
+    supply the view's fields. The message says the fields are not supplied by that
+    report or read. For a saved report, it also says that a report containing them
+    is required. It is not Not configured, not a failed read and not healthy. It
+    performs no read, write or calculation.
   - **Failed**: a read failed with no retained model. It shows the classified source
     reason.
   - **Stale**: a retained model exists. It shows the retained values with their
     stale or last-snapshot label.
-- The Not configured and Waiting states SHALL NOT be stored, labeled or styled as a
-  source failure. They SHALL NOT appear in the source-failure rows or the `e` source
+- The Not configured, Waiting and Fields absent states SHALL NOT be stored, labeled
+  or styled as a source failure. They SHALL NOT appear in the source-failure rows or the `e` source
   list, SHALL NOT be described as an authentication failure, and SHALL NOT by
   themselves affect the exit status. FR-059's rules for real collection failures are
   unchanged.
@@ -268,16 +278,16 @@ Escape quitting when no popup is open, is retained.
 |----|----------|--------------|
 | FR-065-AC-1 | In each of Tickets, Agents, Scope, Status, Health and Retro, at 80x24 and 120x40, the header shows the same `View` selector; `v` opens a dropdown listing all six views with their keys and the highlight on the current view; Down/Up/`j`/`k` then Enter selects, and the target view renders with selection and scroll reset and scope preserved. Selecting the current view changes nothing. Health and Retro are selectable with no data. | Test |
 | FR-065-AC-2 | Escape or `v` with the dropdown open closes it and leaves view, selection, scroll, details and filter unchanged, and does not quit; Escape with no popup open still quits. The highlight is clamped at both ends. At 80x24 all six entries are reachable, and a dropdown taller than the work area keeps the highlight visible. Resizing from 120x40 to 80x24 with it open keeps it open with the highlight in range. | Test |
-| FR-065-AC-3 | F1 and `?` open help in all six views; F1, `?` and Escape close it without quitting or state change. For every view, the keys marked applicable equal exactly that view's column of the Help table, and `s`, `e`, Left/Right and `c` are marked only where the table says. Every line is reachable at 80x24 by scrolling. Resizing with help open keeps it open with scroll in range. Nothing about `f` is asserted. | Test |
+| FR-065-AC-3 | F1 and `?` open help in all six views; F1, `?` and Escape close it without quitting or state change. For every view, the keys marked applicable equal exactly that view's column of the Help table, and `s`, `e`, Left/Right and `c` are marked only where the table says. Every line is reachable at 80x24 by scrolling. Resizing with help open keeps it open with scroll in range. Nothing about `f` is asserted. The help frame shows no requirement identifiers or owner text, lists every table key as one row, and states views only for entries not applicable everywhere. | Test |
 | FR-065-AC-4 | For each popup, a fresh popup is opened per key and each key it does not own is sent, drawn from the keys defined by FR-048, FR-059 and FR-060 plus F1, `?` and `v`. After each, the popup is still open and quit, view, selection, scroll, details, refresh flag, status toggle, filter mode and the other popup are unchanged. Owned keys are asserted by AC-1 to AC-3. `q` while a popup is open does not quit. | Test |
 | FR-065-AC-5 | In all six views the footer contains `v View` and `F1 Help`, and no other shortcut list except the FR-060 Scope filter text; no persistent tab strip appears. At 80x24, with a source error, a stale source, a rate-limit countdown, a replaced session and an active filter present, all classified labels are intact and visible in at most 4 evidence rows, with `v View` and `F1 Help` on the footer. A long multi-source error fixture shows labels intact, detail truncated with a marker, a count of sources not shown, and, in Status/Health/Retro, the full text reachable through `e` then `d`. A below-80x24 fixture truncates without panic. | Test |
 | FR-065-AC-6 | The identity row (lead identity, binding state, activity markers, or the explicit no-lead and binding-diagnostic text) is identical across all six views for each of: a verified lead; a missing or ambiguous lead with explicit scope; a replaced session; explicit scope with no `--lead`; and a saved-report startup. | Test |
 | FR-065-AC-7 | One fixture per label case asserts the exact caption. Tickets and Scope: Focused, whole-team fallback, ticket-only and named mode (per FR-060 and FR-064), and no lead bound. Agents: every reported assignment listed, not a scope. Status, Health and Retro: explicit team and projects, saved report, and lead-only startup with the derived-from-lead-workspace label. With department and lead populations differing, all three department views show the fixed text and no label contains "equal", "same", "narrower" or "subset". Inspection confirms no scope comparison or calculation was added. | Test and Inspection |
 | FR-065-AC-8 | Status shows the specified purpose line at 80x24 and 120x40 without hiding evidence rows. Every Status row other than that line is unchanged by it for a shared fixture. | Test |
-| FR-065-AC-9 | Health and Retro fixtures show exactly one message each for: no configuration (live), saved report lacking the fields, configuration supplied before its first read, a failed read with no model, and a stale retained model. Not configured and Waiting do not appear in source-failure rows or the `e` list, are not styled as errors, and are not called authentication failures; Retro names the history requirement; the live message names the label's population. No zero, green or complete value appears for missing data. | Test |
-| FR-065-AC-10 | In the saved-report case, fail-if-called credential, network, Herdr and Redis adapters record no call while Health or Retro shows Not configured and while either popup is opened and closed. In the live case, with worker clocks held, adapter call counts, files and report, tracker and history stores are equal before and after the same interaction, and no authentication retry occurs. | Test |
+| FR-065-AC-9 | Health and Retro fixtures show exactly one message each for: no configuration (live), saved report lacking the fields, configuration supplied before its first read, a successful configured read with the fields absent, a failed read with no model, and a stale retained model. Not configured, Waiting and Fields absent do not appear in source-failure rows or the `e` list, are not styled as errors, and are not called authentication failures; Retro names the history requirement; the live message names the label's population. No zero, green or complete value appears for missing data. | Test |
+| FR-065-AC-10 | In the saved-report case, fail-if-called credential, network, Herdr and Redis adapters record no call while Health or Retro shows Fields absent and while either popup is opened and closed. In the live case, with worker clocks held, adapter call counts, files and report, tracker and history stores are equal before and after the same interaction, and no authentication retry occurs. | Test |
 | FR-065-AC-11 | With help open at 80x24, a refresh that fails, a rate-limit countdown and a session replacement each appear in the evidence rows and the footer while the popup stays within the work area. A refresh that shrinks rows while a popup is open clamps selection as FR-059 and FR-060 state, and closing the popup leaves exactly that state. Source polling continues while it is open. | Test |
-| FR-065-AC-12 | The fixtures of FR-048-AC-1, FR-059, FR-060 and FR-064-AC-1/AC-13, quit and terminal restoration pass with differences only from the Permitted presentation differences list. The selector, dropdown, help and footer key hints use the primary blue, and descriptions and separators are muted. | Test |
+| FR-065-AC-12 | The fixtures of FR-048-AC-1, FR-059, FR-060 and FR-064-AC-1/AC-13, quit and terminal restoration pass with differences only from the Permitted presentation differences list. The selector, dropdown, help and footer key hints use the primary blue, and descriptions and separators are muted. New stale and rate-limit evidence rows use the existing warning palette, pinned by test, and no canonical metric severity or classification color changes. | Test |
 | FR-065-AC-13 | Inspection of the terminal setup shows it is unchanged and enables no mouse capture. The click behavior is verified only when a later change delivers mouse events. | Inspection |
 
 ## Dependencies

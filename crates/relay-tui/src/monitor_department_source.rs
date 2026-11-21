@@ -74,7 +74,7 @@ impl DepartmentWorker {
         Self::spawn_with_read(move || collect(&config))
     }
 
-    fn spawn_with_read(
+    pub(crate) fn spawn_with_read(
         mut read: impl FnMut() -> Result<Delta, String> + Send + 'static,
     ) -> io::Result<Self> {
         let (events_tx, events) = mpsc::sync_channel(1);

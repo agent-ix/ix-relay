@@ -755,7 +755,7 @@ Options:
   -h, --help                         Print help
 ```
 
-`--report` conflicts with live scope, lead/session and retro configuration options. Department keys are `1` Status, `2` Health and `3` Retro. Lead views use `t`, `a` and `p`. See [Monitor a department](department-monitor.md) for examples, evidence details and collection outcomes.
+`--report` conflicts with live scope, lead/session and retro configuration options. In every view `v` opens the View dropdown for Tickets, Agents, Scope, Status, Health and Retro, and F1 or `?` opens help with the full key list. `1` Status, `2` Health, `3` Retro, `t` Tickets, `a` Agents and `p` Scope remain as shortcuts. See [Monitor a department](department-monitor.md) for examples, evidence details and collection outcomes.
 
 ## relay-admin
 
