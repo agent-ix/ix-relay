@@ -212,5 +212,11 @@ never healthy, are not weakened.
   [FR-048](./FR-048-session-work-monitor.md) are retained as stated;
   [FR-059](./FR-059-department-monitor-adapter.md) departments and explicit-scope
   startup have no named mode and are unchanged.
+- [FR-065](./FR-065-dashboard-view-selector-and-help.md) adds the View selector, F1
+  help, footer and population labels, and lists the presentation differences it
+  allows in the FR-064 statements and fixtures that say "unchanged" or "identical".
+  Keys and data are unchanged. When this requirement delivers the `f` key, it also
+  adds `f` to the FR-065 Help table (Scope view, named mode only) and to the FR-065
+  popup key sweep, and verifies both here; FR-065 does not wait on it.
 - Out of scope: department metrics and monitoring policy, a second tracker reader,
   speeding the full-team snapshot, and nested focuses.
