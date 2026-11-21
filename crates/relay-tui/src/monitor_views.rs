@@ -191,6 +191,15 @@ pub(crate) fn render_agents(
     }
 }
 
+/// A count cell where a zero is a dim middle dot so the non-zero counts stand out.
+fn count_cell(count: usize) -> Cell<'static> {
+    if count == 0 {
+        Cell::from(Span::styled("\u{b7}", Style::default().fg(MUTED)))
+    } else {
+        Cell::from(count.to_string())
+    }
+}
+
 /// Gives each initiative and project its own scrollable progress row.
 pub(crate) fn render_scope(
     frame: &mut Frame,
@@ -251,9 +260,9 @@ pub(crate) fn render_scope(
             Row::new([
                 Cell::from(Line::from(name)),
                 Cell::from(format!("{}/{}", progress.done, progress.total)),
-                Cell::from(progress.total.saturating_sub(progress.done).to_string()),
-                Cell::from(progress.ready.to_string()),
-                Cell::from(progress.blocked.to_string()),
+                count_cell(progress.total.saturating_sub(progress.done)),
+                count_cell(progress.ready),
+                count_cell(progress.blocked),
             ])
         });
     let [table_area, detail_area] = content_areas(area, app.details);
