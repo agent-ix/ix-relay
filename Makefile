@@ -60,6 +60,10 @@ fuzz:
 build:
 	$(CARGO) build --release
 
+.PHONY: build-agent-msg
+build-agent-msg:
+	$(CARGO) build --release -p agent-msg
+
 .PHONY: clean
 clean:
 	$(CARGO) clean

@@ -21,6 +21,25 @@ pub(super) struct Keys {
 }
 
 impl Keys {
+    pub(super) fn work_activity_key(
+        &self,
+        machine: &MachineName,
+        session: &SessionId,
+        process_id: u32,
+    ) -> String {
+        format!(
+            "{}work-activity:{machine}:{session}:{process_id}",
+            self.prefix
+        )
+    }
+
+    pub(super) fn work_events_key(&self) -> String {
+        format!("{}work-events", self.prefix)
+    }
+
+    pub(super) fn work_events_start_key(&self) -> String {
+        format!("{}work-events-start", self.prefix)
+    }
     pub(super) fn new(prefix: impl Into<String>) -> Self {
         Self {
             prefix: prefix.into(),
@@ -250,6 +269,12 @@ mod tests {
                 relay.directory_refresh_key(&machine),
             ),
             ("work_key", relay.work_key(&machine, &sid, 42)),
+            (
+                "work_activity_key",
+                relay.work_activity_key(&machine, &sid, 42),
+            ),
+            ("work_events_key", relay.work_events_key()),
+            ("work_events_start_key", relay.work_events_start_key()),
             ("inbox_key", relay.inbox_key(&agent)),
             ("agents_key", relay.agents_key()),
             ("lane_focus_key", relay.lane_focus_key()),
@@ -296,6 +321,9 @@ mod tests {
             ("directory_sequence_key", "p:directory-sequence:node-a"),
             ("directory_refresh_key", "p:directory-refresh:node-a"),
             ("work_key", "p:work:node-a:sid-1:42"),
+            ("work_activity_key", "p:work-activity:node-a:sid-1:42"),
+            ("work_events_key", "p:work-events"),
+            ("work_events_start_key", "p:work-events-start"),
             ("inbox_key", "p:inbox:lead-a"),
             ("agents_key", "p:agents"),
             ("lane_focus_key", "p:lane:focus"),
@@ -366,6 +394,9 @@ mod tests {
             other.directory_sequence_key(&machine),
             other.directory_refresh_key(&machine),
             other.work_key(&machine, &sid, 42),
+            other.work_activity_key(&machine, &sid, 42),
+            other.work_events_key(),
+            other.work_events_start_key(),
             other.inbox_key(&agent),
             other.agents_key(),
             other.lane_focus_key(),

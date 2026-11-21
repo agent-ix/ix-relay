@@ -134,7 +134,10 @@ fn scope_focus_and_concurrent_agents_survive_independent_updates_and_are_session
         "reviewer"
     );
     assert!(
-        bus.keys().iter().all(|k| k.contains(":work:")),
+        bus.keys().iter().all(|k| k.contains(":work:")
+            || k == &bus.key("work-events")
+            || k == &bus.key("work-events-start")
+            || k.contains(":work-activity:")),
         "reporting never registers agents or writes inboxes"
     );
 }
@@ -235,4 +238,124 @@ fn whole_team_report_clears_narrow_selectors_without_erasing_agents() {
     );
     assert_eq!(report.agents.len(), 1);
     assert_eq!(report.agents[0].agent_id, "coder");
+}
+
+/// Trace: FR-066-AC-1, FR-066-AC-2, FR-066-AC-3
+/// Provenance: SWM-180; atomic history preserves short stages and removals.
+#[test]
+fn work_history_is_ordered_read_only_private_and_session_qualified() {
+    let Some(mut bus) = Bus::connect("work-history") else {
+        return;
+    };
+    let owner = binding();
+    bus.relay
+        .report_work_scope(
+            &owner,
+            &WorkScope {
+                projects: vec!["project-id".into()],
+                reported_at_ms: 100,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut assignment = agent("child-a");
+    bus.relay.report_work_agent(&owner, &assignment).unwrap();
+    assignment.role = "reviewer".into();
+    bus.relay.report_work_agent(&owner, &assignment).unwrap();
+    bus.relay.report_work_activity(&owner, true).unwrap();
+    bus.relay.remove_work_agent(&owner, "child-a").unwrap();
+    bus.relay
+        .report_work_focus(
+            &owner,
+            &WorkFocus {
+                summary: "private focus text".into(),
+                tickets: vec![],
+                reported_at_ms: 101,
+            },
+        )
+        .unwrap();
+    let first = bus.relay.work_events("0-0", 2).unwrap();
+    assert_eq!(first.events.len(), 2);
+    assert!(first.has_more);
+    assert_eq!(first.version, 1);
+    assert!(first.available_from_ms.is_some());
+    let second = bus.relay.work_events(&first.next_cursor, 100).unwrap();
+    assert_eq!(second.events.len(), 3);
+    assert!(!second.has_more);
+    assert_eq!(
+        bus.relay.work_events("0-0", 2).unwrap().events,
+        first.events
+    );
+    assert!(
+        first
+            .events
+            .iter()
+            .chain(&second.events)
+            .all(|e| e.binding == relay_core::work_history::Binding::from(&owner))
+    );
+    assert!(
+        matches!(&second.events[0].change,relay_core::work_history::WorkChange::Agent{agent} if agent.role=="reviewer")
+    );
+    assert!(matches!(
+        second.events[2].change,
+        relay_core::work_history::WorkChange::Remove { .. }
+    ));
+    assert!(
+        !serde_json::to_string(&second)
+            .unwrap()
+            .contains("private focus text")
+    );
+    assert!(
+        bus.relay
+            .work_report(&owner)
+            .unwrap()
+            .unwrap()
+            .agents
+            .is_empty()
+    );
+    let snapshot = bus.relay.work_snapshot(&owner, 1000).unwrap();
+    assert_eq!(snapshot.paused, Some(true));
+    assert_eq!(
+        snapshot.binding,
+        relay_core::work_history::Binding::from(&owner)
+    );
+    assert!(
+        !serde_json::to_string(&snapshot)
+            .unwrap()
+            .contains("private focus text")
+    );
+    assert!(bus.relay.work_events("bad", 10).is_err());
+    assert!(bus.relay.work_events("0-0", 1001).is_err());
+}
+
+/// Trace: FR-066-AC-1, FR-066-AC-4
+/// Provenance: SWM-180; invalid history storage cannot partially update work state.
+#[test]
+fn invalid_history_key_refuses_state_mutation_and_count_retention_is_explicit() {
+    let Some(mut bus) = Bus::connect("work-history-bounds") else {
+        return;
+    };
+    let owner = binding();
+    redis::cmd("SET")
+        .arg(bus.key("work-events"))
+        .arg("wrong-type")
+        .query::<()>(&mut bus.raw)
+        .unwrap();
+    assert!(bus.relay.report_work_agent(&owner, &agent("a")).is_err());
+    assert!(bus.relay.work_report(&owner).unwrap().is_none());
+    redis::cmd("DEL")
+        .arg(bus.key("work-events"))
+        .query::<()>(&mut bus.raw)
+        .unwrap();
+    for _ in 0..4100 {
+        bus.relay.report_work_activity(&owner, false).unwrap();
+    }
+    let count: usize = redis::cmd("XLEN")
+        .arg(bus.key("work-events"))
+        .query(&mut bus.raw)
+        .unwrap();
+    assert_eq!(count, 4096);
+    let page = bus.relay.work_events("1-0", 1).unwrap();
+    assert!(page.truncated);
+    assert!(page.available_from_ms.is_some());
 }

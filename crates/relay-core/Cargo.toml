@@ -13,6 +13,7 @@ publish = false
 workspace = true
 
 [dependencies]
+relay-work-wire.workspace = true
 gethostname.workspace = true
 jiff.workspace = true
 nix.workspace = true
