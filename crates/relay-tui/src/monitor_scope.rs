@@ -46,7 +46,7 @@ impl FocusMode {
     /// Plain statement of what the rows represent.
     pub fn text(self) -> &'static str {
         match self {
-            Self::Focused => "rows are the lead's reported focus",
+            Self::Focused => "",
             Self::WholeTeam => "no focus reported · rows are the whole team",
             Self::TicketOnly => {
                 "no initiative/project focus reported · rows are the whole team narrowed by reported tickets"

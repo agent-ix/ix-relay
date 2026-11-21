@@ -15,6 +15,8 @@
 //! | `<prefix>health:moves` | stream, capped | one [`crate::moves::MoveEvent`] per relink or rename, written by the script that changes the registration: fields `machine`, `lead`, `rec` (FR-043) |
 //! | `<prefix>health:replaced:<lead>` | string, expiring | one lead's [`crate::moves::PaneReplaced`] JSON: the lead's pane now hosts another session (FR-032) |
 //! | `<prefix>health:hooks` | stream, capped | hook failure records flushed from each machine's local spool: fields `machine`, `lead`, `rec` (see [`Relay::push_hook_health`]) |
+//! | `<prefix>focus:def:<id>` | hash, no expiry | one named focus definition: `meta`, `owner`, `rev:<n>` per kept revision, `pin:<incarnation>` per adopter (FR-061, see [`crate::named_focus`]) |
+//! | `<prefix>focus:index`, `<prefix>focus:names` | hash, no expiry | definitions by focus ID, and non-archived names by team and folded name, written in the same atomic operation as the record they describe |
 
 use std::{cell::Cell, collections::HashMap, num::NonZeroUsize, time::Duration};
 
@@ -64,6 +66,8 @@ mod inflight;
 mod inflight_fault_tests;
 mod keys;
 mod moves;
+mod named_focus;
+mod named_focus_scripts;
 #[cfg(test)]
 mod pop_budget_tests;
 mod scan;

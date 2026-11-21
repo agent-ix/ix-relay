@@ -407,7 +407,7 @@ fn tc_056_status_commands_parse_arguments_and_report_the_collection_contract() {
     assert_ne!(invalid_blocker.status, 0);
 }
 
-/// Trace: FR-057-AC-1, FR-057-AC-2, FR-057-AC-3, FR-057-AC-4, FR-057-AC-7
+/// Trace: FR-057-AC-1, FR-057-AC-2, FR-057-AC-3, FR-057-AC-4, FR-057-AC-7, FR-061-AC-22
 #[test]
 fn tc_057_focus_commands_set_clear_and_render_stale_focus() {
     let Some(url) = test_url() else { return };
