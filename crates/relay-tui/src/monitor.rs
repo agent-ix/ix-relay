@@ -182,9 +182,9 @@ pub struct App {
     pub tracker: Source<crate::monitor_tracker::TrackerState>,
     /// Next scheduled retry after a rate-limited Linear read.
     pub tracker_retry_at: Option<Instant>,
-    /// The tracker snapshot is shown, but nothing confirms when its source read happened or
-    /// that a refresh failed; it is not certified fresh and no failure is reported.
-    pub tracker_freshness_unconfirmed: bool,
+    /// Typed state of the latest tracker attempt: clear, a snapshot not certified fresh with no
+    /// failure claimed, or the typed cause of the failed attempt.
+    pub tracker_status: crate::monitor_ops::TrackerStatus,
     /// Human-readable identity of the current team lead.
     pub lead_name: String,
     /// Set by `q` or Escape.
@@ -277,50 +277,62 @@ impl App {
         tracker: Result<crate::monitor_ops::TrackerRead, ix_board::Error>,
         now: Instant,
     ) {
+        use crate::monitor_ops::{
+            Provenance, TrackerStatus,
+            quota::{Cause, Notice},
+        };
         self.collection_failed |= tracker.is_err();
         match tracker {
             Ok(read) => {
-                use crate::monitor_ops::{
-                    Provenance, refresh_failed_diagnostic, refresh_failed_summary,
-                };
                 // A snapshot kept after a failed refresh keeps its source timestamp; the
                 // failure shows beside it until a refresh succeeds. Unconfirmed provenance
                 // is not a failure and only marks the snapshot as not certified fresh.
                 let provenance = read.provenance();
                 self.tracker.success(read.snapshot, now);
                 self.tracker_retry_at = None;
-                self.tracker_freshness_unconfirmed = provenance == Provenance::Unconfirmed;
-                if let Provenance::RefreshFailed { cooldown } = provenance {
-                    self.collection_failed = true;
-                    if cooldown {
-                        self.tracker_retry_at =
-                            now.checked_add(crate::monitor_ops::TRACKER_REFRESH_INTERVAL);
-                        self.tracker.failure(refresh_failed_summary(cooldown));
-                    } else {
-                        self.tracker.failure_with_summary(
-                            refresh_failed_summary(cooldown),
-                            refresh_failed_diagnostic(),
-                        );
+                self.tracker_status = match provenance {
+                    Provenance::Current => TrackerStatus::Clear,
+                    Provenance::Unconfirmed => TrackerStatus::Unconfirmed,
+                    Provenance::RefreshFailed { cause, notice } => {
+                        self.collection_failed = true;
+                        self.hold_tracker(cause, notice, now);
+                        TrackerStatus::Failed(cause)
                     }
+                };
+            }
+            Err(error) => match Cause::of_error(&error) {
+                Some(cause) => {
+                    let notice = Notice::new(cause, error.quota_decision(), false);
+                    self.hold_tracker(cause, notice, now);
+                    self.tracker_status = TrackerStatus::Failed(cause);
                 }
-            }
-            Err(
-                error @ (ix_board::Error::LinearRateLimited { .. }
-                | ix_board::Error::LinearLocalBudgetExhausted { .. }),
-            ) => {
-                self.tracker_retry_at =
-                    now.checked_add(crate::monitor_ops::TRACKER_REFRESH_INTERVAL);
-                self.tracker
-                    .failure(crate::monitor_ops::source_summary(&error));
-            }
-            Err(error) => {
-                self.tracker_retry_at = None;
-                self.tracker.failure_with_summary(
-                    crate::monitor_ops::source_summary(&error),
-                    crate::monitor_ops::source_diagnostic(&error),
-                );
-            }
+                None => {
+                    self.tracker_retry_at = None;
+                    self.tracker_status = TrackerStatus::Failed(Cause::SourceFailed);
+                    self.tracker.failure_with_summary(
+                        crate::monitor_ops::source_summary(&error),
+                        crate::monitor_ops::source_diagnostic(&error),
+                    );
+                }
+            },
         }
+    }
+
+    /// Shows the notice for a failed tracker attempt. Only a hold to wait out schedules the
+    /// next attempt and coalesces manual refreshes; no other cause invents a cooldown.
+    fn hold_tracker(
+        &mut self,
+        cause: crate::monitor_ops::quota::Cause,
+        notice: crate::monitor_ops::quota::Notice,
+        now: Instant,
+    ) {
+        self.tracker_retry_at = if cause.waits() {
+            now.checked_add(crate::monitor_ops::TRACKER_REFRESH_INTERVAL)
+        } else {
+            None
+        };
+        self.tracker
+            .failure_with_summary(notice.summary, notice.detail);
     }
 }
 

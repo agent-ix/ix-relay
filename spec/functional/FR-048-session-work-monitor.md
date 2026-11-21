@@ -40,6 +40,8 @@ not establish a session binding or authorize a work report.
 
 Automatic Linear reads SHALL run on a 30-minute timer. Rate-limited reads SHALL retry on that timer, with a live countdown to the next attempt. Manual refreshes during rate limiting SHALL coalesce until that attempt; quit SHALL remain responsive. Snapshot age SHALL be labeled stale at the 30-minute polling interval or when a refresh fails. Herdr activity and Redis report reads SHALL run independently once per minute. Herdr observations SHALL remain usable between scheduled reads, with activity becoming unknown after two minutes without a successful observation. This behavior extends FR-048-AC-5.
 
+A Linear read that the shared ix-board quota protection holds back SHALL be labeled by the typed state the service reports for that attempt: local allocation, server reserve, server backoff, quota evidence unavailable (including quarantined legacy reservations) or request not admissible. Only a server backoff, or the service's typed rate-limit error, is labeled rate-limited. Local allocation and server reserve holds follow the same timer and coalescing as a rate limit. A held, failed or untyped refresh keeps the last snapshot with its original source time, reports every blocker and the earliest reevaluation time the service gave, and counts down only to the monitor's own next scheduled attempt, and only for a hold to wait out; a reevaluation time is not eligibility. A refresh whose typed outcome is absent stays unknown and is never classified from error text. This behavior extends FR-048-AC-5.
+
 ## Dependencies
 
 - ix-board owns structured scope selection, leaf progress and snapshot queue computation.

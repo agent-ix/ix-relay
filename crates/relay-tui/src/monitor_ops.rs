@@ -13,8 +13,12 @@ use std::{
 };
 
 use crate::monitor_tracker::TrackerState;
-use ix_board::{LinearGraphQlSource, ReadService};
+use ix_board::{LinearGraphQlSource, ReadService, RefreshOutcome, quota::QuotaDecision};
 use ix_cli_kit::streams::{DiagnosticFields, Record};
+
+pub(crate) mod quota;
+
+use quota::{Cause, Notice};
 
 /// Compact source classification suitable for a single diagnostic line.
 pub(crate) fn source_summary(error: &ix_board::Error) -> &'static str {
@@ -23,9 +27,10 @@ pub(crate) fn source_summary(error: &ix_board::Error) -> &'static str {
         ix_board::Error::Credential(_) => {
             "Saved credential access denied; contact credential owner"
         }
-        ix_board::Error::LinearRateLimited { .. } => "Linear rate limited",
-        ix_board::Error::LinearLocalBudgetExhausted { .. } => "Linear request budget exhausted",
-        _ => "Structured tracker read failed; inspect source availability",
+        _ => Cause::of_error(error).map_or(
+            "Structured tracker read failed; inspect source availability",
+            Cause::summary,
+        ),
     }
 }
 
@@ -64,25 +69,6 @@ fn render_diagnostic(kind: &str, message: &str, remedy: &str) -> String {
     format!("{} · {}", record.render_human(false), remedy)
 }
 
-/// Compact notice for a snapshot kept after its latest refresh failed; `cooldown` is a
-/// server cooldown the service reported. The cause is never named: the service reports none.
-pub(crate) fn refresh_failed_summary(cooldown: bool) -> &'static str {
-    if cooldown {
-        "Linear rate limited; showing the last snapshot"
-    } else {
-        "Linear refresh failed; showing the last snapshot"
-    }
-}
-
-/// Actionable form of [`refresh_failed_summary`] without a cooldown.
-pub(crate) fn refresh_failed_diagnostic() -> String {
-    render_diagnostic(
-        "TrackerRefreshFailed",
-        "Linear refresh failed; showing the last snapshot",
-        SOURCE_AVAILABILITY_REMEDY,
-    )
-}
-
 /// Evidence for a snapshot whose source read time and refresh outcome are both unknown.
 pub(crate) const FRESHNESS_UNCONFIRMED_DETAIL: &str =
     "showing the last snapshot; its source read time is unconfirmed";
@@ -94,53 +80,113 @@ const TRACKER_MAX_RETRY_INTERVAL: Duration = TRACKER_REFRESH_INTERVAL;
 
 /// One successful tracker read: the snapshot and how the shared read service obtained it.
 ///
-/// After a failed refresh the service returns its last complete snapshot as a success and records
-/// the failure only in `freshness`; the snapshot keeps the time its source read began.
+/// After a failed refresh the service returns its last complete snapshot as a success and
+/// records the failure only in `outcome` and `freshness`; the snapshot keeps the time its
+/// source read began.
 pub struct TrackerRead {
     /// The snapshot, with its original source timestamp in `fetched_at`.
     pub snapshot: TrackerState,
     /// Provenance of this read as the service reports it; `None` when it reports none.
     pub freshness: Option<ix_board::CacheFreshness>,
+    /// Typed outcome of the attempt that produced this read, captured with the snapshot.
+    /// `Unknown` when the service reports none; it is never rebuilt from failure text.
+    pub outcome: RefreshOutcome,
 }
 
 /// What a successful read says about the freshness of its snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Provenance {
     /// Nothing marks the snapshot stale.
     Current,
     /// The latest refresh did not succeed and the service kept its last complete snapshot.
-    /// `cooldown` is true when the service reported a server cooldown.
-    RefreshFailed { cooldown: bool },
-    /// The service marks the snapshot stale but reports neither a source read age nor a
-    /// cooldown. That is also what it reports for a successful read of a snapshot stored
-    /// without read-start evidence, so no failure may be claimed.
+    RefreshFailed {
+        /// The typed cause of the failed attempt.
+        cause: Cause,
+        /// The primary statement and every reported fact.
+        notice: Notice,
+    },
+    /// The service marks the snapshot stale but reports no typed failure, no source read age
+    /// and no cooldown. That is also what it reports for a successful read of a snapshot
+    /// stored without read-start evidence, so no failure may be claimed.
     Unconfirmed,
 }
 
+impl Provenance {
+    /// The cause of a failed refresh; `None` for a snapshot that is current or unconfirmed.
+    pub(crate) fn cause(&self) -> Option<Cause> {
+        match self {
+            Self::RefreshFailed { cause, .. } => Some(*cause),
+            Self::Current | Self::Unconfirmed => None,
+        }
+    }
+
+    fn failed(cause: Cause, decision: Option<&QuotaDecision>) -> Self {
+        Self::RefreshFailed {
+            cause,
+            notice: Notice::new(cause, decision, true),
+        }
+    }
+}
+
+/// Closed state of the tracker notice the dashboard holds for the latest attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrackerStatus {
+    /// Nothing marks the snapshot or the attempt.
+    #[default]
+    Clear,
+    /// A snapshot is shown, but neither its source read time nor a refresh outcome is
+    /// confirmed; it is not certified fresh and no failure is claimed.
+    Unconfirmed,
+    /// The latest attempt did not produce a fresh snapshot, for this typed cause.
+    Failed(Cause),
+}
+
 impl TrackerRead {
-    /// A read for which the service reported no provenance.
+    /// A read for which the service reported no provenance and no typed outcome.
     #[cfg(test)]
     pub(crate) fn unreported(snapshot: TrackerState) -> Self {
         Self {
             snapshot,
             freshness: None,
+            outcome: RefreshOutcome::Unknown,
         }
     }
 
-    /// Classifies the service's provenance from its typed fields alone: a stale snapshot with
-    /// a known source read age or a reported cooldown follows a failed refresh; one with
-    /// neither is unconfirmed.
+    /// Classifies the attempt from the service's typed fields alone.
+    ///
+    /// A typed failed outcome decides first. A read the service says succeeded
+    /// (`CacheReused`, `Refreshed`) claims no failure, and a stale mark on it only leaves it
+    /// unconfirmed. Without a typed outcome the legacy typed freshness decides: a stale
+    /// snapshot with a reported cooldown follows an actual server rate limit, one with a
+    /// known source read age follows a failed refresh of unknown cause, and one with neither
+    /// is unconfirmed.
     pub(crate) fn provenance(&self) -> Provenance {
-        match &self.freshness {
-            Some(freshness) if freshness.stale => {
-                let cooldown = freshness.rate_limit_until.is_some();
-                if cooldown || freshness.age_seconds.is_some() {
-                    Provenance::RefreshFailed { cooldown }
-                } else {
-                    Provenance::Unconfirmed
-                }
+        let stale = self
+            .freshness
+            .as_ref()
+            .is_some_and(|freshness| freshness.stale);
+        match &self.outcome {
+            RefreshOutcome::QuotaRefused { decision } => {
+                Provenance::failed(Cause::of_decision(decision), Some(decision))
             }
-            Some(_) | None => Provenance::Current,
+            RefreshOutcome::RefreshLockRefused => Provenance::failed(Cause::RefreshLockBusy, None),
+            RefreshOutcome::SourceFailed => Provenance::failed(Cause::SourceFailed, None),
+            RefreshOutcome::CacheReused | RefreshOutcome::Refreshed if stale => {
+                Provenance::Unconfirmed
+            }
+            RefreshOutcome::CacheReused | RefreshOutcome::Refreshed => Provenance::Current,
+            RefreshOutcome::Unknown => match &self.freshness {
+                Some(freshness) if freshness.stale => {
+                    if freshness.rate_limit_until.is_some() {
+                        Provenance::failed(Cause::ServerBackoff, None)
+                    } else if freshness.age_seconds.is_some() {
+                        Provenance::failed(Cause::Unknown, None)
+                    } else {
+                        Provenance::Unconfirmed
+                    }
+                }
+                Some(_) | None => Provenance::Current,
+            },
         }
     }
 }
@@ -276,15 +322,12 @@ impl RefreshWait {
     ) -> Self {
         // Linear refills quota continuously; its full-window reset is not a
         // mandatory pause. Reattempt on the explicit dashboard polling cadence.
-        // A kept snapshot counts only when the service reported a cooldown; its cause
-        // is otherwise not typed, so no cooldown is assumed.
+        // Only a typed hold to wait out protects the attempt, and no new cadence or probe
+        // follows from a decision's reevaluation time: it does not grant eligibility. A kept
+        // snapshot counts only when the service typed its cause; none is otherwise assumed.
         let protected = match result {
-            Err(
-                ix_board::Error::LinearRateLimited { .. }
-                | ix_board::Error::LinearLocalBudgetExhausted { .. },
-            ) => true,
-            Ok(read) => read.provenance() == Provenance::RefreshFailed { cooldown: true },
-            Err(_) => false,
+            Err(error) => Cause::of_error(error).is_some_and(Cause::waits),
+            Ok(read) => read.provenance().cause().is_some_and(Cause::waits),
         };
         Self {
             delay: if protected { refresh } else { retry },
@@ -338,11 +381,13 @@ fn read_tracker_with_factory<S: ix_board::WorkspaceSource>(
     Ok(TrackerRead {
         snapshot,
         freshness: service.cache_freshness().cloned(),
+        outcome: service.refresh_outcome().clone(),
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use ix_board::quota::QuotaState;
     use ix_trace_rs::trace;
     use std::{sync::mpsc, thread, time::Duration};
 
@@ -389,13 +434,38 @@ mod tests {
         assert!(!app.collection_failed);
     }
 
-    /// How the fake source answers its next read.
+    /// How the fake source answers its next read. The typed refusals are the quota decisions of
+    /// [`quota::fixture`], returned the way the SDK's admission returns them.
     #[derive(Clone, Copy, Debug)]
     enum Scenario {
         Succeeds,
         RateLimited,
         GraphQlFailure,
         LocalBudgetExhausted,
+        LockRefused,
+        ReserveHeld,
+        LocalHeld,
+        ServerBackoff,
+        Quarantined,
+        Simultaneous,
+    }
+
+    impl Scenario {
+        /// The decision a typed refusal carries; `None` for every other answer.
+        fn decision(self) -> Option<QuotaDecision> {
+            match self {
+                Self::ReserveHeld => Some(quota::fixture::reserve_held()),
+                Self::LocalHeld => Some(quota::fixture::local_held()),
+                Self::ServerBackoff => Some(quota::fixture::server_backoff()),
+                Self::Quarantined => Some(quota::fixture::quarantined()),
+                Self::Simultaneous => Some(quota::fixture::simultaneous()),
+                Self::Succeeds
+                | Self::RateLimited
+                | Self::GraphQlFailure
+                | Self::LocalBudgetExhausted
+                | Self::LockRefused => None,
+            }
+        }
     }
 
     struct ScenarioSource {
@@ -404,8 +474,13 @@ mod tests {
 
     impl ix_board::WorkspaceSource for ScenarioSource {
         fn fetch_workspace(&self) -> Result<TrackerState, ix_board::Error> {
-            match *self.scenario.lock().unwrap() {
-                Scenario::Succeeds => Ok(TrackerState::default()),
+            let scenario = *self.scenario.lock().unwrap();
+            if let Some(decision) = scenario.decision() {
+                return Err(ix_board::Error::QuotaAdmissionRefused {
+                    decision: Box::new(decision),
+                });
+            }
+            match scenario {
                 Scenario::RateLimited => Err(ix_board::Error::LinearRateLimited {
                     retry_after: Duration::from_secs(60),
                 }),
@@ -417,12 +492,15 @@ mod tests {
                         retry_after: Duration::from_secs(60),
                     })
                 }
+                Scenario::LockRefused => Err(ix_board::Error::RefreshLockTimeout),
+                _ => Ok(TrackerState::default()),
             }
         }
     }
 
-    /// A real read service over a private cache with a scripted source, seeded with one good
-    /// snapshot so each later failed refresh has a snapshot to keep.
+    /// A real read service over a private cache with a scripted source. [`Self::seeded`] holds
+    /// one good snapshot so each later failed refresh has a snapshot to keep; [`Self::cold`]
+    /// holds none.
     struct KeptSnapshot {
         _directory: tempfile::TempDir,
         cache_path: std::path::PathBuf,
@@ -432,23 +510,32 @@ mod tests {
     }
 
     impl KeptSnapshot {
-        fn seeded() -> Self {
+        fn cold() -> Self {
             let directory = tempfile::tempdir().unwrap();
-            let mut fixture = Self {
+            Self {
                 cache_path: directory.path().join("tracker.sqlite"),
                 _directory: directory,
                 scenario: std::sync::Arc::new(std::sync::Mutex::new(Scenario::Succeeds)),
                 original: 0,
-            };
+            }
+        }
+
+        fn seeded() -> Self {
+            let mut fixture = Self::cold();
             let good = fixture.read(Scenario::Succeeds, false);
             assert_eq!(good.provenance(), Provenance::Current);
+            assert_eq!(good.outcome, RefreshOutcome::Refreshed);
             assert!(good.snapshot.fetched_at > 0);
             fixture.original = good.snapshot.fetched_at;
             fixture
         }
 
         /// One tracker read, as the worker does it, with the source answering `scenario`.
-        fn read(&self, scenario: Scenario, force: bool) -> TrackerRead {
+        fn try_read(
+            &self,
+            scenario: Scenario,
+            force: bool,
+        ) -> Result<TrackerRead, ix_board::Error> {
             *self.scenario.lock().unwrap() = scenario;
             read_tracker_with_factory(force, || {
                 ReadService::open(
@@ -458,7 +545,22 @@ mod tests {
                     &self.cache_path,
                 )
             })
-            .unwrap()
+        }
+
+        fn read(&self, scenario: Scenario, force: bool) -> TrackerRead {
+            self.try_read(scenario, force).unwrap()
+        }
+
+        /// The dashboard after one forced read that kept the seeded snapshot.
+        fn applied(&self, scenario: Scenario, now: std::time::Instant) -> crate::monitor::App {
+            let mut app = crate::monitor::App::default();
+            app.apply_tracker_refresh(Ok(self.read(scenario, true)), now);
+            assert_eq!(
+                app.tracker.value.as_ref().unwrap().fetched_at,
+                self.original,
+                "the kept snapshot keeps its source time"
+            );
+            app
         }
     }
 
@@ -481,10 +583,8 @@ mod tests {
         let now = std::time::Instant::now();
         let limited = fixture.read(Scenario::RateLimited, true);
         assert_eq!(limited.snapshot.fetched_at, fixture.original);
-        assert_eq!(
-            limited.provenance(),
-            Provenance::RefreshFailed { cooldown: true }
-        );
+        assert_eq!(limited.outcome, RefreshOutcome::Unknown);
+        assert_eq!(limited.provenance().cause(), Some(Cause::ServerBackoff));
         assert!(
             limited
                 .freshness
@@ -512,17 +612,15 @@ mod tests {
     }
 
     /// A snapshot kept after any other failed refresh shows on a cold start, names no cause
-    /// and invents no cooldown.
+    /// and invents no cooldown. The service types it as a source failure, not a quota hold.
     #[trace("FR-059-AC-5", "FR-064-AC-10", "FR-048-AC-5")]
     #[test]
     fn a_snapshot_kept_after_a_failed_refresh_shows_on_a_cold_start_without_cause_or_cooldown() {
         let fixture = KeptSnapshot::seeded();
         let failed = fixture.read(Scenario::GraphQlFailure, true);
         assert_eq!(failed.snapshot.fetched_at, fixture.original);
-        assert_eq!(
-            failed.provenance(),
-            Provenance::RefreshFailed { cooldown: false }
-        );
+        assert_eq!(failed.outcome, RefreshOutcome::SourceFailed);
+        assert_eq!(failed.provenance().cause(), Some(Cause::SourceFailed));
         assert!(!protected_after(
             fixture.read(Scenario::GraphQlFailure, true)
         ));
@@ -540,18 +638,17 @@ mod tests {
         assert!(cold.collection_failed);
     }
 
-    /// With a snapshot, the service reports an exhausted local budget as a stale snapshot with
-    /// no typed cause: the notice stays neutral and no cooldown or coalescing is invented.
+    /// With a snapshot, the service reports the legacy exhausted-budget error with no typed
+    /// outcome: the metadata stays unknown, the notice stays neutral and no cooldown or
+    /// coalescing is invented.
     #[trace("FR-048-AC-5")]
     #[test]
     fn a_kept_snapshot_after_local_budget_exhaustion_has_the_neutral_notice_and_no_cooldown() {
         let fixture = KeptSnapshot::seeded();
         let refused = fixture.read(Scenario::LocalBudgetExhausted, true);
         assert_eq!(refused.snapshot.fetched_at, fixture.original);
-        assert_eq!(
-            refused.provenance(),
-            Provenance::RefreshFailed { cooldown: false }
-        );
+        assert_eq!(refused.outcome, RefreshOutcome::Unknown);
+        assert_eq!(refused.provenance().cause(), Some(Cause::Unknown));
         assert!(!protected_after(
             fixture.read(Scenario::LocalBudgetExhausted, true)
         ));
@@ -579,7 +676,7 @@ mod tests {
         app.apply_tracker_refresh(Ok(recovered), now);
         assert!(app.tracker.error.is_none());
         assert!(app.tracker_retry_at.is_none());
-        assert!(!app.tracker_freshness_unconfirmed);
+        assert_eq!(app.tracker_status, TrackerStatus::Clear);
     }
 
     fn freshness(
@@ -597,34 +694,286 @@ mod tests {
         }
     }
 
-    /// The classification uses typed fields only: a stale snapshot with a known read age or a
-    /// reported cooldown follows a failed refresh; with neither it is unconfirmed.
+    fn classify(
+        outcome: RefreshOutcome,
+        freshness: Option<ix_board::CacheFreshness>,
+    ) -> Provenance {
+        TrackerRead {
+            snapshot: TrackerState::default(),
+            freshness,
+            outcome,
+        }
+        .provenance()
+    }
+
+    /// Without a typed outcome the legacy typed freshness decides: a stale snapshot with a
+    /// reported cooldown follows an actual server rate limit, with a known read age a failed
+    /// refresh of unknown cause, and with neither it is unconfirmed.
     #[trace("FR-059-AC-5")]
     #[test]
-    fn provenance_separates_a_failed_refresh_from_an_unconfirmed_snapshot() {
-        let classify = |freshness: Option<ix_board::CacheFreshness>| {
-            TrackerRead {
-                snapshot: TrackerState::default(),
-                freshness,
-            }
-            .provenance()
-        };
-        assert_eq!(classify(None), Provenance::Current);
+    fn an_untyped_outcome_stays_unknown_unless_typed_freshness_reports_a_failure() {
+        let unknown = |freshness| classify(RefreshOutcome::Unknown, freshness);
+        assert_eq!(unknown(None), Provenance::Current);
         assert_eq!(
-            classify(Some(freshness(false, Some(5), None))),
+            unknown(Some(freshness(false, Some(5), None))),
             Provenance::Current
         );
         assert_eq!(
-            classify(Some(freshness(true, Some(5), None))),
-            Provenance::RefreshFailed { cooldown: false }
+            unknown(Some(freshness(true, Some(5), None))).cause(),
+            Some(Cause::Unknown)
         );
         assert_eq!(
-            classify(Some(freshness(true, None, Some(1_000)))),
-            Provenance::RefreshFailed { cooldown: true }
+            unknown(Some(freshness(true, None, Some(1_000)))).cause(),
+            Some(Cause::ServerBackoff)
         );
         assert_eq!(
-            classify(Some(freshness(true, None, None))),
+            unknown(Some(freshness(true, None, None))),
             Provenance::Unconfirmed
+        );
+    }
+
+    /// A typed successful outcome claims no failure: a stale mark on it leaves it unconfirmed,
+    /// and a typed failure is not hidden by freshness that says nothing is stale.
+    #[trace("FR-059-AC-5")]
+    #[test]
+    fn a_typed_outcome_decides_before_the_freshness_fields() {
+        for success in [RefreshOutcome::CacheReused, RefreshOutcome::Refreshed] {
+            assert_eq!(
+                classify(success.clone(), Some(freshness(false, Some(5), None))),
+                Provenance::Current
+            );
+            assert_eq!(
+                classify(success.clone(), Some(freshness(true, None, Some(1_000)))),
+                Provenance::Unconfirmed,
+                "a successful attempt shows no failure whatever the freshness marks"
+            );
+        }
+        let current = Some(freshness(false, Some(5), None));
+        assert_eq!(
+            classify(RefreshOutcome::SourceFailed, current.clone()).cause(),
+            Some(Cause::SourceFailed)
+        );
+        assert_eq!(
+            classify(RefreshOutcome::RefreshLockRefused, current.clone()).cause(),
+            Some(Cause::RefreshLockBusy)
+        );
+        let refused = RefreshOutcome::QuotaRefused {
+            decision: quota::fixture::quarantined(),
+        };
+        assert_eq!(
+            classify(refused, current).cause(),
+            Some(Cause::EvidenceQuarantined)
+        );
+    }
+
+    /// A server reserve hold while local usage is zero keeps the snapshot and its time, is not
+    /// a rate limit and not a local hold, and still waits like any hold to wait out.
+    #[trace("FR-048-AC-5", "FR-059-AC-5", "FR-064-AC-10")]
+    #[test]
+    fn a_reserve_hold_with_zero_local_usage_is_neither_a_rate_limit_nor_a_local_hold() {
+        let fixture = KeptSnapshot::seeded();
+        let now = std::time::Instant::now();
+        let read = fixture.read(Scenario::ReserveHeld, true);
+        assert!(matches!(
+            read.outcome,
+            RefreshOutcome::QuotaRefused { ref decision } if decision.state == QuotaState::ServerReserveHeld
+        ));
+        assert_eq!(read.provenance().cause(), Some(Cause::ServerReserve));
+        assert!(protected_after(fixture.read(Scenario::ReserveHeld, true)));
+
+        let app = fixture.applied(Scenario::ReserveHeld, now);
+        assert_eq!(
+            app.tracker_status,
+            TrackerStatus::Failed(Cause::ServerReserve)
+        );
+        assert_eq!(
+            app.tracker_retry_at,
+            now.checked_add(TRACKER_REFRESH_INTERVAL)
+        );
+        assert_eq!(
+            app.tracker.error_summary.as_deref(),
+            Some("Linear server reserve held; showing the last snapshot")
+        );
+        let detail = app.tracker.error.as_deref().unwrap();
+        for shown in ["local usage 0", "remaining 3", "reserve 7", "capacity 40"] {
+            assert!(detail.contains(shown), "{shown}: {detail}");
+        }
+        for absent in ["rate limited", "local allocation held", "owning deadline"] {
+            assert!(!detail.contains(absent), "{absent}: {detail}");
+        }
+        assert!(app.collection_failed);
+    }
+
+    /// An exhausted local window is its own hold, distinct from the reserve hold.
+    #[trace("FR-048-AC-5", "FR-059-AC-5")]
+    #[test]
+    fn a_local_window_hold_is_reported_as_the_local_allocation() {
+        let fixture = KeptSnapshot::seeded();
+        let app = fixture.applied(Scenario::LocalHeld, std::time::Instant::now());
+        assert_eq!(
+            app.tracker_status,
+            TrackerStatus::Failed(Cause::LocalWindow)
+        );
+        let detail = app.tracker.error.as_deref().unwrap();
+        assert!(detail.starts_with("Linear local allocation held; showing the last snapshot"));
+        assert!(detail.contains("local usage 880") && detail.contains("capacity 900"));
+        assert!(!detail.contains("server reserve"), "{detail}");
+        assert!(app.tracker_retry_at.is_some());
+    }
+
+    /// Only a typed server backoff is a rate limit, and it keeps the snapshot with a countdown.
+    #[trace("FR-048-AC-5", "FR-059-AC-5")]
+    #[test]
+    fn an_actual_server_backoff_decision_is_the_rate_limit() {
+        let fixture = KeptSnapshot::seeded();
+        let now = std::time::Instant::now();
+        let read = fixture.read(Scenario::ServerBackoff, true);
+        assert_eq!(read.provenance().cause(), Some(Cause::ServerBackoff));
+        assert!(read.freshness.as_ref().unwrap().rate_limit_until.is_some());
+        let app = fixture.applied(Scenario::ServerBackoff, now);
+        assert_eq!(
+            app.tracker_status,
+            TrackerStatus::Failed(Cause::ServerBackoff)
+        );
+        assert_eq!(
+            app.tracker.error_summary.as_deref(),
+            Some("Linear rate limited; showing the last snapshot")
+        );
+        assert!(app.tracker_retry_at.is_some());
+    }
+
+    /// Quarantined quota evidence is unavailable evidence, never a 429 and never a countdown:
+    /// its reevaluation time is unknown and nothing waits on it.
+    #[trace("FR-048-AC-5", "FR-059-AC-5")]
+    #[test]
+    fn quarantined_quota_evidence_is_not_a_rate_limit_and_shows_no_countdown() {
+        let fixture = KeptSnapshot::seeded();
+        assert!(!protected_after(fixture.read(Scenario::Quarantined, true)));
+        let app = fixture.applied(Scenario::Quarantined, std::time::Instant::now());
+        assert_eq!(
+            app.tracker_status,
+            TrackerStatus::Failed(Cause::EvidenceQuarantined)
+        );
+        assert!(app.tracker_retry_at.is_none(), "no timer is invented");
+        let detail = app.tracker.error.as_deref().unwrap();
+        assert!(detail.starts_with("Linear quota evidence quarantined; showing the last snapshot"));
+        assert!(detail.contains("2 pre-fence reservations pending"));
+        assert!(detail.contains("reevaluation time unknown"));
+        assert!(!detail.contains("rate limited"), "{detail}");
+    }
+
+    /// Every simultaneous blocker reaches the dashboard under the one primary summary.
+    #[trace("FR-048-AC-5", "FR-059-AC-5")]
+    #[test]
+    fn simultaneous_blockers_all_reach_the_dashboard_under_one_primary_summary() {
+        let fixture = KeptSnapshot::seeded();
+        let app = fixture.applied(Scenario::Simultaneous, std::time::Instant::now());
+        assert_eq!(
+            app.tracker.error_summary.as_deref(),
+            Some("Linear quota evidence quarantined; showing the last snapshot")
+        );
+        let detail = app.tracker.error.as_deref().unwrap();
+        for blocker in [
+            "hold: evidence unavailable",
+            "hold: local allocation held requests",
+            "hold: server reserve held endpoint requests",
+        ] {
+            assert!(detail.contains(blocker), "{blocker}: {detail}");
+        }
+        assert!(detail.contains("earliest reevaluation 8m 20s after the attempt"));
+    }
+
+    /// A shared refresh lock the service could not take is its own typed notice, not a hold.
+    #[trace("FR-048-AC-5", "FR-059-AC-5")]
+    #[test]
+    fn a_refused_refresh_lock_is_its_own_notice_and_does_not_coalesce() {
+        let fixture = KeptSnapshot::seeded();
+        let read = fixture.read(Scenario::LockRefused, true);
+        assert_eq!(read.outcome, RefreshOutcome::RefreshLockRefused);
+        assert!(!protected_after(read));
+        let app = fixture.applied(Scenario::LockRefused, std::time::Instant::now());
+        assert_eq!(
+            app.tracker_status,
+            TrackerStatus::Failed(Cause::RefreshLockBusy)
+        );
+        assert!(app.tracker_retry_at.is_none());
+    }
+
+    /// A served cache and a real refresh each carry their typed outcome, and a refresh after a
+    /// hold clears the notice, the countdown and the status.
+    #[trace("FR-059-AC-5", "FR-064-AC-10")]
+    #[test]
+    fn cache_reuse_and_a_real_refresh_are_current_and_recovery_clears_a_hold() {
+        let fixture = KeptSnapshot::seeded();
+        let reused = fixture.read(Scenario::Succeeds, false);
+        assert_eq!(reused.outcome, RefreshOutcome::CacheReused);
+        assert_eq!(reused.provenance(), Provenance::Current);
+
+        let now = std::time::Instant::now();
+        let mut app = fixture.applied(Scenario::ReserveHeld, now);
+        assert!(app.tracker.error.is_some() && app.tracker_retry_at.is_some());
+        let refreshed = fixture.read(Scenario::Succeeds, true);
+        assert_eq!(refreshed.outcome, RefreshOutcome::Refreshed);
+        app.apply_tracker_refresh(Ok(refreshed), now);
+        assert!(app.tracker.error.is_none() && app.tracker.error_summary.is_none());
+        assert!(app.tracker_retry_at.is_none());
+        assert_eq!(app.tracker_status, TrackerStatus::Clear);
+        assert!(
+            app.tracker.value.as_ref().unwrap().fetched_at >= fixture.original,
+            "a real refresh publishes a new source time"
+        );
+    }
+
+    /// With no snapshot to keep, a typed refusal travels on the error and its decision is read
+    /// from `quota_decision`, not from text; an actual backoff arrives as the SDK's legacy
+    /// typed rate-limit error and stays the only rate limit.
+    #[trace("FR-048-AC-5", "FR-059-AC-5")]
+    #[test]
+    fn without_a_snapshot_the_error_carries_the_typed_decision() {
+        let fixture = KeptSnapshot::cold();
+        let now = std::time::Instant::now();
+        let apply = |scenario| {
+            let error = fixture.try_read(scenario, true).err().unwrap();
+            let mut app = crate::monitor::App::default();
+            app.apply_tracker_refresh(Err(error), now);
+            assert!(app.tracker.value.is_none());
+            assert!(app.collection_failed);
+            app
+        };
+
+        let reserve = apply(Scenario::ReserveHeld);
+        assert_eq!(
+            reserve.tracker_status,
+            TrackerStatus::Failed(Cause::ServerReserve)
+        );
+        assert!(reserve.tracker_retry_at.is_some());
+        let detail = reserve.tracker.error.as_deref().unwrap();
+        assert!(detail.starts_with("Linear server reserve held"), "{detail}");
+        assert!(detail.contains("local usage 0") && !detail.contains("showing the last"));
+
+        let quarantine = apply(Scenario::Quarantined);
+        assert_eq!(
+            quarantine.tracker_status,
+            TrackerStatus::Failed(Cause::EvidenceQuarantined)
+        );
+        assert!(quarantine.tracker_retry_at.is_none());
+
+        let backoff = fixture
+            .try_read(Scenario::ServerBackoff, true)
+            .err()
+            .unwrap();
+        assert!(
+            matches!(backoff, ix_board::Error::LinearRateLimited { .. }),
+            "the SDK keeps its legacy typed error for an actual backoff with no snapshot"
+        );
+        let backoff = apply(Scenario::ServerBackoff);
+        assert_eq!(
+            backoff.tracker_status,
+            TrackerStatus::Failed(Cause::ServerBackoff)
+        );
+        assert_eq!(
+            backoff.tracker.error.as_deref(),
+            Some("Linear rate limited")
         );
     }
 

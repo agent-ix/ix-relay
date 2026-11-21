@@ -29,8 +29,12 @@ reported; pane activity is observed only when the native session matches.
 - Redis reports: immediately at startup, then every **minute**, independently
   of Herdr. These reads check scope, focus and agent assignments, not Linear.
 
-`r` requests an immediate Linear fetch unless rate limited, in which case it
-coalesces with the next scheduled attempt. `s` toggles source timestamps (hidden by default). Errors are always visible.
+`r` requests an immediate Linear fetch unless rate limited or held by the shared
+quota protection (local allocation, server reserve), in which case it
+coalesces with the next scheduled attempt. A read the quota protection holds
+back is labeled by the typed state ix-board reports (local allocation, server
+reserve, quota evidence unavailable or quarantined, request not admissible);
+only an actual server backoff is labeled rate-limited. `s` toggles source timestamps (hidden by default). Errors are always visible.
 `d` or Enter toggles details;
 arrows, j/k and Page Up/Down select assignments. `q` or Escape quits.
 
