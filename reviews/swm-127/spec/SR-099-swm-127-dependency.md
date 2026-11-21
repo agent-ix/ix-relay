@@ -39,3 +39,17 @@ scope:
   - {id: "FR-064", path: "spec/functional/FR-064-named-focus-dashboard-reader.md", role: examined, excerpt: "relationships:\n  - target: \"ix://agent-ix/ix-relay/FR-048\"\n    type: \"constrains\"\n  - target: \"ix://agent-ix/ix-relay/FR-060\"\n    type: \"constrains\""}
   - {id: "FR-049", path: "spec/functional/FR-049-shared-cli-json-and-version.md", role: context_only, excerpt: "  - target: \"ix://agent-ix/ix-cli-kit\"\n    type: \"depends_on\""}
 ```
+
+## Dispositions
+
+Round 1 against source head e4931a965ef90d3ccbd3a37bee169ea8c0ebd611 (fix commits a39c0bd and e4931a9 on the reviewed frozen head 218a0ff3157d30022689b3c275fc72fd9e503961). Original findings above are unchanged. No new finding for this method.
+
+| FND | outcome | reason |
+|---|---|---|
+| FND-001 | fixed a39c0bd | The pin primitives, their retention role and reclamation moved into FR-061 (lines 231-257); FR-061-AC-15 to AC-17 test them directly. FR-061 declares no edge to FR-062..064 (lines 44-46), and FR-048 and FR-060 mention FR-061..064 in prose only, so no edge cycle exists. |
+| FND-002 | fixed e4931a9 | FR-061 has edges to ix-board FR-010 and FR-016, FR-063 to FR-010, FR-012 and FR-016, and FR-064 to FR-012, the IDs given by the ix-board owner. SWM-178 is named an implementation prerequisite, and existing contracts are distinguished from future extensions (FR-061 lines 414-425; FR-063 lines 133-141, 190-195). Whether quire resolves these targets is recorded separately by the root. |
+| FND-003 | fixed a39c0bd | FR-061 has edges to FR-008, FR-057, NFR-002 and NFR-004 (frontmatter lines 12-19); FR-062 to FR-061 and FR-049; FR-063 to FR-060; FR-064 to FR-059, FR-061, FR-062 and FR-063. The reverse edges from FR-061 to FR-063 and FR-064 are absent on purpose, to avoid a cycle (FR-061 lines 44-46). |
+
+## Verdict after disposition pass 1
+
+**PASS** for this method. All three findings are fixed; no new finding. The author's earlier claim that no remote branch uses FR-050..052 or FR-061+ remains unverified.

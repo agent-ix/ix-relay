@@ -39,3 +39,16 @@ scope:
   - {id: "FR-060", path: "spec/functional/FR-060-focused-scope-presentation.md", role: examined, excerpt: "Named focuses: for a session in named mode only, the Scope view follows\n  [FR-064](./FR-064-named-focus-dashboard-reader.md), which states exactly which\n  statements of this requirement it takes precedence over."}
   - {id: "FR-049", path: "spec/functional/FR-049-shared-cli-json-and-version.md", role: context_only, excerpt: "The CLI shall keep each command's existing JSON bytes and exit behavior."}
 ```
+
+## Dispositions
+
+Round 1 against source head e4931a965ef90d3ccbd3a37bee169ea8c0ebd611 (fix commits a39c0bd and e4931a9 on the reviewed frozen head 218a0ff3157d30022689b3c275fc72fd9e503961). Original findings above are unchanged. No new finding for this method.
+
+| FND | outcome | reason |
+|---|---|---|
+| FND-001 | fixed a39c0bd | FR-063 no longer lists the six-item interface or type descriptions. The relay needs are conditions (FR-063 lines 133-155), the owning ix-board contracts are referenced (FR-010, FR-012, FR-016), and FR-063-AC-16 inspects that the relay restates no selection types. |
+| FND-002 | fixed a39c0bd | The session group is `work named` (FR-062 lines 27-29) and the library group is `focuses` (FR-061 lines 325-327); neither is a prefix of, or one letter from, `work focus`. FR-061-AC-22 and FR-062-AC-20 assert that `work focus` text is still stored as free text. |
+
+## Verdict after disposition pass 1
+
+**PASS** for this method. Both findings are fixed; no new finding. Spec-only: no implementation, test or runtime claim.

@@ -40,3 +40,17 @@ scope:
   - {id: "FR-064-AC-1", path: "spec/functional/FR-064-named-focus-dashboard-reader.md", role: examined, excerpt: "Given a session with no named record, the Scope view output is identical to the FR-060 fixtures, including whole-team fallback and ticket-only labels"}
   - {id: "FR-049", path: "spec/functional/FR-049-shared-cli-json-and-version.md", role: context_only, excerpt: "id: FR-049 title: \"Shared CLI JSON encoding and version agreement\" (untouched; no id collision with FR-061..064)"}
 ```
+
+## Dispositions
+
+Round 1 against source head e4931a965ef90d3ccbd3a37bee169ea8c0ebd611 (fix commits a39c0bd and e4931a9 on the reviewed frozen head 218a0ff3157d30022689b3c275fc72fd9e503961). Original findings above are unchanged. No new finding for this method.
+
+| FND | outcome | reason |
+|---|---|---|
+| FND-001 | fixed a39c0bd | The criterion is split: FR-064-AC-14 (events without waiting on the source), AC-15 (counters) and AC-16 (cache bound) are Test; AC-17 (before and after recorded in the pull request) is a separate Demonstration. |
+| FND-002 | fixed a39c0bd | Split by limit group: FR-061-AC-12 (record limits), AC-13 (definition counts) and AC-15 (pins). |
+| FND-003 | fixed a39c0bd | FR-062-AC-6 covers `already_active`, the same-revision no-op and deactivation of an inactive focus; FR-062-AC-7 covers deactivation by adopted name and the ambiguous-name refusal. |
+
+## Verdict after disposition pass 1
+
+**PASS** for this method. All three findings are fixed; no new finding. The criterion counts at e4931a9 (FR-061 22, FR-062 20, FR-063 16, FR-064 20) come from reading the tables; the quire matrix result is recorded separately by the root.

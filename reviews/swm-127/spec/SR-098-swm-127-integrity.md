@@ -47,3 +47,22 @@ scope:
   - {id: "FR-061", path: "spec/functional/FR-061-named-focus-definitions.md", role: examined, excerpt: "A definition has one owner. The owner record holds an owner ID, an owner\n  epoch, and the last verified binding of the owner."}
   - {id: "FR-008", path: "spec/functional/FR-008-tolerant-registry-decoding.md", role: context_only, excerpt: "unknown fields are ignored and undecodable records are skipped and reported (as summarized by NFR-004)"}
 ```
+
+## Dispositions
+
+Round 1 against source head e4931a965ef90d3ccbd3a37bee169ea8c0ebd611 (fix commits a39c0bd and e4931a9 on the reviewed frozen head 218a0ff3157d30022689b3c275fc72fd9e503961). Original findings above are unchanged. No new finding for this method.
+
+| FND | outcome | reason |
+|---|---|---|
+| FND-001 | fixed a39c0bd | FR-061 "Stored-record tolerance" (lines 303-321) says unknown members are ignored on read and kept on rewrite, and names the embedded ix-board `schema_version` as the only version exception, with precedence over NFR-004-AC-1. FR-061-AC-18 and FR-064-AC-5 assert it. |
+| FND-002 | fixed a39c0bd | The partial reasons now include the team boundary and apply to initiative and project rows alike (FR-063 lines 61-66, 101-106). FR-063-AC-6 and AC-7 assert both row kinds. |
+| FND-003 | fixed a39c0bd | The active record has no time-to-live and a `mode` field (FR-062 lines 59-75). A record read earlier and now absent shows "named record removed" and never falls back (FR-064 lines 70-74). FR-062-AC-13 and FR-064-AC-4 assert it. |
+| FND-004 | fixed a39c0bd | FR-064 states that department views never read a named focus and are unchanged (lines 38-40, 122-123); FR-064-AC-13 asserts byte-identical output in both modes. |
+| FND-005 | fixed a39c0bd | One stable code table covers the whole contract (FR-061 lines 352-366). FR-062 reuses it (lines 43-44) and FR-062-AC-20 asserts that every refusal carries a listed code. |
+| FND-006 | fixed a39c0bd | FR-061 "Adoption pins" (lines 231-257) defines the pin key, value fields, the only writer (`pin put`), the only releaser (`pin remove`) and atomicity. FR-061-AC-15 asserts them. |
+| FND-007 | fixed a39c0bd | One field per focus: revision at most 56 KiB, focus field at most 58 KiB, active record read at most 18 fields (FR-061 lines 277-284; FR-062 lines 59-67). FR-061-AC-12 asserts the boundary values. |
+| FND-008 | fixed a39c0bd | The owner record names `owner_id`, `epoch`, `binding` (`machine`, `native_session_id`, `process_id`, `address`, `verified_at`) and `change` (FR-061 lines 156-163). FR-061-AC-6 asserts the refresh without changing owner or epoch. |
+
+## Verdict after disposition pass 1
+
+**PASS** for this method. All eight findings are fixed; no new finding.
