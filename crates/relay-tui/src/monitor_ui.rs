@@ -1307,11 +1307,50 @@ pub(crate) mod tests {
         }
         assert!(screen(&mut app, 90, 15).contains("Tasks: 1/2 done"));
         let snapshot = app.tracker.value.as_ref().unwrap().clone();
-        app.apply_tracker_refresh(Ok(snapshot), now);
+        app.apply_tracker_refresh(
+            Ok(crate::monitor_ops::TrackerRead {
+                snapshot,
+                freshness: None,
+            }),
+            now,
+        );
         assert!(app.tracker_retry_at.is_none());
         assert!(app.tracker.error.is_none());
         assert!(!snapshot_is_stale(9_400, 10_000));
         assert!(snapshot_is_stale(8_199, 10_000));
+    }
+
+    /// A snapshot the service kept after a failed refresh is two minutes old, far under the
+    /// thirty-minute stale label, yet the failure and the last-snapshot label show at once and
+    /// the raw failure cause stays out of the display.
+    ///
+    /// Trace: FR-059-AC-5, FR-064-AC-10
+    #[test]
+    fn a_retained_snapshot_shows_the_failed_refresh_while_under_thirty_minutes_old() {
+        let mut app = app();
+        let snapshot = app.tracker.value.as_ref().unwrap().clone();
+        let fetched_at = snapshot.fetched_at;
+        app.apply_tracker_refresh(
+            Ok(crate::monitor_ops::TrackerRead {
+                snapshot,
+                freshness: Some(ix_board::CacheFreshness {
+                    last_successful_sync: Some(fetched_at),
+                    last_full_reconciliation: None,
+                    stale: true,
+                    age_seconds: Some(120),
+                    rate_limit_until: None,
+                    failure_reason: Some("transport detail".into()),
+                }),
+            }),
+            Instant::now(),
+        );
+        assert_eq!(app.tracker.value.as_ref().unwrap().fetched_at, fetched_at);
+        let text = screen(&mut app, 90, 15);
+        assert!(text.contains("Tracker failed"), "{text}");
+        assert!(text.contains("last snapshot"), "{text}");
+        assert!(text.contains("Tasks: 1/2 done"), "{text}");
+        assert!(!text.contains("transport detail"), "{text}");
+        assert!(!text.contains("Tracker stale"), "{text}");
     }
 
     /// Trace: FR-048-AC-3, FR-048-AC-4

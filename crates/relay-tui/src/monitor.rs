@@ -271,19 +271,43 @@ impl App {
     /// Applies an independently refreshed Linear tracker result.
     pub fn apply_tracker_refresh(
         &mut self,
-        tracker: Result<crate::monitor_tracker::TrackerState, ix_board::Error>,
+        tracker: Result<crate::monitor_ops::TrackerRead, ix_board::Error>,
         now: Instant,
     ) {
         self.collection_failed |= tracker.is_err();
         match tracker {
-            Ok(data) => {
+            Ok(read) => {
+                // A snapshot the service kept after a failed refresh keeps its source
+                // timestamp; the failure shows beside it until a refresh succeeds. The
+                // service reports no typed cause here, so the notice names none.
+                let retained = read
+                    .retained()
+                    .map(|freshness| freshness.rate_limit_until.is_some());
+                self.tracker.success(read.snapshot, now);
                 self.tracker_retry_at = None;
-                self.tracker.success(data, now);
+                if let Some(cooldown) = retained {
+                    self.collection_failed = true;
+                    if cooldown {
+                        self.tracker_retry_at =
+                            now.checked_add(crate::monitor_ops::TRACKER_REFRESH_INTERVAL);
+                        self.tracker
+                            .failure("Linear rate limited; showing the last snapshot");
+                    } else {
+                        self.tracker.failure_with_summary(
+                            "Linear refresh failed; showing the last snapshot",
+                            "Linear refresh failed; showing the last snapshot. Inspect source availability with ix-board, or open --report",
+                        );
+                    }
+                }
             }
-            Err(ix_board::Error::LinearRateLimited { .. }) => {
+            Err(
+                error @ (ix_board::Error::LinearRateLimited { .. }
+                | ix_board::Error::LinearLocalBudgetExhausted { .. }),
+            ) => {
                 self.tracker_retry_at =
                     now.checked_add(crate::monitor_ops::TRACKER_REFRESH_INTERVAL);
-                self.tracker.failure("Linear rate limited");
+                self.tracker
+                    .failure(crate::monitor_ops::source_summary(&error));
             }
             Err(error) => {
                 self.tracker_retry_at = None;

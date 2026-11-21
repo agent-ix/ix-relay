@@ -24,6 +24,7 @@ pub(crate) fn source_summary(error: &ix_board::Error) -> &'static str {
             "Saved credential access denied; contact credential owner"
         }
         ix_board::Error::LinearRateLimited { .. } => "Linear rate limited",
+        ix_board::Error::LinearLocalBudgetExhausted { .. } => "Linear request budget exhausted",
         _ => "Structured tracker read failed; inspect source availability",
     }
 }
@@ -60,10 +61,28 @@ pub const TRACKER_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
 /// Limit retries after Linear or its cached workspace read returns an error.
 const TRACKER_MAX_RETRY_INTERVAL: Duration = TRACKER_REFRESH_INTERVAL;
 
+/// One successful tracker read: the snapshot and how the shared read service obtained it.
+///
+/// After a failed refresh the service returns its last complete snapshot as a success and records
+/// the failure only in `freshness`; the snapshot keeps the time its source read began.
+pub struct TrackerRead {
+    /// The snapshot, with its original source timestamp in `fetched_at`.
+    pub snapshot: TrackerState,
+    /// Provenance of this read as the service reports it; `None` when it reports none.
+    pub freshness: Option<ix_board::CacheFreshness>,
+}
+
+impl TrackerRead {
+    /// The provenance when the snapshot was retained because the latest refresh did not succeed.
+    pub(crate) fn retained(&self) -> Option<&ix_board::CacheFreshness> {
+        self.freshness.as_ref().filter(|freshness| freshness.stale)
+    }
+}
+
 /// Independent Linear snapshot refresh worker.
 pub struct TrackerWorker {
     /// Latest available Linear refresh results.
-    pub events: Receiver<Result<TrackerState, ix_board::Error>>,
+    pub events: Receiver<Result<TrackerRead, ix_board::Error>>,
     commands: SyncSender<TrackerCommand>,
     stop_requested: Arc<AtomicBool>,
     handle: JoinHandle<()>,
@@ -81,7 +100,7 @@ impl TrackerWorker {
     }
 
     pub(crate) fn spawn_with_read(
-        read: impl FnMut(bool) -> Result<TrackerState, ix_board::Error> + Send + 'static,
+        read: impl FnMut(bool) -> Result<TrackerRead, ix_board::Error> + Send + 'static,
     ) -> std::io::Result<Self> {
         Self::spawn_with_read_and_intervals(
             read,
@@ -91,7 +110,7 @@ impl TrackerWorker {
     }
 
     fn spawn_with_read_and_intervals(
-        mut read: impl FnMut(bool) -> Result<TrackerState, ix_board::Error> + Send + 'static,
+        mut read: impl FnMut(bool) -> Result<TrackerRead, ix_board::Error> + Send + 'static,
         refresh_interval: Duration,
         max_retry_interval: Duration,
     ) -> std::io::Result<Self> {
@@ -185,13 +204,23 @@ enum WaitOutcome {
 
 impl RefreshWait {
     fn after_read(
-        result: &Result<TrackerState, ix_board::Error>,
+        result: &Result<TrackerRead, ix_board::Error>,
         refresh: Duration,
         retry: Duration,
     ) -> Self {
         // Linear refills quota continuously; its full-window reset is not a
         // mandatory pause. Reattempt on the explicit dashboard polling cadence.
-        let protected = matches!(result, Err(ix_board::Error::LinearRateLimited { .. }));
+        // A retained snapshot counts only when the service observed a cooldown.
+        let protected = match result {
+            Err(
+                ix_board::Error::LinearRateLimited { .. }
+                | ix_board::Error::LinearLocalBudgetExhausted { .. },
+            ) => true,
+            Ok(read) => read
+                .retained()
+                .is_some_and(|freshness| freshness.rate_limit_until.is_some()),
+            Err(_) => false,
+        };
         Self {
             delay: if protected { refresh } else { retry },
             protected,
@@ -225,7 +254,7 @@ fn next_interval(success: bool, previous: Duration, refresh: Duration, cap: Dura
     }
 }
 
-fn read_tracker(force: bool) -> Result<TrackerState, ix_board::Error> {
+fn read_tracker(force: bool) -> Result<TrackerRead, ix_board::Error> {
     read_tracker_with_factory(force, || {
         ReadService::open_default(LinearGraphQlSource::from_env()?)
     })
@@ -234,13 +263,17 @@ fn read_tracker(force: bool) -> Result<TrackerState, ix_board::Error> {
 fn read_tracker_with_factory<S: ix_board::WorkspaceSource>(
     force: bool,
     factory: impl FnOnce() -> Result<ReadService<S>, ix_board::Error>,
-) -> Result<TrackerState, ix_board::Error> {
+) -> Result<TrackerRead, ix_board::Error> {
     let mut service = factory()?;
-    if force {
-        service.force_refresh_workspace()
+    let snapshot = if force {
+        service.force_refresh_workspace()?
     } else {
-        service.workspace_snapshot()
-    }
+        service.workspace_snapshot()?
+    };
+    Ok(TrackerRead {
+        snapshot,
+        freshness: service.cache_freshness().cloned(),
+    })
 }
 
 #[cfg(test)]
@@ -268,7 +301,7 @@ mod tests {
         let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let directory = tempfile::tempdir().unwrap();
         let cache_path = directory.path().join("tracker.sqlite");
-        let snapshot = read_tracker_with_factory(false, || {
+        let read = read_tracker_with_factory(false, || {
             factory_calls.set(factory_calls.get() + 1);
             ReadService::open(
                 FixtureSource {
@@ -285,10 +318,134 @@ mod tests {
         );
         assert_eq!(reads.load(std::sync::atomic::Ordering::Relaxed), 1);
         let mut app = crate::monitor::App::default();
-        app.apply_tracker_refresh(Ok(snapshot), std::time::Instant::now());
+        app.apply_tracker_refresh(Ok(read), std::time::Instant::now());
         assert!(app.tracker.value.is_some());
         assert!(app.tracker.error.is_none());
         assert!(!app.collection_failed);
+    }
+
+    /// Fails its reads as the shared `mode` says: 0 succeeds, 1 is rate limited, 2 is a
+    /// GraphQL failure.
+    struct FlakySource {
+        mode: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    }
+
+    impl ix_board::WorkspaceSource for FlakySource {
+        fn fetch_workspace(&self) -> Result<TrackerState, ix_board::Error> {
+            match self.mode.load(std::sync::atomic::Ordering::Relaxed) {
+                0 => Ok(TrackerState::default()),
+                1 => Err(ix_board::Error::LinearRateLimited {
+                    retry_after: Duration::from_secs(60),
+                }),
+                _ => Err(ix_board::Error::GraphQl {
+                    messages: "upstream".into(),
+                }),
+            }
+        }
+    }
+
+    /// The service answers a failed refresh with its last complete snapshot as a success and
+    /// reports the failure only in its freshness. The dashboard must keep that snapshot's
+    /// original source time, show the failure at once (the snapshot is minutes old, far
+    /// under the thirty-minute stale label), also on a cold start, and drop the notice on the
+    /// next successful read.
+    ///
+    /// Trace: FR-059-AC-5, FR-064-AC-10
+    #[trace("FR-059-AC-5", "FR-064-AC-10")]
+    #[test]
+    fn a_snapshot_kept_after_a_failed_refresh_shows_the_failure_and_its_original_time() {
+        use std::sync::{Arc, atomic::AtomicU8, atomic::Ordering};
+
+        let directory = tempfile::tempdir().unwrap();
+        let cache_path = directory.path().join("tracker.sqlite");
+        let mode = Arc::new(AtomicU8::new(0));
+        let read = |force: bool| {
+            read_tracker_with_factory(force, || {
+                ReadService::open(
+                    FlakySource {
+                        mode: Arc::clone(&mode),
+                    },
+                    &cache_path,
+                )
+            })
+            .unwrap()
+        };
+        let now = std::time::Instant::now();
+
+        let good = read(false);
+        assert!(
+            good.retained().is_none(),
+            "a read that succeeded is not retained"
+        );
+        let original = good.snapshot.fetched_at;
+        assert!(original > 0);
+        let mut app = crate::monitor::App::default();
+        app.apply_tracker_refresh(Ok(good), now);
+        assert!(app.tracker.error.is_none());
+
+        // A forced refresh that Linear rate limits returns the same snapshot, stale.
+        mode.store(1, Ordering::Relaxed);
+        let limited = read(true);
+        assert_eq!(limited.snapshot.fetched_at, original);
+        let freshness = limited.retained().expect("the failed refresh is reported");
+        assert!(freshness.rate_limit_until.is_some());
+        assert!(freshness.age_seconds.is_some_and(|age| age < 60));
+        app.apply_tracker_refresh(Ok(limited), now);
+        assert_eq!(app.tracker.value.as_ref().unwrap().fetched_at, original);
+        assert!(
+            app.tracker
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("showing the last snapshot")
+        );
+        assert_eq!(
+            app.tracker_retry_at,
+            now.checked_add(TRACKER_REFRESH_INTERVAL)
+        );
+        assert!(app.collection_failed);
+
+        // Any other failure keeps the snapshot and the notice but names no cooldown.
+        mode.store(2, Ordering::Relaxed);
+        let failed = read(true);
+        assert_eq!(failed.snapshot.fetched_at, original);
+        assert!(
+            failed
+                .retained()
+                .is_some_and(|freshness| freshness.rate_limit_until.is_none())
+        );
+        let wait = RefreshWait::after_read(
+            &Ok(failed),
+            TRACKER_REFRESH_INTERVAL,
+            TRACKER_MAX_RETRY_INTERVAL,
+        );
+        assert!(!wait.protected, "no known cooldown, no coalescing");
+        let failed = read(true);
+        let mut cold = crate::monitor::App::default();
+        cold.apply_tracker_refresh(Ok(failed), now);
+        assert_eq!(cold.tracker.value.as_ref().unwrap().fetched_at, original);
+        let error = cold.tracker.error.as_deref().unwrap();
+        assert!(error.contains("Linear refresh failed"), "{error}");
+        assert!(!error.contains("upstream"), "the raw cause is not shown");
+        assert!(cold.tracker_retry_at.is_none());
+        mode.store(1, Ordering::Relaxed);
+        let limited_wait = RefreshWait::after_read(
+            &Ok(read(true)),
+            TRACKER_REFRESH_INTERVAL,
+            TRACKER_MAX_RETRY_INTERVAL,
+        );
+        assert!(
+            limited_wait.protected,
+            "a known cooldown coalesces refreshes"
+        );
+
+        // The next successful read clears the notice and the countdown.
+        mode.store(0, Ordering::Relaxed);
+        let recovered = read(true);
+        assert!(recovered.retained().is_none());
+        app.apply_tracker_refresh(Ok(recovered), now);
+        assert!(app.tracker.error.is_none());
+        assert!(app.tracker_retry_at.is_none());
     }
 
     /// Trace: FR-059-AC-6
@@ -394,6 +551,35 @@ mod tests {
         );
         assert_eq!(wait.delay, Duration::from_secs(1800));
         assert!(!wait.protected);
+    }
+
+    /// The shared local request budget refuses a read before any request is sent. It is
+    /// protected like a server rate limit: manual refreshes coalesce, the countdown shows,
+    /// and the failure is not the generic "tracker read failed" line.
+    ///
+    /// Trace: FR-048-AC-5
+    #[test]
+    fn local_budget_exhaustion_is_protected_like_a_rate_limit() {
+        let exhausted = || ix_board::Error::LinearLocalBudgetExhausted {
+            retry_after: Duration::from_secs(60),
+        };
+        let wait = RefreshWait::after_read(
+            &Err(exhausted()),
+            TRACKER_REFRESH_INTERVAL,
+            TRACKER_MAX_RETRY_INTERVAL,
+        );
+        assert_eq!(wait.delay, TRACKER_REFRESH_INTERVAL);
+        assert!(wait.protected);
+
+        let mut app = crate::monitor::App::default();
+        app.apply_tracker_refresh(Err(exhausted()), std::time::Instant::now());
+        assert!(app.tracker_retry_at.is_some());
+        assert_eq!(
+            app.tracker.error.as_deref(),
+            Some("Linear request budget exhausted")
+        );
+        assert!(app.collection_failed);
+        assert!(app.tracker.value.is_none());
     }
 
     /// Trace: FR-048-AC-5
