@@ -33,6 +33,12 @@ statements, and only to the extent listed:
 - FR-059-AC-4 and FR-059-AC-7 "existing Scope fixtures retain their outputs":
   Scope fixtures change only for the rows, labels and key above.
 
+- "Scope fixtures change only for the rows, labels and key above" and the unchanged
+  statement for the Tickets and Agents views and the department views: they also
+  change by the presentation differences that
+  [FR-065](./FR-065-dashboard-view-selector-and-help.md) lists. Keys and data are
+  unchanged.
+
 Everything else in FR-048-AC-7 is retained: the `p` and `t` keys, the blank row
 below Focus, the Initiative/project column heading, no table title, the 🎯 and 📁
 prefixes, no extra type or count-label row, the listed count columns, and the
