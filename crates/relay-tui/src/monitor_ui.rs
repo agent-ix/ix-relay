@@ -4,7 +4,7 @@
 
 use crate::{
     monitor::{App, Source, View, display_text},
-    monitor_tracker::{DashboardView, TicketSummary, summarize},
+    monitor_tracker::{DashboardView, TicketSummary},
 };
 use ix_board::{Clock, SystemClock};
 use ratatui::{
@@ -49,28 +49,146 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
         team.as_deref().unwrap_or("unknown team"),
         if whole_team { " team" } else { "" }
     );
-    let computed = app
-        .tracker
-        .value
-        .as_ref()
-        .zip(team.as_deref())
-        .map(|(snapshot, team)| summarize(snapshot, report, team))
-        .transpose();
-    let (view, scope_error) = match computed {
-        Ok(view) => (view, None),
-        Err(error) => (None, Some(error.to_string())),
+    app.scope.refresh(
+        &app.tracker,
+        &app.report,
+        team.as_deref(),
+        app.show_completed,
+    );
+    let view = app.scope.view();
+    let projection = app.scope.projection();
+    let scope_error = app.scope.error().map(str::to_owned);
+    let snapshot_old = app.tracker.error.is_some()
+        || app.report.error.is_some()
+        || app.session_ended
+        || app
+            .tracker
+            .value
+            .as_ref()
+            .is_some_and(|s| snapshot_is_stale(s.fetched_at, now_epoch));
+    let scope_view = app.view == View::Scope;
+    let summary = if let Some(v) = &view {
+        let mut scope_spans = vec![muted("Scope: "), Span::raw(team_label), muted(" · ")];
+        if v.projects.len() == 1 && v.ticket_roots.is_empty() && v.initiatives.is_empty() {
+            scope_spans.push(Span::raw(display_text(
+                &v.projects[0].name,
+                frame.area().width.saturating_sub(20).into(),
+            )));
+        } else {
+            scope_spans.push(Span::raw(v.projects.len().to_string()));
+            scope_spans.push(muted(" projects"));
+            for (count, label) in [
+                (v.initiatives.len(), " initiatives"),
+                (v.ticket_roots.len(), " ticket roots"),
+            ] {
+                if count > 0 {
+                    scope_spans.push(muted(" · "));
+                    scope_spans.push(Span::raw(count.to_string()));
+                    scope_spans.push(muted(label));
+                }
+            }
+        }
+        if scope_view && let Some(p) = &projection {
+            scope_spans.push(muted(" · "));
+            scope_spans.push(Span::raw(p.mode.text()));
+        }
+        if snapshot_old {
+            scope_spans.push(Span::styled(
+                " [last snapshot]",
+                Style::default().fg(WARNING),
+            ));
+        }
+        let mut task_spans = vec![
+            muted("Tasks: "),
+            Span::raw(format!("{}/{}", v.scope.done, v.scope.leaf_ids.len())),
+            muted(" done"),
+        ];
+        // The hidden, omitted, unknown and filter statements precede the variable-length
+        // stage list on the existing Tasks line, so the list can never push them out of view.
+        if scope_view && let Some(text) = projection.as_ref().and_then(|p| p.filter_text()) {
+            task_spans.push(muted(" · "));
+            task_spans.push(Span::raw(text));
+            if snapshot_old {
+                task_spans.push(Span::styled(
+                    " [last snapshot]",
+                    Style::default().fg(WARNING),
+                ));
+            }
+        }
+        for (stage, count) in &v.scope.remaining_by_stage {
+            task_spans.push(muted(" · "));
+            task_spans.push(Span::raw(count.to_string()));
+            task_spans.push(muted(format!(" {}", display_text(stage, 32))));
+        }
+        vec![Line::from(scope_spans), Line::from(task_spans)]
+    } else if let Some(error) = &scope_error {
+        vec![Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(ERROR),
+        ))]
+    } else {
+        vec![Line::from(vec![
+            muted("Scope: "),
+            Span::raw(team_label),
+            muted(" · waiting for Linear"),
+        ])]
+    };
+    let tracker_error = app.tracker.error.as_ref().map(|error| {
+        app.tracker_retry_at.map_or_else(
+            || error.clone(),
+            |deadline| {
+                let seconds = deadline.saturating_duration_since(now).as_secs();
+                format!(
+                    "{error} · next attempt in {}m {:02}s",
+                    seconds / 60,
+                    seconds % 60
+                )
+            },
+        )
+    });
+    let errors = [
+        scope_error.as_deref(),
+        tracker_error.as_deref(),
+        app.runtime.error.as_deref(),
+        app.report.error.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" · ");
+    let width = usize::from(frame.area().width.max(1));
+    let controls = footer_controls(
+        scope_view
+            .then(|| crate::monitor_scope::footer_mode(projection.as_deref(), app.show_completed)),
+        &errors,
+        width,
+    );
+    let footer_rows = u16::try_from(controls.len()).unwrap_or(1) + u16::from(app.show_status);
+    let focus_rows: u16 = if report.and_then(|r| r.focus.as_ref()).is_some() {
+        2
+    } else {
+        1
+    };
+    // Wrapped Scope text gets the rows it needs, bounded only by what the other panels leave.
+    let scope_height = if scope_view {
+        let needed: usize = summary.iter().map(|l| wrapped_rows(l, width)).sum();
+        let spare = frame
+            .area()
+            .height
+            .saturating_sub(2 + focus_rows + footer_rows + 3);
+        u16::try_from(needed)
+            .unwrap_or(u16::MAX)
+            .clamp(2, spare.max(2))
+    } else {
+        2
     };
     let [identity, tabs, scope, focus, work, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
-        Constraint::Length(2),
-        Constraint::Length(if report.and_then(|r| r.focus.as_ref()).is_some() {
-            2
-        } else {
-            1
-        }),
+        Constraint::Length(scope_height),
+        Constraint::Length(focus_rows),
         Constraint::Min(3),
-        Constraint::Length(if app.show_status { 2 } else { 1 }),
+        Constraint::Length(footer_rows),
     ])
     .areas(frame.area());
     let runtime_fresh = fresh(
@@ -127,64 +245,6 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
         tab_spans.push(muted("  "));
     }
     frame.render_widget(Paragraph::new(Line::from(tab_spans)), tabs);
-    let snapshot_old = app.tracker.error.is_some()
-        || app.report.error.is_some()
-        || app.session_ended
-        || app
-            .tracker
-            .value
-            .as_ref()
-            .is_some_and(|s| snapshot_is_stale(s.fetched_at, now_epoch));
-    let summary = if let Some(v) = &view {
-        let mut scope_spans = vec![muted("Scope: "), Span::raw(team_label), muted(" · ")];
-        if v.projects.len() == 1 && v.ticket_roots.is_empty() && v.initiatives.is_empty() {
-            scope_spans.push(Span::raw(display_text(
-                &v.projects[0].name,
-                frame.area().width.saturating_sub(20).into(),
-            )));
-        } else {
-            scope_spans.push(Span::raw(v.projects.len().to_string()));
-            scope_spans.push(muted(" projects"));
-            for (count, label) in [
-                (v.initiatives.len(), " initiatives"),
-                (v.ticket_roots.len(), " ticket roots"),
-            ] {
-                if count > 0 {
-                    scope_spans.push(muted(" · "));
-                    scope_spans.push(Span::raw(count.to_string()));
-                    scope_spans.push(muted(label));
-                }
-            }
-        }
-        if snapshot_old {
-            scope_spans.push(Span::styled(
-                " [last snapshot]",
-                Style::default().fg(WARNING),
-            ));
-        }
-        let mut task_spans = vec![
-            muted("Tasks: "),
-            Span::raw(format!("{}/{}", v.scope.done, v.scope.leaf_ids.len())),
-            muted(" done"),
-        ];
-        for (stage, count) in &v.scope.remaining_by_stage {
-            task_spans.push(muted(" · "));
-            task_spans.push(Span::raw(count.to_string()));
-            task_spans.push(muted(format!(" {}", display_text(stage, 32))));
-        }
-        vec![Line::from(scope_spans), Line::from(task_spans)]
-    } else if let Some(error) = &scope_error {
-        vec![Line::from(Span::styled(
-            error.clone(),
-            Style::default().fg(ERROR),
-        ))]
-    } else {
-        vec![Line::from(vec![
-            muted("Scope: "),
-            Span::raw(team_label),
-            muted(" · waiting for Linear"),
-        ])]
-    };
     frame.render_widget(
         Paragraph::new(summary)
             .style(Style::default().fg(FOREGROUND))
@@ -221,7 +281,21 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
     );
     match app.view {
         View::Agents => crate::monitor_views::render_agents(frame, app, work, runtime_fresh, now),
-        View::Scope => crate::monitor_views::render_scope(frame, app, view.as_ref(), work),
+        View::Scope => {
+            let unavailable = app
+                .tracker
+                .error
+                .clone()
+                .or(scope_error.clone())
+                .unwrap_or_else(|| "waiting for Linear".into());
+            crate::monitor_views::render_scope(
+                frame,
+                app,
+                view.as_deref().zip(projection.as_deref()),
+                &unavailable,
+                work,
+            );
+        }
         View::Tickets => {
             if let Some(view) = &view {
                 render_work(frame, app, view, work, runtime_fresh);
@@ -255,60 +329,99 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
         source_age(&app.runtime, now),
         source_age(&app.report, now)
     );
-    let tracker_error = app.tracker.error.as_ref().map(|error| {
-        app.tracker_retry_at.map_or_else(
-            || error.clone(),
-            |deadline| {
-                let seconds = deadline.saturating_duration_since(now).as_secs();
-                format!(
-                    "{error} · next attempt in {}m {:02}s",
-                    seconds / 60,
-                    seconds % 60
-                )
-            },
-        )
-    });
-    let errors = [
-        scope_error.as_deref(),
-        tracker_error.as_deref(),
-        app.runtime.error.as_deref(),
-        app.report.error.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join(" · ");
-    let controls = if errors.is_empty() {
-        Line::from(vec![
-            Span::styled("↑↓", Style::default().fg(PRIMARY)),
-            Span::raw(" select · "),
-            Span::styled("d", Style::default().fg(PRIMARY)),
-            Span::raw(" details · "),
-            Span::styled("r", Style::default().fg(PRIMARY)),
-            Span::raw(" refresh · "),
-            Span::styled("q", Style::default().fg(PRIMARY)),
-            Span::raw(" quit · "),
-            Span::styled("s", Style::default().fg(PRIMARY)),
-            Span::raw(" status"),
-        ])
-    } else {
-        Line::from(Span::styled(
-            display_text(&errors, usize::from(footer.width)),
-            Style::default().fg(ERROR),
-        ))
-    };
-    let mut footer_lines = Vec::with_capacity(2);
+    let mut footer_lines = Vec::with_capacity(4);
     if app.show_status {
         footer_lines.push(Line::from(display_text(
             &footer_line,
             usize::from(footer.width),
         )));
     }
-    footer_lines.push(controls);
+    footer_lines.extend(controls);
     frame.render_widget(
         Paragraph::new(footer_lines).style(Style::default().fg(MUTED)),
         footer,
     );
+}
+
+/// Footer control lines sized from their real width.
+///
+/// Outside the Scope view an error replaces the controls. In the Scope view the error
+/// line sits above the controls and the `c` key with its mode is never dropped: it joins
+/// the general controls when they fit and otherwise takes a line of its own.
+fn footer_controls(
+    scope_mode: Option<&'static str>,
+    errors: &str,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let error_line = || {
+        Line::from(Span::styled(
+            display_text(errors, width),
+            Style::default().fg(ERROR),
+        ))
+    };
+    let mut general = vec![
+        Span::styled("↑↓", Style::default().fg(PRIMARY)),
+        Span::raw(" select · "),
+        Span::styled("d", Style::default().fg(PRIMARY)),
+        Span::raw(" details · "),
+        Span::styled("r", Style::default().fg(PRIMARY)),
+        Span::raw(" refresh · "),
+        Span::styled("q", Style::default().fg(PRIMARY)),
+        Span::raw(" quit · "),
+        Span::styled("s", Style::default().fg(PRIMARY)),
+        Span::raw(" status"),
+    ];
+    let Some(mode) = scope_mode else {
+        return vec![if errors.is_empty() {
+            Line::from(general)
+        } else {
+            error_line()
+        }];
+    };
+    let mut lines = Vec::with_capacity(3);
+    if !errors.is_empty() {
+        lines.push(error_line());
+    }
+    let toggle = vec![
+        Span::styled("c", Style::default().fg(PRIMARY)),
+        Span::raw(format!(" {mode}")),
+    ];
+    let toggle_width = Line::from(toggle.clone()).width();
+    if Line::from(general.clone()).width() + 3 + toggle_width <= width {
+        general.push(Span::raw(" · "));
+        general.extend(toggle);
+        lines.push(Line::from(general));
+    } else {
+        lines.push(Line::from(general));
+        lines.push(Line::from(toggle));
+    }
+    lines
+}
+
+/// Rows a line occupies when word-wrapped to `width`, counting over-long words split.
+fn wrapped_rows(line: &Line, width: usize) -> usize {
+    let width = width.max(1);
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    let mut rows = 1;
+    let mut used = 0;
+    for word in text.split_whitespace() {
+        let w = Span::raw(word).width();
+        if used == 0 {
+            used = w;
+        } else if used + 1 + w <= width {
+            used += 1 + w;
+            continue;
+        } else {
+            rows += 1;
+            used = w;
+        }
+        if used > width {
+            let extra = used.div_ceil(width) - 1;
+            rows += extra;
+            used -= extra * width;
+        }
+    }
+    rows
 }
 
 fn snapshot_is_stale(fetched_at: i64, now_epoch: i64) -> bool {
@@ -577,6 +690,7 @@ fn ticket_details(view: &DashboardView, ticket: &TicketSummary) -> String {
 /// Existing populated tracker and binding fixtures for terminal regressions.
 pub(crate) mod tests {
     use super::*;
+    use crate::monitor_tracker::summarize;
     use ix_board::{
         Issue, IssueId, Project, ProjectId, TeamKey, WorkflowStateType, WorkspaceSnapshot,
     };
@@ -606,6 +720,9 @@ pub(crate) mod tests {
             updated_at: None,
             content: None,
             status: "Started".into(),
+            status_name: None,
+            // A record without category evidence, as cached before categories were kept.
+            status_category: ix_board::ProjectStatusCategory::Unknown,
             priority: 2,
             sort_order: 0.0,
             target_date: None,
@@ -788,13 +905,27 @@ pub(crate) mod tests {
                 ),
                 (
                     3,
-                    vec![
-                        ("Tasks: ", MUTED),
-                        ("1/2", FOREGROUND),
-                        (" done · ", MUTED),
-                        ("1", FOREGROUND),
-                        (" Review", MUTED),
-                    ],
+                    if view == View::Scope {
+                        // The fixture's model supplies no status category, so the Scope
+                        // view states that between the done count and the stage list.
+                        vec![
+                            ("Tasks: ", MUTED),
+                            ("1/2", FOREGROUND),
+                            (" done · ", MUTED),
+                            (crate::monitor_scope::FILTER_UNAVAILABLE, FOREGROUND),
+                            (" · ", MUTED),
+                            ("1", FOREGROUND),
+                            (" Review", MUTED),
+                        ]
+                    } else {
+                        vec![
+                            ("Tasks: ", MUTED),
+                            ("1/2", FOREGROUND),
+                            (" done · ", MUTED),
+                            ("1", FOREGROUND),
+                            (" Review", MUTED),
+                        ]
+                    },
                 ),
                 (
                     4,
@@ -1137,6 +1268,7 @@ pub(crate) mod tests {
             scope.projects.push(project.id.0.clone());
             snapshot.projects.push(project);
         }
+        app.scope.invalidate();
         screen(&mut app, 69, 15);
         for _ in 0..21 {
             crate::monitor::handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));

@@ -1490,8 +1490,8 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "ix-board"
-version = "0.5.1"
-source = "git+https://github.com/agent-ix/ix-board?rev=8381a6014e70e833756d04d8d495f5cdda8430bc#8381a6014e70e833756d04d8d495f5cdda8430bc"
+version = "0.6.0"
+source = "git+https://github.com/agent-ix/ix-board?rev=d6e28f40ddb71b05e0cb3e9607e799c6399aabc6#d6e28f40ddb71b05e0cb3e9607e799c6399aabc6"
 dependencies = [
  "chrono",
  "clap",

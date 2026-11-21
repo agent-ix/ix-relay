@@ -80,7 +80,7 @@ impl TrackerWorker {
         Self::spawn_with_read(read_tracker)
     }
 
-    fn spawn_with_read(
+    pub(crate) fn spawn_with_read(
         read: impl FnMut(bool) -> Result<TrackerState, ix_board::Error> + Send + 'static,
     ) -> std::io::Result<Self> {
         Self::spawn_with_read_and_intervals(
