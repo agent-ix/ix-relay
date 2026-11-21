@@ -159,8 +159,10 @@ relay checks at its boundary, and treats as the library's obligations:
   library's catalog evidence, or reported **Unavailable**. The relay SHALL NOT
   guess that such an entity is Missing from project associations.
 - A snapshot read can be bounded by cache age and an operation-wide deadline and
-  returns a typed timeout, so a command or a refresh never waits unboundedly and a
-  timeout publishes nothing. The owning lane verified that the current shared read
+  returns a typed timeout, so once the credentials are ready a command or a
+  refresh never waits unboundedly on the read, and a timeout or any validation
+  failure publishes nothing. The deadline clock starts after the credentials are
+  ready; obtaining them is outside it. The owning lane verified that the current shared read
   has a fixed five-minute cache, a 30-second per-request timeout and no overall
   budget, and owns additive support that preserves existing defaults and typed
   errors ([ix-board FR-004](ix://agent-ix/ix-board/FR-004), under SWM-178). The

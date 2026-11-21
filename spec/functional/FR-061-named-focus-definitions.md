@@ -144,13 +144,17 @@ assignments of [FR-048](./FR-048-session-work-monitor.md), the lane focus text o
   errors. The relay defines no SDK API for it, adds no raw Linear client and runs
   no detached thread it cannot cancel. Until that support exists these criteria
   are blocked, not satisfied by relay-side workarounds.
-- The read has an overall deadline: 120 seconds from the start of the command by
-  default, adjustable with `--read-timeout <seconds>` from 1 to 600. The
-  deadline is enforced at the source boundary of the shared read, which returns a
-  typed timeout; the relay does not run the read on a thread it cannot cancel and
-  starts no read that outlives the command. Requests already in flight stop at
-  their own request timeout, so the command returns within the deadline plus one
-  request timeout.
+- The read has an overall deadline: 120 seconds by default, adjustable with
+  `--read-timeout <seconds>` from 1 to 600. The deadline clock starts after the
+  credentials are ready and before the cache lookup, the read and the selection
+  validation. Obtaining credentials is outside the deadline: the normal
+  operating-system keychain flow can wait for user interaction before a client
+  exists, and the deadline does not bound that wait. The deadline is enforced at
+  the source boundary of the shared read, which returns a typed timeout; the
+  relay does not run the read on a thread it cannot cancel and starts no read that
+  outlives the command. Requests already in flight stop at their own request
+  timeout, so once the credentials are ready the command returns within the
+  deadline plus one request timeout.
 - A failed read refuses with `source_unavailable`, whose `reason` is one of
   `missing`, `stale`, `partial`, `failed` or `timeout`, naming the source, and
   exits with status 1. The relay performs no store write before resolution has
@@ -418,7 +422,7 @@ keep their meanings and no subcommand is placed under either existing name.
 | FR-061-AC-17 | `create` at the 256-definition limit removes at most 8 archived definitions, oldest first, only those archived at least 90 days with no pin after reclamation; an archived definition younger than 90 days, one with a live or unknown pin, and every non-archived definition is kept; a removed ID reads as `not_found`; with no removable definition the create is refused with `limit`. | Test |
 | FR-061-AC-18 | A stored record with an unknown member is read with its known members intact and keeps the unknown member after an update of that record; an undecodable record and a selection with an unsupported embedded `schema_version` are each listed as `unavailable_definition` by ID with their reason, other definitions are still listed, and a write to them is refused without overwriting. | Test |
 | FR-061-AC-19 | With a snapshot fetched four minutes earlier, `create` and `update` resolve without a refresh; a missing, older than five minutes, partial or failed snapshot is refused with `source_unavailable` and the matching `reason`, exit status 1, and no store change. | Test |
-| FR-061-AC-20 | Given a source that never completes, `create` exits with status 1 and `source_unavailable` with reason `timeout` within the deadline plus one request timeout (the default and a `--read-timeout` of 1 and 600 both honored), starts no background read, and leaves the store byte-identical. This criterion and AC-19 are blocked until the bounded shared read of SWM-178 exists. | Test |
+| FR-061-AC-20 | Given a source that never completes, `create` exits with status 1 and `source_unavailable` with reason `timeout` within the deadline plus one request timeout, measured from the point the credentials are ready (the default and a `--read-timeout` of 1 and 600 both honored), starts no background read, and leaves the store byte-identical. This criterion and AC-19 are blocked until the bounded shared read of SWM-178 exists. | Test |
 | FR-061-AC-21 | `focuses` commands in `--json` mode print exactly one compact JSON value and one newline on success and a typed error object with a code from the stable list on standard error on failure, with exit status 1; no `focuses` command consumes an inbox, changes a registration or writes to Linear. | Test |
 | FR-061-AC-22 | `agent-msg focus`, `agent-msg work focus` and `agent-msg work show` keep their previous behavior and bytes, and `agent-msg focuses` is a separate command family. | Test |
 
