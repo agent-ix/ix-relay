@@ -412,6 +412,15 @@ mod tests {
         press(&mut picked, KeyCode::Up);
         press(&mut picked, KeyCode::Char('j'));
         press(&mut picked, KeyCode::Char('k'));
+        // Highlight path: 0 -> 4 (Health) -> 3 -> 4 -> 3 -> 4 again with `j`.
+        press(&mut picked, KeyCode::Char('j'));
+        assert_eq!(
+            picked.popup,
+            Some(Popup::Dropdown {
+                highlight: 4,
+                offset: 0
+            })
+        );
         press(&mut picked, KeyCode::Enter);
         assert_eq!(picked.view, View::Health);
         assert_eq!(picked.view, keyed.view);

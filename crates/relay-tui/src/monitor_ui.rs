@@ -154,6 +154,8 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
     let evidence = evidence_lines(
         &evidence_items(app, now, now_epoch, false, scope_error.as_deref()),
         width,
+        ERROR,
+        true,
     );
     let evidence_rows = u16::try_from(evidence.len()).unwrap_or(0);
     let controls = footer_controls(
@@ -468,7 +470,15 @@ fn truncate_to(text: &str, width: usize) -> String {
 
 /// Evidence rows: each label intact, free-form detail truncated with a marker, and a count
 /// of the sources not shown when more have evidence than fit.
-pub(crate) fn evidence_lines(items: &[Evidence], width: usize) -> Vec<Line<'static>> {
+///
+/// `failure` colours failures; with `colored` false every row uses the terminal's default
+/// colour, as the department views do when color is disabled.
+pub(crate) fn evidence_lines(
+    items: &[Evidence],
+    width: usize,
+    failure: Color,
+    colored: bool,
+) -> Vec<Line<'static>> {
     let shown = if items.len() > MAX_EVIDENCE_ROWS {
         MAX_EVIDENCE_ROWS - 1
     } else {
@@ -477,10 +487,14 @@ pub(crate) fn evidence_lines(items: &[Evidence], width: usize) -> Vec<Line<'stat
     let mut lines: Vec<Line<'static>> = items[..shown]
         .iter()
         .map(|evidence| {
-            let color = match evidence.severity {
-                0 => ERROR,
-                1 | 2 => WARNING,
-                _ => MUTED,
+            let color = if !colored {
+                Color::Reset
+            } else {
+                match evidence.severity {
+                    0 => failure,
+                    1 | 2 => WARNING,
+                    _ => MUTED,
+                }
             };
             let label = Span::styled(
                 evidence.label.clone(),
@@ -505,10 +519,10 @@ pub(crate) fn evidence_lines(items: &[Evidence], width: usize) -> Vec<Line<'stat
         })
         .collect();
     if items.len() > shown {
-        lines.push(Line::from(muted(format!(
-            "+{} more sources not shown",
-            items.len() - shown
-        ))));
+        lines.push(Line::from(Span::styled(
+            format!("+{} more sources not shown", items.len() - shown),
+            Style::default().fg(if colored { MUTED } else { Color::Reset }),
+        )));
     }
     lines
 }
@@ -929,6 +943,7 @@ pub(crate) mod tests {
     use ix_board::{
         Issue, IssueId, Project, ProjectId, TeamKey, WorkflowStateType, WorkspaceSnapshot,
     };
+    use ix_trace_rs::trace;
     use ratatui::{
         Terminal,
         backend::TestBackend,
@@ -1720,6 +1735,7 @@ pub(crate) mod tests {
     }
 
     /// Trace: FR-065-AC-5
+    #[trace("FR-065-AC-5")]
     #[test]
     fn every_view_has_the_same_compact_footer_selector_and_no_tab_strip() {
         for (width, height) in [(80_u16, 24_u16), (120, 40)] {
@@ -1752,6 +1768,7 @@ pub(crate) mod tests {
     }
 
     /// Trace: FR-065-AC-5
+    #[trace("FR-065-AC-5")]
     #[test]
     fn evidence_rows_keep_labels_intact_and_bound_themselves_at_80x24() {
         let mut app = app();
@@ -1799,6 +1816,7 @@ pub(crate) mod tests {
     }
 
     /// Trace: FR-065-AC-6
+    #[trace("FR-065-AC-6")]
     #[test]
     fn identity_row_is_the_same_in_all_six_views() {
         let verified = app();
@@ -1830,6 +1848,7 @@ pub(crate) mod tests {
     }
 
     /// Trace: FR-065-AC-7
+    #[trace("FR-065-AC-7")]
     #[test]
     fn lead_views_name_their_real_population() {
         let mut agents = app();
@@ -1881,6 +1900,7 @@ pub(crate) mod tests {
     }
 
     /// Trace: FR-065-AC-11
+    #[trace("FR-065-AC-11")]
     #[test]
     fn help_stays_inside_the_work_area_and_a_shrinking_refresh_clamps_selection() {
         let mut app = app();
@@ -1928,5 +1948,71 @@ pub(crate) mod tests {
         crate::monitor::handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.popup.is_none() && !app.should_quit);
         assert_eq!(app.table.selected(), Some(2));
+    }
+
+    /// Trace: FR-065-AC-12
+    #[trace("FR-065-AC-12")]
+    #[test]
+    fn key_hints_use_the_primary_blue_and_descriptions_and_separators_are_muted() {
+        fn row_of(terminal: &Terminal<TestBackend>, needle: &str) -> u16 {
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .find(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, *y)].symbol())
+                        .collect::<String>()
+                        .contains(needle)
+                })
+                .unwrap_or_else(|| panic!("no row contains {needle}"))
+        }
+        let draw = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|frame| render(frame, app, Instant::now()))
+                .unwrap();
+            terminal
+        };
+        for view in View::ALL {
+            let mut app = app();
+            app.view = view;
+            let terminal = draw(&mut app);
+            let buffer = terminal.backend().buffer();
+            // Identity row keeps its existing lead-name colour.
+            assert_eq!(buffer[(0, 0)].fg, PRIMARY, "{view:?}");
+            // Selector: "View: " muted, the key blue, its description muted.
+            let key_x = 6 + u16::try_from(view.label().len()).unwrap() + 4;
+            assert_eq!(buffer[(0, 1)].fg, MUTED, "{view:?}");
+            assert_eq!(buffer[(key_x, 1)].symbol(), "v", "{view:?}");
+            assert_eq!(buffer[(key_x, 1)].fg, PRIMARY, "{view:?}");
+            assert_eq!(buffer[(key_x + 1, 1)].fg, MUTED, "{view:?}");
+            // Footer "v View · F1 Help": keys blue, descriptions and separator muted.
+            for (x, symbol, color) in [
+                (0, "v", PRIMARY),
+                (2, "V", MUTED),
+                (7, "·", MUTED),
+                (9, "F", PRIMARY),
+                (10, "1", PRIMARY),
+                (12, "H", MUTED),
+            ] {
+                assert_eq!(buffer[(x, 23)].symbol(), symbol, "{view:?} footer {x}");
+                assert_eq!(buffer[(x, 23)].fg, color, "{view:?} footer {x}");
+            }
+        }
+        let mut app = app();
+        app.popup = Some(crate::monitor::Popup::Dropdown {
+            highlight: 0,
+            offset: 0,
+        });
+        let terminal = draw(&mut app);
+        let y = row_of(&terminal, "(current)");
+        let buffer = terminal.backend().buffer();
+        assert_eq!((buffer[(3, y)].symbol(), buffer[(3, y)].fg), ("t", PRIMARY));
+        assert_eq!((buffer[(6, y)].symbol(), buffer[(6, y)].fg), ("T", MUTED));
+        app.popup = Some(crate::monitor::Popup::Help { scroll: 0 });
+        let terminal = draw(&mut app);
+        let y = row_of(&terminal, "View selector (FR-065)");
+        let buffer = terminal.backend().buffer();
+        assert_eq!((buffer[(3, y)].symbol(), buffer[(3, y)].fg), ("v", PRIMARY));
+        assert_eq!((buffer[(6, y)].symbol(), buffer[(6, y)].fg), ("V", MUTED));
     }
 }

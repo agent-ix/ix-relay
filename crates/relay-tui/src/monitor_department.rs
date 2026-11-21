@@ -469,7 +469,14 @@ fn diagnostic_rows(app: &App) -> Vec<DisplayRow> {
 pub(crate) fn render(frame: &mut Frame, app: &mut App, now: Instant) {
     let now_epoch = SystemClock.now_epoch_seconds();
     let width = usize::from(frame.area().width.max(1));
-    let evidence = evidence_lines(&evidence_items(app, now, now_epoch, true, None), width);
+    // Department evidence keeps its existing policy: light red failures, and the terminal's
+    // default colour when color is disabled.
+    let evidence = evidence_lines(
+        &evidence_items(app, now, now_epoch, true, None),
+        width,
+        Color::LightRed,
+        app.color_enabled,
+    );
     let evidence_rows = u16::try_from(evidence.len()).unwrap_or(0);
     let controls = footer_controls(None, width);
     let footer_rows = u16::try_from(controls.len()).unwrap_or(1);
@@ -1183,6 +1190,42 @@ pub(crate) mod tests {
         assert_eq!(app.department_team().as_deref(), Some("SWM"));
     }
 
+    /// Trace: FR-065-AC-12
+    #[trace("FR-065-AC-12")]
+    #[test]
+    fn department_evidence_keeps_the_existing_color_policy() {
+        for enabled in [false, true] {
+            let mut app = App {
+                view: View::Status,
+                color_enabled: enabled,
+                ..App::default()
+            };
+            app.department.failure("source unavailable");
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|frame| render(frame, &mut app, Instant::now()))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let row = (0..24)
+                .find(|y| {
+                    (0..80)
+                        .map(|x| buffer[(x, *y)].symbol())
+                        .collect::<String>()
+                        .starts_with("Department failed")
+                })
+                .expect("the failure evidence row");
+            let expected = if enabled {
+                Color::LightRed
+            } else {
+                Color::Reset
+            };
+            // Both the label and the detail follow the policy.
+            for x in [0, 20] {
+                assert_eq!(buffer[(x, row)].fg, expected, "color_enabled={enabled}");
+            }
+        }
+    }
+
     fn flat(text: &str) -> String {
         text.split_whitespace().collect::<Vec<_>>().join(" ")
     }
@@ -1368,10 +1411,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// Trace: FR-065-AC-10
-    #[trace("FR-065-AC-10")]
+    /// State-only companion to the production event-loop fixtures in `monitor_main`.
     #[test]
-    fn popups_over_a_not_configured_view_start_no_collection_retry_or_write() {
+    fn popups_over_a_not_configured_view_leave_source_state_untouched() {
         let mut app = App {
             view: View::Health,
             ..App::default()
