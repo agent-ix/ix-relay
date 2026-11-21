@@ -131,6 +131,16 @@ fn reason_of(error: &ix_board::Error) -> SourceReason {
         // The read itself failed, or the failure belongs to no read of a snapshot.
         E::Http(_)
         | E::LinearRateLimited { .. }
+        // The shared quota protection refused or could not run the read; no snapshot was read.
+        | E::LinearLocalBudgetExhausted { .. }
+        | E::RefreshLockTimeout
+        | E::LinearQueryComplexityExceeded { .. }
+        | E::InvalidQuotaConfig { .. }
+        | E::InvalidQuotaReservation { .. }
+        | E::InvalidCacheTtl
+        | E::InvalidConfiguration
+        // A successful response that broke the typed wire contract is not a usable snapshot.
+        | E::LinearDecode(_)
         | E::GraphQl { .. }
         | E::CacheDirectoryUnavailable
         | E::CacheDirectory(_)

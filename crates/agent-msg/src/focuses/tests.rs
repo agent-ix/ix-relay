@@ -1904,6 +1904,28 @@ fn each_sdk_failure_is_placed_under_one_of_the_contract_reasons() {
             },
             "failed",
         ),
+        (
+            E::LinearLocalBudgetExhausted {
+                retry_after: Duration::from_secs(1),
+            },
+            "failed",
+        ),
+        (E::RefreshLockTimeout, "failed"),
+        (
+            E::LinearQueryComplexityExceeded {
+                cost: 20_000,
+                limit: 10_000,
+            },
+            "failed",
+        ),
+        (E::InvalidQuotaConfig { reason: "r" }, "failed"),
+        (E::InvalidQuotaReservation { reason: "r" }, "failed"),
+        (E::InvalidCacheTtl, "failed"),
+        (E::InvalidConfiguration, "failed"),
+        (
+            E::LinearDecode(serde_json::from_str::<u8>("x").unwrap_err()),
+            "failed",
+        ),
         (E::BoundUnsupported, "failed"),
         (E::InvalidReadPolicy { reason: "r" }, "failed"),
         (E::CacheTimestamp, "failed"),

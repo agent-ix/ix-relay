@@ -75,6 +75,74 @@ pub enum View {
     Retro,
 }
 
+impl View {
+    /// Every view in the fixed order the View selector lists them.
+    pub const ALL: [View; 6] = [
+        View::Tickets,
+        View::Agents,
+        View::Scope,
+        View::Status,
+        View::Health,
+        View::Retro,
+    ];
+
+    /// Name shown in the View selector and dropdown.
+    pub const fn label(self) -> &'static str {
+        match self {
+            View::Tickets => "Tickets",
+            View::Agents => "Agents",
+            View::Scope => "Scope",
+            View::Status => "Status",
+            View::Health => "Health",
+            View::Retro => "Retro",
+        }
+    }
+
+    /// Compatibility shortcut that selects this view without the dropdown.
+    pub const fn key(self) -> char {
+        match self {
+            View::Tickets => 't',
+            View::Agents => 'a',
+            View::Scope => 'p',
+            View::Status => '1',
+            View::Health => '2',
+            View::Retro => '3',
+        }
+    }
+}
+
+/// The one popup that may be open over the work area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Popup {
+    /// View dropdown; `highlight` indexes `View::ALL` and `offset` is its first visible entry.
+    Dropdown {
+        /// Highlighted entry.
+        highlight: usize,
+        /// First visible entry, clamped when drawn.
+        offset: usize,
+    },
+    /// Help popup scrolled by `scroll` lines, clamped when drawn.
+    Help {
+        /// First visible help line.
+        scroll: u16,
+    },
+}
+
+/// How the department report is supplied; decides the Health and Retro empty states.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum DepartmentInput {
+    /// Live startup without a retro configuration.
+    #[default]
+    NotConfigured,
+    /// Live startup with a retro configuration; the first read may be pending.
+    Configured,
+    /// A saved report supplied the model.
+    Saved,
+}
+
+/// Text shared by the binding fence and the evidence rows when a session is replaced.
+pub(crate) const SESSION_REPLACED: &str = "session ended/replaced · restart to rebind";
+
 /// Complete dashboard state.
 #[derive(Debug, Default)]
 pub struct App {
@@ -114,6 +182,9 @@ pub struct App {
     pub tracker: Source<crate::monitor_tracker::TrackerState>,
     /// Next scheduled retry after a rate-limited Linear read.
     pub tracker_retry_at: Option<Instant>,
+    /// The tracker snapshot is shown, but nothing confirms when its source read happened or
+    /// that a refresh failed; it is not certified fresh and no failure is reported.
+    pub tracker_freshness_unconfirmed: bool,
     /// Human-readable identity of the current team lead.
     pub lead_name: String,
     /// Set by `q` or Escape.
@@ -124,6 +195,10 @@ pub struct App {
     pub show_completed: bool,
     /// Reused shared summary, Scope projection and Scope selection memory.
     pub scope: crate::monitor_scope::ScopeState,
+    /// Open popup, if any; at most one at a time.
+    pub popup: Option<Popup>,
+    /// How the department report is supplied.
+    pub department_input: DepartmentInput,
 }
 
 impl App {
@@ -163,8 +238,7 @@ impl App {
                         self.runtime.success(observation, read_at);
                     } else {
                         self.session_ended = true;
-                        self.runtime
-                            .failure("session ended/replaced · restart to rebind");
+                        self.runtime.failure(SESSION_REPLACED);
                     }
                 }
                 Ok(_) => {}
@@ -186,8 +260,7 @@ impl App {
                         .is_some_and(|report| self.binding.as_ref() != Some(&report.binding))
                     {
                         self.session_ended = true;
-                        self.report
-                            .failure("session ended/replaced · restart to rebind");
+                        self.report.failure(SESSION_REPLACED);
                     } else {
                         self.report.success(report, read_at);
                     }
@@ -201,19 +274,44 @@ impl App {
     /// Applies an independently refreshed Linear tracker result.
     pub fn apply_tracker_refresh(
         &mut self,
-        tracker: Result<crate::monitor_tracker::TrackerState, ix_board::Error>,
+        tracker: Result<crate::monitor_ops::TrackerRead, ix_board::Error>,
         now: Instant,
     ) {
         self.collection_failed |= tracker.is_err();
         match tracker {
-            Ok(data) => {
+            Ok(read) => {
+                use crate::monitor_ops::{
+                    Provenance, refresh_failed_diagnostic, refresh_failed_summary,
+                };
+                // A snapshot kept after a failed refresh keeps its source timestamp; the
+                // failure shows beside it until a refresh succeeds. Unconfirmed provenance
+                // is not a failure and only marks the snapshot as not certified fresh.
+                let provenance = read.provenance();
+                self.tracker.success(read.snapshot, now);
                 self.tracker_retry_at = None;
-                self.tracker.success(data, now);
+                self.tracker_freshness_unconfirmed = provenance == Provenance::Unconfirmed;
+                if let Provenance::RefreshFailed { cooldown } = provenance {
+                    self.collection_failed = true;
+                    if cooldown {
+                        self.tracker_retry_at =
+                            now.checked_add(crate::monitor_ops::TRACKER_REFRESH_INTERVAL);
+                        self.tracker.failure(refresh_failed_summary(cooldown));
+                    } else {
+                        self.tracker.failure_with_summary(
+                            refresh_failed_summary(cooldown),
+                            refresh_failed_diagnostic(),
+                        );
+                    }
+                }
             }
-            Err(ix_board::Error::LinearRateLimited { .. }) => {
+            Err(
+                error @ (ix_board::Error::LinearRateLimited { .. }
+                | ix_board::Error::LinearLocalBudgetExhausted { .. }),
+            ) => {
                 self.tracker_retry_at =
                     now.checked_add(crate::monitor_ops::TRACKER_REFRESH_INTERVAL);
-                self.tracker.failure("Linear rate limited");
+                self.tracker
+                    .failure(crate::monitor_ops::source_summary(&error));
             }
             Err(error) => {
                 self.tracker_retry_at = None;
@@ -228,8 +326,20 @@ impl App {
 
 /// Handles the dashboard's read-only keyboard controls.
 pub fn handle_key(app: &mut App, key: KeyEvent) {
+    // An open popup receives every key and acts only on the keys it owns.
+    if let Some(popup) = app.popup {
+        crate::monitor_nav::handle_popup_key(app, popup, key);
+        return;
+    }
     let selected_before = app.table.selected();
     match key.code {
+        KeyCode::Char('v') if key.modifiers.is_empty() => {
+            app.popup = Some(Popup::Dropdown {
+                highlight: View::ALL.iter().position(|v| *v == app.view).unwrap_or(0),
+                offset: 0,
+            });
+        }
+        KeyCode::F(1) | KeyCode::Char('?') => app.popup = Some(Popup::Help { scroll: 0 }),
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Char('r') => app.refresh_now = true,
         KeyCode::Char('d') | KeyCode::Enter => app.details = !app.details,
@@ -282,7 +392,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-fn select_view(app: &mut App, view: View) {
+pub(crate) fn select_view(app: &mut App, view: View) {
     if app.view != view {
         app.view = view;
         app.table = Default::default();
