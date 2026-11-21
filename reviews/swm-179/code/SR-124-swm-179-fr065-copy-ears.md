@@ -47,3 +47,19 @@ Reviewer model claude-sonnet-5-5; native run id unavailable. Marker id=SR-124 me
 ## Verdict after disposition pass 1
 
 Not run. If the finding is fixed the same session disposes it.
+
+## Dispositions (round 2, FND-001)
+
+Disposition pass 2 at frozen fix dc80f295e52605247e76c5f3c94b4fe6ee508cc6, judged from FR-065 as it is now; `code-fix2-spec-ready.md` was data. I ran no tool.
+
+| FND | Outcome | Reason |
+|---|---|---|
+| FND-001 | fixed | The Help bullet is now five single-obligation bullets (spec lines 126-130): list each key with its action; one row per entry; name views only for partial entries; no requirement identifiers, owner names or requirement text; no applicable mark where a key has no visible effect. The owner reference is a note bullet before them (124-125), with the owner ids kept in the table. All 13 AC ids and the table rows are unchanged. |
+
+### New findings (disposition pass 2)
+
+None. I checked only the split bullets; no other statement was reopened and no further method was run.
+
+## Current verdict (after disposition pass 2)
+
+**PASS** - the one finding is fixed; no finding is open. Spec text only, read, not run.

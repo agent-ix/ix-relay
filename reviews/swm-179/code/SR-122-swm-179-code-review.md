@@ -158,3 +158,20 @@ Checked against the docs-style catalog (`/Users/peter/.codex/plugins/cache/agent
 ## Current verdict (after disposition pass 1)
 
 **CONDITIONAL** - all 12 initial findings are fixed on the source as read, and 2 new low findings (FND-013, FND-014) are open, so the artifact stays CONDITIONAL until they are fixed. No high finding. This is a reading of source; the pass does not establish that the fix compiles or that the tests pass. Pending root checks: the final clippy exit status (the log shows `Finished` and no diagnostics but no exit code), the TUI test run (the earlier wrapper was cancelled with exit 143 before compilation; it is not a failure), and the aggregate. A spec delta in FR-065 is reviewed in SR-124.
+
+## Dispositions (round 2, FND-013 and FND-014 only)
+
+Disposition pass 2 at frozen fix dc80f295e52605247e76c5f3c94b4fe6ee508cc6, judged from the current source and docs in the sole tree; `code-fix2-ready.md` was data. The 12 initial fixes held at round 1 are not reopened. I ran no command. Outcomes are a reading of source and claim no green result.
+
+| FND | Outcome | Reason |
+|---|---|---|
+| FND-013 | fixed | `status_rows` (monitor_department.rs:437-443) builds the NotConfigured detail as `format!("{} Nothing is being collected; ...", not_configured_instruction(app))`, so the Status row now carries the same two cases as Health and Retro. The Status fixture asserts the lead-only text `Start with --team SWM and --retro-config <file>.` and `department team must be SWM with no projects` (1522-1525), and the AC-9 fixture still asserts the lead-derived text (1615); the explicit case is asserted on `not_configured_instruction` itself (1709-1714), which has no `--team SWM and` text. The Status explicit-selection frame is not asserted separately; the row calls the same function, so I accept that. |
+| FND-014 | fixed | docs/department-monitor.md: line 39 now says the message names `--retro-config <file>` "and, for a lead-only start, `--team`", which matches `not_configured_instruction`; the negation list at the old line 46 is one positive sentence (46); the popup line is `An open popup receives every key. The view underneath keeps its state until the popup closes.` (75); the population paragraph is split into short sentences without "instead" (94-96); JSONL is defined at line 55. I found no remaining negation list or contrast framing in lines 35-104 by reading; the docs-style tool was not run. |
+
+### New findings (disposition pass 2)
+
+None.
+
+## Current verdict (after disposition pass 2)
+
+**PASS** - all 14 findings of this artifact are fixed on the source as read; none is open and none is high. Pending root checks, not claimed by me: the root reports clippy 37263 exit 0 and TUI tests 140 passed / 1 ignored at the earlier head; for dc80f295 fmt and Quire FR-065 passed, and focused clippy 31240 and the tests are running or queued, and the aggregate does not exist yet. This pass establishes no green result.
