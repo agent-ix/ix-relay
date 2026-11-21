@@ -88,7 +88,10 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
                 }
             }
         }
-        if scope_view && let Some(p) = &projection {
+        if scope_view
+            && let Some(p) = &projection
+            && !p.mode.text().is_empty()
+        {
             scope_spans.push(muted(" · "));
             scope_spans.push(Span::raw(p.mode.text()));
         }

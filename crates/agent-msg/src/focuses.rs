@@ -12,6 +12,7 @@
 //! read service under one bounded read and write nothing until every reference resolved.
 
 mod caller;
+mod codec;
 mod file;
 mod output;
 mod resolve;
@@ -30,12 +31,13 @@ use relay_core::{
     AgentList, MachineName, Relay, SessionId, Target,
     named_focus::{
         Caller, ClaimRequest, Definition, FocusError, FocusResult, ListEntry, LivenessEvidence,
-        OwnerBinding, SelectionCheck, SessionState, UnavailableReason, UpdateOutcome,
+        OwnerBinding, SelectionCodec, SessionState, UpdateOutcome,
     },
 };
 
 use self::{
     caller::{CallerSource, HerdrCaller},
+    codec::IxBoardCodec,
     output::ListRow,
     resolve::{DEFAULT_READ_TIMEOUT, LinearSnapshots, SnapshotSource},
 };
@@ -136,28 +138,62 @@ enum FocusesCommand {
 /// Everything a `focuses` command reaches outside itself, so that a test can supply its own.
 pub(crate) struct Env<'a> {
     pub(crate) relay: &'a mut Relay,
-    pub(crate) check: &'a dyn SelectionCheck,
+    pub(crate) codec: &'a dyn SelectionCodec,
     pub(crate) snapshots: &'a mut dyn SnapshotSource,
     pub(crate) caller: &'a dyn CallerSource,
     pub(crate) machine: &'a MachineName,
-    pub(crate) now_ms: i64,
+    /// The wall clock, Unix milliseconds. Read again for each stamp a command writes: the
+    /// snapshot read can take minutes, so a stamp is taken when it is used and never at start.
+    pub(crate) clock: &'a dyn Fn() -> i64,
 }
 
-/// The check of a stored selection by the pinned ix-board decoder.
-pub(crate) struct IxBoardCheck;
-
-impl SelectionCheck for IxBoardCheck {
-    fn schema_version(&self) -> u32 {
-        ix_board::NAMED_SELECTION_SCHEMA_VERSION
+impl Env<'_> {
+    /// The wall clock now, Unix milliseconds.
+    fn now_ms(&self) -> i64 {
+        (self.clock)()
     }
+}
 
-    fn check(&self, selection: &[u8]) -> Result<(), UnavailableReason> {
-        match ix_board::decode_named_selection(selection) {
-            Ok(_) => Ok(()),
-            Err(ix_board::Error::UnsupportedSchemaVersion { .. }) => {
-                Err(UnavailableReason::UnsupportedSchema)
-            }
-            Err(_) => Err(UnavailableReason::Undecodable),
+/// How a command failed once it had started.
+#[derive(Debug)]
+pub(crate) enum CommandError {
+    /// The command was refused with a code of the contract.
+    Refused(FocusError),
+    /// The command ran, and its result could not be written to standard output. A write that
+    /// had been committed stays committed.
+    Output(io::Error),
+}
+
+impl From<FocusError> for CommandError {
+    fn from(error: FocusError) -> Self {
+        Self::Refused(error)
+    }
+}
+
+impl From<io::Error> for CommandError {
+    fn from(error: io::Error) -> Self {
+        Self::Output(error)
+    }
+}
+
+/// Reports a failure on `err` and returns the exit status. A refusal is one typed error. A
+/// closed standard output (`focuses show | head`) is the reader's choice and not a failure of
+/// the command, as for `doctor`; any other write failure is reported as such, with no code of
+/// the contract, since the command itself ran.
+fn report<W: Write>(error: &CommandError, json: bool, err: &mut W) -> u8 {
+    match error {
+        CommandError::Refused(error) => {
+            output::failure(err, json, error);
+            1
+        }
+        CommandError::Output(error) if error.kind() == io::ErrorKind::BrokenPipe => 0,
+        CommandError::Output(error) => {
+            let _ = writeln!(
+                err,
+                "agent-msg: focuses: the command ran, but its result could not be written to \
+                 standard output: {error}"
+            );
+            1
         }
     }
 }
@@ -179,27 +215,24 @@ pub(crate) fn main(args: &FocusesArgs, settings: &relay_core::config::CoreSettin
     };
     let mut env = Env {
         relay: &mut relay,
-        check: &IxBoardCheck,
+        codec: &IxBoardCodec,
         snapshots: &mut snapshots,
         caller: &caller,
         machine: &settings.machine.value,
-        now_ms: crate::now_ms(),
+        clock: &crate::now_ms,
     };
     match run(args, &mut env, &mut stdout) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            output::failure(&mut stderr, args.json, &error);
-            ExitCode::FAILURE
-        }
+        Err(error) => ExitCode::from(report(&error, args.json, &mut stderr)),
     }
 }
 
-fn io_error(error: &io::Error) -> FocusError {
-    FocusError::invalid("output", error.to_string())
-}
-
 /// Runs one command, printing its result on `out`.
-pub(crate) fn run<W: Write>(args: &FocusesArgs, env: &mut Env<'_>, out: &mut W) -> FocusResult<()> {
+pub(crate) fn run<W: Write>(
+    args: &FocusesArgs,
+    env: &mut Env<'_>,
+    out: &mut W,
+) -> Result<(), CommandError> {
     let json = args.json;
     match &args.command {
         FocusesCommand::Create { file, read_timeout } => {
@@ -248,9 +281,10 @@ fn timeout(seconds: Option<u64>) -> Duration {
     seconds.map_or(DEFAULT_READ_TIMEOUT, Duration::from_secs)
 }
 
+/// The caller's verified binding, as of now.
 fn verify(args: &FocusesArgs, env: &Env<'_>) -> FocusResult<OwnerBinding> {
     env.caller
-        .verify(args.lead.as_deref(), args.session.as_ref(), env.now_ms)
+        .verify(args.lead.as_deref(), args.session.as_ref(), env.now_ms())
 }
 
 /// Refuses early a caller that is not the stored owner, before any snapshot is read.
@@ -278,22 +312,26 @@ fn create<W: Write>(
     file: &Path,
     read_timeout: Duration,
     out: &mut W,
-) -> FocusResult<()> {
+) -> Result<(), CommandError> {
     let definition = file::read_definition(file)?;
-    let binding = verify(args, env)?;
+    // Refuses an unverified caller before any snapshot is read.
+    verify(args, env)?;
     let content = resolve::resolve(&definition, &mut *env.snapshots, read_timeout)?;
+    // The read can take minutes: the caller is verified again and every stamp is taken now,
+    // after it, so a session that left meanwhile is not recorded as the owner.
+    let binding = verify(args, env)?;
     let evidence = env.relay.focus_evidence();
     let created = env
         .relay
-        .focus_create(env.check, content, &binding, env.now_ms, &evidence)?;
+        .focus_create(env.codec, content, &binding, env.now_ms(), &evidence)?;
     output::created(
         out,
         args.json,
         &created.meta,
         &created.owner,
         created.removed.as_ref(),
-    )
-    .map_err(|error| io_error(&error))
+    )?;
+    Ok(())
 }
 
 fn update<W: Write>(
@@ -302,21 +340,23 @@ fn update<W: Write>(
     (focus, file, expected_revision): (&str, &Path, u64),
     read_timeout: Duration,
     out: &mut W,
-) -> FocusResult<()> {
+) -> Result<(), CommandError> {
     let definition = file::read_definition(file)?;
     let binding = verify(args, env)?;
     let target = env.relay.focus_resolve(focus)?;
-    let current = env.relay.focus_get(env.check, &target.id)?;
+    let current = env.relay.focus_get(env.codec, &target.id)?;
     ensure_owner(&current, &binding)?;
     let content = resolve::resolve(&definition, &mut *env.snapshots, read_timeout)?;
+    // As for `create`: verified again, and stamped, after the read.
+    let binding = verify(args, env)?;
     let evidence = env.relay.focus_evidence();
     let caller = Caller {
         binding: &binding,
         expected_epoch: current.summary.owner.epoch,
-        now_ms: env.now_ms,
+        now_ms: env.now_ms(),
     };
     let (revision, changed) = match env.relay.focus_update(
-        env.check,
+        env.codec,
         &target,
         expected_revision,
         &content,
@@ -326,8 +366,8 @@ fn update<W: Write>(
         UpdateOutcome::Written(revision) => (revision, true),
         UpdateOutcome::Unchanged(revision) => (revision, false),
     };
-    output::updated(out, args.json, &target.id, revision.revision, changed)
-        .map_err(|error| io_error(&error))
+    output::updated(out, args.json, &target.id, revision.revision, changed)?;
+    Ok(())
 }
 
 fn archive<W: Write>(
@@ -336,20 +376,21 @@ fn archive<W: Write>(
     focus: &str,
     expected_revision: u64,
     out: &mut W,
-) -> FocusResult<()> {
+) -> Result<(), CommandError> {
     let binding = verify(args, env)?;
     let target = env.relay.focus_resolve(focus)?;
-    let current = env.relay.focus_get(env.check, &target.id)?;
+    let current = env.relay.focus_get(env.codec, &target.id)?;
     ensure_owner(&current, &binding)?;
     let caller = Caller {
         binding: &binding,
         expected_epoch: current.summary.owner.epoch,
-        now_ms: env.now_ms,
+        now_ms: env.now_ms(),
     };
     let meta = env
         .relay
-        .focus_archive(env.check, &target, expected_revision, &caller)?;
-    output::archived(out, args.json, &meta).map_err(|error| io_error(&error))
+        .focus_archive(env.codec, &target, expected_revision, &caller)?;
+    output::archived(out, args.json, &meta)?;
+    Ok(())
 }
 
 fn claim<W: Write>(
@@ -359,19 +400,19 @@ fn claim<W: Write>(
     expected_epoch: u64,
     force_reason: Option<&str>,
     out: &mut W,
-) -> FocusResult<()> {
+) -> Result<(), CommandError> {
     let binding = verify(args, env)?;
     let target = env.relay.focus_resolve(focus)?;
-    let observed = env.relay.focus_get(env.check, &target.id)?;
+    let observed = env.relay.focus_get(env.codec, &target.id)?;
     let observed_owner_id = observed.summary.owner.owner_id.clone();
     let evidence = env.relay.focus_evidence();
     let caller = Caller {
         binding: &binding,
         expected_epoch,
-        now_ms: env.now_ms,
+        now_ms: env.now_ms(),
     };
     let owner = env.relay.focus_claim(
-        env.check,
+        env.codec,
         &target,
         &caller,
         &ClaimRequest {
@@ -380,7 +421,8 @@ fn claim<W: Write>(
         },
         &evidence,
     )?;
-    output::owned(out, args.json, &target.id, &owner).map_err(|error| io_error(&error))
+    output::owned(out, args.json, &target.id, &owner)?;
+    Ok(())
 }
 
 fn transfer<W: Write>(
@@ -390,22 +432,23 @@ fn transfer<W: Write>(
     to: &str,
     expected_epoch: u64,
     out: &mut W,
-) -> FocusResult<()> {
+) -> Result<(), CommandError> {
     let binding = verify(args, env)?;
     let target = env.relay.focus_resolve(focus)?;
-    let current = env.relay.focus_get(env.check, &target.id)?;
+    let current = env.relay.focus_get(env.codec, &target.id)?;
     ensure_owner(&current, &binding)?;
-    let registry = env.relay.agents()?;
+    let registry = env.relay.agents().map_err(FocusError::Store)?;
     let new_owner = transfer_target(&registry, to, env.machine)?;
     let caller = Caller {
         binding: &binding,
         expected_epoch,
-        now_ms: env.now_ms,
+        now_ms: env.now_ms(),
     };
     let owner = env
         .relay
-        .focus_transfer(env.check, &target, &caller, &new_owner)?;
-    output::owned(out, args.json, &target.id, &owner).map_err(|error| io_error(&error))
+        .focus_transfer(env.codec, &target, &caller, &new_owner)?;
+    output::owned(out, args.json, &target.id, &owner)?;
+    Ok(())
 }
 
 /// The session `to` names, which must resolve to exactly one verified live registration.
@@ -448,7 +491,7 @@ fn transfer_target(
             "the target is not exactly one verified live session",
         ));
     }
-    let verified_at_ms = registration
+    let verified_at = registration
         .place
         .as_ref()
         .and_then(|place| place.herdr_ids.as_ref())
@@ -458,7 +501,7 @@ fn transfer_target(
         session,
         None,
         &address,
-        verified_at_ms,
+        verified_at,
     ))
 }
 
@@ -468,8 +511,8 @@ fn list<W: Write>(
     team: Option<&str>,
     archived: bool,
     out: &mut W,
-) -> FocusResult<()> {
-    let entries = env.relay.focus_list(env.check)?;
+) -> Result<(), CommandError> {
+    let entries = env.relay.focus_list(env.codec)?;
     let evidence = env.relay.focus_evidence();
     let rows: Vec<ListRow<'_>> = entries
         .iter()
@@ -492,7 +535,8 @@ fn list<W: Write>(
             }
         })
         .collect();
-    output::list(out, json, &rows).map_err(|error| io_error(&error))
+    output::list(out, json, &rows)?;
+    Ok(())
 }
 
 fn show<W: Write>(
@@ -501,12 +545,12 @@ fn show<W: Write>(
     focus: &str,
     revision: Option<u64>,
     out: &mut W,
-) -> FocusResult<()> {
+) -> Result<(), CommandError> {
     let target = env.relay.focus_resolve(focus)?;
-    let definition = env.relay.focus_get(env.check, &target.id)?;
+    let definition = env.relay.focus_get(env.codec, &target.id)?;
     let revision = match revision {
         Some(number) if number != definition.summary.meta.latest_revision => {
-            env.relay.focus_revision(env.check, &target.id, number)?
+            env.relay.focus_revision(env.codec, &target.id, number)?
         }
         _ => definition.summary.latest.clone(),
     };
@@ -515,11 +559,12 @@ fn show<W: Write>(
     let state = evidence.owner_state(&owner.owner_id, &owner.binding.address);
     output::show(
         out,
+        env.codec,
         json,
         &definition.summary,
         &definition.kept_revisions,
         &revision,
         state,
-    )
-    .map_err(|error| io_error(&error))
+    )?;
+    Ok(())
 }

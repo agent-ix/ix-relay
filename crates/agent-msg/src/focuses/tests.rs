@@ -32,10 +32,11 @@ use relay_test_support::Bus;
 use serde_json::{Value, json};
 
 use super::{
-    Env, FocusesArgs, IxBoardCheck,
+    CommandError, Env, FocusesArgs,
     caller::CallerSource,
-    file, output,
-    resolve::{ServiceSnapshots, SnapshotSource},
+    codec::IxBoardCodec,
+    file, output, report,
+    resolve::{self, ServiceSnapshots, SnapshotSource},
     run,
 };
 
@@ -111,6 +112,8 @@ enum Behavior {
     Broken,
     /// The request never completes: it ends at its timeout.
     NeverComplete,
+    /// The read succeeds, after this many seconds of wall time.
+    SucceedAfter(i64),
 }
 
 /// A workspace source that honors the bounded read, records what it was asked and can fail.
@@ -151,6 +154,10 @@ impl WorkspaceSource for FakeSource {
         let behavior = *self.behavior.lock().unwrap();
         match behavior {
             Behavior::Succeed => Ok(self.snapshot.clone()),
+            Behavior::SucceedAfter(seconds) => {
+                self.clock.pass(seconds);
+                Ok(self.snapshot.clone())
+            }
             Behavior::NoCredential => Err(Error::MissingApiKey),
             Behavior::Incomplete => Err(Error::MissingWorkspaceData),
             Behavior::Broken => Err(Error::BoundUnsupported),
@@ -359,13 +366,34 @@ impl Harness {
     }
 
     fn run(&mut self, args: &[&str]) -> Outcome {
+        let clock = self.clock.clone();
         execute(
             &mut self.bus,
             &self.caller,
             &mut self.service,
-            self.clock.epoch() * 1_000,
+            &move || clock.epoch() * 1_000,
             args,
         )
+    }
+
+    /// Runs `args` writing the result to `out`, and gives the command's own result.
+    fn run_to<W: std::io::Write>(
+        &mut self,
+        args: &[&str],
+        out: &mut W,
+    ) -> Result<(), CommandError> {
+        let clock = self.clock.clone();
+        let parsed = parse(args).expect("arguments parse");
+        let machine = machine();
+        let mut env = Env {
+            relay: &mut self.bus.relay,
+            codec: &IxBoardCodec,
+            snapshots: &mut self.service,
+            caller: &self.caller,
+            machine: &machine,
+            clock: &move || clock.epoch() * 1_000,
+        };
+        run(&parsed, &mut env, out)
     }
 
     /// Every key of the case, byte for byte.
@@ -392,18 +420,23 @@ fn dump(bus: &mut Bus) -> BTreeMap<String, Vec<u8>> {
         .collect()
 }
 
+/// The arguments of `agent-msg focuses ...`, or the usage error.
+fn parse(args: &[&str]) -> Result<FocusesArgs, clap::Error> {
+    let mut argv = vec!["focuses"];
+    argv.extend_from_slice(args);
+    Wrapper::try_parse_from(&argv).map(|parsed| parsed.focuses)
+}
+
 /// What `main` does after connecting: run the command, report a failure as a typed error.
 fn execute(
     bus: &mut Bus,
     caller: &dyn CallerSource,
     snapshots: &mut dyn SnapshotSource,
-    now_ms: i64,
+    clock: &dyn Fn() -> i64,
     args: &[&str],
 ) -> Outcome {
-    let mut argv = vec!["focuses"];
-    argv.extend_from_slice(args);
-    let parsed = match Wrapper::try_parse_from(&argv) {
-        Ok(parsed) => parsed.focuses,
+    let parsed = match parse(args) {
+        Ok(parsed) => parsed,
         Err(error) => {
             return Outcome {
                 stdout: String::new(),
@@ -415,19 +448,16 @@ fn execute(
     let machine = machine();
     let mut env = Env {
         relay: &mut bus.relay,
-        check: &IxBoardCheck,
+        codec: &IxBoardCodec,
         snapshots,
         caller,
         machine: &machine,
-        now_ms,
+        clock,
     };
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
     let status = match run(&parsed, &mut env, &mut stdout) {
         Ok(()) => 0,
-        Err(error) => {
-            output::failure(&mut stderr, parsed.json, &error);
-            1
-        }
+        Err(error) => report(&error, parsed.json, &mut stderr),
     };
     Outcome {
         stdout: String::from_utf8(stdout).unwrap(),
@@ -481,8 +511,8 @@ fn create_resolves_names_to_canonical_ids_and_show_reproduces_the_file_shape() {
     assert_eq!(def["description"], "the plan");
     assert_eq!(def["include"]["initiatives"][0]["ref"], "i-1");
     assert_eq!(
-        def["include"]["initiatives"][0]["label"], "i-1",
-        "the label is the canonical ID"
+        def["include"]["initiatives"][0]["label"], "Completion",
+        "no label in the file: the reference text the caller wrote"
     );
     assert_eq!(def["include"]["projects"][0]["ref"], "p-gamma");
     assert_eq!(def["include"]["milestones"][0]["ref"], "m-beta");
@@ -542,7 +572,7 @@ fn the_plain_text_forms_print_the_same_facts() {
     assert!(
         shown
             .stdout
-            .contains("include milestone m-beta in p-alpha (m-beta)")
+            .contains("include milestone m-beta in p-alpha (Beta)")
     );
     let listed = h.run(&["list"]);
     assert!(
@@ -1270,6 +1300,10 @@ fn an_unreadable_definition_is_listed_with_its_reason_and_refuses_writes() {
     );
     let unavailable = rows.iter().find(|r| r["focus_id"] == bad.as_str()).unwrap();
     assert_eq!(unavailable["available"], false);
+    assert_eq!(
+        unavailable["code"], "unavailable_definition",
+        "the row carries the stable code of the refusal it stands for"
+    );
     assert_eq!(unavailable["reason"], "undecodable");
     let text = h.run(&["list"]);
     assert!(
@@ -1382,6 +1416,12 @@ fn every_failure_is_a_typed_object_with_a_code_from_the_stable_list() {
             name: "n".into(),
             holder: None,
         },
+        FocusError::NameMoved {
+            team: "T".into(),
+            name: "n".into(),
+            focus: focus_id(),
+            holder: None,
+        },
         FocusError::Archived { focus: focus_id() },
         FocusError::limit("name bytes", 128),
         FocusError::UnresolvedReference {
@@ -1450,6 +1490,16 @@ fn the_file_parser_is_strict_and_bounded() {
     .unwrap();
     assert_eq!(parsed.include.projects.len(), 2);
     assert!(parsed.exclude.projects.is_empty() && parsed.description.is_empty());
+    // The caller's label is kept as parsed; the resolution joins it to its member.
+    assert_eq!(parsed.include.projects[0].label, None);
+    assert_eq!(parsed.include.projects[1].label.as_deref(), Some("B"));
+    assert!(
+        file::parse_definition(
+            br#"{"team":"SWM","name":"n","include":{"projects":[{"ref":"b","label":7}]}}"#
+        )
+        .is_err(),
+        "a label that is not a string is refused, not dropped"
+    );
 
     for bad in [
         &br#"[]"#[..],
@@ -1478,6 +1528,256 @@ fn the_file_parser_is_strict_and_bounded() {
     let long_ref = json!({"team": "SWM", "name": "n", "include": {"projects": [long]}});
     let error = file::parse_definition(&serde_json::to_vec(&long_ref).unwrap()).unwrap_err();
     assert_eq!(error.code().as_str(), "limit");
+}
+
+// --- AC-1: labels follow the SDK's association, not a position ------------------------------------
+
+/// The members of one list of a shown definition, as `(ref, label)`.
+fn listed(side: &Value, kind: &str) -> Vec<(String, String)> {
+    side[kind]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["ref"].as_str().unwrap().to_owned(),
+                m["label"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn pair(reference: &str, label: &str) -> (String, String) {
+    (reference.to_owned(), label.to_owned())
+}
+
+#[test]
+#[trace("FR-061-AC-1", "FR-061-AC-21")]
+fn each_member_keeps_the_label_of_its_own_input_through_aliases_repeats_and_both_lists() {
+    let Some(mut h) = Harness::new("cli-labels") else {
+        return;
+    };
+    let file = h.file(
+        "labels.json",
+        &json!({
+            "team": "SWM",
+            "name": "Labelled",
+            "include": {
+                // One initiative three ways: the first explicit label wins, the bare alias
+                // and the later explicit label do not replace it.
+                "initiatives": [
+                    {"ref": "I-1", "label": "first alias label"},
+                    "i-1",
+                    {"ref": "Completion", "label": "second explicit"},
+                ],
+                // One project twice: an explicit label beats an earlier reference text.
+                "projects": ["p-gamma", {"ref": "Gamma", "label": "Gamma label"}],
+                // Supplied in the reverse of the canonical order (t-1 before t-2).
+                "tickets": [{"ref": "SWM-2", "label": "two"}, {"ref": "SWM-1"}],
+            },
+            // The same ticket on the other side keeps its own occurrence's text.
+            "exclude": {"tickets": ["SWM-2"]},
+        }),
+    );
+    let made = h.run(&["--json", "create", "--file", &file]).out();
+    let id = made["focus_id"].as_str().unwrap();
+    let shown = h.run(&["--json", "show", id]).out();
+    let (include, exclude) = (
+        &shown["definition"]["include"],
+        &shown["definition"]["exclude"],
+    );
+    assert_eq!(
+        listed(include, "initiatives"),
+        [pair("i-1", "first alias label")]
+    );
+    assert_eq!(
+        listed(include, "projects"),
+        [pair("p-gamma", "Gamma label")]
+    );
+    assert_eq!(
+        listed(include, "tickets"),
+        [pair("t-1", "SWM-1"), pair("t-2", "two")],
+        "canonical order, each label from its own occurrence: the identifier the caller typed \
+         when no label was written"
+    );
+    assert_eq!(listed(exclude, "tickets"), [pair("t-2", "SWM-2")]);
+
+    // The same definition read back from the store, not only from the command's output.
+    let again = h.run(&["--json", "show", "--revision", "1", id]).out();
+    assert_eq!(again["definition"], shown["definition"]);
+}
+
+#[test]
+#[trace("FR-061-AC-1", "FR-061-AC-12")]
+fn a_label_is_cut_to_64_bytes_on_a_character_boundary_and_kept_on_one_line() {
+    let Some(mut h) = Harness::new("cli-label-bounds") else {
+        return;
+    };
+    let long = "é".repeat(40);
+    let file = h.file(
+        "long.json",
+        &json!({
+            "team": "SWM",
+            "name": "Long labels",
+            "include": {"projects": [
+                {"ref": "Gamma", "label": long},
+                {"ref": "Alpha", "label": "two\nlines\u{1b}[0m"},
+            ]},
+        }),
+    );
+    let made = h.run(&["--json", "create", "--file", &file]).out();
+    let id = made["focus_id"].as_str().unwrap();
+    let shown = h.run(&["--json", "show", id]).out();
+    let projects = listed(&shown["definition"]["include"], "projects");
+    let gamma = projects.iter().find(|(r, _)| r == "p-gamma").unwrap();
+    assert_eq!(
+        gamma.1.len(),
+        64,
+        "forty two-byte characters cut to 64 bytes"
+    );
+    assert!(gamma.1.chars().all(|c| c == 'é'));
+    let alpha = projects.iter().find(|(r, _)| r == "p-alpha").unwrap();
+    assert!(
+        alpha.1.starts_with("two") && alpha.1.contains("lines"),
+        "{}",
+        alpha.1
+    );
+    assert!(!alpha.1.chars().any(char::is_control), "{:?}", alpha.1);
+}
+
+#[test]
+#[trace("FR-061-AC-2", "FR-061-AC-20")]
+fn a_refused_or_timed_out_resolution_publishes_neither_the_selection_nor_the_labels() {
+    let Some(mut h) = Harness::new("cli-labels-refused") else {
+        return;
+    };
+    let file = h.file(
+        "bad.json",
+        &json!({
+            "team": "SWM",
+            "name": "Refused",
+            "include": {"projects": [
+                {"ref": "Gamma", "label": "fine"},
+                {"ref": "Nowhere", "label": "never stored"},
+            ]},
+        }),
+    );
+    let refused = h.run(&["--json", "create", "--file", &file]);
+    assert_eq!(refused.error()["code"], "unresolved_reference");
+    assert!(
+        h.keys().is_empty(),
+        "nothing of the selection or its labels was stored"
+    );
+
+    let good = h.file(
+        "good.json",
+        &json!({"team": "SWM", "name": "Timed out",
+                "include": {"projects": [{"ref": "Gamma", "label": "not stored"}]}}),
+    );
+    // The refused attempt cached a valid snapshot, which a fresh cache would legitimately
+    // reuse. Let it age past the five-minute policy so the reader must go to the source.
+    h.clock.pass(301);
+    let reads = h.source.reads();
+    h.source.behave(Behavior::NeverComplete);
+    let timed_out = h.run(&["--json", "create", "--file", &good]);
+    assert_eq!(timed_out.error()["reason"], "timeout");
+    assert_eq!(
+        h.source.reads(),
+        reads + 1,
+        "the bounded source read was attempted"
+    );
+    assert!(h.keys().is_empty());
+}
+
+// --- the shared read's answer is checked, never trusted blindly ----------------------------------
+
+/// A change made to the real service's answer before the command sees it.
+type Tamper = fn(&mut ix_board::ResolvedNamedSelection);
+
+/// A source that returns what the real service returns after `tamper` changed it.
+struct Tampered<'a> {
+    inner: &'a mut ServiceSnapshots<FakeSource, ManualClock>,
+    tamper: Tamper,
+}
+
+impl SnapshotSource for Tampered<'_> {
+    fn resolve_named(
+        &mut self,
+        policy: &ix_board::ReadPolicy,
+        input: &ix_board::NamedSelectionInput,
+    ) -> Result<ix_board::ResolvedNamedSelection, Error> {
+        let mut resolved = self.inner.resolve_named(policy, input)?;
+        (self.tamper)(&mut resolved);
+        Ok(resolved)
+    }
+}
+
+#[test]
+#[trace("FR-061-AC-19")]
+fn an_answer_that_does_not_match_the_input_is_a_failed_read_and_yields_no_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(START);
+    let source = FakeSource {
+        snapshot: workspace(),
+        clock: clock.clone(),
+        behavior: Arc::new(Mutex::new(Behavior::Succeed)),
+        reads: Arc::new(AtomicUsize::new(0)),
+        timeouts: Arc::new(Mutex::new(Vec::new())),
+    };
+    let mut service = ServiceSnapshots(
+        ReadService::with_clock(source, &dir.path().join("cache.sqlite3"), clock).unwrap(),
+    );
+    let definition = file::parse_definition(
+        br#"{"team":"SWM","name":"n","include":{"projects":["Gamma",{"ref":"Alpha","label":"A"}]}}"#,
+    )
+    .unwrap();
+
+    // Control: untouched, the labels join by association.
+    let content = resolve::resolve(
+        &definition,
+        &mut Tampered {
+            inner: &mut service,
+            tamper: |_| {},
+        },
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    let labels: Vec<(&str, &str)> = content
+        .include
+        .iter()
+        .map(|m| (m.id.as_str(), m.label.as_str()))
+        .collect();
+    assert_eq!(labels, [("p-alpha", "A"), ("p-gamma", "Gamma")]);
+
+    let tampers: [(&str, Tamper); 3] = [
+        ("an association is missing", |r| {
+            r.associations.pop();
+        }),
+        ("an association carries another input", |r| {
+            let other = r.associations[1].input.clone();
+            r.associations[0].input = other;
+        }),
+        ("a canonical member has no occurrence", |r| {
+            r.associations[0].member = ix_board::NamedMember::Project {
+                id: "p-elsewhere".into(),
+            };
+        }),
+    ];
+    for (what, tamper) in tampers {
+        let error = resolve::resolve(
+            &definition,
+            &mut Tampered {
+                inner: &mut service,
+                tamper,
+            },
+            Duration::from_secs(30),
+        )
+        .unwrap_err();
+        let FocusError::SourceUnavailable { reason, .. } = &error else {
+            panic!("{what}: {error:?}");
+        };
+        assert_eq!(reason.as_str(), "failed", "{what}");
+    }
 }
 
 // --- AC-22: the existing commands keep their meanings -----------------------------------------
@@ -1513,4 +1813,410 @@ fn the_singular_focus_and_work_commands_are_unchanged_and_focuses_is_separate() 
     // The plural family does not accept the singular's free text, nor the reverse.
     assert!(parse(&["agent-msg", "focuses", "phase 2"]).is_err());
     assert!(parse(&["agent-msg", "focus", "list", "--json"]).is_err());
+}
+
+// --- AC-19: every SDK failure has a reason, chosen on purpose ---------------------------------
+
+#[test]
+#[trace("FR-061-AC-19")]
+fn each_sdk_failure_is_placed_under_one_of_the_contract_reasons() {
+    use ix_board::Error as E;
+    let io = || std::io::Error::other("fixture");
+    let table: Vec<(E, &str)> = vec![
+        (
+            E::ReadTimeout {
+                deadline: Duration::from_secs(1),
+            },
+            "timeout",
+        ),
+        (E::MissingApiKey, "missing"),
+        (E::EmptyCredentialInput, "missing"),
+        (E::CredentialInput(io()), "missing"),
+        (E::MissingWorkspaceData, "partial"),
+        (E::PaginationLimit { pages: 3 }, "partial"),
+        (
+            E::NestedPaginationLimit {
+                resource: "r".into(),
+            },
+            "partial",
+        ),
+        (E::MissingCursor, "partial"),
+        (
+            E::InvalidCursor {
+                resource: "r".into(),
+            },
+            "partial",
+        ),
+        (
+            E::RelationsLimit {
+                issue: "SWM-1".into(),
+            },
+            "partial",
+        ),
+        (
+            E::MissingDependency {
+                issue: "SWM-1".into(),
+            },
+            "partial",
+        ),
+        (
+            E::DependencyCycle {
+                issues: "SWM-1".into(),
+            },
+            "partial",
+        ),
+        (
+            E::ParentCycle {
+                identifier: "SWM-1".into(),
+            },
+            "partial",
+        ),
+        (
+            E::MissingProjectMilestone {
+                issue: "SWM-1".into(),
+                milestone: "m".into(),
+                project: "p".into(),
+            },
+            "partial",
+        ),
+        (
+            E::FocusPlanIncomplete {
+                issue: "SWM-1".into(),
+                field: "state",
+            },
+            "partial",
+        ),
+        (
+            E::FocusHygieneIncomplete {
+                issue: "SWM-1".into(),
+            },
+            "partial",
+        ),
+        (
+            E::GraphQl {
+                messages: "m".into(),
+            },
+            "failed",
+        ),
+        (
+            E::LinearRateLimited {
+                retry_after: Duration::from_secs(1),
+            },
+            "failed",
+        ),
+        (E::BoundUnsupported, "failed"),
+        (E::InvalidReadPolicy { reason: "r" }, "failed"),
+        (E::CacheTimestamp, "failed"),
+        (E::CacheDirectoryUnavailable, "failed"),
+    ];
+    for (error, reason) in table {
+        let FocusError::SourceUnavailable {
+            reason: got,
+            origin,
+            ..
+        } = resolve::source_error(&error)
+        else {
+            panic!("{error}: not a source_unavailable");
+        };
+        assert_eq!(got.as_str(), reason, "{error}");
+        assert_eq!(origin, "ix-board workspace snapshot");
+    }
+    // A fault of the caller's own reference is never blamed on the source.
+    let scope = E::ScopeSelection {
+        kind: "project",
+        identifier: "Twin".into(),
+        matches: 2,
+    };
+    let FocusError::UnresolvedReference { reference, .. } = resolve::unresolved(scope) else {
+        panic!("a reference that matches twice is unresolved");
+    };
+    assert_eq!(reference, "Twin");
+    assert_eq!(
+        resolve::unresolved(E::InvalidTeam).code().as_str(),
+        "invalid_argument"
+    );
+}
+
+// --- AC-1, AC-4: stored text and the printed forms ----------------------------------------------
+
+#[test]
+#[trace("FR-061-AC-1", "FR-061-AC-21")]
+fn a_name_is_stored_as_one_safe_line_and_a_description_keeps_its_lines_but_prints_indented() {
+    let Some(mut h) = Harness::new("cli-text-rules") else {
+        return;
+    };
+    let mut value = definition("unused");
+    value["name"] = json!("Plan\u{1b}[31m\nSecond line");
+    value["description"] = json!("first\nowner: terra/forged epoch 9 (live)\u{1b}[2J");
+    let file = h.file("odd.json", &value);
+    let made = h.run(&["--json", "create", "--file", &file]).out();
+    let name = made["name"].as_str().unwrap();
+    assert!(
+        !name.contains('\n') && !name.chars().any(char::is_control),
+        "a name is one line of plain text: {name:?}"
+    );
+    assert!(name.starts_with("Plan"), "{name:?}");
+    let id = made["focus_id"].as_str().unwrap();
+    assert_eq!(
+        h.run(&["--json", "show", name]).out()["focus_id"],
+        id,
+        "the stored name is the name that resolves"
+    );
+
+    let shown = h.run(&["--json", "show", id]).out();
+    let description = shown["definition"]["description"].as_str().unwrap();
+    assert!(
+        description.contains('\n'),
+        "the description keeps its line break"
+    );
+    assert!(
+        !description.chars().any(|c| c.is_control() && c != '\n'),
+        "{description:?}"
+    );
+
+    let text = h.run(&["show", id]);
+    let forged = text
+        .stdout
+        .lines()
+        .filter(|line| line.starts_with("owner:"))
+        .count();
+    assert_eq!(
+        forged, 1,
+        "only the real owner line starts with `owner:`: {}",
+        text.stdout
+    );
+    assert!(!text.stdout.contains('\u{1b}'));
+}
+
+// --- AC-4: the name on create ---------------------------------------------------------------
+
+#[test]
+#[trace("FR-061-AC-4")]
+fn creating_a_second_definition_with_a_name_in_use_is_name_taken_in_any_letter_case() {
+    let Some(mut h) = Harness::new("cli-create-name-taken") else {
+        return;
+    };
+    let first = created(&mut h, "Plan");
+    let before = h.focus_keys();
+    for name in ["Plan", "PLAN", "plan"] {
+        let file = h.file("again.json", &definition(name));
+        let out = h.run(&["--json", "create", "--file", &file]);
+        let error = out.error();
+        assert_eq!(error["code"], "name_taken", "{name}");
+        assert_eq!(error["name"], name, "{name}");
+        assert_eq!(
+            error["focus_id"],
+            first.as_str(),
+            "the holder is named: {name}"
+        );
+    }
+    assert_eq!(h.focus_keys(), before, "nothing was written");
+}
+
+// --- AC-7: two claimants of the same owner -----------------------------------------------------
+
+#[test]
+#[trace("FR-061-AC-8")]
+fn the_second_of_two_claims_made_at_the_same_epoch_loses_and_is_told_who_won() {
+    let Some(mut h) = Harness::new("cli-claim-vs-claim") else {
+        return;
+    };
+    let id = created(&mut h, "Plan");
+    h.as_session("sess-b");
+    let won = h
+        .run(&["--json", "claim", &id, "--expected-owner-epoch", "1"])
+        .out();
+    assert_eq!(won["owner_id"], "terra/sess-b");
+    assert_eq!(won["owner_epoch"], 2);
+    let after_winner = h.focus_keys();
+
+    h.as_session("sess-c");
+    let lost = h.run(&["--json", "claim", &id, "--expected-owner-epoch", "1"]);
+    let error = lost.error();
+    assert_eq!(error["code"], "owner_epoch_conflict");
+    assert_eq!(
+        error["current_owner_id"], "terra/sess-b",
+        "the winner is named"
+    );
+    assert_eq!(error["current_owner_epoch"], 2);
+    assert_eq!(h.focus_keys(), after_winner, "the loser changed nothing");
+}
+
+// --- AC-16: a skipped registry record --------------------------------------------------------
+
+#[test]
+#[trace("FR-061-AC-16", "FR-061-AC-10")]
+fn a_registry_read_that_skipped_a_record_shows_unknown_and_refuses_a_transfer_target() {
+    let Some(mut h) = Harness::new("cli-skipped-registration") else {
+        return;
+    };
+    let id = created(&mut h, "Plan");
+    h.bus.relay.register(&live("sess-a")).unwrap();
+    h.bus.relay.register(&live("sess-b")).unwrap();
+    let state = |h: &mut Harness| {
+        h.run(&["--json", "show", &id]).out()["owner"]["state"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(
+        state(&mut h),
+        "live",
+        "a complete read of one verified registration"
+    );
+
+    h.bus.plant("terra-garbage", b"\xff not a registration");
+    assert_eq!(h.bus.relay.agents().unwrap().skipped.len(), 1);
+    assert_eq!(
+        state(&mut h),
+        "unknown",
+        "one verified registration is not enough when a record was skipped"
+    );
+    let before = h.focus_keys();
+    let refused = h.run(&[
+        "--json",
+        "transfer",
+        &id,
+        "--to",
+        "terra:QSL:sess-b",
+        "--expected-owner-epoch",
+        "1",
+    ]);
+    assert_eq!(refused.code(), "invalid_argument");
+    assert_eq!(h.focus_keys(), before);
+
+    redis::cmd("HDEL")
+        .arg(h.bus.key("agents"))
+        .arg("terra-garbage")
+        .exec(&mut h.bus.raw)
+        .unwrap();
+    let moved = h
+        .run(&[
+            "--json",
+            "transfer",
+            &id,
+            "--to",
+            "terra:QSL:sess-b",
+            "--expected-owner-epoch",
+            "1",
+        ])
+        .out();
+    assert_eq!(moved["owner_id"], "terra/sess-b");
+}
+
+// --- AC-21: the stamps of a write are taken after the read -------------------------------------
+
+#[test]
+#[trace("FR-061-AC-21")]
+fn every_stamp_of_a_write_is_taken_after_the_snapshot_read_and_not_before_it() {
+    let Some(mut h) = Harness::new("cli-stamps") else {
+        return;
+    };
+    let started = START * 1_000;
+    let after_read = (START + 300) * 1_000;
+
+    // An unverified caller is refused before the read starts.
+    let file = h.file("plan.json", &definition("Plan"));
+    let wrong = h.run(&["--json", "--session", "other", "create", "--file", &file]);
+    assert_eq!(wrong.code(), "invalid_argument");
+    assert_eq!(h.source.reads(), 0);
+
+    h.source.behave(Behavior::SucceedAfter(300));
+    let made = h.run(&["--json", "create", "--file", &file]).out();
+    let id = made["focus_id"].as_str().unwrap().to_owned();
+    let shown = h.run(&["--json", "show", &id]).out();
+    assert_eq!(shown["written_at_ms"], after_read, "the revision");
+    assert_eq!(
+        shown["owner"]["binding"]["verified_at"], after_read,
+        "the verification"
+    );
+    assert_eq!(
+        shown["owner"]["change"]["at"], after_read,
+        "the owner change"
+    );
+    assert_ne!(shown["written_at_ms"], started);
+
+    let next = h.file("next.json", &definition("Next"));
+    h.source.behave(Behavior::SucceedAfter(200));
+    h.run(&[
+        "--json",
+        "update",
+        &id,
+        "--file",
+        &next,
+        "--expected-revision",
+        "1",
+    ])
+    .out();
+    let updated = h.run(&["--json", "show", &id]).out();
+    assert_eq!(updated["written_at_ms"], (START + 500) * 1_000);
+    assert_eq!(
+        updated["owner"]["binding"]["verified_at"],
+        (START + 500) * 1_000,
+        "the owner's binding is verified again after the read"
+    );
+}
+
+// --- AC-21: a result that cannot be printed --------------------------------------------------
+
+/// A standard output that fails every write with `kind`.
+struct Failing(std::io::ErrorKind);
+
+impl std::io::Write for Failing {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::from(self.0))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::from(self.0))
+    }
+}
+
+#[test]
+#[trace("FR-061-AC-21")]
+fn a_closed_standard_output_after_a_committed_write_is_not_an_invalid_argument() {
+    let Some(mut h) = Harness::new("cli-closed-stdout") else {
+        return;
+    };
+    let file = h.file("plan.json", &definition("Plan"));
+
+    // A closed pipe (`| head`): the write is committed, the reader chose to stop reading.
+    let error = h
+        .run_to(
+            &["--json", "create", "--file", &file],
+            &mut Failing(std::io::ErrorKind::BrokenPipe),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, CommandError::Output(e) if e.kind() == std::io::ErrorKind::BrokenPipe),
+        "{error:?}"
+    );
+    let mut stderr = Vec::new();
+    assert_eq!(report(&error, true, &mut stderr), 0);
+    assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
+    let listed = h.run(&["--json", "list"]).out();
+    assert_eq!(
+        listed["definitions"].as_array().unwrap().len(),
+        1,
+        "the write stands"
+    );
+
+    // Any other failure to print is reported as that, with no code of the contract.
+    let other = h
+        .run_to(
+            &["--json", "list"],
+            &mut Failing(std::io::ErrorKind::StorageFull),
+        )
+        .unwrap_err();
+    let mut stderr = Vec::new();
+    assert_eq!(report(&other, true, &mut stderr), 1);
+    let text = String::from_utf8(stderr).unwrap();
+    assert!(
+        text.contains("could not be written to standard output"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("invalid_argument") && !text.contains("\"code\""),
+        "{text}"
+    );
 }

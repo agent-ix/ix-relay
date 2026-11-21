@@ -10,7 +10,7 @@
 use std::{collections::BTreeMap, fmt, fs::File, io::Read, str::FromStr};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value, value::RawValue};
 
 use super::{
     error::{FocusError, FocusResult, UnavailableReason},
@@ -120,26 +120,15 @@ pub enum MemberKind {
 }
 
 impl MemberKind {
-    /// The kind as the shared selection spells it on the wire.
+    /// The kind as printed for a person. Not the stored document's spelling, which only the
+    /// [`SelectionCodec`] knows.
     #[must_use]
-    pub const fn wire(self) -> &'static str {
+    pub const fn noun(self) -> &'static str {
         match self {
             Self::Initiative => "initiative",
             Self::Project => "project",
             Self::Milestone => "milestone",
-            Self::Issue => "issue",
-        }
-    }
-
-    /// The kind spelled `wire`, if it is one.
-    #[must_use]
-    pub fn from_wire(wire: &str) -> Option<Self> {
-        match wire {
-            "initiative" => Some(Self::Initiative),
-            "project" => Some(Self::Project),
-            "milestone" => Some(Self::Milestone),
-            "issue" => Some(Self::Issue),
-            _ => None,
+            Self::Issue => "ticket",
         }
     }
 }
@@ -184,16 +173,6 @@ impl Member {
         }
     }
 
-    fn wire_value(&self) -> Value {
-        let mut member = Map::new();
-        member.insert("kind".into(), json!(self.kind.wire()));
-        member.insert("id".into(), json!(self.id));
-        if let Some(project) = &self.project_id {
-            member.insert("project_id".into(), json!(project));
-        }
-        Value::Object(member)
-    }
-
     fn identity(&self) -> (MemberKind, &str, Option<&str>) {
         (self.kind, &self.id, self.project_id.as_deref())
     }
@@ -226,6 +205,32 @@ pub(crate) fn cut_utf8(text: &str, max: usize) -> &str {
     text.get(..end).unwrap_or_default()
 }
 
+/// Free text stored as given after the relay's own text rules (FR-061: a name is sanitized
+/// as a single line like a work-report field; a description keeps its line breaks and
+/// loses only unsafe characters). A text with nothing in it is refused when `required`.
+fn sanitized_text(
+    field: &str,
+    value: &str,
+    (bound, max): (&'static str, usize),
+    single_line: bool,
+    required: bool,
+) -> FocusResult<String> {
+    let stored = if single_line {
+        text::sanitise_line(value)
+    } else {
+        text::sanitise(value).into_owned()
+    };
+    if required && stored.trim().is_empty() {
+        return Err(FocusError::invalid(field, "must not be empty"));
+    }
+    if stored.len() > max {
+        return Err(FocusError::limit(bound, max));
+    }
+    Ok(stored)
+}
+
+/// An identifier or reference: refused, never rewritten, when it is not one line of safe
+/// text, because a changed identifier would name a different object.
 fn checked_line(
     field: &str,
     value: String,
@@ -274,7 +279,7 @@ fn normalize_members(list: &str, members: Vec<Member>) -> FocusResult<Vec<Member
             }
             (kind, Some(_)) => {
                 return Err(FocusError::invalid(
-                    format!("{list} {}", kind.wire()),
+                    format!("{list} {}", kind.noun()),
                     "only a milestone member has a project ID",
                 ));
             }
@@ -282,8 +287,10 @@ fn normalize_members(list: &str, members: Vec<Member>) -> FocusResult<Vec<Member
         };
         let line = text::sanitise_line(&member.label);
         let label = cut_utf8(&line, MAX_MEMBER_LABEL_BYTES);
-        seen.entry((member.kind, id, project))
-            .or_insert_with(|| label.to_owned());
+        let stored = seen.entry((member.kind, id, project)).or_default();
+        if stored.is_empty() {
+            label.clone_into(stored);
+        }
     }
     Ok(seen
         .into_iter()
@@ -297,13 +304,14 @@ fn normalize_members(list: &str, members: Vec<Member>) -> FocusResult<Vec<Member
 }
 
 impl FocusContent {
-    /// The content in its stored form: single-line text within its bounds, members in
-    /// canonical order without duplicates, labels cut to 64 bytes on a UTF-8 boundary.
+    /// The content in its stored form: a sanitized single-line name, a sanitized description,
+    /// members in canonical order without duplicates, labels cut to 64 bytes on a UTF-8
+    /// boundary.
     ///
     /// # Errors
     ///
-    /// [`FocusError::InvalidArgument`] for an empty or multi-line field or a malformed
-    /// member, and [`FocusError::Limit`] naming the bound for an over-long field or too many
+    /// [`FocusError::InvalidArgument`] for an empty name or team, an identifier that is not
+    /// one line of safe text, or a malformed member, and [`FocusError::Limit`] naming the bound for an over-long field or too many
     /// selectors. Nothing is stored by this call.
     pub fn normalize(self) -> FocusResult<Self> {
         let team = checked_line(
@@ -312,11 +320,18 @@ impl FocusContent {
             ("bytes per stable ID or selector", MAX_SELECTOR_BYTES),
             true,
         )?;
-        let name = checked_line("name", self.name, ("name bytes", MAX_NAME_BYTES), true)?;
-        let description = checked_line(
+        let name = sanitized_text(
+            "name",
+            &self.name,
+            ("name bytes", MAX_NAME_BYTES),
+            true,
+            true,
+        )?;
+        let description = sanitized_text(
             "description",
-            self.description,
+            &self.description,
             ("description bytes", MAX_DESCRIPTION_BYTES),
+            false,
             false,
         )?;
         let include = normalize_members("include", self.include)?;
@@ -334,50 +349,42 @@ impl FocusContent {
     }
 }
 
-/// What the stored selection of a revision is checked against.
-///
-/// A revision embeds the shared ix-board selection, which carries its own explicit
-/// `schema_version`. The relay does not read ix-board itself: its caller supplies the
-/// version the pinned ix-board supports and the decoder that checks a stored selection.
-pub trait SelectionCheck {
-    /// The `schema_version` the pinned ix-board writes and reads.
-    fn schema_version(&self) -> u32;
+/// A selection as the codec reads it: the team and the members of each list in the codec's
+/// canonical order. The members carry no label; a label is the relay's own display metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecodedSelection {
+    /// The team the selection is fenced to.
+    pub team: String,
+    /// What is included.
+    pub include: Vec<Member>,
+    /// What is removed from the selection.
+    pub exclude: Vec<Member>,
+}
 
-    /// Whether a stored selection can be used.
+/// The one place that knows the stored selection document.
+///
+/// A revision embeds the shared ix-board selection, and ix-board owns its wire type, its
+/// version and its canonical encoding. The relay never spells that document: its caller
+/// supplies this codec, built on the ix-board encoder and decoder, and the relay stores the
+/// bytes `encode` returns and reads them back only through `decode`.
+pub trait SelectionCodec {
+    /// The canonical document of `team`, `include` and `exclude`, exactly as ix-board encodes it.
+    ///
+    /// # Errors
+    ///
+    /// [`FocusError::InvalidArgument`] when the document cannot be encoded.
+    fn encode(&self, team: &str, include: &[Member], exclude: &[Member]) -> FocusResult<String>;
+
+    /// The selection a stored document holds.
     ///
     /// # Errors
     ///
     /// [`UnavailableReason::UnsupportedSchema`] for a version this build does not read,
     /// [`UnavailableReason::Undecodable`] for a document that is not a valid selection.
-    fn check(&self, selection: &[u8]) -> Result<(), UnavailableReason>;
+    fn decode(&self, document: &[u8]) -> Result<DecodedSelection, UnavailableReason>;
 }
 
-/// A [`SelectionCheck`] that reads only the embedded `schema_version`, for a caller with no
-/// ix-board decoder of its own.
-#[derive(Clone, Copy, Debug)]
-pub struct VersionOnlyCheck(pub u32);
-
-impl SelectionCheck for VersionOnlyCheck {
-    fn schema_version(&self) -> u32 {
-        self.0
-    }
-
-    fn check(&self, selection: &[u8]) -> Result<(), UnavailableReason> {
-        let value: Value =
-            serde_json::from_slice(selection).map_err(|_| UnavailableReason::Undecodable)?;
-        let version = value
-            .get("schema_version")
-            .and_then(Value::as_i64)
-            .ok_or(UnavailableReason::Undecodable)?;
-        if version == i64::from(self.0) {
-            Ok(())
-        } else {
-            Err(UnavailableReason::UnsupportedSchema)
-        }
-    }
-}
-
-/// Display labels of a revision's members, in the order of the embedded selection's lists.
+/// Display labels of a revision's members, in the order the codec decodes each list.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Labels {
     /// One label per inclusion.
@@ -389,7 +396,7 @@ pub struct Labels {
 }
 
 /// One immutable revision of a definition.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Revision {
     /// The definition.
     pub focus_id: FocusId,
@@ -401,8 +408,9 @@ pub struct Revision {
     pub name: String,
     /// The description at this revision.
     pub description: String,
-    /// The embedded shared ix-board selection: canonical IDs only.
-    pub selection: Value,
+    /// The embedded shared ix-board selection, byte for byte as the codec encoded it:
+    /// canonical IDs only.
+    pub selection: Box<RawValue>,
     /// Display labels of the selection's members.
     #[serde(default)]
     pub labels: Labels,
@@ -412,38 +420,77 @@ pub struct Revision {
     pub written_at_ms: i64,
 }
 
+impl PartialEq for Revision {
+    fn eq(&self, other: &Self) -> bool {
+        self.focus_id == other.focus_id
+            && self.revision == other.revision
+            && self.team == other.team
+            && self.name == other.name
+            && self.description == other.description
+            && self.selection.get() == other.selection.get()
+            && self.labels == other.labels
+            && self.owner_epoch == other.owner_epoch
+            && self.written_at_ms == other.written_at_ms
+    }
+}
+
+/// The label of the member of `members` that has `member`'s identity, or none.
+fn label_of(members: &[Member], member: &Member) -> String {
+    members
+        .iter()
+        .find(|candidate| candidate.identity() == member.identity())
+        .map(|found| found.label.clone())
+        .unwrap_or_default()
+}
+
 impl Revision {
     /// Builds revision `number` of `focus` from normalized `content`.
-    #[must_use]
+    ///
+    /// The selection is the codec's own encoding; the labels are lined up with the order in
+    /// which the codec reads that document back, so they follow whatever canonical order
+    /// ix-board uses.
+    ///
+    /// # Errors
+    ///
+    /// [`FocusError::InvalidArgument`] when the codec cannot encode the selection or reads
+    /// back a different one.
     pub fn build(
+        codec: &dyn SelectionCodec,
         focus: &FocusId,
         number: u64,
         content: &FocusContent,
-        schema_version: u32,
         owner_epoch: u64,
         written_at_ms: i64,
-    ) -> Self {
-        let wire =
-            |members: &[Member]| Value::Array(members.iter().map(Member::wire_value).collect());
-        Self {
+    ) -> FocusResult<Self> {
+        let document = codec.encode(&content.team, &content.include, &content.exclude)?;
+        let selection = RawValue::from_string(document)
+            .map_err(|error| FocusError::invalid("selection", error.to_string()))?;
+        let read = codec
+            .decode(selection.get().as_bytes())
+            .map_err(|reason| FocusError::invalid("selection", reason.to_string()))?;
+        let labels = Labels {
+            include: read
+                .include
+                .iter()
+                .map(|member| label_of(&content.include, member))
+                .collect(),
+            exclude: read
+                .exclude
+                .iter()
+                .map(|member| label_of(&content.exclude, member))
+                .collect(),
+        };
+        Ok(Self {
             focus_id: focus.clone(),
             revision: number,
             team: content.team.clone(),
             name: content.name.clone(),
             description: content.description.clone(),
-            selection: json!({
-                "schema_version": schema_version,
-                "team": content.team,
-                "include": wire(&content.include),
-                "exclude": wire(&content.exclude),
-            }),
-            labels: Labels {
-                include: content.include.iter().map(|m| m.label.clone()).collect(),
-                exclude: content.exclude.iter().map(|m| m.label.clone()).collect(),
-            },
+            selection,
+            labels,
             owner_epoch,
             written_at_ms,
-        }
+        })
     }
 
     /// The revision as stored.
@@ -463,31 +510,41 @@ impl Revision {
         Ok(bytes)
     }
 
-    /// The inclusions and exclusions of the embedded selection, with their labels.
+    /// The inclusions and exclusions of the embedded selection, as the codec reads them,
+    /// with their labels.
     ///
     /// # Errors
     ///
-    /// [`UnavailableReason::Undecodable`] when the embedded selection is not a list of
-    /// members of the four kinds.
-    pub fn members(&self) -> Result<(Vec<Member>, Vec<Member>), UnavailableReason> {
-        Ok((
-            parse_members(self.selection.get("include"), &self.labels.include)?,
-            parse_members(self.selection.get("exclude"), &self.labels.exclude)?,
-        ))
+    /// The codec's refusal: an unsupported version or an undecodable document.
+    pub fn members(
+        &self,
+        codec: &dyn SelectionCodec,
+    ) -> Result<(Vec<Member>, Vec<Member>), UnavailableReason> {
+        let mut read = codec.decode(self.selection.get().as_bytes())?;
+        for (members, labels) in [
+            (&mut read.include, &self.labels.include),
+            (&mut read.exclude, &self.labels.exclude),
+        ] {
+            for (member, label) in members.iter_mut().zip(labels) {
+                label.clone_into(&mut member.label);
+            }
+        }
+        Ok((read.include, read.exclude))
     }
 
     /// Whether this revision already holds `content` (labels, which only display, aside).
     #[must_use]
-    pub fn holds(&self, content: &FocusContent) -> bool {
-        let Ok((include, exclude)) = self.members() else {
+    pub fn holds(&self, codec: &dyn SelectionCodec, content: &FocusContent) -> bool {
+        let Ok((include, exclude)) = self.members(codec) else {
             return false;
         };
+        // The same members whatever order either side lists them in.
         let same = |stored: &[Member], wanted: &[Member]| {
-            stored.len() == wanted.len()
-                && stored
-                    .iter()
-                    .zip(wanted)
-                    .all(|(a, b)| a.identity() == b.identity())
+            let mut stored: Vec<_> = stored.iter().map(Member::identity).collect();
+            let mut wanted: Vec<_> = wanted.iter().map(Member::identity).collect();
+            stored.sort_unstable();
+            wanted.sort_unstable();
+            stored == wanted
         };
         self.team == content.team
             && self.name == content.name
@@ -495,40 +552,6 @@ impl Revision {
             && same(&include, &content.include)
             && same(&exclude, &content.exclude)
     }
-}
-
-fn parse_members(
-    list: Option<&Value>,
-    labels: &[String],
-) -> Result<Vec<Member>, UnavailableReason> {
-    let list = list
-        .and_then(Value::as_array)
-        .ok_or(UnavailableReason::Undecodable)?;
-    list.iter()
-        .enumerate()
-        .map(|(index, entry)| {
-            let entry = entry.as_object().ok_or(UnavailableReason::Undecodable)?;
-            let text = |key: &str| {
-                entry
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .ok_or(UnavailableReason::Undecodable)
-            };
-            let kind =
-                MemberKind::from_wire(&text("kind")?).ok_or(UnavailableReason::Undecodable)?;
-            Ok(Member {
-                kind,
-                id: text("id")?,
-                project_id: if kind == MemberKind::Milestone {
-                    Some(text("project_id")?)
-                } else {
-                    None
-                },
-                label: labels.get(index).cloned().unwrap_or_default(),
-            })
-        })
-        .collect()
 }
 
 /// Whether a definition accepts changes.
@@ -574,8 +597,8 @@ pub struct OwnerBinding {
     pub process_id: Option<u32>,
     /// The owner's address when it last wrote; a display label, never identity.
     pub address: String,
-    /// When the binding was last verified, Unix milliseconds.
-    pub verified_at_ms: i64,
+    /// When the binding was last verified, in Unix milliseconds.
+    pub verified_at: i64,
     /// Members this build does not define.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -589,14 +612,14 @@ impl OwnerBinding {
         session: &SessionId,
         process_id: Option<u32>,
         address: &str,
-        verified_at_ms: i64,
+        verified_at: i64,
     ) -> Self {
         Self {
             machine: machine.to_string(),
             native_session_id: session.to_string(),
             process_id,
             address: address.to_owned(),
-            verified_at_ms,
+            verified_at,
             extra: Map::new(),
         }
     }
@@ -644,8 +667,8 @@ pub struct OwnerChange {
     pub previous_owner_id: Option<String>,
     /// The reason a forced claim records.
     pub reason: Option<String>,
-    /// When, Unix milliseconds.
-    pub at_ms: i64,
+    /// When, in Unix milliseconds.
+    pub at: i64,
     /// Members this build does not define.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -719,8 +742,8 @@ pub struct NewPin {
     pub incarnation: Incarnation,
     /// The revision it adopted.
     pub adopted_revision: u64,
-    /// When, Unix milliseconds.
-    pub pinned_at_ms: i64,
+    /// When, in Unix milliseconds.
+    pub pinned_at: i64,
 }
 
 /// The stored value of a pin, at most 512 bytes.
@@ -730,8 +753,8 @@ pub struct PinValue {
     pub incarnation: String,
     /// The revision it adopted.
     pub adopted_revision: u64,
-    /// When, Unix milliseconds.
-    pub pinned_at_ms: i64,
+    /// When, in Unix milliseconds.
+    pub pinned_at: i64,
     /// Members this build does not define.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -792,7 +815,7 @@ pub(crate) fn decode_summary(
     meta_raw: &[u8],
     owner_raw: &[u8],
     latest_raw: Option<&[u8]>,
-    check: &dyn SelectionCheck,
+    codec: &dyn SelectionCodec,
 ) -> Result<Summary, UnavailableReason> {
     let undecodable = |_| UnavailableReason::Undecodable;
     let meta: Meta = serde_json::from_slice(meta_raw).map_err(undecodable)?;
@@ -806,8 +829,7 @@ pub(crate) fn decode_summary(
     if latest.focus_id != *focus || latest.revision != meta.latest_revision {
         return Err(UnavailableReason::Undecodable);
     }
-    let selection = serde_json::to_vec(&latest.selection).map_err(undecodable)?;
-    check.check(&selection)?;
+    codec.decode(latest.selection.get().as_bytes())?;
     Ok(Summary {
         meta,
         owner,
@@ -819,16 +841,14 @@ pub(crate) fn decode_summary(
 pub(crate) fn decode_revision(
     focus: &FocusId,
     raw: &[u8],
-    check: &dyn SelectionCheck,
+    codec: &dyn SelectionCodec,
 ) -> Result<Revision, UnavailableReason> {
     let revision: Revision =
         serde_json::from_slice(raw).map_err(|_| UnavailableReason::Undecodable)?;
     if revision.focus_id != *focus {
         return Err(UnavailableReason::Undecodable);
     }
-    let selection =
-        serde_json::to_vec(&revision.selection).map_err(|_| UnavailableReason::Undecodable)?;
-    check.check(&selection)?;
+    codec.decode(revision.selection.get().as_bytes())?;
     Ok(revision)
 }
 
@@ -837,6 +857,7 @@ mod tests {
     #![allow(clippy::unwrap_used, reason = "test fixtures")]
 
     use ix_trace_rs::trace;
+    use serde_json::json;
 
     use super::*;
 
@@ -946,40 +967,48 @@ mod tests {
         );
     }
 
-    #[trace("FR-061-AC-3")]
+    #[trace("FR-061-AC-1")]
     #[test]
-    fn a_revision_holds_the_content_it_was_built_from_and_nothing_else() {
-        let id = FocusId::generate().unwrap();
-        let wanted = content().normalize().unwrap();
-        let revision = Revision::build(&id, 1, &wanted, 3, 1, 10);
-        assert!(revision.holds(&wanted));
-        let mut other = wanted.clone();
-        other.description = "changed".into();
-        assert!(!revision.holds(&other));
-        let mut other = wanted.clone();
-        other
-            .include
-            .push(Member::new(MemberKind::Project, "p2", "x"));
-        assert!(!revision.holds(&other.normalize().unwrap()));
-        // A label only displays: a different label is the same content.
-        let mut relabelled = wanted.clone();
-        relabelled.include[0].label = "renamed upstream".into();
-        assert!(revision.holds(&relabelled));
-        // A revision whose selection does not parse holds nothing.
-        let mut broken = revision;
-        broken.selection = json!({"schema_version": 3, "include": "nope", "exclude": []});
-        assert!(!broken.holds(&wanted));
-        assert_eq!(
-            broken.members().unwrap_err(),
-            UnavailableReason::Undecodable
+    fn a_name_is_sanitized_to_one_line_and_a_description_keeps_its_line_breaks() {
+        let mut wanted = content();
+        wanted.name = "Plan\none\ttwo\u{7}".into();
+        wanted.description = "first\nsecond\u{7}".into();
+        let normalized = wanted.normalize().unwrap();
+        assert!(
+            !normalized.name.contains(['\n', '\t', '\u{7}']),
+            "{:?}",
+            normalized.name
         );
+        assert!(normalized.name.starts_with("Plan"));
+        assert!(normalized.description.contains('\n'), "line breaks stay");
+        assert!(
+            !normalized.description.contains('\u{7}'),
+            "unsafe characters go"
+        );
+        let mut blank = content();
+        // Sanitizing replaces a line break with a visible character, so a name that is
+        // blank is empty or spaces only.
+        for name in ["", "   "] {
+            blank.name = name.into();
+            assert!(blank.clone().normalize().is_err(), "{name:?} is blank");
+        }
+    }
+
+    #[trace("FR-061-AC-12")]
+    #[test]
+    fn the_bound_applies_to_the_stored_text_after_sanitizing() {
+        let mut wanted = content();
+        // 43 bytes of U+0007 become 43 three-byte replacement characters: 129 bytes.
+        wanted.name = "\u{7}".repeat(43);
+        let error = wanted.normalize().unwrap_err();
+        assert_eq!(error.code().as_str(), "limit", "{error}");
     }
 
     #[trace("FR-061-AC-6")]
     #[test]
     fn an_owner_binding_keeps_the_members_it_does_not_define() {
         let stored = r#"{"machine":"terra","native_session_id":"s","process_id":7,
-            "address":"terra:QSL:a","verified_at_ms":3,"from_the_future":[1,2]}"#;
+            "address":"terra:QSL:a","verified_at":3,"from_the_future":[1,2]}"#;
         let binding: OwnerBinding = serde_json::from_str(stored).unwrap();
         assert_eq!(binding.owner_id(), "terra/s");
         let again = serde_json::to_value(&binding).unwrap();

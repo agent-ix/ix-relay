@@ -10,8 +10,8 @@
 use std::io::{self, Write};
 
 use relay_core::named_focus::{
-    ChangeKind, DefinitionState, FocusError, FocusId, Member, MemberKind, Meta, Owner,
-    OwnerBinding, OwnerChange, Revision, SessionState, Summary,
+    ChangeKind, DefinitionState, FocusError, FocusErrorCode, FocusId, Member, MemberKind, Meta,
+    Owner, OwnerBinding, OwnerChange, Revision, SelectionCodec, SessionState, Summary,
 };
 use serde::Serialize;
 
@@ -65,8 +65,11 @@ pub(crate) struct DefinitionJson {
 }
 
 /// The definition file's shape of `revision`, or `None` when its selection does not decode.
-pub(crate) fn definition_json(revision: &Revision) -> Option<DefinitionJson> {
-    let (include, exclude) = revision.members().ok()?;
+pub(crate) fn definition_json(
+    revision: &Revision,
+    codec: &dyn SelectionCodec,
+) -> Option<DefinitionJson> {
+    let (include, exclude) = revision.members(codec).ok()?;
     Some(DefinitionJson {
         team: revision.team.clone(),
         name: revision.name.clone(),
@@ -114,6 +117,7 @@ struct ShowJson<'a> {
 /// Prints one definition at one revision.
 pub(crate) fn show(
     out: &mut impl Write,
+    codec: &dyn SelectionCodec,
     json: bool,
     summary: &Summary,
     kept: &[u64],
@@ -121,9 +125,9 @@ pub(crate) fn show(
     owner_state: SessionState,
 ) -> io::Result<()> {
     let meta = &summary.meta;
-    let definition = definition_json(revision);
+    let definition = definition_json(revision, codec);
     let empty = revision
-        .members()
+        .members(codec)
         .is_ok_and(|(include, _)| include.is_empty());
     if json {
         return json::write_line(
@@ -154,8 +158,15 @@ pub(crate) fn show(
         state_word(meta.state),
         kept
     )?;
-    if !revision.description.is_empty() {
-        writeln!(out, "description: {}", revision.description)?;
+    // A description keeps its line breaks; every line after the first is indented, so that
+    // none of its lines can pass for a line of this listing (`owner: ...`, `include ...`).
+    for (number, line) in revision.description.lines().enumerate() {
+        let lead = if number == 0 {
+            "description: "
+        } else {
+            "             "
+        };
+        writeln!(out, "{lead}{line}")?;
     }
     let owner = &summary.owner;
     writeln!(
@@ -163,7 +174,7 @@ pub(crate) fn show(
         "owner: {} epoch {} ({}) at {}",
         owner.owner_id, owner.epoch, owner_state, owner.binding.address
     )?;
-    match revision.members() {
+    match revision.members(codec) {
         Ok((include, exclude)) => {
             if include.is_empty() {
                 writeln!(out, "selects nothing: the inclusion list is empty")?;
@@ -184,7 +195,7 @@ fn members_text(out: &mut impl Write, side: &str, members: &[Member]) -> io::Res
         writeln!(
             out,
             "{side} {} {}{project} ({})",
-            member.kind.wire(),
+            member.kind.noun(),
             member.id,
             member.label
         )?;
@@ -217,6 +228,7 @@ enum ListItemJson<'a> {
     Unavailable {
         focus_id: &'a FocusId,
         available: bool,
+        code: &'static str,
         reason: &'static str,
     },
 }
@@ -253,6 +265,7 @@ pub(crate) fn list(out: &mut impl Write, json: bool, rows: &[ListRow<'_>]) -> io
                 ListRow::Unavailable(focus, reason) => ListItemJson::Unavailable {
                     focus_id: focus,
                     available: false,
+                    code: FocusErrorCode::UnavailableDefinition.as_str(),
                     reason,
                 },
             })
@@ -456,6 +469,8 @@ pub(crate) struct ErrorJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    holder_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<String>,
 }
 
@@ -474,6 +489,7 @@ pub(crate) fn error_json(error: &FocusError) -> ErrorJson {
         field: None,
         reference: None,
         name: None,
+        holder_id: None,
         source: None,
     };
     match error {
@@ -499,6 +515,18 @@ pub(crate) fn error_json(error: &FocusError) -> ErrorJson {
         FocusError::NameTaken { name, holder, .. } => {
             body.name = Some(name.clone());
             body.focus_id = holder.as_ref().map(ToString::to_string);
+        }
+        // The definition the command resolved is `focus_id`; the holder of the name now is
+        // `holder_id`.
+        FocusError::NameMoved {
+            name,
+            focus,
+            holder,
+            ..
+        } => {
+            body.name = Some(name.clone());
+            body.focus_id = Some(focus.to_string());
+            body.holder_id = holder.as_ref().map(ToString::to_string);
         }
         FocusError::Archived { focus } => body.focus_id = Some(focus.to_string()),
         FocusError::Limit { bound, max } => {

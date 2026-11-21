@@ -35,6 +35,8 @@ pub const REMOVAL_EXAMINED: usize = 8;
 /// Most fields one definition record may hold: eight revisions, 32 pins, `meta`, `owner`,
 /// and room for fields a newer writer adds.
 pub const MAX_RECORD_FIELDS: usize = 128;
+/// Most bytes in the name of one field of a definition record (`rev:<n>`, `pin:<incarnation>`).
+pub const MAX_FIELD_NAME_BYTES: usize = 1024;
 /// Most index entries a read of the indexes accepts before it refuses the store as damaged.
 pub const MAX_INDEX_ENTRIES: usize = 1024;
 /// Times a write re-reads and retries when a concurrent write changed an unrelated part of

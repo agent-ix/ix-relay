@@ -10,8 +10,8 @@
 //!
 //! Reference resolution, the workspace snapshot and membership belong to the shared ix-board
 //! library. Nothing here reads Linear: a revision stores canonical IDs and display labels, and
-//! the selection it embeds is the shared ix-board selection, checked by the caller's
-//! [`SelectionCheck`].
+//! the selection it embeds is the shared ix-board selection, which only the caller's
+//! [`SelectionCodec`] encodes and decodes.
 
 mod error;
 pub mod limits;
@@ -22,9 +22,9 @@ mod plan;
 pub use error::{FocusError, FocusErrorCode, FocusResult, SourceReason, UnavailableReason};
 pub use liveness::{LivenessEvidence, SessionState};
 pub use model::{
-    ChangeKind, Definition, DefinitionState, FOCUS_ID_PREFIX, FocusContent, FocusId, Incarnation,
-    Labels, ListEntry, Member, MemberKind, Meta, NewPin, Owner, OwnerBinding, OwnerChange,
-    PinEntry, PinValue, Revision, SelectionCheck, Summary, VersionOnlyCheck,
+    ChangeKind, DecodedSelection, Definition, DefinitionState, FOCUS_ID_PREFIX, FocusContent,
+    FocusId, Incarnation, Labels, ListEntry, Member, MemberKind, Meta, NewPin, Owner, OwnerBinding,
+    OwnerChange, PinEntry, PinValue, Revision, SelectionCodec, Summary,
 };
 pub use plan::{
     Applied, Caller, ClaimRequest, Committed, CreateOutcome, Planned, Resolved, UpdateOutcome,

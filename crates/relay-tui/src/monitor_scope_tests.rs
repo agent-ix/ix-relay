@@ -214,7 +214,7 @@ fn rendered_rows_keep_counts_prefixes_and_add_no_heading_rows() {
     assert!(!text.contains(NO_SELECTED_INITIATIVE), "{text}");
     assert!(lines[focus + 6].trim().is_empty(), "{text}");
     assert!(
-        text.contains("rows are the lead's reported focus"),
+        !text.contains("rows are the lead's reported focus"),
         "{text}"
     );
     press(&mut app, KeyCode::Char('t'));

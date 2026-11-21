@@ -55,7 +55,7 @@ The three modes are mutually exclusive and are selected only from the reported
 scope:
 
 - **Focused**: the report names at least one initiative or project. The scope
-  line says the rows are the lead's reported focus.
+  line carries no mode caption; the rows are the lead's reported focus.
 - **Whole-team fallback**: the report names no initiative, project or ticket,
   or no report exists. The scope line says plainly that no focus is reported and
   the rows are the whole team. It never says or implies lead focus.

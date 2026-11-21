@@ -1493,7 +1493,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 [[package]]
 name = "ix-board"
 version = "0.6.0"
-source = "git+https://github.com/agent-ix/ix-board?rev=2d8c2a8d6c2720066930355135cf6b1e75cf0a48#2d8c2a8d6c2720066930355135cf6b1e75cf0a48"
+source = "git+https://github.com/agent-ix/ix-board?rev=9c9e49fae63a83e14f40ddb83090702ff71bd88d#9c9e49fae63a83e14f40ddb83090702ff71bd88d"
 dependencies = [
  "chrono",
  "clap",
@@ -2601,6 +2601,7 @@ name = "relay-core"
 version = "0.3.4"
 dependencies = [
  "gethostname",
+ "ix-board",
  "ix-cli-kit",
  "ix-trace-rs",
  "jiff",

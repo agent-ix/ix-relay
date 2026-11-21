@@ -41,6 +41,10 @@ pub(crate) struct FileMember {
     pub(crate) reference: String,
     /// For a milestone, the project that must own it.
     pub(crate) project: Option<String>,
+    /// The display label the caller wrote, kept exactly as parsed. The resolution joins it to
+    /// the member the occurrence resolved to through the SDK's `(list, index)` association
+    /// (see `resolve.rs`); an absent or blank label falls back to the reference text.
+    pub(crate) label: Option<String>,
 }
 
 /// The four kinds of members of one list.
@@ -120,6 +124,7 @@ fn member(path: &str, value: &Value, milestone: bool) -> FocusResult<FileMember>
         Value::String(reference) => Ok(FileMember {
             reference: reference.clone(),
             project: None,
+            label: None,
         }),
         Value::Object(map) => {
             let allowed: &[&str] = if milestone {
@@ -137,10 +142,15 @@ fn member(path: &str, value: &Value, milestone: bool) -> FocusResult<FileMember>
                 .get("project")
                 .map(|value| text(&format!("{path}.project"), value))
                 .transpose()?;
-            if let Some(label) = map.get("label") {
-                text(&format!("{path}.label"), label)?;
-            }
-            Ok(FileMember { reference, project })
+            let label = map
+                .get("label")
+                .map(|value| text(&format!("{path}.label"), value))
+                .transpose()?;
+            Ok(FileMember {
+                reference,
+                project,
+                label,
+            })
         }
         _ => refuse(path, "must be a reference string or an object with a ref"),
     }

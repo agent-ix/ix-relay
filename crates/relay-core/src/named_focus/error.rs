@@ -122,6 +122,14 @@ impl fmt::Display for SourceReason {
     }
 }
 
+/// Who holds a name that moved away from the definition a command resolved it to.
+fn holder_clause(holder: Option<&FocusId>) -> String {
+    holder.map_or_else(
+        || "no non-archived definition holds it".to_owned(),
+        |holder| format!("it now names {holder}"),
+    )
+}
+
 /// Everything a named-focus operation can refuse with.
 #[derive(Debug, thiserror::Error)]
 pub enum FocusError {
@@ -166,6 +174,24 @@ pub enum FocusError {
         /// The name.
         name: String,
         /// The definition holding it, when known.
+        holder: Option<FocusId>,
+    },
+    /// The name a command resolved no longer resolves to the definition it found: the
+    /// definition was renamed or archived after the lookup, so the name now belongs to
+    /// another definition or to none. Nothing was written. Reported under the `name_taken`
+    /// code, with its own message.
+    #[error(
+        "the name {name:?} of team {team} no longer resolves to {focus}: {}",
+        holder_clause(.holder.as_ref())
+    )]
+    NameMoved {
+        /// The team.
+        team: String,
+        /// The name the command resolved.
+        name: String,
+        /// The definition the command resolved it to.
+        focus: FocusId,
+        /// The definition that holds the name at the atomic comparison, when one does.
         holder: Option<FocusId>,
     },
     /// The definition is archived.
@@ -239,7 +265,7 @@ impl FocusError {
             Self::RevisionConflict { .. } => FocusErrorCode::RevisionConflict,
             Self::OwnerEpochConflict { .. } => FocusErrorCode::OwnerEpochConflict,
             Self::NotOwner { .. } => FocusErrorCode::NotOwner,
-            Self::NameTaken { .. } => FocusErrorCode::NameTaken,
+            Self::NameTaken { .. } | Self::NameMoved { .. } => FocusErrorCode::NameTaken,
             Self::Archived { .. } => FocusErrorCode::Archived,
             Self::Limit { .. } => FocusErrorCode::Limit,
             Self::UnresolvedReference { .. } => FocusErrorCode::UnresolvedReference,

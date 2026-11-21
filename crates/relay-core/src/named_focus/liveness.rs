@@ -16,7 +16,8 @@ use crate::{
 /// What the evidence says about one session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionState {
-    /// Exactly one registration of the session exists and its placement is `Verified`.
+    /// A complete registry read shows exactly one registration of the session and its
+    /// placement is `Verified`.
     Live,
     /// A successful, complete registry read shows no registration of the session.
     Absent,
@@ -108,7 +109,9 @@ impl LivenessEvidence {
             .filter(|r| r.machine == *machine && r.session_id.as_ref() == Some(session))
             .collect();
         match own.as_slice() {
-            [only] => {
+            // A record the read skipped might be a second registration of the same session, so
+            // "exactly one" is only known from a complete read.
+            [only] if self.complete => {
                 if matches!(only.placement_state(), PlacementState::Verified { .. }) {
                     SessionState::Live
                 } else {
@@ -238,6 +241,21 @@ mod tests {
             complete: false,
         };
         assert_eq!(state(&incomplete, "terra", "a"), SessionState::Unknown);
+    }
+
+    #[trace("FR-061-AC-16")]
+    #[test]
+    fn one_verified_registration_in_an_incomplete_read_is_unknown_not_live() {
+        let incomplete = LivenessEvidence {
+            registrations: vec![registration("terra", "a", "a", true)],
+            complete: false,
+        };
+        assert_eq!(state(&incomplete, "terra", "a"), SessionState::Unknown);
+        assert_eq!(
+            incomplete.owner_state("terra/a", "terra:QSL:a"),
+            SessionState::Unknown
+        );
+        assert!(!state(&incomplete, "terra", "a").is_gone());
     }
 
     #[trace("FR-061-AC-6")]

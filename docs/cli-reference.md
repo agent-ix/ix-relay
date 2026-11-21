@@ -581,7 +581,9 @@ Options:
 `agent-msg focuses` manages named focus definitions: durable, revisioned selections of Linear initiatives, projects, milestones and tickets, each with one owner session. Use `agent-msg focus` to set a lane's free-text focus.
 
 ```text
-Usage: agent-msg focuses [--json] [--lead <ADDRESS>] [--session <ID>] <COMMAND>
+Durable, revisioned named focus definitions with one owner: create, list, show, update, archive, claim and transfer. Not `focus`, which sets this lane's free-text focus.
+
+Usage: agent-msg focuses [OPTIONS] <COMMAND>
 
 Commands:
   create    Resolve a definition file and store revision 1; the caller becomes owner
@@ -591,24 +593,64 @@ Commands:
   archive   Archive a definition: final, releases its name, writes no revision
   claim     Take ownership of a definition whose owner's session is gone
   transfer  Hand ownership to a verified live session
+  help      Print this message or the help of the given subcommand(s)
 
 Options:
-      --json              Print one compact JSON value, or on failure one typed error object on standard error
-      --lead <LEAD>       Writes: the caller's Herdr address; omitted means the calling pane
-      --session <SESSION> Writes: the expected native session ID; refuse a different occupant
-
-agent-msg focuses create --file <FILE> [--read-timeout <SECONDS>]
-agent-msg focuses list [--team <TEAM>] [--archived]
-agent-msg focuses show <FOCUS> [--revision <N>]
-agent-msg focuses update <FOCUS> --file <FILE> --expected-revision <N> [--read-timeout <SECONDS>]
-agent-msg focuses archive <FOCUS> --expected-revision <N>
-agent-msg focuses claim <FOCUS> --expected-owner-epoch <N> [--force --reason <TEXT>]
-agent-msg focuses transfer <FOCUS> --to <server:workspace:tab> --expected-owner-epoch <N>
+      --json               Print one compact JSON value, or on failure one typed error object on standard error
+      --lead <LEAD>        Writes: the caller's Herdr address; omitted means the calling pane
+      --session <SESSION>  Writes: the expected native session ID; refuse a different occupant
+      --url <URL>          Redis URL of the bus. Defaults come from `~/.ix/relay/config.toml`, then `IX_RELAY_URL`, then `redis://127.0.0.1:6379`
+      --prefix <PREFIX>    Redis key prefix. Lets tests (and, in principle, separate buses) share one Redis without colliding. Defaults come from `~/.ix/relay/config.toml`, then `IX_RELAY_PREFIX`, then [`relay_core::DEFAULT_PREFIX`]
+      --human <HUMAN>      The human inbox `escalate`/`resolve` notify/sign as. Defaults come from `~/.ix/relay/config.toml`'s `human` key, then `IX_RELAY_HUMAN`, then `operator`
+  -h, --help               Print help
 ```
 
-`<FOCUS>` is a `foc-` ID or the exact current name of a non-archived definition. `--read-timeout` is one deadline, 1 to 600 seconds (default 120), for the cache lookup, the Linear read and the lookup of every reference. It starts after the credentials are ready, so waiting for the system keychain is not counted. Cached data up to five minutes old is used.
+Each command takes the options above (`--json`, `--lead`, `--session`, `--url`, `--prefix`, `--human`) and these of its own:
 
-The definition file is JSON. Members are reference strings (stable ID, identifier or exact name) or `{"ref": "...", "label": "..."}`; a milestone also takes `"project"`. Any other member is refused with `invalid_argument`. `focuses show --json` prints the definition in this same shape under `definition`, with canonical IDs as references, so it can be saved and used as an update file.
+```text
+agent-msg focuses create [OPTIONS] --file <FILE>
+      --file <FILE>                The definition file (JSON)
+      --read-timeout <SECONDS>     Overall deadline of the snapshot read, 1 to 600 seconds (default 120)
+
+agent-msg focuses list [OPTIONS]
+      --team <TEAM>                Only definitions of this team
+      --archived                   Include archived definitions
+
+agent-msg focuses show [OPTIONS] <FOCUS>
+  <FOCUS>                          The focus ID or its exact current name
+      --revision <REVISION>        A kept revision; the eight newest are kept
+
+agent-msg focuses update [OPTIONS] --file <FILE> --expected-revision <EXPECTED_REVISION> <FOCUS>
+  <FOCUS>                          The focus ID or its exact current name
+      --file <FILE>                          The definition file (JSON)
+      --expected-revision <EXPECTED_REVISION>  The revision this change was made against
+      --read-timeout <SECONDS>               Overall deadline of the snapshot read, 1 to 600 seconds (default 120)
+
+agent-msg focuses archive [OPTIONS] --expected-revision <EXPECTED_REVISION> <FOCUS>
+  <FOCUS>                          The focus ID or its exact current name
+      --expected-revision <EXPECTED_REVISION>  The revision this change was made against
+
+agent-msg focuses claim [OPTIONS] --expected-owner-epoch <EXPECTED_OWNER_EPOCH> <FOCUS>
+  <FOCUS>                          The focus ID or its exact current name
+      --expected-owner-epoch <EXPECTED_OWNER_EPOCH>  The owner epoch you observed
+      --force                      Claim from an owner that is live or whose state is unknown (needs --reason)
+      --reason <REASON>            Why; recorded in the owner's last change (needs --force)
+
+agent-msg focuses transfer [OPTIONS] --to <TO> --expected-owner-epoch <EXPECTED_OWNER_EPOCH> <FOCUS>
+  <FOCUS>                          The focus ID or its exact current name
+      --to <TO>                    The full server:workspace:tab address of the new owner
+      --expected-owner-epoch <EXPECTED_OWNER_EPOCH>  The owner epoch you verified
+```
+
+`--expected-revision` and `--expected-owner-epoch` take the numbers a read just printed: `focuses show <FOCUS> --json` gives `latest_revision` and `owner.epoch`, and `focuses list --json` gives `latest_revision` and `owner_epoch` for each definition. A change made against an older number is refused with `revision_conflict` or `owner_epoch_conflict`, and the error carries the current value to read again before retrying. `claim` takes the epoch you observed, not your own.
+
+`<FOCUS>` is a `foc-` ID or the exact current name of a non-archived definition. A name that belongs to definitions of several teams is refused with `invalid_argument`: use the ID. `--read-timeout` is one deadline, 1 to 600 seconds (default 120), for the cache lookup, the Linear read and the lookup of every reference. It starts after the credentials are ready, so waiting for the system keychain is not counted. Cached data up to five minutes old is used.
+
+A write is made by the verified live session of the calling pane (or `--lead` and `--session`). `create` and `update` verify the caller before the snapshot read, and again after it, so a session that left while the read ran is refused. Every time stored by a command (`written_at_ms`, `verified_at`, `at`, `pinned_at`, `archived_at_ms`) is Unix milliseconds taken when it is stored, after the read.
+
+The definition file is JSON, at most 256 KiB (a larger file is refused with `limit`). Members are reference strings (stable ID, identifier or exact name) or `{"ref": "...", "label": "..."}`; a milestone also takes `"project"`. Any other member is refused with `invalid_argument`. A `label` only displays and is never read back as identity. Each stored member keeps the label of the input that resolved to it, joined through the shared ix-board read's own answer of which input became which member (by list and position in the file, never by position in the canonical order): the label written for it, else the reference text written for it, else the canonical ID. When several inputs of one list resolve to the same member (a name and an identifier, or a repeat), an explicit label beats a reference text and the first of equals in file order wins; a later, different label for that member is not kept. The same member in `include` and in `exclude` keeps a label for each side. A label is one line of at most 64 bytes, cut on a character boundary. `focuses show --json` prints the definition in this same shape under `definition`, with canonical IDs as references, so it can be saved and used as an update file.
+
+A name is stored as one line: line breaks, tabs and control characters are replaced, and it is unique per team among non-archived definitions, ignoring letter case. A description keeps its line breaks and loses only unsafe characters; the text form of `show` indents each continuation line so that no line of a description can pass for a line of the listing.
 
 ```json
 {
@@ -625,9 +667,37 @@ The definition file is JSON. Members are reference strings (stable ID, identifie
 }
 ```
 
-An empty inclusion list selects nothing; it never means the whole team. Only the eight newest revisions are kept.
+An empty inclusion list selects nothing; it never means the whole team. Only the eight newest revisions are kept. A definition is stored as a record of at most 128 fields (eight revisions, 32 pins, `meta`, `owner` and room for fields a newer writer adds); a record with more, or with a field over 64 KiB, is listed as `unavailable_definition` with reason `undecodable` and is never overwritten.
 
-On failure the command exits 1. With `--json` standard output stays empty and standard error carries one compact object whose `code` is one of `revision_conflict`, `owner_epoch_conflict`, `not_owner`, `name_taken`, `archived`, `limit`, `unresolved_reference`, `source_unavailable`, `unavailable_definition`, `not_found` or `invalid_argument`. A `source_unavailable` object also carries `reason`: `missing`, `partial`, `failed` or `timeout`. A usage error exits 2.
+The owner state that `list` and `show` print for the owner's session is one of:
+
+| State | Meaning |
+|---|---|
+| `live` | a complete registry read shows exactly one registration of the session and its Herdr placement is verified |
+| `absent` | a complete registry read shows no registration of the session |
+| `replaced` | absent, and the address the owner recorded now belongs to a different native session |
+| `unknown` | every other case, including a registry read that failed or skipped a record, an unverified placement, or several registrations. Never shown as `live`, never counted as `absent` |
+
+`claim` without `--force` needs the owner to be `absent` or `replaced`. `claim` is also accepted for an archived definition (archiving refuses update, adoption and transfer, not a change of owner) and from the session that already owns it, since the caller's own ID is never compared with the stored one. `transfer` to the session that already owns the definition is refused with `invalid_argument`: it would raise the epoch and change nothing. `transfer --to` must resolve to exactly one verified live session, and a registry read that skipped a record is `unknown`, so it is refused too.
+
+On failure the command exits 1. With `--json` standard output stays empty and standard error carries one compact object. Its `code` is one of `revision_conflict`, `owner_epoch_conflict`, `not_owner`, `name_taken`, `archived`, `limit`, `unresolved_reference`, `source_unavailable`, `unavailable_definition`, `not_found` or `invalid_argument`, and it has a `message` and the fields that apply to the code:
+
+| Field | Present for |
+|---|---|
+| `focus_id` | `revision_conflict`, `owner_epoch_conflict`, `not_owner`, `archived`, `unavailable_definition`, `not_found` (the reference as given), and `name_taken` (the definition that holds the name, or for a name that moved, the definition the command resolved) |
+| `current_revision` | `revision_conflict`: the latest revision |
+| `current_owner_id`, `current_owner_epoch` | `owner_epoch_conflict`, `not_owner` |
+| `name`, `holder_id` | `name_taken`; `holder_id` is set when the name moved to another definition after the command resolved it, and absent when the definition was renamed or archived and no definition holds the name |
+| `bound`, `max` | `limit` |
+| `reference` | `unresolved_reference` |
+| `reason`, `source` | `source_unavailable` (`missing`, `partial`, `failed` or `timeout`, and the source); `unavailable_definition` (`undecodable` or `unsupported_schema`) |
+| `field` | `invalid_argument` |
+
+A `list --json` row for a definition that cannot be used has `available: false`, `code: "unavailable_definition"` and the `reason`.
+
+`stale` is not returned as a reason: a cached snapshot older than five minutes is never used and is refreshed under the same deadline, so a failed refresh is reported as the failure that stopped it (`failed`, `partial`, `missing` or `timeout`).
+
+A failure to reach or use the relay's Redis is reported as `source_unavailable` with reason `failed` and source `relay store`, since the stable codes have no store code. When the result of a command that already succeeded cannot be written to standard output, the command prints `agent-msg: focuses: the command ran, but its result could not be written to standard output` and exits 1; a closed pipe (`| head`) exits 0, as `doctor` does. The change that was committed stands in both cases. A usage error exits 2.
 
 ## relay-watcher
 

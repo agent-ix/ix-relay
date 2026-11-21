@@ -21,7 +21,7 @@ use crate::{
         Applied, Caller, ChangeKind, ClaimRequest, Committed, CreateOutcome, Definition,
         DefinitionState, FocusContent, FocusError, FocusId, FocusResult, Incarnation, ListEntry,
         LivenessEvidence, Meta, NewPin, Owner, OwnerBinding, OwnerChange, PinEntry, PinValue,
-        PlanKind, Planned, Resolved, ResolvedName, Revision, SelectionCheck, UnavailableReason,
+        PlanKind, Planned, Resolved, ResolvedName, Revision, SelectionCodec, UnavailableReason,
         UpdateOutcome, WritePlan, contended,
         limits::{
             ARCHIVE_RETENTION_MS, KEPT_REVISIONS, MAX_ACTIVE_DEFINITIONS, MAX_DEFINITIONS,
@@ -144,10 +144,14 @@ fn refusal(
                 },
                 "name_moved" => {
                     let (team, name) = moved.cloned().unwrap_or((meta.team, meta.name));
-                    FocusError::NameTaken {
+                    FocusError::NameMoved {
                         team,
                         name,
-                        holder: None,
+                        focus,
+                        holder: reply
+                            .get(3)
+                            .and_then(|id| std::str::from_utf8(id).ok())
+                            .and_then(|id| id.parse().ok()),
                     }
                 }
                 _ => unexpected("focus-write", other),
@@ -159,7 +163,7 @@ fn refusal(
 fn decode_definition(
     focus: &FocusId,
     fields: &BTreeMap<String, Vec<u8>>,
-    check: &dyn SelectionCheck,
+    codec: &dyn SelectionCodec,
 ) -> Result<Definition, UnavailableReason> {
     let meta_raw = fields.get("meta").ok_or(UnavailableReason::Undecodable)?;
     let owner_raw = fields.get("owner").ok_or(UnavailableReason::Undecodable)?;
@@ -168,7 +172,7 @@ fn decode_definition(
     let latest = fields
         .get(&format!("rev:{}", meta.latest_revision))
         .map(Vec::as_slice);
-    let summary = decode_summary(focus, meta_raw, owner_raw, latest, check)?;
+    let summary = decode_summary(focus, meta_raw, owner_raw, latest, codec)?;
     let mut kept_revisions: Vec<u64> = fields
         .keys()
         .filter_map(|field| field.strip_prefix("rev:")?.parse().ok())
@@ -224,7 +228,7 @@ fn successor_owner(
             kind,
             previous_owner_id: Some(previous.owner_id.clone()),
             reason,
-            at_ms: now_ms,
+            at: now_ms,
             extra: Map::new(),
         },
         extra: previous.extra.clone(),
@@ -288,11 +292,10 @@ impl Relay {
 
     fn focus_script(
         &mut self,
-        source: &str,
+        script: &redis::Script,
         keys: &[String],
         args: &[Vec<u8>],
     ) -> crate::Result<Vec<Vec<u8>>> {
-        let script = redis::Script::new(source);
         let mut call = script.prepare_invoke();
         for key in keys {
             call.key(key.as_str());
@@ -322,7 +325,7 @@ impl Relay {
 
     fn focus_read_raw(&mut self, id: &FocusId) -> FocusResult<RawRead> {
         let key = self.keys.focus_key(id);
-        let reply = self.focus_script(&scripts::plain(scripts::READ_ONE), &[key], &[])?;
+        let reply = self.focus_script(&scripts::READ_ONE, &[key], &[])?;
         match status(&reply) {
             "missing" => Ok(RawRead::Missing),
             "toolarge" => Ok(RawRead::TooLarge),
@@ -392,7 +395,7 @@ impl Relay {
     /// never overwrites.
     pub fn focus_get(
         &mut self,
-        check: &dyn SelectionCheck,
+        codec: &dyn SelectionCodec,
         id: &FocusId,
     ) -> FocusResult<Definition> {
         match self.focus_read_raw(id)? {
@@ -401,7 +404,7 @@ impl Relay {
             }),
             RawRead::TooLarge => Err(unavailable(id, UnavailableReason::Undecodable)),
             RawRead::Fields(fields) => {
-                decode_definition(id, &fields, check).map_err(|reason| unavailable(id, reason))
+                decode_definition(id, &fields, codec).map_err(|reason| unavailable(id, reason))
             }
         }
     }
@@ -414,11 +417,11 @@ impl Relay {
     /// kept (the eight newest are).
     pub fn focus_revision(
         &mut self,
-        check: &dyn SelectionCheck,
+        codec: &dyn SelectionCodec,
         id: &FocusId,
         number: u64,
     ) -> FocusResult<Revision> {
-        let definition = self.focus_get(check, id)?;
+        let definition = self.focus_get(codec, id)?;
         if !definition.kept_revisions.contains(&number) {
             return Err(FocusError::NotFound {
                 focus: format!(
@@ -443,7 +446,7 @@ impl Relay {
         let raw = raw.ok_or_else(|| FocusError::NotFound {
             focus: format!("revision {number} of {id}"),
         })?;
-        decode_revision(id, &raw, check).map_err(|reason| unavailable(id, reason))
+        decode_revision(id, &raw, codec).map_err(|reason| unavailable(id, reason))
     }
 
     /// Every definition, in one bounded read: the usable ones sorted by team and name, and the
@@ -453,9 +456,9 @@ impl Relay {
     /// # Errors
     ///
     /// Only Redis failing, or an index larger than any the relay writes.
-    pub fn focus_list(&mut self, check: &dyn SelectionCheck) -> FocusResult<Vec<ListEntry>> {
+    pub fn focus_list(&mut self, codec: &dyn SelectionCodec) -> FocusResult<Vec<ListEntry>> {
         let reply = self.focus_script(
-            &scripts::plain(scripts::LIST),
+            &scripts::LIST,
             &[self.keys.focus_index_key()],
             &[self.keys.focus_stem_arg()],
         )?;
@@ -473,7 +476,7 @@ impl Relay {
                 continue;
             };
             let latest = (!revision.is_empty()).then_some(revision.as_slice());
-            match decode_summary(&id, meta, owner, latest, check) {
+            match decode_summary(&id, meta, owner, latest, codec) {
                 Ok(summary) => usable.push(summary),
                 Err(reason) => unusable.push((id, reason)),
             }
@@ -510,7 +513,7 @@ impl Relay {
     /// [`FocusContent::normalize`]. A refusal writes nothing.
     pub fn focus_create(
         &mut self,
-        check: &dyn SelectionCheck,
+        codec: &dyn SelectionCodec,
         content: FocusContent,
         owner: &OwnerBinding,
         now_ms: i64,
@@ -520,10 +523,7 @@ impl Relay {
         let candidates = self.focus_removal_candidates(now_ms, evidence)?;
         for _ in 0..MAX_WRITE_ATTEMPTS {
             let id = FocusId::generate()?;
-            let revision = Revision::build(&id, 1, &content, check.schema_version(), 1, now_ms);
-            check
-                .check(&bytes(&revision.selection, "selection")?)
-                .map_err(|reason| unavailable(&id, reason))?;
+            let revision = Revision::build(codec, &id, 1, &content, 1, now_ms)?;
             let meta = Meta {
                 focus_id: id.clone(),
                 team: content.team.clone(),
@@ -541,7 +541,7 @@ impl Relay {
                     kind: ChangeKind::Create,
                     previous_owner_id: None,
                     reason: None,
-                    at_ms: now_ms,
+                    at: now_ms,
                     extra: Map::new(),
                 },
                 extra: Map::new(),
@@ -566,7 +566,7 @@ impl Relay {
                 self.keys.focus_index_key(),
                 self.keys.focus_names_key(),
             ];
-            let reply = self.focus_script(&scripts::plain(scripts::CREATE), &keys, &args)?;
+            let reply = self.focus_script(&scripts::CREATE, &keys, &args)?;
             match status(&reply) {
                 "ok" => {
                     let removed = reply
@@ -667,14 +667,14 @@ impl Relay {
     /// The typed refusals named above, and those of [`FocusContent::normalize`].
     pub fn focus_plan_update(
         &mut self,
-        check: &dyn SelectionCheck,
+        codec: &dyn SelectionCodec,
         target: &Resolved,
         expected_revision: u64,
         content: FocusContent,
         caller: &Caller<'_>,
     ) -> FocusResult<Planned> {
         let content = content.normalize()?;
-        let def = self.focus_get(check, &target.id)?;
+        let def = self.focus_get(codec, &target.id)?;
         let meta = &def.summary.meta;
         if meta.state == DefinitionState::Archived {
             return Err(FocusError::Archived {
@@ -694,7 +694,7 @@ impl Relay {
                 "a definition keeps its team; create a new definition for another team",
             ));
         }
-        if def.summary.latest.holds(&content) {
+        if def.summary.latest.holds(codec, &content) {
             return Ok(Planned::Unchanged(Box::new(def.summary.latest)));
         }
         let next = meta
@@ -705,16 +705,13 @@ impl Relay {
                 max: u64::MAX,
             })?;
         let revision = Revision::build(
+            codec,
             &target.id,
             next,
             &content,
-            check.schema_version(),
             def.summary.owner.epoch,
             caller.now_ms,
-        );
-        check
-            .check(&bytes(&revision.selection, "selection")?)
-            .map_err(|reason| unavailable(&target.id, reason))?;
+        )?;
         let mut new_meta = meta.clone();
         new_meta.name = content.name.clone();
         new_meta.latest_revision = next;
@@ -758,12 +755,12 @@ impl Relay {
     /// [`Relay::focus_plan_update`].
     pub fn focus_plan_archive(
         &mut self,
-        check: &dyn SelectionCheck,
+        codec: &dyn SelectionCodec,
         target: &Resolved,
         expected_revision: u64,
         caller: &Caller<'_>,
     ) -> FocusResult<WritePlan> {
-        let def = self.focus_get(check, &target.id)?;
+        let def = self.focus_get(codec, &target.id)?;
         let meta = &def.summary.meta;
         if meta.state == DefinitionState::Archived {
             return Err(FocusError::Archived {
@@ -820,13 +817,13 @@ impl Relay {
     /// reason, and the refusals of an unusable definition.
     pub fn focus_plan_claim(
         &mut self,
-        check: &dyn SelectionCheck,
+        codec: &dyn SelectionCodec,
         target: &Resolved,
         caller: &Caller<'_>,
         claim: &ClaimRequest<'_>,
         evidence: &LivenessEvidence,
     ) -> FocusResult<WritePlan> {
-        let def = self.focus_get(check, &target.id)?;
+        let def = self.focus_get(codec, &target.id)?;
         let owner = &def.summary.owner;
         if owner.owner_id != claim.observed_owner_id || owner.epoch != caller.expected_epoch {
             return Err(FocusError::OwnerEpochConflict {
@@ -877,12 +874,12 @@ impl Relay {
     /// and [`FocusError::InvalidArgument`] for a transfer to the current owner.
     pub fn focus_plan_transfer(
         &mut self,
-        check: &dyn SelectionCheck,
+        codec: &dyn SelectionCodec,
         target: &Resolved,
         caller: &Caller<'_>,
         to: &OwnerBinding,
     ) -> FocusResult<WritePlan> {
-        let def = self.focus_get(check, &target.id)?;
+        let def = self.focus_get(codec, &target.id)?;
         if def.summary.meta.state == DefinitionState::Archived {
             return Err(FocusError::Archived {
                 focus: target.id.clone(),
@@ -942,13 +939,13 @@ impl Relay {
     ///
     /// The refusal the comparison found, carrying the state it saw. Nothing is written then.
     pub fn focus_commit(&mut self, plan: &WritePlan) -> FocusResult<Committed> {
-        let body = match plan.kind {
-            PlanKind::Update => scripts::UPDATE,
-            PlanKind::Archive => scripts::ARCHIVE,
-            PlanKind::Claim => scripts::CLAIM,
-            PlanKind::Transfer => scripts::TRANSFER,
+        let script = match plan.kind {
+            PlanKind::Update => &scripts::UPDATE,
+            PlanKind::Archive => &scripts::ARCHIVE,
+            PlanKind::Claim => &scripts::CLAIM,
+            PlanKind::Transfer => &scripts::TRANSFER,
         };
-        let reply = self.focus_script(&scripts::guarded(body), &plan.keys, &plan.args)?;
+        let reply = self.focus_script(script, &plan.keys, &plan.args)?;
         match status(&reply) {
             "ok" => Ok(Committed::Applied),
             "retry" => Ok(Committed::Retry),
@@ -979,7 +976,7 @@ impl Relay {
     /// carrying the latest revision.
     pub fn focus_update(
         &mut self,
-        check: &dyn SelectionCheck,
+        codec: &dyn SelectionCodec,
         target: &Resolved,
         expected_revision: u64,
         content: &FocusContent,
@@ -988,7 +985,7 @@ impl Relay {
     ) -> FocusResult<UpdateOutcome> {
         for _ in 0..MAX_WRITE_ATTEMPTS {
             match self.focus_plan_update(
-                check,
+                codec,
                 target,
                 expected_revision,
                 content.clone(),
@@ -1015,13 +1012,13 @@ impl Relay {
     /// As [`Relay::focus_plan_archive`] and [`Relay::focus_commit`].
     pub fn focus_archive(
         &mut self,
-        check: &dyn SelectionCheck,
+        codec: &dyn SelectionCodec,
         target: &Resolved,
         expected_revision: u64,
         caller: &Caller<'_>,
     ) -> FocusResult<Meta> {
         for _ in 0..MAX_WRITE_ATTEMPTS {
-            let plan = self.focus_plan_archive(check, target, expected_revision, caller)?;
+            let plan = self.focus_plan_archive(codec, target, expected_revision, caller)?;
             if self.focus_commit(&plan)? == Committed::Applied
                 && let Applied::Archived(meta) = plan.applied
             {
@@ -1038,14 +1035,14 @@ impl Relay {
     /// As [`Relay::focus_plan_claim`] and [`Relay::focus_commit`].
     pub fn focus_claim(
         &mut self,
-        check: &dyn SelectionCheck,
+        codec: &dyn SelectionCodec,
         target: &Resolved,
         caller: &Caller<'_>,
         claim: &ClaimRequest<'_>,
         evidence: &LivenessEvidence,
     ) -> FocusResult<Owner> {
         for _ in 0..MAX_WRITE_ATTEMPTS {
-            let plan = self.focus_plan_claim(check, target, caller, claim, evidence)?;
+            let plan = self.focus_plan_claim(codec, target, caller, claim, evidence)?;
             if self.focus_commit(&plan)? == Committed::Applied
                 && let Applied::Owner(owner) = plan.applied
             {
@@ -1062,13 +1059,13 @@ impl Relay {
     /// As [`Relay::focus_plan_transfer`] and [`Relay::focus_commit`].
     pub fn focus_transfer(
         &mut self,
-        check: &dyn SelectionCheck,
+        codec: &dyn SelectionCodec,
         target: &Resolved,
         caller: &Caller<'_>,
         to: &OwnerBinding,
     ) -> FocusResult<Owner> {
         for _ in 0..MAX_WRITE_ATTEMPTS {
-            let plan = self.focus_plan_transfer(check, target, caller, to)?;
+            let plan = self.focus_plan_transfer(codec, target, caller, to)?;
             if self.focus_commit(&plan)? == Committed::Applied
                 && let Applied::Owner(owner) = plan.applied
             {
@@ -1090,12 +1087,12 @@ impl Relay {
     /// pin could be reclaimed.
     pub fn focus_pin_put(
         &mut self,
-        check: &dyn SelectionCheck,
+        codec: &dyn SelectionCodec,
         id: &FocusId,
         pin: &NewPin,
         evidence: &LivenessEvidence,
     ) -> FocusResult<()> {
-        self.focus_get(check, id)?;
+        self.focus_get(codec, id)?;
         let adopters = || FocusError::limit("adopters per definition", MAX_PINS);
         if self.focus_pin_put_once(id, pin)? {
             return Ok(());
@@ -1111,7 +1108,7 @@ impl Relay {
         let value = PinValue {
             incarnation: pin.incarnation.to_string(),
             adopted_revision: pin.adopted_revision,
-            pinned_at_ms: pin.pinned_at_ms,
+            pinned_at: pin.pinned_at,
             extra: Map::new(),
         };
         let encoded = serde_json::to_vec(&value)
@@ -1124,11 +1121,7 @@ impl Relay {
             encoded,
             number(MAX_PINS as u64),
         ];
-        let reply = self.focus_script(
-            &scripts::guarded(scripts::PIN_PUT),
-            &[self.keys.focus_key(id)],
-            &args,
-        )?;
+        let reply = self.focus_script(&scripts::PIN_PUT, &[self.keys.focus_key(id)], &args)?;
         match status(&reply) {
             "ok" => Ok(true),
             "limit" => Ok(false),
@@ -1148,11 +1141,7 @@ impl Relay {
             format!("pin:{}", pin.incarnation).into_bytes(),
             pin.raw.clone(),
         ];
-        let reply = self.focus_script(
-            &scripts::plain(scripts::PIN_REMOVE),
-            &[self.keys.focus_key(id)],
-            &args,
-        )?;
+        let reply = self.focus_script(&scripts::PIN_REMOVE, &[self.keys.focus_key(id)], &args)?;
         match status(&reply) {
             "removed" => Ok(true),
             "changed" => Ok(false),
