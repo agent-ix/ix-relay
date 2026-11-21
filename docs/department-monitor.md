@@ -99,6 +99,18 @@ Status also shows a short purpose line.
 
 Source ages belong to the evidence timestamps and remain visible in department views.
 A failed refresh retains the last snapshot with its original timestamps and a visible error.
+The Linear tracker follows the same rule when its read service keeps the last snapshot after a failed refresh.
+The snapshot shows with its original read time and the last-snapshot label.
+A failure row appears at once, even when the snapshot is only minutes old.
+Quitting then returns a partial outcome.
+When the service reports a server rate-limit cooldown, the row shows the rate-limit countdown.
+When the service reports no typed cause, the row stays neutral and shows no countdown.
+An exhausted local request budget with no snapshot shows "Linear request budget exhausted" and a countdown.
+With a kept snapshot, the service reports no typed cause for it, so the row is neutral and has no countdown.
+Refreshes that the local budget refuses send no request and spend no quota.
+Sometimes the service marks a snapshot stale but reports neither its read time nor a cooldown.
+Then the row "Tracker freshness unconfirmed" shows, and no failure is reported.
+That row does not change the exit outcome, and the snapshot is not shown as fresh.
 Red severity can coexist with incomplete evidence.
 Unknown, unavailable, unassessed, unrouted and `query_changed` retain their shared meanings.
 

@@ -656,7 +656,10 @@ fn shared_summary_is_reused_until_source_report_or_scope_changes() {
     app.report.success(report, Instant::now());
     assert_eq!(draw(&mut app), (2, 4), "a report change adds one of each");
     let snapshot: TrackerState = app.tracker.value.clone().unwrap();
-    app.apply_tracker_refresh(Ok(snapshot), Instant::now());
+    app.apply_tracker_refresh(
+        Ok(crate::monitor_ops::TrackerRead::unreported(snapshot)),
+        Instant::now(),
+    );
     assert_eq!(draw(&mut app), (3, 5), "a source change adds one of each");
     app.team = Some("SWM".into());
     assert_eq!(draw(&mut app), (3, 5), "the same effective scope is reused");
@@ -1003,7 +1006,10 @@ fn pressing_c_and_shrinking_refreshes_keep_the_selected_placement_through_render
     let text = screen(&mut app, 100, 24);
     assert!(selected_line(&text).contains("Mystery"), "{text}");
     let snapshot = without_projects(&app, &["Finished tasks"]);
-    app.apply_tracker_refresh(Ok(snapshot), Instant::now());
+    app.apply_tracker_refresh(
+        Ok(crate::monitor_ops::TrackerRead::unreported(snapshot)),
+        Instant::now(),
+    );
     let text = screen(&mut app, 100, 24);
     assert!(selected_line(&text).contains("Mystery"), "{text}");
     assert_eq!(app.table.selected(), Some(3));
@@ -1012,7 +1018,10 @@ fn pressing_c_and_shrinking_refreshes_keep_the_selected_placement_through_render
     let text = screen(&mut app, 100, 24);
     assert!(selected_line(&text).contains("Retired"), "{text}");
     let snapshot = without_projects(&app, &["Retired"]);
-    app.apply_tracker_refresh(Ok(snapshot), Instant::now());
+    app.apply_tracker_refresh(
+        Ok(crate::monitor_ops::TrackerRead::unreported(snapshot)),
+        Instant::now(),
+    );
     let text = screen(&mut app, 100, 24);
     assert!(selected_line(&text).contains("Mystery"), "{text}");
     assert_eq!(app.table.selected(), Some(3));

@@ -426,6 +426,13 @@ pub(crate) fn evidence_items(
             ),
         ));
     }
+    if app.tracker_freshness_unconfirmed && app.tracker.error.is_none() {
+        items.push(item(
+            EvidenceSeverity::Stale,
+            "Tracker freshness unconfirmed",
+            crate::monitor_ops::FRESHNESS_UNCONFIRMED_DETAIL,
+        ));
+    }
     if let Some(error) = app
         .runtime
         .error
@@ -1307,11 +1314,99 @@ pub(crate) mod tests {
         }
         assert!(screen(&mut app, 90, 15).contains("Tasks: 1/2 done"));
         let snapshot = app.tracker.value.as_ref().unwrap().clone();
-        app.apply_tracker_refresh(Ok(snapshot), now);
+        app.apply_tracker_refresh(
+            Ok(crate::monitor_ops::TrackerRead::unreported(snapshot)),
+            now,
+        );
         assert!(app.tracker_retry_at.is_none());
         assert!(app.tracker.error.is_none());
         assert!(!snapshot_is_stale(9_400, 10_000));
         assert!(snapshot_is_stale(8_199, 10_000));
+    }
+
+    /// A tracker read whose service reports the snapshot stale with the given typed fields;
+    /// `failure_reason` carries text that must never reach the screen.
+    fn stale_read(
+        app: &App,
+        age_seconds: Option<i64>,
+        rate_limit_until: Option<i64>,
+    ) -> crate::monitor_ops::TrackerRead {
+        let snapshot = app.tracker.value.as_ref().unwrap().clone();
+        crate::monitor_ops::TrackerRead {
+            freshness: Some(ix_board::CacheFreshness {
+                last_successful_sync: Some(snapshot.fetched_at),
+                last_full_reconciliation: None,
+                stale: true,
+                age_seconds,
+                rate_limit_until,
+                failure_reason: Some("transport detail".into()),
+            }),
+            snapshot,
+        }
+    }
+
+    /// A snapshot the service kept after a failed refresh is two minutes old, far under the
+    /// thirty-minute stale label, yet the failure and the last-snapshot label show at once and
+    /// the raw failure cause stays out of the display.
+    #[trace("FR-059-AC-5", "FR-064-AC-10")]
+    #[test]
+    fn a_retained_snapshot_shows_the_failed_refresh_while_under_thirty_minutes_old() {
+        let mut app = app();
+        let fetched_at = app.tracker.value.as_ref().unwrap().fetched_at;
+        let read = stale_read(&app, Some(120), None);
+        app.apply_tracker_refresh(Ok(read), Instant::now());
+        assert_eq!(app.tracker.value.as_ref().unwrap().fetched_at, fetched_at);
+        let text = screen(&mut app, 90, 15);
+        assert!(text.contains("Tracker failed"), "{text}");
+        assert!(text.contains("last snapshot"), "{text}");
+        assert!(text.contains("Tasks: 1/2 done"), "{text}");
+        assert!(!text.contains("transport detail"), "{text}");
+        assert!(!text.contains("Tracker stale"), "{text}");
+        assert!(app.collection_failed);
+    }
+
+    /// A stale snapshot with no read age and no cooldown may be a successful read of a
+    /// snapshot stored without read-start evidence. It is shown as unconfirmed, not as a failed
+    /// refresh: no failure row, no remedy, no Partial exit; the source time is kept and it is
+    /// not certified fresh. The next read the service reports clean clears the notice.
+    #[trace("FR-059-AC-5", "FR-064-AC-10")]
+    #[test]
+    fn an_unconfirmed_snapshot_is_shown_as_unconfirmed_not_as_a_failed_refresh() {
+        let mut app = app();
+        let fetched_at = app.tracker.value.as_ref().unwrap().fetched_at;
+        let read = stale_read(&app, None, None);
+        app.apply_tracker_refresh(Ok(read), Instant::now());
+        assert_eq!(app.tracker.value.as_ref().unwrap().fetched_at, fetched_at);
+        assert!(app.tracker.error.is_none() && !app.collection_failed);
+        assert_eq!(crate::quit_outcome(&app).0, ix_cli_kit::exit::Outcome::Ok);
+        let text = screen(&mut app, 90, 15);
+        assert!(text.contains("Tracker freshness unconfirmed"), "{text}");
+        assert!(text.contains("Tasks: 1/2 done"), "{text}");
+        for failure in ["Tracker failed", "refresh failed", "transport detail"] {
+            assert!(!text.contains(failure), "{failure}\n{text}");
+        }
+
+        let clean = crate::monitor_ops::TrackerRead::unreported(
+            app.tracker.value.as_ref().unwrap().clone(),
+        );
+        app.apply_tracker_refresh(Ok(clean), Instant::now());
+        assert!(!app.tracker_freshness_unconfirmed);
+        let text = screen(&mut app, 90, 15);
+        assert!(!text.contains("Tracker freshness unconfirmed"), "{text}");
+    }
+
+    /// An unconfirmed age does not hide a cooldown the service did report.
+    #[trace("FR-048-AC-5")]
+    #[test]
+    fn a_reported_cooldown_is_recognized_without_a_read_age() {
+        let mut app = app();
+        let read = stale_read(&app, None, Some(4_000));
+        app.apply_tracker_refresh(Ok(read), Instant::now());
+        assert!(app.tracker_retry_at.is_some());
+        assert!(app.collection_failed);
+        assert!(!app.tracker_freshness_unconfirmed);
+        let text = screen(&mut app, 90, 15);
+        assert!(text.contains("Tracker rate-limited"), "{text}");
     }
 
     /// Trace: FR-048-AC-3, FR-048-AC-4
