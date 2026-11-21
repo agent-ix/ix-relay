@@ -103,26 +103,24 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
             Span::raw(format!("{}/{}", v.scope.done, v.scope.leaf_ids.len())),
             muted(" done"),
         ];
+        // The hidden, omitted, unknown and filter statements precede the variable-length
+        // stage list on the existing Tasks line, so the list can never push them out of view.
+        if scope_view && let Some(text) = projection.as_ref().and_then(|p| p.filter_text()) {
+            task_spans.push(muted(" · "));
+            task_spans.push(Span::raw(text));
+            if snapshot_old {
+                task_spans.push(Span::styled(
+                    " [last snapshot]",
+                    Style::default().fg(WARNING),
+                ));
+            }
+        }
         for (stage, count) in &v.scope.remaining_by_stage {
             task_spans.push(muted(" · "));
             task_spans.push(Span::raw(count.to_string()));
             task_spans.push(muted(format!(" {}", display_text(stage, 32))));
         }
-        let mut lines = vec![Line::from(scope_spans)];
-        // The hidden, omitted and filter statements sit on their own line ahead of the
-        // variable-length stage list, so the stage list can never push them out of view.
-        if scope_view && let Some(text) = projection.as_ref().and_then(|p| p.filter_text()) {
-            let mut filter_spans = vec![Span::raw(text)];
-            if snapshot_old {
-                filter_spans.push(Span::styled(
-                    " [last snapshot]",
-                    Style::default().fg(WARNING),
-                ));
-            }
-            lines.push(Line::from(filter_spans));
-        }
-        lines.push(Line::from(task_spans));
-        lines
+        vec![Line::from(scope_spans), Line::from(task_spans)]
     } else if let Some(error) = &scope_error {
         vec![Line::from(Span::styled(
             error.clone(),
@@ -907,13 +905,27 @@ pub(crate) mod tests {
                 ),
                 (
                     3,
-                    vec![
-                        ("Tasks: ", MUTED),
-                        ("1/2", FOREGROUND),
-                        (" done · ", MUTED),
-                        ("1", FOREGROUND),
-                        (" Review", MUTED),
-                    ],
+                    if view == View::Scope {
+                        // The fixture's model supplies no status category, so the Scope
+                        // view states that between the done count and the stage list.
+                        vec![
+                            ("Tasks: ", MUTED),
+                            ("1/2", FOREGROUND),
+                            (" done · ", MUTED),
+                            (crate::monitor_scope::FILTER_UNAVAILABLE, FOREGROUND),
+                            (" · ", MUTED),
+                            ("1", FOREGROUND),
+                            (" Review", MUTED),
+                        ]
+                    } else {
+                        vec![
+                            ("Tasks: ", MUTED),
+                            ("1/2", FOREGROUND),
+                            (" done · ", MUTED),
+                            ("1", FOREGROUND),
+                            (" Review", MUTED),
+                        ]
+                    },
                 ),
                 (
                     4,
@@ -921,12 +933,6 @@ pub(crate) mod tests {
                 ),
                 (5, vec![("Tickets: ", MUTED), ("SWM-12", FOREGROUND)]),
             ] {
-                // The Scope view's filter statement takes its own row after the scope line.
-                let y = if view == View::Scope && y >= 3 {
-                    y + 1
-                } else {
-                    y
-                };
                 let mut x = 0;
                 for (text, color) in pieces {
                     for character in text.chars() {
