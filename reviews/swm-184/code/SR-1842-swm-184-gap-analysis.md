@@ -102,3 +102,20 @@ The bounded read starts its deadline after the credential is ready (work.rs:96-9
 ## Current verdict (after disposition pass 1)
 
 **CONDITIONAL** - all 3 initial findings are fixed on the source as read, and 2 new low findings (FND-004, FND-005) are open, so the artifact stays CONDITIONAL until they are fixed. No high or medium finding. No criterion in scope is untagged in the parent's official matrix; whole-repository legacy matrix gaps are not assessed and not claimed clean. This is a reading of source and the parent-supplied results listed above; I ran no gate and no matrix.
+
+## Dispositions (round 2, FND-004 and FND-005 only)
+
+Disposition pass 2 at frozen head 293ff39 (atop f2af240), PR 46, same reviewer, judged from the current work.rs, FR-048 line 29 and docs/how-it-works.md; `fix2-ready.md` was data. The eight earlier fixes held at round 1 are not reopened. I ran no command. Parent-supplied, not re-run by me: fmt exit 0; agent-msg all-targets clippy 31540 exit 0; the two affected work tests 75759 exit 0; FR-048 Quire validate exit 0; diff check exit 0; Vale zero alerts in the new paragraphs, with the twelve legacy how-it-works alerts outside them. Source behavior is unchanged from the 497-test head; only tests, the clause and docs moved.
+
+| FND | Outcome | Reason |
+|---|---|---|
+| FND-004 | fixed | The tests pass the literal 240 s and 301 s (work.rs:335, 348); the derived `max_age_seconds` helper is gone. `work_accepts_a_snapshot_read_within_five_minutes_without_a_refresh` now asserts `SNAPSHOT_MAX_AGE == 300 s` and `READ_DEADLINE == 120 s` against the clause's literals (work.rs:332-333), so lowering either constant fails: at 60 s the 240 s entry would need a refresh while the source is down, and the assertions fail first anyway. Raising the age is also caught by the assertion. No new test was added, which is enough for the finding. |
+| FND-005 | fixed | FR-048-AC-3 now reads within 120 seconds of the credentials being ready, still the one existing clause with no new id or relationship, and docs/how-it-works.md line 177 says the 120 seconds start once the credentials are ready and a keychain wait is not counted. This matches `source_snapshot`, which resolves the credential before the bounded read starts its deadline. |
+
+### New findings (disposition pass 2)
+
+None.
+
+## Current verdict (after disposition pass 2)
+
+**PASS** - all 5 findings of this artifact are fixed (3 initial, FND-004 and FND-005) and none is open; no high or medium finding was ever raised. This is a reading of source plus the parent-supplied results above; I ran no gate and no matrix. With SR-1841 PASS at round 1, no finding of the review is open on my side.
