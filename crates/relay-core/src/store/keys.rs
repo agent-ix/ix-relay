@@ -10,6 +10,7 @@ use crate::{
     escalation::EscalationId,
     ids::{MachineName, SessionId},
     name::AgentName,
+    named_focus::FocusId,
     status::StatusRequestId,
 };
 
@@ -49,6 +50,27 @@ impl Keys {
         process_id: u32,
     ) -> String {
         format!("{}work:{machine}:{session}:{process_id}", self.prefix)
+    }
+
+    /// One named focus definition's record (a hash: `meta`, `owner`, `rev:<n>`, `pin:<…>`).
+    pub(super) fn focus_key(&self, id: &FocusId) -> String {
+        format!("{}focus:def:{id}", self.prefix)
+    }
+
+    /// What every [`Keys::focus_key`] starts with, for the scripts that reach other
+    /// definitions' records.
+    pub(super) fn focus_stem(&self) -> String {
+        format!("{}focus:def:", self.prefix)
+    }
+
+    /// The index of definitions by focus ID, archived ones included.
+    pub(super) fn focus_index_key(&self) -> String {
+        format!("{}focus:index", self.prefix)
+    }
+
+    /// The index of non-archived names by team and folded name.
+    pub(super) fn focus_names_key(&self) -> String {
+        format!("{}focus:names", self.prefix)
     }
 
     pub(super) fn inbox_key(&self, agent: &AgentName) -> String {
@@ -199,7 +221,12 @@ mod tests {
         let sid: SessionId = "sid-1".parse().unwrap();
         let machine: MachineName = "node-a".parse().unwrap();
         let request: StatusRequestId = "r1".parse().unwrap();
+        let focus: FocusId = "foc-00000000000000000000000000000001".parse().unwrap();
         vec![
+            ("focus_key", relay.focus_key(&focus)),
+            ("focus_stem", relay.focus_stem()),
+            ("focus_index_key", relay.focus_index_key()),
+            ("focus_names_key", relay.focus_names_key()),
             (
                 "directory_committed_key",
                 relay.directory_committed_key(&machine),
@@ -247,6 +274,10 @@ mod tests {
     #[test]
     fn the_keys_are_the_documented_ones() {
         let want = [
+            ("focus_key", "p:focus:def:foc-00000000000000000000000000000001"),
+            ("focus_stem", "p:focus:def:"),
+            ("focus_index_key", "p:focus:index"),
+            ("focus_names_key", "p:focus:names"),
             ("directory_committed_key", "p:directory-committed:node-a"),
             ("directory_key", "p:directory:node-a"),
             ("directory_sequence_key", "p:directory-sequence:node-a"),
@@ -310,7 +341,12 @@ mod tests {
         let sid: SessionId = "sid-1".parse().unwrap();
         let machine: MachineName = "node-a".parse().unwrap();
         let request: StatusRequestId = "r1".parse().unwrap();
+        let focus: FocusId = "foc-00000000000000000000000000000001".parse().unwrap();
         let moved = [
+            other.focus_key(&focus),
+            other.focus_stem(),
+            other.focus_index_key(),
+            other.focus_names_key(),
             other.directory_committed_key(&machine),
             other.directory_key(&machine),
             other.directory_sequence_key(&machine),

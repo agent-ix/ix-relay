@@ -24,6 +24,7 @@ toml.workspace = true
 ix-cli-kit.workspace = true
 
 [dev-dependencies]
+ix-trace-rs = { git = "https://github.com/agent-ix/ix-trace-rs", tag = "v0.1.1" }
 proptest.workspace = true
 relay-test-support.workspace = true
 tempfile.workspace = true

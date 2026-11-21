@@ -13,6 +13,7 @@ Usage: agent-msg [OPTIONS] <COMMAND>
 
 Commands:
   work             Report session scope, focus and agent assignments for the dashboard
+  focuses          Durable, revisioned named focus definitions with one owner: create, list, show, update, archive, claim and transfer. Not `focus`, which sets this lane's free-text focus
   send             Send a message to one lead, or to `all`
   inbox            Print and remove your pending messages
   who              List registered leads
@@ -574,6 +575,59 @@ Options:
       --human <HUMAN>    The human inbox `escalate`/`resolve` notify/sign as. Defaults come from `~/.ix/relay/config.toml`'s `human` key, then `IX_RELAY_HUMAN`, then `operator`
   -h, --help             Print help
 ```
+
+### agent-msg focuses
+
+`agent-msg focuses` manages named focus definitions: durable, revisioned selections of Linear initiatives, projects, milestones and tickets, each with one owner session. Use `agent-msg focus` to set a lane's free-text focus.
+
+```text
+Usage: agent-msg focuses [--json] [--lead <ADDRESS>] [--session <ID>] <COMMAND>
+
+Commands:
+  create    Resolve a definition file and store revision 1; the caller becomes owner
+  list      Read definitions with their current revision and owner state
+  show      Read one definition at one kept revision (the current one by default)
+  update    Write the next revision from a complete replacement of the content
+  archive   Archive a definition: final, releases its name, writes no revision
+  claim     Take ownership of a definition whose owner's session is gone
+  transfer  Hand ownership to a verified live session
+
+Options:
+      --json              Print one compact JSON value, or on failure one typed error object on standard error
+      --lead <LEAD>       Writes: the caller's Herdr address; omitted means the calling pane
+      --session <SESSION> Writes: the expected native session ID; refuse a different occupant
+
+agent-msg focuses create --file <FILE> [--read-timeout <SECONDS>]
+agent-msg focuses list [--team <TEAM>] [--archived]
+agent-msg focuses show <FOCUS> [--revision <N>]
+agent-msg focuses update <FOCUS> --file <FILE> --expected-revision <N> [--read-timeout <SECONDS>]
+agent-msg focuses archive <FOCUS> --expected-revision <N>
+agent-msg focuses claim <FOCUS> --expected-owner-epoch <N> [--force --reason <TEXT>]
+agent-msg focuses transfer <FOCUS> --to <server:workspace:tab> --expected-owner-epoch <N>
+```
+
+`<FOCUS>` is a `foc-` ID or the exact current name of a non-archived definition. `--read-timeout` is the overall deadline of the snapshot read, 1 to 600 seconds (default 120); it starts after the credentials are ready.
+
+The definition file is JSON. Members are reference strings (stable ID, identifier or exact name) or `{"ref": "...", "label": "..."}`; a milestone also takes `"project"`. Any other member is refused with `invalid_argument`. `focuses show --json` prints the definition in this same shape under `definition`, with canonical IDs as references, so it can be saved and used as an update file.
+
+```json
+{
+  "team": "SWM",
+  "name": "Completion",
+  "description": "optional",
+  "include": {
+    "initiatives": ["Completion"],
+    "projects": [],
+    "milestones": [{"ref": "Beta", "project": "Alpha"}],
+    "tickets": ["SWM-12"]
+  },
+  "exclude": {}
+}
+```
+
+An empty inclusion list selects nothing; it never means the whole team. Only the eight newest revisions are kept.
+
+On failure the command exits 1. With `--json` standard output stays empty and standard error carries one compact object whose `code` is one of `revision_conflict`, `owner_epoch_conflict`, `not_owner`, `name_taken`, `archived`, `limit`, `unresolved_reference`, `source_unavailable`, `unavailable_definition`, `not_found` or `invalid_argument`. A `source_unavailable` object also carries `reason`: `missing`, `stale`, `partial`, `failed` or `timeout`. A usage error exits 2.
 
 ## relay-watcher
 

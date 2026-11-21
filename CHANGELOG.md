@@ -1,5 +1,9 @@
 # Release notes
 
+## Unreleased
+
+- Add `agent-msg focuses` with `create`, `list`, `show`, `update`, `archive`, `claim` and `transfer`: named focus definitions with immutable revisions, one owner session per definition and typed errors with `--json`. `agent-msg focus` and `agent-msg work focus` are unchanged.
+
 ## 0.3.4
 
 - Publish the versioned `agent-spend-dashboard` Helm chart for Grafana to consume.
