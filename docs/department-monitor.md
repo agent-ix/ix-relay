@@ -30,7 +30,10 @@ team-leader-dashboard --team SWM --retro-config <retro-config.json>
 ```
 
 The configuration's department team and project populations must exactly match the command's selectors.
-Health and Retro show unavailable guidance when no configuration or saved report supplies those fields.
+Without a configuration or saved report, Health and Retro show one "Not configured" message that names `--retro-config <file>`.
+Retro also states that its previous and baseline comparisons need a retained snapshot history.
+Before the first read of a supplied configuration they say they are waiting for it.
+Neither state is a source failure or an authentication failure, neither starts a collection, and neither shows a zero or green value.
 
 ## Open a saved report
 
@@ -50,12 +53,33 @@ Plan fields absent from a saved report remain unavailable.
 
 ## Navigate and inspect evidence
 
-Press `1`, `2` or `3` for Status, Health or Retro.
+Every view shows the same header: the monitored lead, then a `View` selector with the current view and its key.
+Press `v` to open the View dropdown and see all six views: Tickets, Agents, Scope, Status, Health and Retro.
+Use Up, Down, `j` or `k` to move the highlight and Enter to select.
+Escape or `v` closes the dropdown without changing anything.
+Press F1 or `?` for help, which lists every key and the views where it applies.
+Scroll help with Up, Down, PageUp and PageDown; F1, `?` or Escape closes it.
+While a popup is open it receives every key, so `q` does not quit and nothing underneath changes.
+Source refreshes continue while a popup is open.
+
+The footer shows only `v View`, `F1 Help` and, when the width allows, `q Quit`.
+The Scope view also shows its completed-projects key.
+Source failures, stale snapshots, rate-limit countdowns and a replaced session appear in up to four evidence rows above the footer.
+Each row keeps its label; long detail is cut with `…`, and a count shows any sources not shown.
+
+The shortcuts remain: `1`, `2` or `3` for Status, Health or Retro, and `t`, `a` or `p` for Tickets, Agents or Scope.
 Use arrows or `j` and `k` to select a row; `d` or Enter opens details.
 Left and right arrows scroll department evidence details vertically.
 Press `e` to inspect source errors, then select a source and open its full diagnostic with `d`.
-Use `t`, `a` and `p` for the lead's Tickets, Agents and Scope views.
-Press `r` to refresh and `q` or Escape to quit.
+Press `r` to refresh and `q` or Escape to quit when no popup is open.
+
+## Know which population each view shows
+
+Tickets and Scope describe the lead's reported focus, or say that no lead is bound.
+Agents lists every reported assignment and is not limited by scope.
+Status, Health and Retro name the department selection instead: the explicit team and projects, the saved report's scope, or the team derived from the lead's workspace across all its projects.
+The department selection is chosen independently of the lead's reported focus; see Scope (`p`).
+Status also shows a short purpose line.
 
 Source ages belong to the evidence timestamps and remain visible in department views.
 A failed refresh retains the last snapshot with its original timestamps and a visible error.

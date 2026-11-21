@@ -3,21 +3,34 @@
 //! Read-only projection of the shared department assessment (FR-059).
 
 use crate::{
-    monitor::{App, View, display_text},
-    monitor_ui::{FOREGROUND, MUTED, PRIMARY, SELECTION, WARNING},
+    monitor::{App, DepartmentInput, View, display_text},
+    monitor_ui::{
+        FOREGROUND, MUTED, SELECTION, WARNING, evidence_items, evidence_lines, footer_controls,
+        identity_line, selector_line, wrapped_rows,
+    },
     monitor_views::{content_areas, select_row},
 };
-use ix_board::retro::department::{
-    CLASSES, Comparison, ComparisonState, Delta, Measurement, Route, Scope, Severity, Value,
+use ix_board::{
+    Clock, SystemClock,
+    retro::department::{
+        CLASSES, Comparison, ComparisonState, Delta, Measurement, Route, Scope, Severity, Value,
+    },
 };
-use ix_cli_kit::streams::{DiagnosticFields, Record, Severity as DiagnosticSeverity};
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Paragraph, Row, Table, Wrap},
 };
+use std::time::Instant;
+
+/// Fixed statement relating the department population to the lead's reported focus.
+const DEPARTMENT_RELATION: &str =
+    "Department scope, chosen independently of the lead's reported focus; see Scope (p).";
+/// Relay-local orientation for Status; it defines none of the Status contents.
+const STATUS_PURPOSE: &str =
+    "Status: progress, blockers and lane evidence for the selected department scope.";
 
 struct DisplayRow {
     name: String,
@@ -453,92 +466,204 @@ fn diagnostic_rows(app: &App) -> Vec<DisplayRow> {
 }
 
 /// Draws shared results without collecting or assessing evidence.
-pub(crate) fn render(frame: &mut Frame, app: &mut App) {
-    let failures = diagnostic_rows(app);
-    let [header, tabs, source, body, diagnostics, controls] = Layout::vertical([
-        Constraint::Length(3),
+pub(crate) fn render(frame: &mut Frame, app: &mut App, now: Instant) {
+    let now_epoch = SystemClock.now_epoch_seconds();
+    let width = usize::from(frame.area().width.max(1));
+    let evidence = evidence_lines(&evidence_items(app, now, now_epoch, true, None), width);
+    let evidence_rows = u16::try_from(evidence.len()).unwrap_or(0);
+    let controls = footer_controls(None, width);
+    let footer_rows = u16::try_from(controls.len()).unwrap_or(1);
+    let label = label_lines(app);
+    let needed: usize = label.iter().map(|line| wrapped_rows(line, width)).sum();
+    let spare = frame
+        .area()
+        .height
+        .saturating_sub(2 + evidence_rows + footer_rows + 3);
+    let label_rows = u16::try_from(needed)
+        .unwrap_or(u16::MAX)
+        .clamp(1, spare.max(1));
+    let [identity, selector, label_area, body, evidence_area, footer] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(label_rows),
         Constraint::Min(3),
-        Constraint::Length(u16::try_from(failures.len()).unwrap_or(4)),
-        Constraint::Length(1),
+        Constraint::Length(evidence_rows),
+        Constraint::Length(footer_rows),
     ])
     .areas(frame.area());
-    let selected_scope = app.department.value.as_ref().map_or_else(
-        || {
+    frame.render_widget(
+        Paragraph::new(identity_line(app, now)).style(Style::default().fg(FOREGROUND)),
+        identity,
+    );
+    frame.render_widget(Paragraph::new(selector_line(app.view)), selector);
+    frame.render_widget(
+        Paragraph::new(label)
+            .style(Style::default().fg(FOREGROUND))
+            .wrap(Wrap { trim: true }),
+        label_area,
+    );
+    frame.render_widget(
+        Paragraph::new(evidence).style(Style::default().fg(MUTED)),
+        evidence_area,
+    );
+    render_content(frame, app, body);
+    frame.render_widget(
+        Paragraph::new(controls).style(Style::default().fg(MUTED)),
+        footer,
+    );
+    crate::monitor_nav::render_popup(frame, app, body);
+}
+
+fn muted(text: impl Into<std::borrow::Cow<'static, str>>) -> Span<'static> {
+    Span::styled(text, Style::default().fg(MUTED))
+}
+
+/// Source windows and ages of the shared report, age first so the evidence row can be
+/// truncated at its end without hiding the age.
+pub(crate) fn evidence_windows(delta: &Delta) -> String {
+    delta
+        .current
+        .measurements
+        .values()
+        .map(|metric| {
             format!(
-                "team:{} · projects:{}",
-                app.department_team().as_deref().unwrap_or("unknown"),
-                app.projects.join(", ")
+                "age:{} ({}, {}]",
+                metric
+                    .source_age_seconds
+                    .map_or_else(|| "unknown".into(), |age| format!("{age}s")),
+                safe(&metric.window_start),
+                safe(&metric.window_end),
             )
-        },
-        |delta| scope_text(&delta.current.scope),
-    );
-    frame.render_widget(
-        Paragraph::new(format!(
-            "Department · {}\n{}",
-            safe(&app.lead_name),
-            safe(&selected_scope)
-        ))
-        .style(Style::default().fg(FOREGROUND)),
-        header,
-    );
-    frame.render_widget(
-        Paragraph::new(format!(
-            "{}1 Status  {}2 Health  {}3 Retro  t Tickets  a Agents  p Scope",
-            if app.view == View::Status { "›" } else { " " },
-            if app.view == View::Health { "›" } else { " " },
-            if app.view == View::Retro { "›" } else { " " }
-        ))
-        .style(Style::default().fg(PRIMARY)),
-        tabs,
-    );
-    let department_source = app.department.value.as_ref().map_or_else(
-        || "Department source: unavailable; no successful report".into(),
-        |delta| {
-            let windows = delta
-                .current
-                .measurements
-                .values()
-                .map(|metric| {
-                    format!(
-                        "({}, {}] age:{}",
-                        safe(&metric.window_start),
-                        safe(&metric.window_end),
-                        metric
-                            .source_age_seconds
-                            .map_or_else(|| "unknown".into(), |age| format!("{age}s"))
-                    )
-                })
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>()
-                .join(" · ");
-            format!(
-                "Evidence: {windows}{}",
-                if app.department.error.is_some() {
-                    " · last snapshot"
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// Names the department selection that decides the evidence population. It reads only the
+/// selectors the dashboard was given or the saved report; it computes no population.
+fn department_selection(app: &App) -> String {
+    if app.department_input == DepartmentInput::Saved {
+        let scope = app
+            .department
+            .value
+            .as_ref()
+            .map(|delta| scope_text(&delta.current.scope))
+            .filter(|text| !text.is_empty());
+        return scope.map_or_else(
+            || "saved report".to_owned(),
+            |text| format!("saved report · {}", safe(&text)),
+        );
+    }
+    if app.team.is_some() || !app.projects.is_empty() {
+        let mut parts = Vec::new();
+        if let Some(team) = &app.team {
+            parts.push(format!("team {}", safe(team)));
+        }
+        if !app.projects.is_empty() {
+            parts.push(format!(
+                "projects {}",
+                app.projects
+                    .iter()
+                    .map(|project| safe(project))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        return parts.join(" · ");
+    }
+    format!(
+        "team {} derived from lead workspace · all projects",
+        app.department_team()
+            .as_deref()
+            .map_or_else(|| "unknown".to_owned(), safe)
+    )
+}
+
+/// Population label, its fixed relation to the lead's focus and, in Status, its purpose.
+fn label_lines(app: &App) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(vec![
+            muted("Department selection: "),
+            Span::raw(department_selection(app)),
+        ]),
+        Line::from(muted(DEPARTMENT_RELATION)),
+    ];
+    if app.view == View::Status {
+        lines.push(Line::from(Span::raw(STATUS_PURPOSE)));
+    }
+    lines
+}
+
+/// The one concise message for Health or Retro when no values can be shown, chosen from
+/// their own fields. Not configured and Waiting are not source failures.
+fn empty_message(app: &App) -> Option<String> {
+    let name = match app.view {
+        View::Health => "Health",
+        View::Retro => "Retro",
+        _ => return None,
+    };
+    let saved_lacks = || {
+        format!(
+            "Not configured: this saved report does not supply the {name} fields. \
+             Open a report that contains them with --report <file>."
+        )
+    };
+    match &app.department.value {
+        Some(delta) => {
+            let lacking = if app.view == View::Health {
+                delta.current.classes.is_empty()
+            } else {
+                delta.current.measurements.is_empty() && delta.current.loops.is_empty()
+            };
+            lacking.then(|| {
+                if app.department_input == DepartmentInput::Saved {
+                    saved_lacks()
+                } else {
+                    format!("The retained report supplies no {name} fields; nothing is shown.")
+                }
+            })
+        }
+        None => Some(match (&app.department.error, app.department_input) {
+            (Some(error), _) => format!(
+                "{name} unavailable: {}. No retained report exists, so no values are shown.",
+                safe(app.department.error_summary.as_deref().unwrap_or(error))
+            ),
+            (None, DepartmentInput::Saved) => saved_lacks(),
+            (None, DepartmentInput::Configured) => format!(
+                "Waiting for the first read of the retro configuration. \
+                 No {name} values are shown until it returns."
+            ),
+            (None, DepartmentInput::NotConfigured) => format!(
+                "Not configured: {name} needs a department retro configuration. Start with \
+                 --retro-config <file> whose department team and project population matches \
+                 the selection shown above ({}).{}",
+                department_selection(app),
+                if app.view == View::Retro {
+                    " Previous and baseline comparisons also need a retained snapshot history."
                 } else {
                     ""
                 }
-            )
-        },
-    );
-    let source_text = app.tracker.value.as_ref().map_or_else(
-        || department_source.clone(),
-        |snapshot| {
-            format!(
-                "Tracker evidence at epoch {}\n{department_source}",
-                snapshot.fetched_at
-            )
-        },
-    );
-    frame.render_widget(
-        Paragraph::new(source_text)
-            .wrap(Wrap { trim: true })
-            .style(Style::default().fg(MUTED)),
-        source,
-    );
+            ),
+        }),
+    }
+}
+
+/// Draws the rows, details or empty state of the current department view inside `body`.
+fn render_content(frame: &mut Frame, app: &mut App, body: Rect) {
+    if !app.show_diagnostics
+        && let Some(message) = empty_message(app)
+    {
+        select_row(app, 0);
+        frame.render_widget(
+            Paragraph::new(message)
+                .style(Style::default().fg(FOREGROUND))
+                .wrap(Wrap { trim: true }),
+            body,
+        );
+        return;
+    }
     let rows = if app.show_diagnostics {
         diagnostic_rows(app)
     } else {
@@ -583,7 +708,7 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
             Paragraph::new(if app.show_diagnostics {
                 "No source failures"
             } else {
-                "Unavailable: no shared department report"
+                "No rows in the shared department report"
             }),
             table_area,
         );
@@ -600,42 +725,6 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
             detail_area,
         );
     }
-    let diagnostic =
-        Record::error("DepartmentSource", "Source failure").with_fields(DiagnosticFields {
-            reason: Some("source_unavailable"),
-            remedy: Some("Inspect source access or open a saved report with --report"),
-            ..DiagnosticFields::default()
-        });
-    let color = match diagnostic.severity {
-        DiagnosticSeverity::Error => Color::LightRed,
-        DiagnosticSeverity::Warning => WARNING,
-    };
-    frame.render_widget(
-        Paragraph::new(
-            failures
-                .iter()
-                .map(|failure| {
-                    Line::from(format!(
-                        "{}: {}",
-                        failure.name,
-                        Record::error("DepartmentSource", &failure.value).render_human(false)
-                    ))
-                })
-                .collect::<Vec<_>>(),
-        )
-        .style(Style::default().fg(if app.color_enabled {
-            color
-        } else {
-            Color::Reset
-        })),
-        diagnostics,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(
-            "↑↓ select · d details · ←→ scroll · e source errors · r refresh · q quit",
-        )),
-        controls,
-    );
 }
 
 #[cfg(test)]
@@ -805,7 +894,9 @@ pub(crate) mod tests {
 
     fn screen(app: &mut App, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal
+            .draw(|frame| render(frame, app, Instant::now()))
+            .unwrap();
         terminal
             .backend()
             .buffer()
@@ -1003,7 +1094,7 @@ pub(crate) mod tests {
         app.department.failure("source unavailable");
         let output = screen(&mut app, 80, 24);
         assert!(output.contains("source unavailable"));
-        assert!(output.contains("q quit"));
+        assert!(output.contains("q Quit"));
         key(&mut app, KeyCode::Right);
         assert_eq!(app.detail_scroll, 1);
     }
@@ -1041,14 +1132,14 @@ pub(crate) mod tests {
         for view in ['1', '2', '3'] {
             key(&mut app, KeyCode::Char(view));
             let output = screen(&mut app, 80, 24);
-            assert!(output.contains("Department:"), "{output}");
-            assert!(output.contains("Tracker:"), "{output}");
+            assert!(output.contains("Department failed:"), "{output}");
+            assert!(output.contains("Tracker failed:"), "{output}");
             assert!(output.contains("ix-board auth login"), "{output}");
             assert!(
-                output.contains("Binding / Herdr: ambiguous requested lead"),
+                output.contains("Binding / Herdr failed: ambiguous requested lead"),
                 "{output}"
             );
-            assert!(output.contains("e source errors"), "{output}");
+            assert!(output.contains("F1 Help"), "{output}");
         }
         key(&mut app, KeyCode::Char('e'));
         screen(&mut app, 80, 24);
@@ -1090,5 +1181,211 @@ pub(crate) mod tests {
         assert!(screen(&mut app, 80, 24).contains(&progress));
         app.team = Some("SWM".into());
         assert_eq!(app.department_team().as_deref(), Some("SWM"));
+    }
+
+    fn flat(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn labels(app: &App) -> String {
+        label_lines(app)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Trace: FR-065-AC-7
+    #[trace("FR-065-AC-7")]
+    #[test]
+    fn department_views_name_their_selection_and_state_the_fixed_relation() {
+        let mut explicit = App {
+            team: Some("SWM".into()),
+            projects: vec!["native-project".into()],
+            ..App::default()
+        };
+        let mut derived = crate::monitor_ui::tests::app();
+        let mut saved = App {
+            department_input: DepartmentInput::Saved,
+            ..App::default()
+        };
+        saved.department.success(fixture(), Instant::now());
+        for (name, app, selection) in [
+            (
+                "explicit",
+                &mut explicit,
+                "team SWM · projects native-project",
+            ),
+            (
+                "derived",
+                &mut derived,
+                "team SWM derived from lead workspace · all projects",
+            ),
+            ("saved", &mut saved, "saved report · team:SWM (Department)"),
+        ] {
+            for view in [View::Status, View::Health, View::Retro] {
+                app.view = view;
+                let text = labels(app);
+                assert!(
+                    text.contains(&format!("Department selection: {selection}")),
+                    "{name}\n{text}"
+                );
+                assert!(text.contains(DEPARTMENT_RELATION), "{name}\n{text}");
+                let lower = text.to_lowercase();
+                for word in ["equal", "same", "narrower", "subset"] {
+                    assert!(!lower.contains(word), "{name} {word}\n{text}");
+                }
+                for (width, height) in [(80, 24), (120, 40)] {
+                    let drawn = flat(&screen(app, width, height));
+                    assert!(drawn.contains(DEPARTMENT_RELATION), "{name}\n{drawn}");
+                    assert!(drawn.contains(&format!("Department selection: {selection}")));
+                }
+            }
+        }
+    }
+
+    /// Trace: FR-065-AC-8
+    #[trace("FR-065-AC-8")]
+    #[test]
+    fn status_states_its_purpose_without_hiding_evidence_or_rows() {
+        for (width, height) in [(80, 24), (120, 40)] {
+            let mut app = App {
+                view: View::Status,
+                ..App::default()
+            };
+            app.department.success(fixture(), Instant::now());
+            app.department.failure("source unavailable");
+            app.runtime.failure("ambiguous requested lead");
+            let text = flat(&screen(&mut app, width, height));
+            assert!(text.contains(STATUS_PURPOSE), "{text}");
+            assert!(text.contains("Department failed:"), "{text}");
+            assert!(text.contains("Binding / Herdr failed:"), "{text}");
+            assert!(text.contains("Bound activity"), "{text}");
+            for view in [View::Health, View::Retro] {
+                app.view = view;
+                let other = flat(&screen(&mut app, width, height));
+                assert!(!other.contains(STATUS_PURPOSE), "{view:?}");
+            }
+        }
+    }
+
+    /// Trace: FR-065-AC-9
+    #[trace("FR-065-AC-9")]
+    #[test]
+    fn health_and_retro_show_one_concise_state_and_never_a_failure_or_a_value() {
+        for view in [View::Health, View::Retro] {
+            let name = if view == View::Health {
+                "Health"
+            } else {
+                "Retro"
+            };
+            let mut live = App {
+                view,
+                team: Some("SWM".into()),
+                ..App::default()
+            };
+            let text = flat(&screen(&mut live, 80, 24));
+            assert_eq!(text.matches("Not configured").count(), 1, "{text}");
+            assert!(text.contains("--retro-config <file>"), "{text}");
+            assert!(text.contains("team SWM"), "{text}");
+            assert_eq!(
+                text.contains("retained snapshot history"),
+                view == View::Retro
+            );
+            assert!(diagnostic_rows(&live).is_empty());
+            assert!(live.department.error.is_none());
+            let lower = text.to_lowercase();
+            for forbidden in [
+                "failed",
+                "authentication",
+                "complete",
+                "green",
+                "measure / class",
+            ] {
+                assert!(!lower.contains(forbidden), "{forbidden}\n{text}");
+            }
+
+            let mut saved = App {
+                view,
+                department_input: DepartmentInput::Saved,
+                ..App::default()
+            };
+            let mut lacking = fixture();
+            lacking.current.classes.clear();
+            lacking.current.measurements.clear();
+            lacking.current.loops.clear();
+            saved.department.success(lacking, Instant::now());
+            let text = flat(&screen(&mut saved, 80, 24));
+            assert!(
+                text.contains(&format!("does not supply the {name} fields")),
+                "{text}"
+            );
+            assert!(text.contains("--report <file>"), "{text}");
+            assert!(diagnostic_rows(&saved).is_empty());
+
+            let mut waiting = App {
+                view,
+                department_input: DepartmentInput::Configured,
+                ..App::default()
+            };
+            let text = flat(&screen(&mut waiting, 80, 24));
+            assert!(
+                text.contains("Waiting for the first read of the retro configuration"),
+                "{text}"
+            );
+            assert!(!text.to_lowercase().contains("failed"), "{text}");
+            assert!(diagnostic_rows(&waiting).is_empty());
+
+            let mut failed = App {
+                view,
+                department_input: DepartmentInput::Configured,
+                ..App::default()
+            };
+            failed.department.failure("source unreachable");
+            let text = flat(&screen(&mut failed, 80, 24));
+            assert!(
+                text.contains(&format!("{name} unavailable: source unreachable")),
+                "{text}"
+            );
+            assert!(text.contains("Department failed:"), "{text}");
+            assert!(!text.contains("Measure / class"), "{text}");
+
+            let mut stale = App {
+                view,
+                department_input: DepartmentInput::Configured,
+                ..App::default()
+            };
+            stale.department.success(fixture(), Instant::now());
+            stale.department.failure("source unreachable");
+            let text = flat(&screen(&mut stale, 80, 24));
+            assert!(text.contains("last snapshot"), "{text}");
+            assert!(text.contains("Measure / class"), "{text}");
+        }
+    }
+
+    /// Trace: FR-065-AC-10
+    #[trace("FR-065-AC-10")]
+    #[test]
+    fn popups_over_a_not_configured_view_start_no_collection_retry_or_write() {
+        let mut app = App {
+            view: View::Health,
+            ..App::default()
+        };
+        for open in [KeyCode::Char('v'), KeyCode::F(1)] {
+            key(&mut app, open);
+            screen(&mut app, 80, 24);
+            key(&mut app, KeyCode::Esc);
+        }
+        assert!(app.popup.is_none() && !app.should_quit);
+        assert!(!app.refresh_now && !app.collection_failed);
+        assert!(app.department.value.is_none() && app.department.error.is_none());
+        assert_eq!(app.department.revision, 0);
+        assert!(app.tracker.error.is_none() && app.runtime.error.is_none());
+        assert_eq!(app.department_input, DepartmentInput::NotConfigured);
     }
 }

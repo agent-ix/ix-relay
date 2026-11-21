@@ -5,6 +5,7 @@
 mod monitor;
 mod monitor_department;
 mod monitor_department_source;
+mod monitor_nav;
 mod monitor_ops;
 mod monitor_runtime;
 #[cfg(test)]
@@ -145,8 +146,9 @@ fn run() -> io::Result<(Outcome, Option<String>)> {
         ix_cli_kit::streams::stdout_is_terminal(),
         std::env::var_os("NO_COLOR").is_some(),
     );
-    if args.report.is_none() && department_config.is_none() {
-        app.department.failure("Department health/retro unavailable: supply --retro-config with department policies matching the selected scope, or open --report");
+    // A missing retro configuration is a state of the Health and Retro views, not a source failure.
+    if args.report.is_none() && department_config.is_some() {
+        app.department_input = monitor::DepartmentInput::Configured;
     }
     let department_worker = department_config
         .map(monitor_department_source::DepartmentWorker::spawn)
@@ -342,6 +344,11 @@ fn prepare_app(
             monitor::View::Status
         } else {
             monitor::View::Tickets
+        },
+        department_input: if args.report.is_some() {
+            monitor::DepartmentInput::Saved
+        } else {
+            monitor::DepartmentInput::NotConfigured
         },
         ..App::default()
     };

@@ -27,10 +27,11 @@ const ERROR: Color = Color::Rgb(240, 163, 163);
 /// Renders one bound session, retaining visibly labeled snapshots on source failure.
 pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
     if matches!(app.view, View::Status | View::Health | View::Retro) {
-        crate::monitor_department::render(frame, app);
+        crate::monitor_department::render(frame, app, now);
         return;
     }
     let now_epoch = SystemClock.now_epoch_seconds();
+    let unbound = app.binding.is_none();
     let report = app.report.value.as_ref().and_then(Option::as_ref);
     let team = app.team.clone().or_else(|| {
         app.binding.as_ref().and_then(|binding| {
@@ -88,8 +89,10 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
                 }
             }
         }
-        if scope_view
-            && let Some(p) = &projection
+        if unbound {
+            scope_spans.push(muted(" · "));
+            scope_spans.push(Span::raw(UNBOUND_SCOPE));
+        } else if let Some(p) = &projection
             && !p.mode.text().is_empty()
         {
             scope_spans.push(muted(" · "));
@@ -130,40 +133,32 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
             Style::default().fg(ERROR),
         ))]
     } else {
-        vec![Line::from(vec![
+        let mut spans = vec![
             muted("Scope: "),
             Span::raw(team_label),
             muted(" · waiting for Linear"),
-        ])]
+        ];
+        if unbound {
+            spans.push(muted(" · "));
+            spans.push(Span::raw(UNBOUND_SCOPE));
+        }
+        vec![Line::from(spans)]
     };
-    let tracker_error = app.tracker.error.as_ref().map(|error| {
-        app.tracker_retry_at.map_or_else(
-            || error.clone(),
-            |deadline| {
-                let seconds = deadline.saturating_duration_since(now).as_secs();
-                format!(
-                    "{error} · next attempt in {}m {:02}s",
-                    seconds / 60,
-                    seconds % 60
-                )
-            },
-        )
-    });
-    let errors = [
-        scope_error.as_deref(),
-        tracker_error.as_deref(),
-        app.runtime.error.as_deref(),
-        app.report.error.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join(" · ");
+    // Agents lists every reported assignment; it never presents a scope or a scope count.
+    let summary = if app.view == View::Agents {
+        vec![Line::from(vec![muted("Agents: "), Span::raw(AGENTS_LABEL)])]
+    } else {
+        summary
+    };
     let width = usize::from(frame.area().width.max(1));
+    let evidence = evidence_lines(
+        &evidence_items(app, now, now_epoch, false, scope_error.as_deref()),
+        width,
+    );
+    let evidence_rows = u16::try_from(evidence.len()).unwrap_or(0);
     let controls = footer_controls(
         scope_view
             .then(|| crate::monitor_scope::footer_mode(projection.as_deref(), app.show_completed)),
-        &errors,
         width,
     );
     let footer_rows = u16::try_from(controls.len()).unwrap_or(1) + u16::from(app.show_status);
@@ -172,82 +167,50 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
     } else {
         1
     };
-    // Wrapped Scope text gets the rows it needs, bounded only by what the other panels leave.
-    let scope_height = if scope_view {
-        let needed: usize = summary.iter().map(|l| wrapped_rows(l, width)).sum();
-        let spare = frame
-            .area()
-            .height
-            .saturating_sub(2 + focus_rows + footer_rows + 3);
+    // Wrapped label text gets the rows it needs, bounded only by what the other panels leave.
+    let needed: usize = summary.iter().map(|l| wrapped_rows(l, width)).sum();
+    let spare = frame
+        .area()
+        .height
+        .saturating_sub(2 + focus_rows + evidence_rows + footer_rows + 3);
+    let scope_height = if app.view == View::Agents {
+        u16::try_from(needed)
+            .unwrap_or(u16::MAX)
+            .clamp(1, spare.max(1))
+    } else {
         u16::try_from(needed)
             .unwrap_or(u16::MAX)
             .clamp(2, spare.max(2))
-    } else {
-        2
     };
-    let [identity, tabs, scope, focus, work, footer] = Layout::vertical([
+    let [
+        identity,
+        selector,
+        scope,
+        focus,
+        work,
+        evidence_area,
+        footer,
+    ] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(scope_height),
         Constraint::Length(focus_rows),
         Constraint::Min(3),
+        Constraint::Length(evidence_rows),
         Constraint::Length(footer_rows),
     ])
     .areas(frame.area());
-    let runtime_fresh = fresh(
-        &app.runtime,
-        now,
-        crate::monitor_runtime::RUNTIME_REFRESH_INTERVAL.saturating_mul(2),
-    );
-    let status = if app.session_ended {
-        "session ended/replaced · restart to rebind"
-    } else if !runtime_fresh {
-        "activity unknown"
-    } else {
-        app.runtime
-            .value
-            .as_ref()
-            .map_or("activity unknown", |r| activity(&r.status))
-    };
+    let runtime_fresh = runtime_is_fresh(app, now);
+    let status = current_activity(app, now);
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                display_text(&app.lead_name, 40),
-                Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
-            ),
-            muted(" · "),
-            Span::raw(app.binding.as_ref().map_or("unknown", |b| b.kind.as_str())),
-            muted(" · "),
-            Span::raw(activity_marker(status)),
-        ]))
-        .style(Style::default().fg(FOREGROUND)),
+        Paragraph::new(identity_line(app, now)).style(Style::default().fg(FOREGROUND)),
         identity,
     );
-    let mut tab_spans = Vec::new();
-    for (key, label, view) in [
-        ("t", "Tickets", View::Tickets),
-        ("a", "Agents", View::Agents),
-        ("p", "Scope", View::Scope),
-    ] {
-        let selected = app.view == view;
-        let decoration = if selected {
-            Modifier::BOLD | Modifier::UNDERLINED
-        } else {
-            Modifier::empty()
-        };
-        tab_spans.push(Span::styled(
-            key,
-            Style::default().fg(PRIMARY).add_modifier(decoration),
-        ));
-        tab_spans.push(Span::styled(
-            format!(" {label}"),
-            Style::default()
-                .fg(if app.view == view { FOREGROUND } else { MUTED })
-                .add_modifier(decoration),
-        ));
-        tab_spans.push(muted("  "));
-    }
-    frame.render_widget(Paragraph::new(Line::from(tab_spans)), tabs);
+    frame.render_widget(Paragraph::new(selector_line(app.view)), selector);
+    frame.render_widget(
+        Paragraph::new(evidence).style(Style::default().fg(MUTED)),
+        evidence_area,
+    );
     frame.render_widget(
         Paragraph::new(summary)
             .style(Style::default().fg(FOREGROUND))
@@ -344,65 +307,334 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
         Paragraph::new(footer_lines).style(Style::default().fg(MUTED)),
         footer,
     );
+    crate::monitor_nav::render_popup(frame, app, work);
 }
 
-/// Footer control lines sized from their real width.
-///
-/// Outside the Scope view an error replaces the controls. In the Scope view the error
-/// line sits above the controls and the `c` key with its mode is never dropped: it joins
-/// the general controls when they fit and otherwise takes a line of its own.
-fn footer_controls(
-    scope_mode: Option<&'static str>,
-    errors: &str,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let error_line = || {
-        Line::from(Span::styled(
-            display_text(errors, width),
-            Style::default().fg(ERROR),
-        ))
-    };
-    let mut general = vec![
-        Span::styled("↑↓", Style::default().fg(PRIMARY)),
-        Span::raw(" select · "),
-        Span::styled("d", Style::default().fg(PRIMARY)),
-        Span::raw(" details · "),
-        Span::styled("r", Style::default().fg(PRIMARY)),
-        Span::raw(" refresh · "),
-        Span::styled("q", Style::default().fg(PRIMARY)),
-        Span::raw(" quit · "),
-        Span::styled("s", Style::default().fg(PRIMARY)),
-        Span::raw(" status"),
-    ];
-    let Some(mode) = scope_mode else {
-        return vec![if errors.is_empty() {
-            Line::from(general)
-        } else {
-            error_line()
-        }];
-    };
-    let mut lines = Vec::with_capacity(3);
-    if !errors.is_empty() {
-        lines.push(error_line());
+/// Fixed Scope-line statement while no lead is bound; it never implies a reported focus.
+const UNBOUND_SCOPE: &str = "no lead bound · rows are the whole team";
+/// Population statement for Agents, which is not limited by scope (FR-048-AC-6).
+const AGENTS_LABEL: &str = "every reported assignment is listed, not limited by scope";
+/// The most rows the evidence area may use, counting a "not shown" line.
+const MAX_EVIDENCE_ROWS: usize = 4;
+
+/// One source state shown outside any popup. The label is never truncated.
+pub(crate) struct Evidence {
+    severity: u8,
+    label: String,
+    detail: String,
+}
+
+fn item(severity: u8, label: impl Into<String>, detail: impl Into<String>) -> Evidence {
+    Evidence {
+        severity,
+        label: label.into(),
+        detail: detail.into(),
     }
-    let toggle = vec![
-        Span::styled("c", Style::default().fg(PRIMARY)),
-        Span::raw(format!(" {mode}")),
-    ];
-    let toggle_width = Line::from(toggle.clone()).width();
-    if Line::from(general.clone()).width() + 3 + toggle_width <= width {
-        general.push(Span::raw(" · "));
-        general.extend(toggle);
-        lines.push(Line::from(general));
+}
+
+/// Source evidence, highest severity first: failures and a replaced binding, then a
+/// rate-limit countdown, stale evidence and finally plain source facts.
+///
+/// Department views use the compact classified summaries; lead views keep the full text.
+pub(crate) fn evidence_items(
+    app: &App,
+    now: Instant,
+    now_epoch: i64,
+    department_view: bool,
+    scope_error: Option<&str>,
+) -> Vec<Evidence> {
+    let text = |summary: &Option<String>, error: &str| {
+        display_text(
+            if department_view {
+                summary.as_deref().unwrap_or(error)
+            } else {
+                error
+            },
+            4096,
+        )
+    };
+    let mut items = Vec::new();
+    if app.session_ended {
+        items.push(item(0, "Binding: session replaced", "restart to rebind"));
+    }
+    if department_view {
+        if let Some(error) = &app.department.error {
+            items.push(item(
+                0,
+                "Department failed",
+                text(&app.department.error_summary, error),
+            ));
+        }
+    } else if let Some(error) = scope_error {
+        items.push(item(0, "Scope failed", display_text(error, 4096)));
+    }
+    if let Some(error) = &app.tracker.error {
+        if let Some(deadline) = app.tracker_retry_at {
+            let seconds = deadline.saturating_duration_since(now).as_secs();
+            items.push(item(
+                1,
+                format!(
+                    "Tracker rate-limited (next attempt in {}m {:02}s)",
+                    seconds / 60,
+                    seconds % 60
+                ),
+                display_text(error, 4096),
+            ));
+        } else {
+            items.push(item(
+                0,
+                "Tracker failed",
+                text(&app.tracker.error_summary, error),
+            ));
+        }
+    } else if let Some(snapshot) = &app.tracker.value
+        && snapshot_is_stale(snapshot.fetched_at, now_epoch)
+    {
+        items.push(item(
+            2,
+            "Tracker stale",
+            format!(
+                "snapshot {} old",
+                duration(now_epoch.saturating_sub(snapshot.fetched_at).max(0))
+            ),
+        ));
+    }
+    if let Some(error) = app
+        .runtime
+        .error
+        .as_ref()
+        .filter(|error| error.as_str() != crate::monitor::SESSION_REPLACED)
+    {
+        items.push(item(
+            0,
+            if department_view {
+                "Binding / Herdr failed"
+            } else {
+                "Herdr failed"
+            },
+            text(&app.runtime.error_summary, error),
+        ));
+    }
+    if let Some(error) = app
+        .report
+        .error
+        .as_ref()
+        .filter(|error| error.as_str() != crate::monitor::SESSION_REPLACED)
+    {
+        items.push(item(
+            0,
+            "Reports failed",
+            text(&app.report.error_summary, error),
+        ));
+    }
+    if department_view {
+        if let Some(delta) = &app.department.value {
+            let stale = app.department.error.is_some();
+            items.push(item(
+                if stale { 2 } else { 3 },
+                if stale {
+                    "Department evidence · last snapshot"
+                } else {
+                    "Department evidence"
+                },
+                crate::monitor_department::evidence_windows(delta),
+            ));
+        }
+        if let Some(snapshot) = &app.tracker.value {
+            items.push(item(
+                3,
+                "Tracker evidence",
+                format!("epoch {}", snapshot.fetched_at),
+            ));
+        }
+    }
+    items.sort_by_key(|evidence| evidence.severity);
+    items
+}
+
+fn truncate_to(text: &str, width: usize) -> String {
+    let mut used = 0;
+    let mut out = String::new();
+    for character in text.chars() {
+        let w = Span::raw(character.to_string()).width();
+        if used + w > width {
+            break;
+        }
+        used += w;
+        out.push(character);
+    }
+    out
+}
+
+/// Evidence rows: each label intact, free-form detail truncated with a marker, and a count
+/// of the sources not shown when more have evidence than fit.
+pub(crate) fn evidence_lines(items: &[Evidence], width: usize) -> Vec<Line<'static>> {
+    let shown = if items.len() > MAX_EVIDENCE_ROWS {
+        MAX_EVIDENCE_ROWS - 1
     } else {
-        lines.push(Line::from(general));
-        lines.push(Line::from(toggle));
+        items.len()
+    };
+    let mut lines: Vec<Line<'static>> = items[..shown]
+        .iter()
+        .map(|evidence| {
+            let color = match evidence.severity {
+                0 => ERROR,
+                1 | 2 => WARNING,
+                _ => MUTED,
+            };
+            let label = Span::styled(
+                evidence.label.clone(),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            );
+            if evidence.detail.is_empty() {
+                return Line::from(label);
+            }
+            let lead = format!(": {}", evidence.detail);
+            let room = width.saturating_sub(label.width());
+            let detail = if Span::raw(lead.clone()).width() <= room {
+                lead
+            } else if room > 3 {
+                format!("{}…", truncate_to(&lead, room - 1))
+            } else {
+                String::new()
+            };
+            Line::from(vec![
+                label,
+                Span::styled(detail, Style::default().fg(color)),
+            ])
+        })
+        .collect();
+    if items.len() > shown {
+        lines.push(Line::from(muted(format!(
+            "+{} more sources not shown",
+            items.len() - shown
+        ))));
     }
     lines
 }
 
+fn runtime_is_fresh(app: &App, now: Instant) -> bool {
+    fresh(
+        &app.runtime,
+        now,
+        crate::monitor_runtime::RUNTIME_REFRESH_INTERVAL.saturating_mul(2),
+    )
+}
+
+/// Current activity wording for the identity row and the optional status line.
+fn current_activity(app: &App, now: Instant) -> &'static str {
+    if app.session_ended {
+        crate::monitor::SESSION_REPLACED
+    } else if !runtime_is_fresh(app, now) {
+        "activity unknown"
+    } else {
+        app.runtime
+            .value
+            .as_ref()
+            .map_or("activity unknown", |r| activity(&r.status))
+    }
+}
+
+/// The monitored lead, identical in every view. Without a bound lead it says so plainly
+/// and keeps any binding diagnostic.
+pub(crate) fn identity_line(app: &App, now: Instant) -> Line<'static> {
+    let name = Span::styled(
+        display_text(&app.lead_name, 40),
+        Style::default().fg(PRIMARY).add_modifier(Modifier::BOLD),
+    );
+    let Some(binding) = &app.binding else {
+        let mut spans = vec![name, muted(" · "), Span::raw("no lead bound")];
+        if let Some(error) = &app.runtime.error {
+            spans.push(muted(" · "));
+            spans.push(Span::styled(
+                display_text(error, 120),
+                Style::default().fg(ERROR),
+            ));
+        }
+        return Line::from(spans);
+    };
+    Line::from(vec![
+        name,
+        muted(" · "),
+        Span::raw(display_text(&binding.kind, 40)),
+        muted(" · "),
+        Span::raw(activity_marker(current_activity(app, now))),
+    ])
+}
+
+/// The one View selector shown in every view: its label, the current view and its key.
+pub(crate) fn selector_line(view: View) -> Line<'static> {
+    Line::from(vec![
+        muted("View: "),
+        Span::styled(
+            view.label(),
+            Style::default().fg(FOREGROUND).add_modifier(Modifier::BOLD),
+        ),
+        muted(" ▾  "),
+        Span::styled("v", Style::default().fg(PRIMARY)),
+        muted(" opens the list"),
+    ])
+}
+
+/// The single controls row: `v View` and `F1 Help` always, `q Quit` when width allows, and
+/// in Scope the `c` key with its mode, which is never dropped: it joins the row when it
+/// fits and otherwise takes a line of its own.
+pub(crate) fn footer_controls(
+    scope_mode: Option<&'static str>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let hint = |key: &'static str, label: &'static str| {
+        vec![
+            Span::styled(key, Style::default().fg(PRIMARY)),
+            muted(format!(" {label}")),
+        ]
+    };
+    let separator = || muted(" · ");
+    let mut core = hint("v", "View");
+    core.push(separator());
+    core.extend(hint("F1", "Help"));
+    let mut with_quit = core.clone();
+    with_quit.push(separator());
+    with_quit.extend(hint("q", "Quit"));
+    let toggle = scope_mode.map(|mode| {
+        vec![
+            Span::styled("c", Style::default().fg(PRIMARY)),
+            muted(format!(" {mode}")),
+        ]
+    });
+    let fits = |spans: &[Span<'static>], extra: Option<&[Span<'static>]>| {
+        let mut width_used = Line::from(spans.to_vec()).width();
+        if let Some(extra) = extra {
+            width_used += 3 + Line::from(extra.to_vec()).width();
+        }
+        width_used <= width
+    };
+    let join = |spans: &[Span<'static>], toggle: &[Span<'static>]| {
+        let mut joined = spans.to_vec();
+        joined.push(separator());
+        joined.extend(toggle.to_vec());
+        Line::from(joined)
+    };
+    match toggle {
+        None => vec![Line::from(if fits(with_quit.as_slice(), None) {
+            with_quit
+        } else {
+            core
+        })],
+        Some(toggle) => {
+            if fits(with_quit.as_slice(), Some(toggle.as_slice())) {
+                vec![join(with_quit.as_slice(), toggle.as_slice())]
+            } else if fits(core.as_slice(), Some(toggle.as_slice())) {
+                vec![join(core.as_slice(), toggle.as_slice())]
+            } else {
+                vec![Line::from(core), Line::from(toggle)]
+            }
+        }
+    }
+}
+
 /// Rows a line occupies when word-wrapped to `width`, counting over-long words split.
-fn wrapped_rows(line: &Line, width: usize) -> usize {
+pub(crate) fn wrapped_rows(line: &Line, width: usize) -> usize {
     let width = width.max(1);
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
     let mut rows = 1;
@@ -801,7 +1033,8 @@ pub(crate) mod tests {
         let hidden = screen(&mut app, 90, 15);
         assert!(!hidden.contains("Linear: updated"));
         assert!(!hidden.contains("Herdr:"));
-        assert!(hidden.contains("s status"));
+        assert!(hidden.contains("v View") && hidden.contains("F1 Help"));
+        assert!(!hidden.contains("s status"), "shortcuts live in help");
         crate::monitor::handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
@@ -830,16 +1063,14 @@ pub(crate) mod tests {
             .unwrap();
         let mut x = 0;
         for (text, color) in [
-            ("↑↓", PRIMARY),
-            (" select · ", MUTED),
-            ("d", PRIMARY),
-            (" details · ", MUTED),
-            ("r", PRIMARY),
-            (" refresh · ", MUTED),
+            ("v", PRIMARY),
+            (" View", MUTED),
+            (" · ", MUTED),
+            ("F1", PRIMARY),
+            (" Help", MUTED),
+            (" · ", MUTED),
             ("q", PRIMARY),
-            (" quit · ", MUTED),
-            ("s", PRIMARY),
-            (" status", MUTED),
+            (" Quit", MUTED),
         ] {
             for character in text.chars() {
                 let cell = &terminal.backend().buffer()[(x, 14)];
@@ -852,9 +1083,11 @@ pub(crate) mod tests {
         terminal
             .draw(|frame| render(frame, &mut app, Instant::now()))
             .unwrap();
+        // The error is an evidence row above the one-row footer, which keeps its hints.
         for x in 0..7 {
-            assert_eq!(terminal.backend().buffer()[(x, 14)].fg, ERROR);
+            assert_eq!(terminal.backend().buffer()[(x, 13)].fg, ERROR);
         }
+        assert_eq!(terminal.backend().buffer()[(0, 14)].fg, PRIMARY);
     }
 
     /// Trace: FR-048-AC-4
@@ -876,11 +1109,7 @@ pub(crate) mod tests {
             Instant::now(),
         );
         let mut terminal = Terminal::new(TestBackend::new(120, 18)).unwrap();
-        for (view, key, tab) in [
-            (View::Tickets, "t", "Tickets"),
-            (View::Agents, "a", "Agents"),
-            (View::Scope, "p", "Scope"),
-        ] {
+        for (view, tab) in [(View::Tickets, "Tickets"), (View::Scope, "Scope")] {
             app.view = view;
             terminal
                 .draw(|frame| render(frame, &mut app, Instant::now()))
@@ -946,25 +1175,21 @@ pub(crate) mod tests {
                     }
                 }
             }
+            // The one View selector replaces the persistent tab strip.
             let mut x = 0;
-            for (tab_key, label) in [("t", "Tickets"), ("a", "Agents"), ("p", "Scope")] {
-                let selected = tab_key == key && label == tab;
-                for (text, color) in [
-                    (tab_key.to_owned(), PRIMARY),
-                    (
-                        format!(" {label}"),
-                        if selected { FOREGROUND } else { MUTED },
-                    ),
-                ] {
-                    for _ in text.chars() {
-                        let cell = &buffer[(x, 1)];
-                        assert_eq!(cell.fg, color);
-                        assert_eq!(cell.modifier.contains(Modifier::UNDERLINED), selected);
-                        x += 1;
-                    }
+            for (text, color) in [
+                ("View: ", MUTED),
+                (tab, FOREGROUND),
+                (" ▾  ", MUTED),
+                ("v", PRIMARY),
+                (" opens the list", MUTED),
+            ] {
+                for character in text.chars() {
+                    let cell = &buffer[(x, 1)];
+                    assert_eq!(cell.symbol(), character.to_string(), "selector {x}");
+                    assert_eq!(cell.fg, color, "selector {x}");
+                    x += 1;
                 }
-                assert!(!buffer[(x, 1)].modifier.contains(Modifier::UNDERLINED));
-                x += 2;
             }
         }
         for (state, marker, description) in [
@@ -1029,7 +1254,7 @@ pub(crate) mod tests {
                 })
                 .unwrap();
             let line = (0..90)
-                .map(|x| terminal.backend().buffer()[(x, 14)].symbol())
+                .map(|x| terminal.backend().buffer()[(x, 13)].symbol())
                 .collect::<String>();
             assert!(line.contains("Linear rate limited"), "{line}");
             assert!(line.contains(expected), "{line}");
@@ -1492,5 +1717,216 @@ pub(crate) mod tests {
         let waiting = screen(&mut app, 90, 15);
         assert!(waiting.contains("Scope: SWM team · waiting for Linear"));
         assert!(!waiting.contains("Scope: not reported"));
+    }
+
+    /// Trace: FR-065-AC-5
+    #[test]
+    fn every_view_has_the_same_compact_footer_selector_and_no_tab_strip() {
+        for (width, height) in [(80_u16, 24_u16), (120, 40)] {
+            for view in View::ALL {
+                let mut app = app();
+                app.view = view;
+                let text = screen(&mut app, width, height);
+                let footer = text.lines().last().unwrap();
+                assert!(
+                    footer.contains("v View") && footer.contains("F1 Help"),
+                    "{view:?}\n{text}"
+                );
+                for strip in [
+                    "t Tickets",
+                    "a Agents",
+                    "p Scope",
+                    "1 Status",
+                    "2 Health",
+                    "3 Retro",
+                ] {
+                    assert!(!text.contains(strip), "{view:?} {strip}\n{text}");
+                }
+                let selector = text.lines().nth(1).unwrap();
+                assert!(
+                    selector.starts_with(&format!("View: {}", view.label())),
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    /// Trace: FR-065-AC-5
+    #[test]
+    fn evidence_rows_keep_labels_intact_and_bound_themselves_at_80x24() {
+        let mut app = app();
+        app.apply_tracker_refresh(
+            Err(ix_board::Error::LinearRateLimited {
+                retry_after: std::time::Duration::from_secs(3600),
+            }),
+            Instant::now(),
+        );
+        app.runtime
+            .failure(format!("Herdr unreachable {}", "detail ".repeat(60)));
+        app.report.failure("Redis unavailable");
+        app.session_ended = true;
+        let labels = [
+            "Binding: session replaced",
+            "Herdr failed",
+            "Reports failed",
+            "Tracker rate-limited (next attempt in",
+        ];
+        let text = screen(&mut app, 80, 24);
+        for label in labels {
+            assert!(text.contains(label), "{label}\n{text}");
+        }
+        assert!(
+            text.contains('…'),
+            "detail is truncated with a marker\n{text}"
+        );
+        let footer = text.lines().last().unwrap();
+        assert!(footer.contains("v View") && footer.contains("F1 Help"));
+        let rows = text
+            .lines()
+            .filter(|line| labels.iter().any(|label| line.contains(label)))
+            .count();
+        assert!(rows <= 4, "{text}");
+        // More sources than rows: highest severity first and a count of those not shown.
+        app.team = Some("UNKNOWN".into());
+        let crowded = screen(&mut app, 80, 24);
+        assert!(crowded.contains("Scope failed"), "{crowded}");
+        assert!(crowded.contains("+2 more sources not shown"), "{crowded}");
+        assert!(crowded.lines().last().unwrap().contains("F1 Help"));
+        // Below the supported size the dashboard truncates without panic.
+        for (width, height) in [(40_u16, 10_u16), (60, 16)] {
+            screen(&mut app, width, height);
+        }
+    }
+
+    /// Trace: FR-065-AC-6
+    #[test]
+    fn identity_row_is_the_same_in_all_six_views() {
+        let verified = app();
+        let mut replaced = app();
+        replaced.session_ended = true;
+        replaced.runtime.failure(crate::monitor::SESSION_REPLACED);
+        let mut unbound = app();
+        unbound.binding = None;
+        unbound.report.value = Some(None);
+        unbound.lead_name = "identity unknown".into();
+        unbound.team = Some("SWM".into());
+        unbound.runtime.failure("ambiguous requested lead");
+        for (name, mut app) in [
+            ("verified", verified),
+            ("replaced", replaced),
+            ("unbound", unbound),
+        ] {
+            let mut rows = Vec::new();
+            for view in View::ALL {
+                app.view = view;
+                rows.push(screen(&mut app, 120, 40).lines().next().unwrap().to_owned());
+            }
+            assert!(rows.iter().all(|row| row == &rows[0]), "{name} {rows:?}");
+            if name == "unbound" {
+                assert!(rows[0].contains("no lead bound"), "{rows:?}");
+                assert!(rows[0].contains("ambiguous requested lead"), "{rows:?}");
+            }
+        }
+    }
+
+    /// Trace: FR-065-AC-7
+    #[test]
+    fn lead_views_name_their_real_population() {
+        let mut agents = app();
+        agents.view = View::Agents;
+        let text = screen(&mut agents, 200, 30);
+        assert!(
+            text.contains("Agents: every reported assignment is listed, not limited by scope"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("Scope:") && !text.contains("Tasks:"),
+            "{text}"
+        );
+        let mut focused = app();
+        let text = screen(&mut focused, 200, 30);
+        assert!(text.contains("Scope: SWM · Product"));
+        assert!(!text.contains("focus reported") && !text.contains("no lead bound"));
+        let mut whole = app();
+        whole.report.value.as_mut().unwrap().as_mut().unwrap().scope = None;
+        let mut tickets = app();
+        tickets
+            .report
+            .value
+            .as_mut()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .scope = Some(WorkScope {
+            tickets: vec!["id-12".into()],
+            ..Default::default()
+        });
+        let mut unbound = app();
+        unbound.binding = None;
+        unbound.team = Some("SWM".into());
+        unbound.report.value = Some(None);
+        for (app, expected) in [
+            (&mut whole, "no focus reported · rows are the whole team"),
+            (&mut tickets, "no initiative/project focus reported"),
+            (&mut unbound, "no lead bound · rows are the whole team"),
+        ] {
+            for view in [View::Tickets, View::Scope] {
+                app.view = view;
+                let text = screen(app, 200, 30);
+                assert!(text.contains(expected), "{view:?} {expected}\n{text}");
+            }
+        }
+        unbound.view = View::Agents;
+        assert!(screen(&mut unbound, 200, 30).contains("no lead bound"));
+    }
+
+    /// Trace: FR-065-AC-11
+    #[test]
+    fn help_stays_inside_the_work_area_and_a_shrinking_refresh_clamps_selection() {
+        let mut app = app();
+        app.view = View::Agents;
+        let agent = |n: usize| AgentWork {
+            agent_id: n.to_string(),
+            name: format!("worker-{n:02}"),
+            ticket: "SWM-12".parse().unwrap(),
+            role: "coder".into(),
+            status: WorkStatus::Running,
+            pane: None,
+            session: None,
+            reported_at_ms: 100,
+        };
+        app.report.value.as_mut().unwrap().as_mut().unwrap().agents = (0..12).map(agent).collect();
+        screen(&mut app, 80, 24);
+        for _ in 0..11 {
+            crate::monitor::handle_key(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        screen(&mut app, 80, 24);
+        assert_eq!(app.table.selected(), Some(11));
+        crate::monitor::handle_key(&mut app, KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        app.runtime.failure("Herdr unreachable");
+        app.session_ended = true;
+        app.apply_tracker_refresh(
+            Err(ix_board::Error::LinearRateLimited {
+                retry_after: std::time::Duration::from_secs(3600),
+            }),
+            Instant::now(),
+        );
+        app.report.value.as_mut().unwrap().as_mut().unwrap().agents = (0..3).map(agent).collect();
+        let text = screen(&mut app, 80, 24);
+        assert_eq!(app.table.selected(), Some(2), "clamped while help is open");
+        let lines: Vec<&str> = text.lines().collect();
+        let help = lines.iter().position(|l| l.contains("Help · F1")).unwrap();
+        let evidence = lines
+            .iter()
+            .position(|l| l.contains("Binding: session replaced"))
+            .unwrap();
+        assert!(help > 3 && help < evidence, "{text}");
+        for label in ["Herdr failed", "Tracker rate-limited"] {
+            assert!(text.contains(label), "{label}\n{text}");
+        }
+        assert!(lines.last().unwrap().contains("v View"));
+        crate::monitor::handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.popup.is_none() && !app.should_quit);
+        assert_eq!(app.table.selected(), Some(2));
     }
 }

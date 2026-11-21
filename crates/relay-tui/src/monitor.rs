@@ -75,6 +75,74 @@ pub enum View {
     Retro,
 }
 
+impl View {
+    /// Every view in the fixed order the View selector lists them (FR-065).
+    pub const ALL: [View; 6] = [
+        View::Tickets,
+        View::Agents,
+        View::Scope,
+        View::Status,
+        View::Health,
+        View::Retro,
+    ];
+
+    /// Name shown in the View selector and dropdown.
+    pub const fn label(self) -> &'static str {
+        match self {
+            View::Tickets => "Tickets",
+            View::Agents => "Agents",
+            View::Scope => "Scope",
+            View::Status => "Status",
+            View::Health => "Health",
+            View::Retro => "Retro",
+        }
+    }
+
+    /// Compatibility shortcut that selects this view without the dropdown.
+    pub const fn key(self) -> char {
+        match self {
+            View::Tickets => 't',
+            View::Agents => 'a',
+            View::Scope => 'p',
+            View::Status => '1',
+            View::Health => '2',
+            View::Retro => '3',
+        }
+    }
+}
+
+/// The one popup that may be open over the work area (FR-065).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Popup {
+    /// View dropdown; `highlight` indexes `View::ALL` and `offset` is its first visible entry.
+    Dropdown {
+        /// Highlighted entry.
+        highlight: usize,
+        /// First visible entry, clamped when drawn.
+        offset: usize,
+    },
+    /// Help popup scrolled by `scroll` lines, clamped when drawn.
+    Help {
+        /// First visible help line.
+        scroll: u16,
+    },
+}
+
+/// How the department report is supplied; decides the Health and Retro empty states.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum DepartmentInput {
+    /// Live startup without a retro configuration.
+    #[default]
+    NotConfigured,
+    /// Live startup with a retro configuration; the first read may be pending.
+    Configured,
+    /// A saved report supplied the model.
+    Saved,
+}
+
+/// Text shared by the binding fence and the evidence rows when a session is replaced.
+pub(crate) const SESSION_REPLACED: &str = "session ended/replaced · restart to rebind";
+
 /// Complete dashboard state.
 #[derive(Debug, Default)]
 pub struct App {
@@ -124,6 +192,10 @@ pub struct App {
     pub show_completed: bool,
     /// Reused shared summary, Scope projection and Scope selection memory.
     pub scope: crate::monitor_scope::ScopeState,
+    /// Open popup, if any; at most one at a time.
+    pub popup: Option<Popup>,
+    /// How the department report is supplied.
+    pub department_input: DepartmentInput,
 }
 
 impl App {
@@ -163,8 +235,7 @@ impl App {
                         self.runtime.success(observation, read_at);
                     } else {
                         self.session_ended = true;
-                        self.runtime
-                            .failure("session ended/replaced · restart to rebind");
+                        self.runtime.failure(SESSION_REPLACED);
                     }
                 }
                 Ok(_) => {}
@@ -186,8 +257,7 @@ impl App {
                         .is_some_and(|report| self.binding.as_ref() != Some(&report.binding))
                     {
                         self.session_ended = true;
-                        self.report
-                            .failure("session ended/replaced · restart to rebind");
+                        self.report.failure(SESSION_REPLACED);
                     } else {
                         self.report.success(report, read_at);
                     }
@@ -228,8 +298,20 @@ impl App {
 
 /// Handles the dashboard's read-only keyboard controls.
 pub fn handle_key(app: &mut App, key: KeyEvent) {
+    // An open popup receives every key and acts only on the keys it owns.
+    if let Some(popup) = app.popup {
+        crate::monitor_nav::handle_popup_key(app, popup, key);
+        return;
+    }
     let selected_before = app.table.selected();
     match key.code {
+        KeyCode::Char('v') if key.modifiers.is_empty() => {
+            app.popup = Some(Popup::Dropdown {
+                highlight: View::ALL.iter().position(|v| *v == app.view).unwrap_or(0),
+                offset: 0,
+            });
+        }
+        KeyCode::F(1) | KeyCode::Char('?') => app.popup = Some(Popup::Help { scroll: 0 }),
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Char('r') => app.refresh_now = true,
         KeyCode::Char('d') | KeyCode::Enter => app.details = !app.details,
@@ -282,7 +364,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-fn select_view(app: &mut App, view: View) {
+pub(crate) fn select_view(app: &mut App, view: View) {
     if app.view != view {
         app.view = view;
         app.table = Default::default();
