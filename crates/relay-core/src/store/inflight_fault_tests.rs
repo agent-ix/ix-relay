@@ -64,6 +64,8 @@ fn a_requeue_that_fails_after_its_first_write_never_leaves_a_message_nowhere() {
         .arg("r")
         .arg("not-a-number")
         .arg("h")
+        .arg(r.keys.receipt_stream_key())
+        .arg(r.keys.receipt_meta_key())
         .query(&mut r.conn);
     assert!(failed.is_err(), "XADD refuses a cap that is not a number");
 

@@ -291,6 +291,8 @@ proptest! {
                             .arg("old-lead")
                             .arg(raw_a)
                             .arg(1000)
+                            .arg(r.keys.receipt_stream_key())
+                            .arg(r.keys.receipt_meta_key())
                             .invoke(&mut r.conn);
                     }
                 }

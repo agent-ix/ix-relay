@@ -46,7 +46,8 @@ local function count(s, pattern)
 end
 local total, n, stored = 0, 0, 0
 for i, v in ipairs(items) do
-    local w = #v + slack
+    local visible = string.gsub(v, ',"_relay":%{[^{}]*%}', '')
+    local w = #visible + slack
         + 3 * count(v, '\\n')
         + count(v, '\\[rbf]')
         + 2 * count(v, '[%z\1-\31\127]')

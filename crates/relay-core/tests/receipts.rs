@@ -426,6 +426,12 @@ fn receipts_failed_observation_survives_recovery_as_an_explicit_gap() {
             )
             .is_err()
     );
+    assert!(
+        bus.relay
+            .ack(&name("receiver"), batch, Popper::Watcher)
+            .is_err(),
+        "a receipt write failure must not remove the original in-flight message"
+    );
     assert_eq!(
         export(&mut bus).reasons,
         [ReceiptCoverageReason::SourceUnavailable]
