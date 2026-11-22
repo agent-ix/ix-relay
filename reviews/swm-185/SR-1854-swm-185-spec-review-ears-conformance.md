@@ -56,3 +56,25 @@ The first sentence's subject is `A Linear read that the shared ix-board quota pr
 ## Verdict after disposition pass 1
 
 Not run at the review pass. Dispositions follow for this same reviewer session after the fix round.
+
+## Dispositions (round 1, all 3)
+
+Disposition pass 1 at frozen source f4cfaad (atop c97b4dd, base d5fa1c3), PR 47, by the same reviewer, judged by reading the current FR-048 text (lines 43 to 49) and the four FR-065 edits (lines 141, 150-152, 159-161 and 200-203) against EARS, bounded to those changes and not to the whole requirements. I ran no command. Parent-supplied facts relied on, none re-run by me: Quire validate of FR-048 and FR-065 exit 0, with only the two legacy line 16 EARS warnings, which are outside the changed paragraphs, and no new engine warning (so no engine finding is counted); diff check exit 0.
+
+| FND | Outcome | Reason |
+|---|---|---|
+| FND-001 | fixed | Every obligation the change implements is now a `SHALL` sentence with the monitor as the subject: the label by decision state, the typed-outcome-first rule, the rate-limited rule, the unknown-cooldown rule, the unknown-cause and unconfirmed rules and the ban on classifying from error text (line 45), the countdown, the coalescing and the two times (line 47), and the blockers, the attempt and the earliest reevaluation, the unknown display, the action derivation, the kept snapshot and the inspector (line 49). The only sentences without `SHALL` are the defined-terms paragraph at line 43, which states definitions and no response, and the closing reference sentence of the older timer paragraph, which this change did not touch. |
+| FND-002 | fixed | The five-verb sentence is gone. Each sentence of lines 45 to 49 states one response: keep the snapshot with its original source time, report each blocker, report the attempt and the earliest reevaluation, count down, coalesce, and treat the two times as separate each have their own sentence, and the not-eligibility negation became `The monitor SHALL NOT present either time as a promise that a read will be admitted`. The cause class selects between the countdown and the coalescing sentences (`When the cause is a waiting cause ...`, `When the cause is a non-waiting cause ...`) rather than being joined inside one. The conditions that join two facts (`If the refresh outcome is unknown and the service reports a legacy cooldown`) carry a single response each. |
+| FND-003 | fixed | The first sentence is now `If the shared quota protection refuses a Linear read, the monitor SHALL label the refresh by the decision state of the refusal`, which names the monitor and uses the unwanted-condition form. The other conditions follow the same `If ..., the monitor SHALL ...` or `When ..., the monitor SHALL ...` shape. |
+
+## New findings (disposition pass 1)
+
+None. Bounded check of the added FR-048 sentences and the four FR-065 edits against the engine lexicon, by reading: no sentence is non-singular, no response is vague (each names a displayed label, count, count-down, coalescing or kept value), every statement has a subject, and the triggers are the canonical `If` and `When` forms. The FR-065 edits sit inside existing `SHALL` and `SHALL NOT` bullets and point to FR-048 for the behavior; the sentence `In Tickets, Agents and Scope, e opens the tracker inspector that FR-048 specifies` is a cross-reference to the obligation in FR-048 line 49 and not a second statement of it. The overlap between the waiting and non-waiting lists that I found in the base review (SR-1853 FND-004) is a definition defect and not an EARS one, and is recorded there only.
+
+## Review context (disposition pass 1, appended)
+
+Same disposition session as SR-1851. Correction to the Review Context above, which used the older cached quoin 0.29.4: this pass read the current files, all readable, under /Users/peter/.codex/plugins/cache/agent-ix/quoin/0.31.1/skills/spec-ears-analysis/SKILL.md, and /Users/peter/.codex/plugins/cache/agent-ix/dev-team/0.4.1/skills/reviewer/SKILL.md. Not run: any command, including `quire validate`; the engine results are the parent's. The original text of this artifact above is unchanged.
+
+## Current verdict (after disposition pass 1)
+
+**PASS** - all 3 findings are fixed on the text as read and no new finding was found. This is a reading of the spec and the parent-supplied results above; I ran no command. The overall PR is not yet clear: SR-1853 has one new low finding.

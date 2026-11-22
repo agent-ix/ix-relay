@@ -57,3 +57,37 @@ The fourth sentence starts `A held, failed or untyped refresh keeps the last sna
 ## Verdict after disposition pass 1
 
 Not run at the review pass. Dispositions follow for this same reviewer session after the fix round.
+
+## Dispositions (round 1, all 3)
+
+Disposition pass 1 at frozen source f4cfaad (atop c97b4dd, base d5fa1c3), PR 47, by the same reviewer, judged from the current FR-048 text (lines 43 to 49, which replace the single paragraph I reviewed) and the four FR-065 edits (lines 141, 150-152, 159-161 and 200-203), read as the bounded base check alongside the existing FR-048 scope and not as a review of the whole requirements. The code was read for the behavior the text describes. I ran no Quire command and no Vale. Parent-supplied facts relied on, none re-run by me: Quire validate of FR-048 and FR-065 exit 0 with only the two legacy line 16 EARS warnings outside the changed paragraphs and no new engine warning; diff check exit 0. No id, relationship, hash, digest, pin or `Verification` cell was added by either file, and FR-065 gets no new criterion.
+
+| FND | Outcome | Reason |
+|---|---|---|
+| FND-001 | fixed | Line 43 now names the three typed sources and defines each: the decision state (local allocation held, server reserve held, server backoff, evidence unavailable, request not admissible, or available when no hold is reported), the refresh outcome (cache reused, refreshed, quota refused, source failed, refresh lock refused or unknown) and the legacy errors (rate-limited and local-budget-exhausted, reported with an unknown refresh outcome). Line 45 resolves the contradiction: the typed outcome decides first, a refresh is labeled rate-limited only for the server backoff decision state or the legacy rate-limited error, an unknown outcome with a legacy cooldown is treated as a server backoff, a failed refresh with no cooldown is labeled as an unknown cause, and nothing is classified from error text. `typed state`, `typed outcome` and `untyped` no longer appear. The code applies the same order (`TrackerFailure::cause`, `TrackerRead::provenance`). |
+| FND-002 | fixed | Line 43 states the waiting causes (server backoff, local allocation hold, server reserve hold, the legacy local-budget error) and the non-waiting causes, and line 47 gives the countdown and the coalescing rule for each class as four singular SHALL sentences, including SHALL NOT for the non-waiting class. The legacy local budget is now listed. The two lists overlap on the unknown outcome, which is recorded as new finding FND-004 below and is not a reason to hold this one: the original defect, a set of waiting holds that was not stated, is closed. |
+| FND-003 | fixed | Line 49 says that if the service provides a quota decision, with or without a stored snapshot, the monitor reports each blocker with its reported dimension and values, and reports the attempt and the earliest reevaluation time; an omitted reevaluation time or value is shown as unknown. The obligation is limited to a decision, so a failed or unknown refresh has no blocker to report and the text no longer implies one. A kept snapshot is a separate sentence (`If a refresh fails and a snapshot is stored ...`). The code agrees: a cold decision carries the same facts as a warm one (monitor_ops.rs:1042). |
+
+## New findings (disposition pass 1)
+
+Next unused id FND-004. It is low and is to be fixed in this PR.
+
+| ID | Severity | Summary | Refs |
+|---|---|---|---|
+| FND-004 | low | The waiting and non-waiting lists in FR-048 line 43 overlap: the legacy local-budget error is a waiting cause and is reported with an unknown outcome, while `an unknown outcome` is a non-waiting cause, and line 45 makes an unknown outcome with a cooldown a waiting server backoff | FR-048, FR-048-AC-5 |
+
+### FND-004 (low) An unknown outcome is both waiting and non-waiting
+
+Line 43 says the legacy errors are reported `with an unknown refresh outcome`, lists `the legacy local-budget error` among the waiting causes, and ends the non-waiting list with `a source failure or an unknown outcome`. The legacy local-budget error therefore falls in both lists. Line 45 adds a third reading: an unknown outcome with a legacy cooldown is treated as a server backoff, which is a waiting cause, and an unknown outcome with no cooldown is a failure of unknown cause. So `an unknown outcome` is non-waiting only when it carries no cooldown and no legacy local-budget error, and the sentence does not say that. The code resolves it one way: `Cause::waits` is true for the local-budget cause and a failed refresh of unknown cause does not wait. One more case the text should record: with a kept snapshot the service reports no legacy error, so the same local-budget refusal arrives as an unknown outcome with no cooldown and is non-waiting, as the earlier SWM-184 decision recorded for the dashboard. A test of line 47 for an unknown outcome cannot decide between the two lists. Confidence medium: a careful reader takes the more specific waiting rule first, and the finding is the missing precedence, not a missing behavior. Fix: end the non-waiting list with `or an unknown outcome that reports neither a legacy cooldown nor the legacy local-budget error`, and say that the legacy local-budget error is a waiting cause only when the service reports it.
+
+## FR-065 bounded check
+
+The four edits are the `e` key row (`source errors and tracker quota detail`), the sentence that `e` keeps its Status, Health and Retro meaning and opens the tracker inspector in Tickets, Agents and Scope, the key-ownership list that adds the tracker inspector with Up, Down, PageUp, PageDown, Escape and `e`, and the evidence-row bullet that names the inspector as the full-text path. Each is a single statement that points to FR-048 for the behavior and does not restate it. They are consistent with FR-048 line 49 (the `e` key and the three lead views) and with the code (`View::is_department`, the popup key set in monitor_nav.rs). No ambiguity, undefined term, missing edge case or orphan reference was found in them, and no id, hash or pin was added. Nothing is raised against FR-065.
+
+## Review context (disposition pass 1, appended)
+
+Same disposition session as SR-1851. Correction to the Review Context above, which used the older cached quoin 0.29.4: this pass read the current files, all readable, under /Users/peter/.codex/plugins/cache/agent-ix/quoin/0.31.1/skills/: spec-review/SKILL.md and spec-review/references/checklist.md. Also read: dev-team/0.4.1/skills/reviewer/SKILL.md. Not opened: spec-review/references/workflow.md (no waves or SpecReview rewrite were run in this bounded pass). Examined: the added FR-048 text (lines 43 to 49) and the four FR-065 edits against ID format, terminology, verifiable behavior, error and edge conditions and the hash, digest and pin antipattern. Not run: any command, wave analysis, entity or relationship analysis, or whole-requirement sweep, by instruction. Assurance profile: none exists under spec/. The original text of this artifact above is unchanged.
+
+## Current verdict (after disposition pass 1)
+
+**CONDITIONAL** - all 3 initial findings are fixed on the text as read, and 1 new low finding (FND-004) is open, so the artifact stays CONDITIONAL until it is fixed. No high or medium finding. This is a reading of the spec and the parent-supplied results above; I ran no Quire command.
