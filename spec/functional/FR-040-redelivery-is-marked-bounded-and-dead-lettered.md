@@ -22,8 +22,9 @@ instead of delivering it again.
   ignores), so that a byte-identical entry sent afresh starts at zero and no side
   record of counts exists to leak.
 - A message popped with a count above zero shall render as
-  `[ix-relay] from <sender> (redelivered): <text>`; the stored message and its
-  wire form shall not change.
+  `[ix-relay] from <sender> (redelivered): <text>`; the marker shall not change the
+  stored message payload or its wire form. Receipt identity metadata under
+  [FR-067](./FR-067-persistent-delivery-receipts.md) is not recipient message content.
 - The rendered-size weight of every message shall include the marker, so the byte
   budgets hold whether or not a message is redelivered.
 - If an expired entry has already been redelivered 3 times, then the store shall
