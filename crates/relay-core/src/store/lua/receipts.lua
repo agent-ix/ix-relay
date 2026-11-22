@@ -58,8 +58,14 @@ receipt_append = function(entry, outcome, now, evidence, reason)
     if count > 10000 then
         local evicted = redis.call('XRANGE', receipt_stream, '-', '+', 'COUNT', count - 10000)
         for _, row in ipairs(evicted) do
-            local old = cjson.decode(row[2][2])
-            redis.call('HDEL', receipt_meta, 'event:' .. old.event_id)
+            local valid, old = pcall(cjson.decode, row[2][2])
+            if not valid or type(old) ~= 'table' or type(old.observed_at_ms) ~= 'number'
+                or type(old.event_id) ~= 'string' then
+                receipt_gap(now)
+                old = {observed_at_ms = now}
+            else
+                redis.call('HDEL', receipt_meta, 'event:' .. old.event_id)
+            end
             local boundary = tonumber(redis.call('HGET', receipt_meta, 'evicted_through_ms'))
             redis.call('HSET', receipt_meta, 'evicted_through_ms',
                 math.max(boundary or old.observed_at_ms, old.observed_at_ms),

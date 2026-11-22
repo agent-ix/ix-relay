@@ -1,7 +1,15 @@
 //! Receipt lifecycle evidence against an explicitly configured isolated Redis.
 #![expect(clippy::unwrap_used, clippy::expect_used, reason = "test assertions")]
 
-use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
+use std::{
+    collections::BTreeMap,
+    io::{BufRead, BufReader, Read, Write},
+    net::TcpListener,
+    num::NonZeroUsize,
+    os::unix::net::UnixStream,
+    thread,
+    time::Duration,
+};
 
 use ix_trace_rs::trace;
 use redis::Commands;
@@ -90,6 +98,137 @@ fn snapshot(bus: &mut Bus) -> BTreeMap<String, Vec<u8>> {
             (key, bytes)
         })
         .collect()
+}
+
+fn resp_frame(reader: &mut impl BufRead) -> Vec<u8> {
+    let mut frame = Vec::new();
+    reader.read_until(b'\n', &mut frame).unwrap();
+    assert!(
+        !frame.is_empty(),
+        "Redis frame must not end before its header"
+    );
+    let length = || {
+        std::str::from_utf8(&frame[1..frame.len() - 2])
+            .unwrap()
+            .parse::<i64>()
+            .unwrap()
+    };
+    match frame[0] {
+        b'$' => {
+            let length = length();
+            if length >= 0 {
+                let mut body = vec![0; usize::try_from(length).unwrap() + 2];
+                reader.read_exact(&mut body).unwrap();
+                frame.extend(body);
+            }
+        }
+        b'*' => {
+            for _ in 0..length().max(0) {
+                frame.extend(resp_frame(reader));
+            }
+        }
+        b'+' | b'-' | b':' => {}
+        other => panic!("unsupported isolated fixture RESP frame {other}"),
+    }
+    frame
+}
+
+/// Commit one EVAL at the isolated backend, then lose exactly its response.
+fn lose_eval_reply(bus: &Bus) -> (Relay, thread::JoinHandle<()>) {
+    let path = bus
+        .url
+        .strip_prefix("redis+unix://")
+        .expect("lost-reply fixtures require the dedicated Unix-socket Redis")
+        .to_owned();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let worker = thread::spawn(move || {
+        let (client, _) = listener.accept().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut client = BufReader::new(client);
+        let upstream = UnixStream::connect(path).unwrap();
+        upstream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut upstream = BufReader::new(upstream);
+        loop {
+            let request = resp_frame(&mut client);
+            upstream.get_mut().write_all(&request).unwrap();
+            let response = resp_frame(&mut upstream);
+            let marker = b"\r\n$4\r\nEVAL\r\n";
+            if request.windows(marker.len()).any(|bytes| bytes == marker) {
+                assert!(
+                    !response.starts_with(b"-"),
+                    "backend EVAL must commit before its reply is lost"
+                );
+                break;
+            }
+            client.get_mut().write_all(&response).unwrap();
+        }
+    });
+    let relay = Relay::connect(&format!("redis://127.0.0.1:{port}"), Duration::from_secs(2))
+        .unwrap()
+        .with_prefix(bus.prefix.clone());
+    (relay, worker)
+}
+
+#[test]
+#[trace("FR-067-AC-4")]
+fn receipts_enqueue_and_ack_remain_atomic_when_committed_replies_are_lost() {
+    let mut bus = bus();
+    let (mut disconnected, worker) = lose_eval_reply(&bus);
+    let message = Message {
+        from: name("sender"),
+        to: "receiver".parse().unwrap(),
+        text: "lost reply".into(),
+        sent_at_ms: 42,
+        forwarded: false,
+    };
+    assert!(disconnected.send(&message).is_err());
+    worker.join().unwrap();
+    assert_eq!(bus.relay.inbox_len(&name("receiver")).unwrap(), 1);
+    assert_eq!(
+        export(&mut bus)
+            .events
+            .iter()
+            .filter(|row| row.event.outcome == ReceiptOutcome::Queued)
+            .count(),
+        1
+    );
+    let at = now(&mut bus);
+    let batch = claim(&mut bus, at).batch.unwrap();
+    bus.relay
+        .observe_delivery(
+            &name("receiver"),
+            batch,
+            Popper::Watcher,
+            DeliveryEvidence::HerdrPrompt,
+            Now::AtMs(at),
+        )
+        .unwrap();
+    let (mut disconnected, worker) = lose_eval_reply(&bus);
+    assert!(
+        disconnected
+            .ack(&name("receiver"), batch, Popper::Watcher)
+            .is_err()
+    );
+    worker.join().unwrap();
+    assert_eq!(bus.relay.inflight_len(&name("receiver")).unwrap(), 0);
+    assert!(
+        !bus.relay
+            .ack(&name("receiver"), batch, Popper::Watcher)
+            .unwrap()
+    );
+    assert_eq!(
+        export(&mut bus)
+            .events
+            .iter()
+            .filter(|row| row.event.outcome == ReceiptOutcome::Acknowledged)
+            .count(),
+        1
+    );
 }
 
 #[test]

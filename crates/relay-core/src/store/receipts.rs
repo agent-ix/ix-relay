@@ -52,7 +52,7 @@ struct StoredMetadata {
     delivered: Option<DeliveryEvidence>,
 }
 
-pub(super) fn decode_message(bytes: &[u8]) -> std::result::Result<Message, serde_json::Error> {
+pub(crate) fn decode_message(bytes: &[u8]) -> std::result::Result<Message, serde_json::Error> {
     let stored: StoredMessage = serde_json::from_slice(bytes)?;
     // Metadata belongs to persistence, never to the recipient's public payload.
     if let Some(meta) = stored.metadata {
