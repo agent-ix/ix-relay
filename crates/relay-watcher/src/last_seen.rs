@@ -106,7 +106,7 @@ pub fn refresh_if_live(
 
 #[cfg(test)]
 mod tests {
-    use relay_core::{PaneId, Registration, Relay};
+    use relay_core::{Registration, Relay};
     use relay_test_support::Bus;
 
     use super::*;
@@ -115,6 +115,7 @@ mod tests {
         herdr::{AgentGet, AgentStatus, ProcessError},
         supervise::Wake,
     };
+    use relay_core::PaneId;
 
     const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 

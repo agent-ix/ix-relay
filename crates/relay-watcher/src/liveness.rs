@@ -286,11 +286,12 @@ impl Beat {
 mod tests {
     use std::cell::RefCell;
 
-    use relay_core::{PaneId, health::HeartbeatRead};
+    use relay_core::health::HeartbeatRead;
     use relay_test_support::Bus;
 
     use super::*;
     use crate::test_support::{connection_error, data_error};
+    use relay_core::PaneId;
 
     fn config(ttl: Duration) -> HeartbeatConfig {
         HeartbeatConfig {

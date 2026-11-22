@@ -27,9 +27,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use relay_core::{
-    AgentName, MachineName, PaneId, PaneRef, Registration, Relay, SessionId, moves::PaneReplaced,
-};
+use relay_core::moves::PaneReplaced;
+use relay_core::{AgentName, MachineName, PaneId, PaneRef, Registration, Relay, SessionId};
 
 use crate::herdr::Layout;
 

@@ -2,10 +2,9 @@
 //! process runner the watcher's layout code reads through, for tests. herdr itself
 //! is never run.
 
+use crate::otlp::panes::{PaneSeries, panes_of};
 use relay_core::MachineName;
 use relay_ops::find::MachineView;
-
-use crate::otlp::panes::{PaneSeries, panes_of};
 
 /// Replays three recorded listings: agents, workspaces and tabs.
 pub(crate) struct Replay(&'static str, &'static str, &'static str);
