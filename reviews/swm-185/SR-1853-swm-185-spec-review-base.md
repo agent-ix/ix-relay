@@ -91,3 +91,23 @@ Same disposition session as SR-1851. Correction to the Review Context above, whi
 ## Current verdict (after disposition pass 1)
 
 **CONDITIONAL** - all 3 initial findings are fixed on the text as read, and 1 new low finding (FND-004) is open, so the artifact stays CONDITIONAL until it is fixed. No high or medium finding. This is a reading of the spec and the parent-supplied results above; I ran no Quire command.
+
+## Dispositions (round 2, FND-004 only)
+
+Disposition pass 2 by the same reviewer session, PR 47, same single 185 tree, judged by reading FR-048 line 43 as edited and fix2-ready.md as a claim. Bounded to FND-004; no new method wave. I ran no command. Parent-supplied facts relied on, none re-run by me: Quire validate of FR-048 exit 0 with only the two old line 16 EARS warnings; the four cumulative SRs of round 1 validated and their original prefixes byte-preserved; the four round 1 comments posted to SWM-185. The edit changes no source, test, pin, README or FR-065 text.
+
+| FND | Outcome | Reason |
+|---|---|---|
+| FND-004 | fixed | The waiting list now ends `or the legacy local-budget error when the service reports that error`, and the non-waiting list ends `a source failure, or an unknown outcome that reports neither a legacy cooldown nor the legacy local-budget error`, which is the wording I requested. The lists no longer overlap: an unknown outcome with a legacy cooldown is a server backoff by line 45 and waits, the reported legacy local-budget error waits, and an unknown outcome with neither is non-waiting; a kept-snapshot local-budget refusal reports no legacy error and so does not wait, as `Cause::waits` already behaves. No SHALL sentence changed and none gained a second obligation, no id, relationship or policy was added, and the text outside line 43 is unchanged. |
+
+## New findings (disposition pass 2)
+
+None. In the changed sentence, `when the service reports that error` is a single condition and `neither ... nor` is unambiguous. I did not re-review the rest of the paragraph.
+
+## Review context (disposition pass 2, appended)
+
+The same current paths as in the round 1 context were used, all readable, under /Users/peter/.codex/plugins/cache/agent-ix/: quoin/0.31.1/skills/spec-review/SKILL.md, quoin/0.31.1/skills/spec-ears-analysis/SKILL.md and dev-team/0.4.1/skills/reviewer/SKILL.md; no older cached copy was used. Scope limit: this round accepts the UI and spec subset at the current source only. The upstream 0.7.2 capacity bug hold is outside this artifact: the final SDK pin and its dependency-delta acceptance and checks are still required before the aggregate and merge, and nothing here says the delivery is complete.
+
+## Current verdict (after disposition pass 2)
+
+**PASS** - all 4 findings of this artifact are fixed on the text as read and no new finding was found. This is a reading of the spec and the parent-supplied results above; I ran no Quire command. It does not clear the upstream 0.7.2 hold.
