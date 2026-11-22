@@ -151,6 +151,8 @@ impl Relay {
             .arg(seen.name.as_str())
             .arg(raw)
             .arg(DEAD_LETTER_CAP)
+            .arg(self.keys.receipt_stream_key())
+            .arg(self.keys.receipt_meta_key())
             .invoke(&mut self.conn)?;
         match status {
             1 => Ok(Buried::Done(moved)),

@@ -704,6 +704,7 @@ impl SocketDeliverer {
         for o in adopted.owed.into_iter().take(MAX_PENDING) {
             let action = match o.action.as_str() {
                 "ack" => SettleAction::Ack,
+                "ack_unconfirmed" => SettleAction::AckUnconfirmed,
                 "requeue" => SettleAction::Requeue,
                 "dead_letter" => SettleAction::DeadLetter,
                 _ => continue,
@@ -930,11 +931,15 @@ impl SocketDeliverer {
     /// # Errors
     ///
     /// [`SocketError`], as the module docs describe.
-    pub fn deliver(&self, target: &BatchTarget<'_>, text: &str) -> Result<(), SocketError> {
+    pub fn deliver(
+        &self,
+        target: &BatchTarget<'_>,
+        text: &str,
+    ) -> Result<relay_core::receipts::DeliveryEvidence, SocketError> {
         let result = self.attempt(target, text);
         let mut state = self.lock();
         match &result {
-            Ok(()) => {
+            Ok(_) => {
                 state.notes.remove(target.lead);
                 state.suspect.remove(target.lead);
             }
@@ -961,7 +966,11 @@ impl SocketDeliverer {
         result
     }
 
-    fn attempt(&self, target: &BatchTarget<'_>, text: &str) -> Result<(), SocketError> {
+    fn attempt(
+        &self,
+        target: &BatchTarget<'_>,
+        text: &str,
+    ) -> Result<relay_core::receipts::DeliveryEvidence, SocketError> {
         let session = target
             .session
             .map(relay_core::SessionId::as_str)
@@ -1147,7 +1156,7 @@ impl SocketDeliverer {
         session: &str,
         msg_id: &str,
         mut watch: Option<Watch>,
-    ) -> Result<(), SocketError> {
+    ) -> Result<relay_core::receipts::DeliveryEvidence, SocketError> {
         let deadline = Instant::now() + self.config.ack_wait;
         let mut step = POLL_START;
         loop {
@@ -1171,7 +1180,7 @@ impl SocketDeliverer {
                         state.drift.acknowledged(&p.version);
                     }
                     state.held.remove(target.lead);
-                    return Ok(());
+                    return Ok(relay_core::receipts::DeliveryEvidence::SocketConfirmed);
                 }
                 Some(Scan {
                     found: TranscriptMatch::ShapeUnrecognised,
@@ -1192,7 +1201,7 @@ impl SocketDeliverer {
                         );
                     }
                     state.held.remove(target.lead);
-                    return Ok(());
+                    return Ok(relay_core::receipts::DeliveryEvidence::SocketUnconfirmed);
                 }
                 Some(Scan {
                     found: TranscriptMatch::Absent,
@@ -1250,7 +1259,7 @@ impl SocketDeliverer {
         session: &str,
         msg_id: &str,
         verdict: Verdict,
-    ) -> Option<Result<(), SocketError>> {
+    ) -> Option<Result<relay_core::receipts::DeliveryEvidence, SocketError>> {
         let mut state = self.lock();
         match verdict {
             Verdict::Held => {
@@ -1548,7 +1557,7 @@ impl SocketDeliverer {
                     line_type,
                 }) => {
                     p.resolution = Some(Resolution {
-                        action: SettleAction::Ack,
+                        action: SettleAction::AckUnconfirmed,
                         why: "transcript_shape_unrecognised: the transcript names the message \
                               without a structured origin.msg_id; acknowledged as received"
                             .to_owned(),
@@ -1596,7 +1605,7 @@ impl SocketDeliverer {
             if p.delivered_at.is_some_and(|at| at.elapsed() >= grace) {
                 unconfirmed.push((p.lead.clone(), p.version.clone()));
                 p.resolution = Some(Resolution {
-                    action: SettleAction::Ack,
+                    action: SettleAction::AckUnconfirmed,
                     why: "delivered_unconfirmed: Claude Code reported it delivered; the \
                           transcript never showed it"
                         .to_owned(),
@@ -1823,6 +1832,7 @@ impl SocketDeliverer {
                         batch: p.batch.get(),
                         action: match r.action {
                             SettleAction::Ack => "ack",
+                            SettleAction::AckUnconfirmed => "ack_unconfirmed",
                             SettleAction::Requeue => "requeue",
                             SettleAction::DeadLetter => "dead_letter",
                             SettleAction::Renew(_) => return None,

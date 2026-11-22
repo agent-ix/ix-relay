@@ -117,6 +117,8 @@ pub struct Settlement {
 pub enum SettleAction {
     /// It was delivered: acknowledge it.
     Ack,
+    /// Socket reported delivery without structured transcript confirmation.
+    AckUnconfirmed,
     /// It was certainly not delivered: put it back, unmarked.
     Requeue,
     /// It will never be delivered (the receiver's user denied it, or nobody answered
@@ -150,8 +152,9 @@ pub trait Deliverer {
         _target: &BatchTarget<'_>,
         pane: &PaneId,
         text: &str,
-    ) -> Result<(), DeliverError> {
+    ) -> Result<relay_core::receipts::DeliveryEvidence, DeliverError> {
         self.deliver(pane, text)
+            .map(|()| relay_core::receipts::DeliveryEvidence::HerdrPrompt)
     }
 
     /// Told at the start of every tick which leads the registry the tick read holds, so a

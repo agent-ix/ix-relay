@@ -1071,7 +1071,23 @@ fn apply_settlements<H: Herdr + Deliverer>(
             continue;
         };
         let result = match s.action {
-            SettleAction::Ack => relay.ack(&lead, s.batch, Popper::Watcher).map(usize::from),
+            SettleAction::Ack | SettleAction::AckUnconfirmed => {
+                let evidence = if s.action == SettleAction::Ack {
+                    relay_core::receipts::DeliveryEvidence::SocketConfirmed
+                } else {
+                    relay_core::receipts::DeliveryEvidence::SocketUnconfirmed
+                };
+                relay
+                    .observe_delivery(
+                        &lead,
+                        s.batch,
+                        Popper::Watcher,
+                        evidence,
+                        relay_core::Now::Server,
+                    )
+                    .and_then(|_| relay.ack(&lead, s.batch, Popper::Watcher))
+                    .map(usize::from)
+            }
             SettleAction::Requeue => relay.requeue_batch(&lead, s.batch, Popper::Watcher),
             SettleAction::DeadLetter => relay.dead_letter_batch(&lead, s.batch, Popper::Watcher),
             SettleAction::Renew(lease) => relay.renew_batch(
@@ -1431,7 +1447,21 @@ impl Inbox for RelayInbox<'_> {
         })
     }
 
-    fn ack(&mut self, batch: &PoppedBatch) {
+    fn ack(&mut self, batch: &PoppedBatch, evidence: relay_core::receipts::DeliveryEvidence) {
+        if let Err(error) = self.relay.observe_delivery(
+            self.lead,
+            batch.batch,
+            relay_core::Popper::Watcher,
+            evidence,
+            relay_core::Now::Server,
+        ) {
+            let text = self.record(error);
+            eprintln!(
+                "relay-watcher: {}: receipt observation failed: {text}; batch left in flight",
+                self.lead
+            );
+            return;
+        }
         self.ack_batch(batch.batch);
     }
 

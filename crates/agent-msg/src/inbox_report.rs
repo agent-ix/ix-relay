@@ -82,10 +82,15 @@ mod tests {
         }
     }
 
+    fn entries(message: Message) -> Vec<relay_core::receipts::InboxEntry> {
+        let bytes = serde_json::to_vec(&message).unwrap();
+        vec![relay_core::receipts::InboxEntry::try_from(bytes.as_slice()).unwrap()]
+    }
+
     #[test]
     fn reports_a_direct_message_with_its_rendered_line() {
         let popped = PopResult {
-            messages: vec![msg("draco:qsl:code", "terra:tl:code", "hi")],
+            messages: entries(msg("draco:qsl:code", "terra:tl:code", "hi")),
             rejected: vec![],
         };
         let report = InboxReport::new(&popped, &AddressBook::default());
@@ -107,7 +112,7 @@ mod tests {
     #[test]
     fn a_broadcast_renders_with_to_all_and_reports_to_as_all() {
         let popped = PopResult {
-            messages: vec![msg("draco:qsl:code", "all", "merged AGE-2007")],
+            messages: entries(msg("draco:qsl:code", "all", "merged AGE-2007")),
             rejected: vec![],
         };
         let report = InboxReport::new(&popped, &AddressBook::default());

@@ -194,6 +194,21 @@ enum Cmd {
         /// Most messages to show.
         #[arg(long, default_value_t = 100)]
         max: usize,
+        /// Emit structured message history or receipt evidence.
+        #[arg(long)]
+        json: bool,
+        /// Read content-free lifecycle receipts instead of message bodies.
+        #[arg(long, requires = "json")]
+        receipts: bool,
+        /// Inclusive Unix-millisecond interval start for receipt export.
+        #[arg(long, requires = "receipts")]
+        since_ms: Option<i64>,
+        /// Inclusive Unix-millisecond interval end for receipt export.
+        #[arg(long, requires = "receipts")]
+        until_ms: Option<i64>,
+        /// Continue after the ordering cursor returned by the preceding page.
+        #[arg(long, requires = "receipts")]
+        after: Option<String>,
     },
     /// Register yourself by hand. Hooks do this on session start.
     Register {
@@ -728,20 +743,45 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 }
             }
         }
-        Cmd::Log { since, max } => {
+        Cmd::Log {
+            since,
+            max,
+            json,
+            receipts,
+            since_ms,
+            until_ms,
+            after,
+        } => {
             let window = i64::try_from(since.0.as_millis()).unwrap_or(i64::MAX);
-            let book = display_book(&mut relay, &redial);
-            let since_ms = now_ms().saturating_sub(window);
-            let messages = retry::read(&mut relay, &redial, |r| Ok(r.log(since_ms, max)?))?;
-            for m in messages {
-                writeln!(
-                    out,
-                    "{} {} -> {}: {}",
-                    clock(m.sent_at_ms),
-                    book.label(&m.from),
-                    book.label_target(&m.to),
-                    relay_core::text::neutralise(&m.text)
-                )?;
+            let now = now_ms();
+            let since_ms = since_ms.unwrap_or_else(|| now.saturating_sub(window));
+            if receipts {
+                let request = relay_core::receipts::ReceiptRequest {
+                    since_ms,
+                    until_ms: until_ms.unwrap_or(now),
+                    now_ms: now,
+                    page_size: max,
+                    after,
+                };
+                let report = relay.receipt_export(&request)?;
+                json::write_line(&mut out, &report)?;
+            } else {
+                let messages = retry::read(&mut relay, &redial, |r| Ok(r.log(since_ms, max)?))?;
+                if json {
+                    json::write_line(&mut out, &messages)?;
+                } else {
+                    let book = display_book(&mut relay, &redial);
+                    for m in messages {
+                        writeln!(
+                            out,
+                            "{} {} -> {}: {}",
+                            clock(m.sent_at_ms),
+                            book.label(&m.from),
+                            book.label_target(&m.to),
+                            relay_core::text::neutralise(&m.text)
+                        )?;
+                    }
+                }
             }
         }
         Cmd::Register { kind } => {

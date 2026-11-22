@@ -1,0 +1,22 @@
+-- KEYS: publication fences, recipient inboxes, ordinary message log.
+-- ARGV: fence count, recipient count, expected publications, message, log cap,
+--       optional clock override, receipt stream, receipt metadata.
+local fences, recipients = tonumber(ARGV[1]), tonumber(ARGV[2])
+for i = 1, fences do
+    if redis.call('GET', KEYS[i]) ~= ARGV[i + 2] then return 0 end
+end
+for i = fences + 1, fences + recipients do
+    if not readable(KEYS[i], 'list') then return redis.error_reply('inbox has wrong type') end
+end
+local log = KEYS[fences + recipients + 1]
+if not readable(log, 'stream') or not receipt_ready() then
+    return redis.error_reply('message or receipt history has wrong type')
+end
+local now = now_ms(ARGV[fences + 5])
+local entry = ARGV[fences + 3]
+local id = redis.call('XADD', log, 'MAXLEN', '~', ARGV[fences + 4], '*', 'msg', entry)
+for i = 1, recipients do
+    local marked = receipt_enqueue(entry, id .. '/' .. i, now)
+    redis.call('RPUSH', KEYS[fences + i], marked)
+end
+return 1

@@ -56,7 +56,7 @@ pub trait Inbox {
     /// Acknowledges `batch`: the transport reported success, so its in-flight
     /// record is dropped. Never called for a failed or ambiguous delivery, whose
     /// batch stays in flight and is redelivered when its lease expires.
-    fn ack(&mut self, batch: &PoppedBatch);
+    fn ack(&mut self, batch: &PoppedBatch, _evidence: relay_core::receipts::DeliveryEvidence);
     /// Puts `batch` back at the front of the inbox. Called only when the
     /// transport is certain no input was sent for it.
     fn requeue(&mut self, batch: &PoppedBatch);
@@ -344,8 +344,8 @@ pub fn try_deliver<H: Herdr + Deliverer>(
                     pane,
                     &batch.rendered,
                 ) {
-                    Ok(()) => {
-                        inbox.ack(&batch);
+                    Ok(evidence) => {
+                        inbox.ack(&batch, evidence);
                         Outcome::Delivered {
                             messages: batch.messages.len(),
                         }
@@ -566,7 +566,7 @@ mod tests {
                 .expect("try_deliver popped more times than the test scripted")
         }
 
-        fn ack(&mut self, batch: &PoppedBatch) {
+        fn ack(&mut self, batch: &PoppedBatch, _evidence: relay_core::receipts::DeliveryEvidence) {
             self.acked.push(batch.batch);
         }
 

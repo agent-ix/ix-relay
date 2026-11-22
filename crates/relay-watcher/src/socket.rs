@@ -105,7 +105,7 @@ impl<H: Deliverer> Deliverer for Routed<H> {
         target: &BatchTarget<'_>,
         pane: &PaneId,
         text: &str,
-    ) -> Result<(), DeliverError> {
+    ) -> Result<relay_core::receipts::DeliveryEvidence, DeliverError> {
         let Some(socket) = &self.socket else {
             return self.herdr.deliver_to(target, pane, text);
         };
@@ -117,7 +117,7 @@ impl<H: Deliverer> Deliverer for Routed<H> {
             return self.herdr.deliver_to(target, pane, text);
         }
         match socket.deliver(target, text) {
-            Ok(()) => Ok(()),
+            Ok(evidence) => Ok(evidence),
             Err(deliverer::SocketError::NotSent(why)) => {
                 eprintln!(
                     "relay-watcher: {}: inbox socket not used ({why}); typing it in through herdr",

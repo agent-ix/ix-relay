@@ -1638,7 +1638,7 @@ fn tc_020_09_a_redelivered_batch_over_the_budget_by_one_byte_takes_only_one() {
     };
     let me = lead(1);
     bus.relay
-        .requeue_front(&me, &[first.clone(), second])
+        .requeue_front(&me, &inbox_entries(&[first.clone(), second]))
         .unwrap();
     let claim = Claim::new(Popper::Hook).with_lease(Duration::from_millis(1));
     let cap = NonZeroUsize::new(50).unwrap();
@@ -1825,4 +1825,14 @@ fn tc_020_13_the_backlog_reports_an_unreadable_key_and_matches_the_prefix_litera
             .iter()
             .any(|l| l.lead == "zed" && l.in_flight == 1)
     );
+}
+
+fn inbox_entries(messages: &[Message]) -> Vec<relay_core::receipts::InboxEntry> {
+    messages
+        .iter()
+        .map(|message| {
+            let json = serde_json::to_vec(message).unwrap();
+            relay_core::receipts::InboxEntry::try_from(json.as_slice()).unwrap()
+        })
+        .collect()
 }

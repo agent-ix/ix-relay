@@ -14,7 +14,7 @@ local function unreadable()
     local counter = redis.call('GET', KEYS[4])
     return counter and (#counter > 17 or string.find(counter, '%D')) and true or false
 end
-if unreadable() then return { -1, 0, 0, {}, {}, 0, 0 } end
+if unreadable() or not receipt_ready() then return { -1, 0, 0, {}, {}, 0, 0 } end
 local now = now_ms(ARGV[6])
 local reaped = reap(KEYS[1], KEYS[2], KEYS[3], now, tonumber(ARGV[7]), tonumber(ARGV[8]))
 local stuck, evicted = reaped[3], reaped[4]
@@ -71,8 +71,20 @@ local deadline = now + tonumber(ARGV[5])
 local taken, counts = {}, {}
 for i = 1, n do
     local _, c = split_count(items[i])
-    redis.call('RPUSH', KEYS[2], make_row(id, ARGV[4], deadline, items[i]))
-    taken[i] = items[i]
+    local entry = items[i]
+    local metadata = receipt_metadata(entry)
+    if metadata then
+        metadata.attempt = tostring(id)
+        metadata.delivered = nil
+        entry = receipt_entry(entry, metadata)
+        receipt_append(entry, 'attempt_started', now)
+        if c > 0 then receipt_append(entry, 'redelivered', now, nil, 'lease_recovery') end
+        receipt_pending(entry, now)
+    else
+        receipt_gap(now)
+    end
+    redis.call('RPUSH', KEYS[2], make_row(id, ARGV[4], deadline, entry))
+    taken[i] = entry
     counts[i] = c
 end
 redis.call('LTRIM', KEYS[1], n, -1)

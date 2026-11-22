@@ -6,12 +6,15 @@
 -- dead-letter list to its cap. For a consumer that knows the batch will never be
 -- delivered (the user denied it). Returns how many it moved, or -1 when a key is
 -- of the wrong type (nothing is changed then).
-if not (readable(KEYS[1], 'list') and readable(KEYS[2], 'list')) then return -1 end
+if not (readable(KEYS[1], 'list') and readable(KEYS[2], 'list')) or not receipt_ready() then return -1 end
 local target = tonumber(ARGV[1])
+local now = now_ms('')
 local buried, rows = {}, {}
 for _, row in ipairs(redis.call('LRANGE', KEYS[1], 0, -1)) do
     local id, who, deadline, entry = parse(row)
     if id == target and who == ARGV[3] then
+        receipt_append(entry, 'dead_lettered', now, nil, 'receiver_denied')
+        receipt_finish(entry, now, false)
         local core = split_count(entry)
         buried[#buried + 1] = core
         rows[#rows + 1] = row
