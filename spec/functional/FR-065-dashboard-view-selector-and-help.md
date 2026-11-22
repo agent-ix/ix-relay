@@ -138,7 +138,7 @@ Escape quitting when no popup is open, is retained.
   | Left, Right | scroll details (FR-059) | Status, Health, Retro, with details open |
   | `r` | refresh (FR-048) | all |
   | `s` | source timestamps (FR-048) | Tickets, Agents, Scope |
-  | `e` | source errors (FR-059) | Status, Health, Retro |
+  | `e` | source errors and tracker quota detail (FR-059, FR-048) | all |
   | `c` | completed projects (FR-060) | Scope |
   | `q`, Escape | quit, when no popup is open (FR-048) | all |
   | F1, `?` | help (FR-065) | all |
@@ -147,7 +147,9 @@ Escape quitting when no popup is open, is retained.
 - The key `f` (FR-064) is not part of this table or of FR-065's acceptance. When
   FR-064 delivers `f`, that delivery adds its Help row (Scope view, named mode only)
   and its popup-sweep entry, and FR-064 verifies them. FR-065 does not wait on it.
-- This requirement SHALL NOT change what `s`, `e`, Left or Right do in any view.
+- This requirement SHALL NOT change what `s`, Left or Right do in any view, or what
+  `e` does in Status, Health and Retro. In Tickets, Agents and Scope, `e` opens the
+  tracker inspector that FR-048 specifies.
 
 ### Modal isolation
 
@@ -156,7 +158,7 @@ Escape quitting when no popup is open, is retained.
   that popup only.
 - Each popup SHALL act only on the keys it owns: the dropdown owns Up, Down, `j`,
   `k`, Enter, Escape and `v`; help owns Up, Down, PageUp, PageDown, Escape, F1 and
-  `?`.
+  `?`; the tracker inspector owns Up, Down, PageUp, PageDown, Escape and `e`.
 - A popup SHALL ignore every other key, including a key that would open the other
   popup, without changing any state, and SHALL stay open.
 - While a popup is open, `q` SHALL NOT quit, and Escape SHALL close the popup
@@ -197,8 +199,8 @@ Escape quitting when no popup is open, is retained.
   severity first and a visible count of the sources not shown.
 - Where a view already has a diagnostic path, the full text SHALL remain reachable
   there (Status, Health and Retro: `e` lists sources and `d` opens the full
-  diagnostic, FR-059). This requirement adds no new diagnostic view; in Tickets,
-  Agents and Scope the truncated detail is accepted.
+  diagnostic, FR-059). In Tickets, Agents and Scope, `e` opens the tracker
+  inspector (FR-048); other truncated detail is accepted.
 - The supported minimum size is 80x24. Below it, the dashboard SHALL truncate
   without panic or quit; no other guarantee applies.
 - The `v View` and `F1 Help` hints SHALL NOT be dropped at 80 columns or wider.
