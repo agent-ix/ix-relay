@@ -381,6 +381,7 @@ impl Relay {
             .arg(MAX_INFLIGHT_BYTES)
             .arg(INFLIGHT_ROW_OVERHEAD)
             .arg(crate::message::FORWARDED_NOTICE_MAX)
+            .arg(agent.as_str())
             .arg(self.keys.receipt_stream_key())
             .arg(self.keys.receipt_meta_key())
             .query(&mut self.conn)?;

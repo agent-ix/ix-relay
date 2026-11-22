@@ -20,10 +20,82 @@ receipt_metadata = function(entry)
     return meta
 end
 
+local function string_end(json, start)
+    local at = start + 1
+    while at <= #json do
+        local byte = string.byte(json, at)
+        if byte == 92 then at = at + 2
+        elseif byte == 34 then return at
+        else at = at + 1 end
+    end
+    return nil
+end
+
+local function member_end(json, start)
+    local at, depth = start, 0
+    while at <= #json do
+        local byte = string.byte(json, at)
+        if byte == 34 then
+            local last = string_end(json, at)
+            if not last then return nil end
+            at = last + 1
+        elseif byte == 123 or byte == 91 then
+            depth = depth + 1
+            at = at + 1
+        elseif byte == 125 or byte == 93 then
+            if depth == 0 then return at end
+            depth = depth - 1
+            at = at + 1
+        elseif byte == 44 and depth == 0 then return at
+        else at = at + 1 end
+    end
+    return nil
+end
+
+-- Remove only top-level metadata spans. Strings, escaped quotes and nested
+-- objects are scanned structurally; all other bytes, including integer lexemes,
+-- remain untouched.
+receipt_without_metadata = function(entry)
+    local first = string.find(entry, '%S')
+    if not first or string.byte(entry, first) ~= 123 then return entry end
+    local at, separator, kept = first + 1, nil, 0
+    local cuts = {}
+    while at <= #entry do
+        local key_start = string.find(entry, '%S', at)
+        if not key_start or string.byte(entry, key_start) == 125 then break end
+        if string.byte(entry, key_start) ~= 34 then return entry end
+        local key_end = string_end(entry, key_start)
+        if not key_end then return entry end
+        local colon = string.find(entry, '%S', key_end + 1)
+        if not colon or string.byte(entry, colon) ~= 58 then return entry end
+        local ending = member_end(entry, colon + 1)
+        if not ending then return entry end
+        local valid, key = pcall(cjson.decode, string.sub(entry, key_start, key_end))
+        if not valid then return entry end
+        if key == '_relay' then
+            local from = kept == 0 and key_start or separator
+            local through = ending - 1
+            if kept == 0 and string.byte(entry, ending) == 44 then through = ending end
+            cuts[#cuts + 1] = {from, through}
+        else
+            kept = kept + 1
+        end
+        if string.byte(entry, ending) ~= 44 then break end
+        separator, at = ending, ending + 1
+    end
+    if #cuts == 0 then return entry end
+    local chunks, cursor = {}, 1
+    for _, cut in ipairs(cuts) do
+        if cut[1] > cursor then chunks[#chunks + 1] = string.sub(entry, cursor, cut[1] - 1) end
+        cursor = math.max(cursor, cut[2] + 1)
+    end
+    chunks[#chunks + 1] = string.sub(entry, cursor)
+    return table.concat(chunks)
+end
+
 -- Change private metadata without decoding/re-encoding recipient content.
 receipt_entry = function(entry, metadata)
-    local core, count = split_count(entry)
-    core = string.gsub(core, ',"_relay":%{[^{}]*%}', '')
+    local core, count = split_count(receipt_without_metadata(entry))
     if string.sub(core, -1) ~= '}' then return entry end
     return string.sub(core, 1, -2) .. ',"_relay":' .. cjson.encode(metadata) .. '}'
         .. string.rep(' ', count)

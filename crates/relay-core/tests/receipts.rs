@@ -1,10 +1,10 @@
 //! Receipt lifecycle evidence against an explicitly configured isolated Redis.
-#![expect(clippy::unwrap_used, clippy::expect_used, reason = "test assertions")]
+#![expect(clippy::unwrap_used, reason = "test assertions")]
 
 use std::{
     collections::BTreeMap,
-    io::{BufRead, BufReader, Write},
-    net::TcpListener,
+    io::{self, BufRead, BufReader, Read, Write},
+    net::{TcpListener, TcpStream},
     num::NonZeroUsize,
     os::unix::net::UnixStream,
     thread,
@@ -12,7 +12,7 @@ use std::{
 };
 
 use ix_trace_rs::trace;
-use redis::Commands;
+use redis::{Commands, ConnectionAddr, IntoConnectionInfo};
 use relay_core::{
     AgentName, Claim, Message, Now, Popper, Registration, Relay,
     receipts::{
@@ -26,9 +26,8 @@ fn name(value: &str) -> AgentName {
     value.parse().unwrap()
 }
 
-fn bus() -> Bus {
-    let mut bus =
-        Bus::connect("receipts").expect("receipt tests require isolated IX_RELAY_TEST_URL");
+fn bus() -> Option<Bus> {
+    let mut bus = Bus::connect("receipts")?;
     bus.relay
         .register(&Registration {
             name: name("receiver"),
@@ -41,7 +40,7 @@ fn bus() -> Bus {
             last_seen_ms: 0,
         })
         .unwrap();
-    bus
+    Some(bus)
 }
 
 fn send(bus: &mut Bus) {
@@ -133,13 +132,54 @@ fn resp_frame(reader: &mut impl BufRead) -> Vec<u8> {
     frame
 }
 
+enum FixtureStream {
+    Tcp(TcpStream),
+    Unix(UnixStream),
+}
+
+impl FixtureStream {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.set_read_timeout(timeout),
+            Self::Unix(stream) => stream.set_read_timeout(timeout),
+        }
+    }
+}
+
+impl Read for FixtureStream {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.read(output),
+            Self::Unix(stream) => stream.read(output),
+        }
+    }
+}
+
+impl Write for FixtureStream {
+    fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Tcp(stream) => stream.write(input),
+            Self::Unix(stream) => stream.write(input),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.flush(),
+            Self::Unix(stream) => stream.flush(),
+        }
+    }
+}
+
 /// Commit one EVAL at the isolated backend, then lose exactly its response.
 fn lose_eval_reply(bus: &Bus) -> (Relay, thread::JoinHandle<()>) {
-    let path = bus
+    let address = bus
         .url
-        .strip_prefix("redis+unix://")
-        .expect("lost-reply fixtures require the dedicated Unix-socket Redis")
-        .to_owned();
+        .as_str()
+        .into_connection_info()
+        .unwrap()
+        .addr()
+        .clone();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let worker = thread::spawn(move || {
@@ -148,7 +188,13 @@ fn lose_eval_reply(bus: &Bus) -> (Relay, thread::JoinHandle<()>) {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
         let mut client = BufReader::new(client);
-        let upstream = UnixStream::connect(path).unwrap();
+        let upstream = match address {
+            ConnectionAddr::Tcp(host, port) => {
+                FixtureStream::Tcp(TcpStream::connect((host.as_str(), port)).unwrap())
+            }
+            ConnectionAddr::Unix(path) => FixtureStream::Unix(UnixStream::connect(path).unwrap()),
+            other => panic!("unsupported isolated Redis transport: {other:?}"),
+        };
         upstream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
@@ -175,9 +221,185 @@ fn lose_eval_reply(bus: &Bus) -> (Relay, thread::JoinHandle<()>) {
 }
 
 #[test]
+#[trace("FR-067-AC-8")]
+fn receipts_braced_recipient_preserves_payload_and_render_budget_on_claim() {
+    let Some(mut bus) = bus() else { return };
+    let recipient = name("session/valid{queue}");
+    bus.relay
+        .register(&Registration {
+            name: recipient.clone(),
+            machine: "fixture".parse().unwrap(),
+            kind: "codex".into(),
+            session_id: None,
+            cwd: None,
+            herdr_pane: None,
+            place: None,
+            last_seen_ms: 0,
+        })
+        .unwrap();
+    let message = Message {
+        from: name("sender"),
+        to: relay_core::Target::Agent(recipient.clone()),
+        text: r#"literal braces { } and escaped "quotes"; _relay is recipient content"#.into(),
+        sent_at_ms: 9_007_199_254_740_993,
+        forwarded: false,
+    };
+    bus.relay.send(&message).unwrap();
+    bus.relay.send(&message).unwrap();
+    let slack = "[ix-relay] from ".len()
+        + relay_core::MAX_LABEL_BYTES
+        + " (to all)".len()
+        + " (redelivered)".len()
+        + ": ".len()
+        + 1
+        - 46;
+    let weight = serde_json::to_string(&message).unwrap().len() + slack;
+    let claimed = bus
+        .relay
+        .pop_inbox_budget(
+            &recipient,
+            NonZeroUsize::new(2).unwrap(),
+            2 * weight,
+            Claim::new(Popper::Watcher),
+        )
+        .unwrap();
+    assert!(
+        claimed.rejected.is_empty(),
+        "valid braces in metadata must not corrupt recipient JSON"
+    );
+    assert_eq!(
+        claimed.messages,
+        [message.clone(), message.clone()],
+        "metadata must neither consume the recipient render budget nor round its timestamp"
+    );
+    let rows: Vec<String> = bus
+        .raw
+        .lrange(bus.key(&format!("inflight:{recipient}")), 0, -1)
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert_eq!(
+            row.matches(",\"_relay\":").count(),
+            1,
+            "exactly one private metadata member"
+        );
+        assert!(
+            row.contains("9007199254740993"),
+            "preserve the integer lexeme byte-for-byte"
+        );
+    }
+}
+
+fn claim_with_queue_counter(
+    bus: &mut Bus,
+    recipient: &AgentName,
+    counter: &str,
+) -> relay_core::BatchId {
+    let body = [
+        include_str!("../src/store/lua/common.lua"),
+        include_str!("../src/store/lua/receipts.lua"),
+        include_str!("../src/store/lua/pop.lua"),
+    ]
+    .join("\n");
+    let reply: (i64, usize, u64, Vec<Vec<u8>>, Vec<u32>, usize, usize) = redis::cmd("EVAL")
+        .arg(body)
+        .arg(4)
+        .arg(bus.key(&format!("inbox:{recipient}")))
+        .arg(bus.key(&format!("inflight:{recipient}")))
+        .arg(bus.key(&format!("deadletter:{recipient}")))
+        .arg(bus.key(counter))
+        .arg(1)
+        .arg(10_000)
+        .arg(1_024)
+        .arg("w")
+        .arg(60_000)
+        .arg("")
+        .arg(relay_core::MAX_REDELIVERIES)
+        .arg(relay_core::DEAD_LETTER_CAP)
+        .arg(relay_core::MAX_INFLIGHT_BATCHES)
+        .arg(relay_core::MAX_INFLIGHT_BYTES)
+        .arg(relay_core::INFLIGHT_ROW_OVERHEAD)
+        .arg(1_024)
+        .arg(recipient.as_str())
+        .arg(bus.key("receipts"))
+        .arg(bus.key("receipt-meta"))
+        .query(&mut bus.raw)
+        .unwrap();
+    assert_eq!(reply.0, 0);
+    assert_eq!(reply.3.len(), 1);
+    relay_core::BatchId::new(reply.2)
+}
+
+#[test]
+#[trace("FR-067-AC-2", "FR-067-AC-8")]
+fn receipts_forwarding_to_another_queue_never_reuses_the_receipt_attempt() {
+    let Some(mut bus) = bus() else { return };
+    send(&mut bus);
+    let old = bus.relay.agent(&name("receiver")).unwrap().unwrap();
+    let replacement = Registration {
+        name: name("replacement"),
+        ..old.clone()
+    };
+    bus.relay.register(&replacement).unwrap();
+    // Independently scoped queue counters legitimately have the same scalar batch ID.
+    let first = claim_with_queue_counter(&mut bus, &old.name, "old-queue-counter");
+    bus.relay
+        .requeue_batch(&old.name, first, Popper::Watcher)
+        .unwrap();
+    assert_eq!(
+        bus.relay.forward_stranded(&old, &replacement).unwrap(),
+        Some(1)
+    );
+    let second = claim_with_queue_counter(&mut bus, &replacement.name, "replacement-queue-counter");
+    assert_eq!(
+        first.get(),
+        second.get(),
+        "exercise a scalar batch-ID collision across queues"
+    );
+    let report = export(&mut bus);
+    let attempts: Vec<_> = report
+        .events
+        .iter()
+        .filter(|row| row.event.outcome == ReceiptOutcome::AttemptStarted)
+        .collect();
+    assert_eq!(
+        attempts.len(),
+        2,
+        "deduplication must retain both genuine attempts"
+    );
+    assert_eq!(attempts[0].event.original_id, attempts[1].event.original_id);
+    assert_ne!(attempts[0].event.attempt_id, attempts[1].event.attempt_id);
+    assert_ne!(attempts[0].event.event_id, attempts[1].event.event_id);
+}
+
+#[test]
+#[trace("FR-067-AC-8")]
+fn receipts_absent_configuration_uses_the_documented_skip_path() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .env_remove("IX_RELAY_TEST_URL")
+        .args([
+            "--exact",
+            "receipts_enqueue_and_ack_remain_atomic_when_committed_replies_are_lost",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("skipping receipts: IX_RELAY_TEST_URL unset"),
+        "the missing configuration must take Bus::connect's explicit skip path"
+    );
+}
+
+#[test]
 #[trace("FR-067-AC-4")]
 fn receipts_enqueue_and_ack_remain_atomic_when_committed_replies_are_lost() {
-    let mut bus = bus();
+    let Some(mut bus) = bus() else { return };
     let (mut disconnected, worker) = lose_eval_reply(&bus);
     let message = Message {
         from: name("sender"),
@@ -234,7 +456,7 @@ fn receipts_enqueue_and_ack_remain_atomic_when_committed_replies_are_lost() {
 #[test]
 #[trace("FR-067-AC-1", "FR-067-AC-7")]
 fn receipts_lifecycle_separates_observation_from_settlement_without_content() {
-    let mut bus = bus();
+    let Some(mut bus) = bus() else { return };
     send(&mut bus);
     let queued = export(&mut bus);
     assert_eq!(queued.events.len(), 1);
@@ -316,7 +538,7 @@ fn receipts_lifecycle_separates_observation_from_settlement_without_content() {
 #[test]
 #[trace("FR-067-AC-1", "FR-067-AC-8")]
 fn receipts_broadcast_retains_each_native_recipient_without_changing_message_history() {
-    let mut bus = bus();
+    let Some(mut bus) = bus() else { return };
     bus.relay
         .register(&Registration {
             name: name("second"),
@@ -354,7 +576,7 @@ fn receipts_broadcast_retains_each_native_recipient_without_changing_message_his
 #[test]
 #[trace("FR-067-AC-2", "FR-067-AC-3", "FR-067-AC-8")]
 fn receipts_identical_sends_recover_with_distinct_attempts_and_stale_ack_is_inert() {
-    let mut bus = bus();
+    let Some(mut bus) = bus() else { return };
     send(&mut bus);
     send(&mut bus);
     let queued = export(&mut bus);
@@ -445,7 +667,7 @@ fn receipts_identical_sends_recover_with_distinct_attempts_and_stale_ack_is_iner
 #[test]
 #[trace("FR-067-AC-4", "FR-067-AC-6")]
 fn receipts_failed_observation_survives_recovery_as_an_explicit_gap() {
-    let mut bus = bus();
+    let Some(mut bus) = bus() else { return };
     send(&mut bus);
     let at = now(&mut bus);
     let batch = claim(&mut bus, at).batch.unwrap();
@@ -502,7 +724,7 @@ fn receipts_failed_observation_survives_recovery_as_an_explicit_gap() {
 #[test]
 #[trace("FR-067-AC-5", "FR-067-AC-6", "FR-067-AC-7")]
 fn receipts_pages_retention_and_empty_coverage_remain_truthful_and_read_only() {
-    let mut bus = bus();
+    let Some(mut bus) = bus() else { return };
     for _ in 0..1_003 {
         send(&mut bus);
     }
@@ -560,7 +782,7 @@ fn receipts_pages_retention_and_empty_coverage_remain_truthful_and_read_only() {
 #[test]
 #[trace("FR-067-AC-5", "FR-067-AC-6")]
 fn receipts_count_bound_marks_an_evicted_continuation_incomplete() {
-    let mut bus = bus();
+    let Some(mut bus) = bus() else { return };
     send(&mut bus);
     let oldest = export(&mut bus).events[0].cursor.clone();
     for _ in 0..RECEIPT_EVENT_CAP {
@@ -583,7 +805,7 @@ fn receipts_count_bound_marks_an_evicted_continuation_incomplete() {
 #[test]
 #[trace("FR-067-AC-2", "FR-067-AC-8")]
 fn receipts_plain_pop_requeue_preserves_original_without_inventing_delivery() {
-    let mut bus = bus();
+    let Some(mut bus) = bus() else { return };
     send(&mut bus);
     let original = export(&mut bus).events[0].event.original_id.clone();
     let popped = bus
@@ -633,7 +855,7 @@ fn receipts_plain_pop_requeue_preserves_original_without_inventing_delivery() {
 #[test]
 #[trace("FR-067-AC-2", "FR-067-AC-8")]
 fn receipts_expired_approval_retains_its_typed_reason_without_claiming_denial() {
-    let mut bus = bus();
+    let Some(mut bus) = bus() else { return };
     send(&mut bus);
     let at = now(&mut bus);
     let batch = claim(&mut bus, at).batch.unwrap();
