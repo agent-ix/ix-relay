@@ -69,3 +69,35 @@ fn receipts_cli_selection_is_read_only_and_keeps_ordinary_history_separate() {
         0
     );
 }
+
+#[test]
+#[trace("FR-067-AC-6")]
+fn receipts_cli_unreachable_source_is_unavailable_evidence_not_empty_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let unavailable = format!(
+        "redis+unix://{}",
+        directory.path().join("absent.sock").display()
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_agent-msg"))
+        .args([
+            "--url",
+            &unavailable,
+            "--prefix",
+            "isolated-missing-source:",
+            "log",
+            "--receipts",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["complete"], false);
+    assert_eq!(report["reasons"], serde_json::json!(["source_unavailable"]));
+    assert!(report["events"].as_array().unwrap().is_empty());
+    assert_eq!(report["covered_since_ms"], serde_json::Value::Null);
+}

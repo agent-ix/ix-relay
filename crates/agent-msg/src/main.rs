@@ -461,8 +461,39 @@ pub(crate) type BoxError = Box<dyn std::error::Error>;
 
 fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxError> {
     let redial = retry::Redial::new(&settings.url.value, &settings.prefix.value);
-    let mut relay = redial.dial(CLI_TIMEOUT)?;
     let mut out = io::stdout().lock();
+    let mut relay = match redial.dial(CLI_TIMEOUT) {
+        Ok(relay) => relay,
+        Err(error) => {
+            if let Cmd::Log {
+                receipts: true,
+                since,
+                max,
+                since_ms,
+                until_ms,
+                after,
+                ..
+            } = &cli.cmd
+                && error
+                    .downcast_ref::<relay_core::Error>()
+                    .is_some_and(relay_core::Error::is_connection)
+            {
+                let window = i64::try_from(since.0.as_millis()).unwrap_or(i64::MAX);
+                let now = now_ms();
+                let request = relay_core::receipts::ReceiptRequest {
+                    since_ms: since_ms.unwrap_or_else(|| now.saturating_sub(window)),
+                    until_ms: until_ms.unwrap_or(now),
+                    now_ms: now,
+                    page_size: *max,
+                    after: after.clone(),
+                };
+                let report = relay_core::receipts::ReceiptExport::source_unavailable(&request)?;
+                json::write_line(&mut out, &report)?;
+                return Ok(());
+            }
+            return Err(error);
+        }
+    };
     match cli.cmd {
         Cmd::Work(args) => work::run(args, &mut relay, settings, &mut out)?,
         Cmd::Send { to, text } => {

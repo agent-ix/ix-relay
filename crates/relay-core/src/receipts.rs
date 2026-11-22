@@ -202,3 +202,16 @@ pub struct ReceiptExport {
     /// Whether additional retained matching events remain.
     pub has_more: bool,
 }
+
+impl ReceiptExport {
+    /// Reports an unavailable source for a validated interval without claiming
+    /// that the missing history is empty or disclosing connection credentials.
+    pub fn source_unavailable(request: &ReceiptRequest) -> crate::Result<Self> {
+        crate::store::receipts::validate_request(request)?;
+        let mut report = crate::store::receipts::empty_export(request);
+        report
+            .reasons
+            .push(ReceiptCoverageReason::SourceUnavailable);
+        Ok(report)
+    }
+}

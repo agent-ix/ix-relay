@@ -195,7 +195,7 @@ impl Relay {
     }
 }
 
-fn validate_request(request: &ReceiptRequest) -> Result<()> {
+pub(crate) fn validate_request(request: &ReceiptRequest) -> Result<()> {
     if request.since_ms > request.until_ms
         || request.until_ms > request.now_ms
         || !(1..=RECEIPT_PAGE_CAP).contains(&request.page_size)
@@ -216,7 +216,7 @@ fn cursor_parts(cursor: &str) -> Option<(u64, u64)> {
     Some((time.parse().ok()?, sequence.parse().ok()?))
 }
 
-fn empty_export(request: &ReceiptRequest) -> ReceiptExport {
+pub(crate) fn empty_export(request: &ReceiptRequest) -> ReceiptExport {
     ReceiptExport {
         requested_since_ms: request.since_ms,
         requested_until_ms: request.until_ms,
