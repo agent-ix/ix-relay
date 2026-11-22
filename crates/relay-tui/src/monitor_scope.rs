@@ -342,6 +342,22 @@ impl ScopeState {
                             .map_err(|error| error.to_string()),
                     )
                 }
+                (Some(snapshot), None)
+                    if report_value
+                        .and_then(|report| report.scope.as_ref())
+                        .is_some_and(|scope| {
+                            !scope.initiatives.is_empty()
+                                || !scope.projects.is_empty()
+                                || !scope.tickets.is_empty()
+                        }) =>
+                {
+                    self.summary_computations += 1;
+                    Some(
+                        crate::monitor_tracker::summarize_report_scope(snapshot, report_value)
+                            .map(Rc::new)
+                            .map_err(|error| error.to_string()),
+                    )
+                }
                 _ => None,
             };
             self.summary = computed;

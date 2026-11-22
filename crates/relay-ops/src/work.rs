@@ -221,6 +221,18 @@ pub fn resolve_work_target(
     target: Option<&str>,
     local_machine: &MachineName,
 ) -> Result<WorkObservation> {
+    resolve_work_target_for_session(runner, target, None, local_machine)
+}
+
+/// Resolves an explicit address or the calling pane, using `expected_session` to disambiguate
+/// multiple live agents in one tab. The observed process identity is checked again after the
+/// pane is selected, so the session selector cannot bind a replacement occupant.
+pub fn resolve_work_target_for_session(
+    runner: &impl ProcessRunner,
+    target: Option<&str>,
+    expected_session: Option<&SessionId>,
+    local_machine: &MachineName,
+) -> Result<WorkObservation> {
     let address = target.map(str::parse::<Address>).transpose()?;
     let machine: MachineName = address
         .as_ref()
@@ -237,7 +249,7 @@ pub fn resolve_work_target(
     } else {
         None
     };
-    let candidates: Vec<_> = view
+    let address_candidates: Vec<_> = view
         .panes
         .iter()
         .filter(|pane| {
@@ -267,12 +279,32 @@ pub fn resolve_work_target(
             })
         })
         .collect();
+    let candidates: Vec<_> = if let Some(expected_session) = expected_session {
+        address_candidates
+            .iter()
+            .copied()
+            .filter(|pane| {
+                pane.agent_session.as_ref().is_some_and(|session| {
+                    session.kind == "id" && session.value == expected_session.as_str()
+                })
+            })
+            .collect()
+    } else {
+        address_candidates.clone()
+    };
     let [pane] = candidates.as_slice() else {
+        if expected_session.is_some() && !address_candidates.is_empty() && candidates.is_empty() {
+            return Err(OpsError::WorkSessionReplaced);
+        }
         return Err(OpsError::WorkTargetCardinality {
             matches: candidates.len(),
         });
     };
-    observe_pane(runner, remote, &view, pane, machine.clone())
+    let observation = observe_pane(runner, remote, &view, pane, machine.clone())?;
+    if expected_session.is_some_and(|expected| expected != &observation.binding.session) {
+        return Err(OpsError::WorkSessionReplaced);
+    }
+    Ok(observation)
 }
 
 /// Observes the original pane and refuses to inherit another session's reports.

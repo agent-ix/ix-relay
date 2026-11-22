@@ -7,7 +7,7 @@ use relay_core::{
     MachineName, SessionId,
     named_focus::{FocusError, FocusResult, OwnerBinding},
 };
-use relay_ops::work::resolve_work_target;
+use relay_ops::work::resolve_work_target_for_session;
 
 /// Establishes who is calling.
 pub(crate) trait CallerSource {
@@ -32,20 +32,19 @@ impl CallerSource for HerdrCaller<'_> {
         session: Option<&SessionId>,
         now_ms: i64,
     ) -> FocusResult<OwnerBinding> {
-        let observation = resolve_work_target(&herdr_cli::RealProcessRunner, lead, self.machine)
-            .map_err(|error| {
-                FocusError::invalid(
-                    "lead",
-                    format!("the calling session could not be verified: {error}"),
-                )
-            })?;
+        let observation = resolve_work_target_for_session(
+            &herdr_cli::RealProcessRunner,
+            lead,
+            session,
+            self.machine,
+        )
+        .map_err(|error| {
+            FocusError::invalid(
+                "lead",
+                format!("the calling session could not be verified: {error}"),
+            )
+        })?;
         let binding = observation.binding;
-        if session.is_some_and(|expected| *expected != binding.session) {
-            return Err(FocusError::invalid(
-                "session",
-                "the pane hosts a different native session than --session names",
-            ));
-        }
         Ok(OwnerBinding::new(
             &binding.machine,
             &binding.session,

@@ -44,7 +44,7 @@ struct Args {
     /// Existing ix-board retro configuration JSON containing department policies and sources.
     #[arg(long)]
     retro_config: Option<std::path::PathBuf>,
-    /// Native session expected at that address.
+    /// Select this native session when an address contains multiple agents, and refuse a replacement.
     #[arg(long, requires = "lead")]
     session: Option<relay_core::SessionId>,
 }
@@ -402,17 +402,13 @@ fn bind_lead(
     relay_core::config::CoreSettings,
 )> {
     let settings = relay_core::config::load_core(Default::default()).map_err(io::Error::other)?;
-    let observed = relay_ops::work::resolve_work_target(
+    let observed = relay_ops::work::resolve_work_target_for_session(
         &herdr_cli::RealProcessRunner,
         Some(lead),
+        session.as_ref(),
         &settings.machine.value,
     )
     .map_err(io::Error::other)?;
-    if session.is_some_and(|id| id != observed.binding.session) {
-        return Err(io::Error::other(
-            "target session changed; explicitly rebind",
-        ));
-    }
     Ok((observed, settings))
 }
 

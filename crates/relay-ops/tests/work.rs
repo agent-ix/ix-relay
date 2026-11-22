@@ -5,7 +5,7 @@ use herdr_cli::{Output, ProcessError, ProcessRunner};
 use ix_trace_rs::trace;
 use relay_ops::{
     OpsError,
-    work::{observe_work_binding, resolve_work_target},
+    work::{observe_work_binding, resolve_work_target, resolve_work_target_for_session},
 };
 use std::time::Duration;
 
@@ -31,7 +31,15 @@ impl ProcessRunner for Runner {
                 r#"{{"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1","agent":"codex","agent_status":"working","agent_session":{session}}}"#
             );
             let other = if self.duplicate {
-                format!(",{}", pane.replace("w1:p1", "w1:p2"))
+                let other = pane.replace("w1:p1", "w1:p2");
+                let other = match self.session {
+                    Some(session) => other.replace(session, "session-b"),
+                    None => other.replace(
+                        r#""agent_session":null"#,
+                        r#""agent_session":{"agent":"codex","kind":"id","value":"session-b"}"#,
+                    ),
+                };
+                format!(",{other}")
             } else {
                 String::new()
             };
@@ -109,6 +117,34 @@ fn binding_uses_measured_resume_identity_and_refuses_ambiguity_conflict_and_repl
             &machine
         ),
         Err(OpsError::WorkTargetCardinality { matches: 2 })
+    ));
+    let expected_session = "session-a".parse().unwrap();
+    let selected = resolve_work_target_for_session(
+        &Runner {
+            session: Some("session-a"),
+            duplicate: true,
+            ..runner
+        },
+        Some("luna:SWM:code"),
+        Some(&expected_session),
+        &machine,
+    )
+    .unwrap();
+    assert_eq!(selected.binding.pane.as_str(), "w1:p1");
+    assert_eq!(selected.binding.session, expected_session);
+    let missing_session = "session-missing".parse().unwrap();
+    assert!(matches!(
+        resolve_work_target_for_session(
+            &Runner {
+                session: Some("session-a"),
+                duplicate: true,
+                ..runner
+            },
+            Some("luna:SWM:code"),
+            Some(&missing_session),
+            &machine,
+        ),
+        Err(OpsError::WorkSessionReplaced)
     ));
     assert!(matches!(
         resolve_work_target(

@@ -12,7 +12,7 @@ use relay_core::{
     Relay, SessionId, TicketId,
     work::{AgentWork, WorkFocus, WorkScope, WorkStatus},
 };
-use relay_ops::work::{resolve_work_scope, resolve_work_target};
+use relay_ops::work::{resolve_work_scope, resolve_work_target, resolve_work_target_for_session};
 use std::{io::Write, time::Duration};
 
 #[derive(Args)]
@@ -20,7 +20,7 @@ pub(crate) struct WorkArgs {
     /// Target lead's Herdr address; omitted means the calling pane.
     #[arg(long)]
     lead: Option<String>,
-    /// Expected native session ID; refuse a different occupant.
+    /// Select this native session within a shared tab and refuse a replacement occupant.
     #[arg(long)]
     session: Option<SessionId>,
     #[command(subcommand)]
@@ -135,11 +135,13 @@ pub(crate) fn run(
     out: &mut impl Write,
 ) -> Result<(), BoxError> {
     let runner = herdr_cli::RealProcessRunner;
-    let observation = resolve_work_target(&runner, args.lead.as_deref(), &settings.machine.value)?;
+    let observation = resolve_work_target_for_session(
+        &runner,
+        args.lead.as_deref(),
+        args.session.as_ref(),
+        &settings.machine.value,
+    )?;
     let binding = observation.binding;
-    if args.session.is_some_and(|id| id != binding.session) {
-        return Err(relay_ops::OpsError::WorkSessionReplaced.into());
-    }
     let now = crate::now_ms();
     match args.command {
         WorkCommand::Scope {
