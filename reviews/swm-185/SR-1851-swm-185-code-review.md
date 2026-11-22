@@ -129,3 +129,45 @@ The docs-style rules were applied to the README lines by reading. Reverse gap: t
 ## Current verdict (after disposition pass 1)
 
 **PASS** - all 6 findings of this artifact are fixed on the source as read; none is open and no new finding was found. This is a reading of source and the parent-supplied results listed above; I ran no gate. The overall PR is not yet clear: SR-1853 has one new low finding.
+
+## Dependency delta check (final SDK pin, appended)
+
+Bounded check of the last commit, which changes only Cargo.toml and Cargo.lock: ix-board fcb0b358 (0.7.1) to 237f4ff53474bce34995e2183282c978ac291ed3 (0.7.2). By the same reviewer, PR 47, same tree. I ran no command. The UI and spec findings of all four artifacts stay closed and no wave was run. I did not re-review the upstream fix; I used the accepted upstream boundary (PR 84, SR-6095 and SR-6096 PASS, per the parent) and checked the consumer against the delta in the private final-sdk-public-delta.patch and final-sdk-runtime-delta.patch (git-derived by the parent). Instruction sources: the same current Codex paths as the earlier passes (dev-team 0.4.1 reviewer, dev-tools 0.3.2 code-review, rust-review and rust-style, quoin 0.31.1); no older cache.
+
+Evidence read. The workspace pin is `rev = "237f4ff53474bce34995e2183282c978ac291ed3"` (Cargo.toml:43) and Cargo.lock has ix-board 0.7.2 at that source, with the dependency list unchanged. The public delta is the version line only. The runtime delta changes three things: `QuotaDecision.evidence` now holds the most restrictive representative per dimension, with every actual blocker still pushed to `blockers`; two indexes on the observation table; and the observation capacity bound moves from 512 to 131,072. No type, field, enum variant or function signature changed, so the consumer compiles against the same API, and the parent reports a Cargo-generated lock update with no compilation. No consumer code reads a raw observation or the DB.
+
+Compatibility. The consumer renders blockers, the attempt, the earliest reevaluation, pending reservations and actions from `decision.blockers`, `endpoint`, `estimated_complexity`, `next_reevaluation_at`, `legacy_pending_reservations` and `evaluated_at`, and derives actions from blockers and pending reservations only (quota.rs:217-253, 256-287). None of those changed, so the display, the unknown handling, the expiry text and the no-probing behavior are preserved. The one field that changed meaning is `evidence`, and the consumer reads it in one place only (quota.rs:280-285). All fixtures set `evidence: Vec::new()`.
+
+## Dispositions (dependency delta)
+
+No original finding is reopened. One new finding follows.
+
+## New findings (dependency delta)
+
+| ID | Severity | Summary | Refs |
+|---|---|---|---|
+| FND-007 | low | The notice fact `N live server observations reported` takes N from `decision.evidence.len()`, which under 0.7.2 is at most one representative per dimension and no longer a count of observations, and no fixture or test populates `evidence` | crates/relay-tui/src/monitor_ops/quota.rs:280 |
+
+### FND-007 (low) The evidence count no longer counts observations
+
+`decision_facts` pushes `{} live server observations reported` with `decision.evidence.len()` (quota.rs:280-285). Before the delta the SDK pushed every available observation, so the number was the number of observations. After it, the SDK keeps one most restrictive representative per dimension (quota.rs of the SDK, the `iter_mut().find(...)` branch), so N is at most the number of dimensions with evidence (three at most) while the service may have evaluated tens of thousands of observations. The inspector would then state a count that is not the count of observations, which is the kind of overstated precision the contract asks the consumer to avoid; the blockers it also lists remain exact. No test covers the fact: every fixture sets `evidence: Vec::new()` and `live server observations` appears in no assertion, so the wording could not fail either way. Confidence high on the facts, low impact. Fix: word the fact for what is reported, for example `live server evidence reported for N dimensions` computed from the distinct dimensions, or drop the line, and add one fixture decision with evidence entries that asserts the new wording. Text and a test only; no API, pin or lock change.
+
+## Current verdict (after dependency delta check)
+
+**CONDITIONAL** - the pin is accepted as a bounded delta: the lock change is the version and source only, the public API is unchanged, and the consumer's blockers, attempt, reevaluation, actions, unknown handling and no-probing behavior are preserved. One new low finding (FND-007) is open on the one place the consumer assumed `evidence` lists raw observations. The delivery is not complete: the aggregate, the exact-head merge, the dashboard install and UAT are still required, and the upstream hold on restarts and the lost-evidence expiry is outside this review.
+
+## Dispositions (round 3, dependency FND-007 only)
+
+Disposition round 3, distinct from rounds 1 and 2 above, by the same reviewer session, PR 47, same tree. Bounded to FND-007; no wave. I read final-sdk-wording-ready.md as a claim and crates/relay-tui/src/monitor_ops/quota.rs as fact. I ran no command, and nothing was compiled or tested by me. Parent-supplied facts relied on: fmt check exit 0 and diff check exit 0; no compilation or tests have run yet because the owner CLI-first heavy build hold is pending; the SDK pin 237f4ff is unchanged; the generated lock moved tempfile's getrandom 0.3.4 to the already-locked 0.4.3, both crates already present and no other dependency changed; the source freeze is this quota.rs correction plus review custody, with no concurrent writer.
+
+| FND | Outcome | Reason |
+|---|---|---|
+| FND-007 | fixed | `decision_facts` now says `{} live server evidence summaries reported` from `decision.evidence.len()` (quota.rs:280-285), which is what the 0.7.2 evidence holds (one representative per dimension), and the `Notice::facts` doc comment says `the count of live server evidence summaries` (quota.rs:177-178). The word observations is gone from production code. The new test `live_server_evidence_is_counted_as_summaries_not_observations` (quota.rs:609-642, tagged FR-048-AC-5) sets two evidence entries on `mixed_backoff()` and asserts the exact fact `2 live server evidence summaries reported`, that the detail does not contain `observations reported`, that the action is still `ReconcileEvidence`, and that the server backoff, evidence unavailable and local allocation holds are still in the detail. The assertions can fail on a wording regression. The strings match `state_label` and `blocker_text`, `Action` is `PartialEq` and `Debug` so the `assert_eq!` with an array compiles by reading, and `QuotaDimension` is in scope through `use super::*` because the module imports it at line 13. No API, pin, lock, spec or README change. |
+
+## New findings (round 3)
+
+None. The wording is a direct length count of what the SDK now reports, which is the honest reading; a distinct-dimension count was not needed.
+
+## Current verdict (after round 3)
+
+**PASS** - all 7 findings of this artifact are fixed on the source as read and no new finding was found, so all 17 findings across the four SRs are closed and all four SRs are PASS. This is a reading of source and the parent-supplied results; I ran and compiled nothing, so the new test is not claimed executed. Acceptance of the wording and test is at source level with the final gate as the prerequisite: the one final aggregate with `RUST_TEST_THREADS=1` (including clippy and the TUI tests), the exact-head merge, the dashboard install and UAT are still pending. This is not a runtime delivery claim.

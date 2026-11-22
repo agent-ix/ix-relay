@@ -175,7 +175,7 @@ pub struct Notice {
     /// What the reader can do, each from a reported blocker or pending reservation.
     pub actions: Vec<Action>,
     /// Every fact the service reported: the attempt, the earliest reevaluation, each blocker
-    /// and the observation count. Empty when no decision was reported.
+    /// and the count of live server evidence summaries. Empty when no decision was reported.
     pub facts: Vec<String>,
     /// The summary, the actions and the facts as one line, for one-line surfaces.
     pub detail: String,
@@ -279,7 +279,7 @@ fn decision_facts(decision: &QuotaDecision) -> Vec<String> {
     );
     if !decision.evidence.is_empty() {
         facts.push(format!(
-            "{} live server observations reported",
+            "{} live server evidence summaries reported",
             decision.evidence.len()
         ));
     }
@@ -602,6 +602,47 @@ mod tests {
             notice.detail
         );
         assert!(notice.actions.is_empty());
+    }
+
+    /// Live server evidence is representative per dimension, so its length counts summaries,
+    /// not raw observations, and the facts say so without losing a blocker or an action.
+    #[trace("FR-048-AC-5")]
+    #[test]
+    fn live_server_evidence_is_counted_as_summaries_not_observations() {
+        let mut decision = mixed_backoff();
+        decision.evidence = vec![
+            blocker(
+                QuotaState::ServerReserveHeld,
+                Some(QuotaDimension::Requests),
+                None,
+            ),
+            blocker(
+                QuotaState::ServerReserveHeld,
+                Some(QuotaDimension::Complexity),
+                None,
+            ),
+        ];
+        let notice = Notice::new(Cause::of_decision(&decision), Some(&decision), false);
+        assert!(
+            notice
+                .facts
+                .contains(&"2 live server evidence summaries reported".to_owned()),
+            "{:?}",
+            notice.facts
+        );
+        assert!(
+            !notice.detail.contains("observations reported"),
+            "{}",
+            notice.detail
+        );
+        assert_eq!(notice.actions, [Action::ReconcileEvidence]);
+        assert!(notice.detail.contains("hold: server backoff"));
+        assert!(notice.detail.contains("hold: evidence unavailable"));
+        assert!(
+            notice
+                .detail
+                .contains("hold: local allocation held requests")
+        );
     }
 
     /// A local window hold is its own cause, with its own exhausted usage.
