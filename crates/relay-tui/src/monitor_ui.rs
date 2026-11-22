@@ -422,6 +422,25 @@ pub(crate) fn evidence_items(
                 text(&app.tracker.error_summary, error),
             ));
         }
+        // An action a reported blocker calls for stays in view beside any countdown.
+        let actions = app
+            .tracker_notice
+            .iter()
+            .flat_map(|notice| notice.actions.iter())
+            .filter(|action| action.is_prominent())
+            .map(|action| action.label())
+            .collect::<Vec<_>>();
+        if !actions.is_empty() {
+            items.push(item(
+                EvidenceSeverity::Failure,
+                format!("Tracker action: {}", actions.join(", ")),
+                if department_view {
+                    "e lists source errors"
+                } else {
+                    "e shows every hold"
+                },
+            ));
+        }
     } else if let Some(snapshot) = &app.tracker.value
         && snapshot_is_stale(snapshot.fetched_at, now_epoch)
     {
@@ -1295,7 +1314,8 @@ pub(crate) mod tests {
         app.apply_tracker_refresh(
             Err(ix_board::Error::LinearRateLimited {
                 retry_after: std::time::Duration::from_secs(3600),
-            }),
+            }
+            .into()),
             now,
         );
         assert_eq!(
@@ -1463,9 +1483,68 @@ pub(crate) mod tests {
             "{text}"
         );
         assert!(text.contains("Tasks: 1/2 done"), "{text}");
+        assert!(
+            text.contains("Tracker action: reconcile quota evidence"),
+            "{text}"
+        );
         for absent in ["next attempt", "rate-limited", "rate limited", "429"] {
             assert!(!text.contains(absent), "{absent}\n{text}");
         }
+    }
+
+    /// Refusals that do not wait show their own label and no countdown at the screen. Only
+    /// the ones that call for an action also show it.
+    #[trace("FR-048-AC-5", "FR-064-AC-10")]
+    #[test]
+    fn refusals_that_do_not_wait_show_their_label_and_no_countdown() {
+        use crate::monitor_ops::quota::fixture;
+        for (decision, label, action) in [
+            (
+                fixture::rejected(),
+                "Tracker request cannot be admitted",
+                Some("Tracker action: inspect request"),
+            ),
+            (
+                fixture::evidence_only(),
+                "Tracker quota evidence unavailable",
+                Some("Tracker action: reconcile quota evidence"),
+            ),
+            (fixture::unexplained(), "Tracker quota refused", None),
+        ] {
+            let mut app = app();
+            let read = refused_read(&app, decision);
+            app.apply_tracker_refresh(Ok(read), Instant::now());
+            let text = screen(&mut app, 100, 15);
+            assert!(text.contains(label), "{label}\n{text}");
+            assert!(text.contains("Tasks: 1/2 done"), "{text}");
+            match action {
+                Some(row) => assert!(text.contains(row), "{row}\n{text}"),
+                None => assert!(!text.contains("Tracker action"), "{text}"),
+            }
+            for absent in ["next attempt", "rate-limited", "rate limited", "429"] {
+                assert!(!text.contains(absent), "{absent}\n{text}");
+            }
+        }
+    }
+
+    /// An explicit backoff that also carries quarantined reservations keeps its own countdown
+    /// and, beside it, the reconcile action.
+    #[trace("FR-048-AC-5", "FR-064-AC-10")]
+    #[test]
+    fn a_backoff_with_quarantine_keeps_the_countdown_and_the_reconcile_action_in_view() {
+        let mut app = app();
+        let read = refused_read(&app, crate::monitor_ops::quota::fixture::mixed_backoff());
+        app.apply_tracker_refresh(Ok(read), Instant::now());
+        let text = screen(&mut app, 100, 15);
+        assert!(
+            text.contains("Tracker rate-limited (next attempt in"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Tracker action: reconcile quota evidence"),
+            "{text}"
+        );
+        assert!(text.contains("Tasks: 1/2 done"), "{text}");
     }
 
     /// Only a typed server backoff decision carries the rate-limited label and its countdown.
@@ -1983,7 +2062,8 @@ pub(crate) mod tests {
         app.apply_tracker_refresh(
             Err(ix_board::Error::LinearRateLimited {
                 retry_after: std::time::Duration::from_secs(3600),
-            }),
+            }
+            .into()),
             Instant::now(),
         );
         app.runtime
@@ -2170,7 +2250,8 @@ pub(crate) mod tests {
         app.apply_tracker_refresh(
             Err(ix_board::Error::LinearRateLimited {
                 retry_after: std::time::Duration::from_secs(3600),
-            }),
+            }
+            .into()),
             Instant::now(),
         );
         app.report.value.as_mut().unwrap().as_mut().unwrap().agents = (0..3).map(agent).collect();
@@ -2281,7 +2362,8 @@ pub(crate) mod tests {
         limited.apply_tracker_refresh(
             Err(ix_board::Error::LinearRateLimited {
                 retry_after: std::time::Duration::from_secs(3600),
-            }),
+            }
+            .into()),
             Instant::now(),
         );
         limited.runtime.failure("Herdr unreachable");

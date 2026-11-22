@@ -61,8 +61,9 @@ impl Cause {
         }
     }
 
-    /// The quota cause of a failed read with no snapshot, or `None` when the failure is not a
-    /// quota matter (authentication, transport and the rest keep their own classification).
+    /// The quota cause of a failed read, from the error alone: the SDK's legacy typed errors
+    /// and a refusal that carries its decision. `None` when the failure is not a quota matter
+    /// (authentication, transport and the rest keep their own classification).
     pub fn of_error(error: &ix_board::Error) -> Option<Self> {
         match error {
             ix_board::Error::LinearRateLimited { .. } => Some(Self::ServerBackoff),
@@ -119,24 +120,49 @@ impl Cause {
             | Self::Unknown => false,
         }
     }
+}
 
-    /// What the reader can do about a cause that waiting does not clear.
-    fn remedy(self) -> Option<&'static str> {
+/// What the reader can do about a reported hold. Each action follows from a reported blocker or
+/// pending reservation, never from the primary cause alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// The quota evidence needs reconciling by its owner.
+    ReconcileEvidence,
+    /// Waiting cannot admit the request, so the request itself needs inspecting.
+    InspectRequest,
+    /// The source needs inspecting.
+    InspectSource,
+}
+
+impl Action {
+    /// Short name for an evidence-row label.
+    pub fn label(self) -> &'static str {
         match self {
-            Self::ServerBackoff
-            | Self::LocalWindow
-            | Self::ServerReserve
-            | Self::LocalBudget
-            | Self::RefreshLockBusy => None,
-            Self::EvidenceUnavailable | Self::EvidenceQuarantined => {
-                Some("Ask the quota owner to reconcile the quota evidence, or open --report")
+            Self::ReconcileEvidence => "reconcile quota evidence",
+            Self::InspectRequest => "inspect request",
+            Self::InspectSource => "inspect source",
+        }
+    }
+
+    /// The full instruction.
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::ReconcileEvidence => {
+                "Ask the quota owner to reconcile the quota evidence, or open --report"
             }
-            Self::RequestRejected => {
-                Some("Waiting will not admit this request; inspect ix-board, or open --report")
+            Self::InspectRequest => {
+                "Waiting will not admit this request; inspect ix-board, or open --report"
             }
-            Self::RefusalUnexplained | Self::SourceFailed | Self::Unknown => {
-                Some(super::SOURCE_AVAILABILITY_REMEDY)
-            }
+            Self::InspectSource => super::SOURCE_AVAILABILITY_REMEDY,
+        }
+    }
+
+    /// Whether the action earns its own evidence row. Inspecting the source is the ordinary
+    /// remedy of every failure and stays in the detail.
+    pub fn is_prominent(self) -> bool {
+        match self {
+            Self::ReconcileEvidence | Self::InspectRequest => true,
+            Self::InspectSource => false,
         }
     }
 }
@@ -146,8 +172,12 @@ impl Cause {
 pub struct Notice {
     /// The primary statement: what held or failed, and the kept snapshot when there is one.
     pub summary: String,
-    /// The summary followed by every fact the service reported: the attempt, the earliest
-    /// reevaluation and every blocker, then what the reader can do.
+    /// What the reader can do, each from a reported blocker or pending reservation.
+    pub actions: Vec<Action>,
+    /// Every fact the service reported: the attempt, the earliest reevaluation, each blocker
+    /// and the observation count. Empty when no decision was reported.
+    pub facts: Vec<String>,
+    /// The summary, the actions and the facts as one line, for one-line surfaces.
     pub detail: String,
 }
 
@@ -160,23 +190,66 @@ impl Notice {
         } else {
             cause.summary().to_owned()
         };
+        let actions = actions_for(cause, decision);
+        let facts = decision.map(decision_facts).unwrap_or_default();
         let detail = match cause {
             Cause::SourceFailed | Cause::Unknown => super::render_diagnostic(
                 "TrackerRefreshFailed",
                 &summary,
                 super::SOURCE_AVAILABILITY_REMEDY,
             ),
-            _ => {
-                let mut parts = vec![summary.clone()];
-                if let Some(decision) = decision {
-                    parts.extend(decision_facts(decision));
-                }
-                parts.extend(cause.remedy().map(str::to_owned));
-                parts.join(" · ")
-            }
+            _ => std::iter::once(summary.clone())
+                .chain(actions.iter().map(|action| action.text().to_owned()))
+                .chain(facts.iter().cloned())
+                .collect::<Vec<_>>()
+                .join(" · "),
         };
-        Self { summary, detail }
+        Self {
+            summary,
+            actions,
+            facts,
+            detail,
+        }
     }
+}
+
+/// The actions each reported blocker and pending reservation calls for, once each.
+fn actions_for(cause: Cause, decision: Option<&QuotaDecision>) -> Vec<Action> {
+    let mut actions = Vec::new();
+    let mut want = |action: Action| {
+        if !actions.contains(&action) {
+            actions.push(action);
+        }
+    };
+    match decision {
+        Some(decision) => {
+            let held = |state: QuotaState| decision.blockers.iter().any(|b| b.state == state);
+            if decision.legacy_pending_reservations > 0 || held(QuotaState::EvidenceUnavailable) {
+                want(Action::ReconcileEvidence);
+            }
+            if held(QuotaState::RequestRejected) {
+                want(Action::InspectRequest);
+            }
+            if decision.blockers.is_empty() {
+                want(Action::InspectSource);
+            }
+        }
+        None => match cause {
+            Cause::EvidenceUnavailable | Cause::EvidenceQuarantined => {
+                want(Action::ReconcileEvidence);
+            }
+            Cause::RequestRejected => want(Action::InspectRequest),
+            Cause::RefusalUnexplained | Cause::SourceFailed | Cause::Unknown => {
+                want(Action::InspectSource);
+            }
+            Cause::ServerBackoff
+            | Cause::LocalWindow
+            | Cause::ServerReserve
+            | Cause::LocalBudget
+            | Cause::RefreshLockBusy => {}
+        },
+    }
+    actions
 }
 
 /// Every reported fact of a decision: the attempt, the earliest reevaluation and each blocker.
@@ -187,7 +260,7 @@ fn decision_facts(decision: &QuotaDecision) -> Vec<String> {
     )];
     if decision.legacy_pending_reservations > 0 {
         facts.push(format!(
-            "{} pre-fence reservations pending reconciliation; not a server limit",
+            "{} pre-fence reservations are pending reconciliation by the quota owner",
             decision.legacy_pending_reservations
         ));
     }
@@ -283,6 +356,7 @@ fn span(milliseconds: i64) -> String {
 
 /// Typed decision fixtures shared by the dashboard's tests. Their numbers are arbitrary: the
 /// tests assert that the dashboard shows what a decision reports, never a production value.
+/// Each fixture names its primary state, as the SDK reports the highest-precedence blocker.
 #[cfg(test)]
 pub(crate) mod fixture {
     use super::{QuotaBlocker, QuotaDecision, QuotaDimension, QuotaState};
@@ -290,13 +364,11 @@ pub(crate) mod fixture {
     /// When every fixture decision was captured, in Unix milliseconds.
     pub(crate) const EVALUATED_AT: i64 = 1_000_000;
 
-    /// A decision captured at [`EVALUATED_AT`]. As the SDK derives them, its primary state is
-    /// the first blocker's and its earliest reevaluation is the earliest blocker deadline.
-    pub(crate) fn decision(blockers: Vec<QuotaBlocker>) -> QuotaDecision {
+    /// A decision captured at [`EVALUATED_AT`] with the stated primary state. Its earliest
+    /// reevaluation is the earliest blocker deadline, as the SDK derives it.
+    pub(crate) fn decision(primary: QuotaState, blockers: Vec<QuotaBlocker>) -> QuotaDecision {
         QuotaDecision {
-            state: blockers
-                .first()
-                .map_or(QuotaState::Available, |blocker| blocker.state),
+            state: primary,
             next_reevaluation_at: blockers.iter().filter_map(|blocker| blocker.deadline).min(),
             blockers,
             evidence: Vec::new(),
@@ -344,7 +416,7 @@ pub(crate) mod fixture {
         held.local_usage = Some(0);
         held.outstanding_charge = Some(0);
         held.effective_remaining = Some(3);
-        decision(vec![held])
+        decision(QuotaState::ServerReserveHeld, vec![held])
     }
 
     /// An exhausted local complexity allocation; it reevaluates at the local window reset.
@@ -357,40 +429,92 @@ pub(crate) mod fixture {
         held.capacity = Some(900);
         held.local_usage = Some(880);
         held.estimated_charge = Some(50);
-        decision(vec![held])
+        decision(QuotaState::LocalWindowHeld, vec![held])
     }
 
-    /// An actual server cooldown, reevaluating in 1m 30s.
+    /// An actual server cooldown alone, reevaluating in 1m 30s.
     pub(crate) fn server_backoff() -> QuotaDecision {
-        decision(vec![blocker(
+        decision(
             QuotaState::ServerBackoff,
-            None,
-            Some(EVALUATED_AT + 90_000),
-        )])
+            vec![blocker(
+                QuotaState::ServerBackoff,
+                None,
+                Some(EVALUATED_AT + 90_000),
+            )],
+        )
+    }
+
+    /// An actual server cooldown that outranks quarantined evidence and a local hold: three
+    /// pending pre-fence reservations, an evidence blocker with no time, and a local requests
+    /// hold. The earliest reevaluation is the cooldown's, 1m 30s.
+    pub(crate) fn mixed_backoff() -> QuotaDecision {
+        let mut local = blocker(
+            QuotaState::LocalWindowHeld,
+            Some(QuotaDimension::Requests),
+            Some(EVALUATED_AT + 2_000_000),
+        );
+        local.capacity = Some(8);
+        local.local_usage = Some(7);
+        local.estimated_charge = Some(2);
+        let mut held = decision(
+            QuotaState::ServerBackoff,
+            vec![
+                blocker(QuotaState::ServerBackoff, None, Some(EVALUATED_AT + 90_000)),
+                blocker(QuotaState::EvidenceUnavailable, None, None),
+                local,
+            ],
+        );
+        held.legacy_pending_reservations = 3;
+        held
     }
 
     /// Unreadable quota evidence with two pre-fence reservations pending and no known time.
     pub(crate) fn quarantined() -> QuotaDecision {
-        let mut held = decision(vec![blocker(QuotaState::EvidenceUnavailable, None, None)]);
+        let mut held = evidence_only();
         held.legacy_pending_reservations = 2;
         held
     }
 
-    /// Three independent holds at once; the primary state is evidence unavailable.
+    /// Unreadable quota evidence with no pending reservation and no known time.
+    pub(crate) fn evidence_only() -> QuotaDecision {
+        decision(
+            QuotaState::EvidenceUnavailable,
+            vec![blocker(QuotaState::EvidenceUnavailable, None, None)],
+        )
+    }
+
+    /// A request that waiting cannot admit.
+    pub(crate) fn rejected() -> QuotaDecision {
+        decision(
+            QuotaState::RequestRejected,
+            vec![blocker(QuotaState::RequestRejected, None, None)],
+        )
+    }
+
+    /// A refusal whose decision reports no hold at all.
+    pub(crate) fn unexplained() -> QuotaDecision {
+        decision(QuotaState::Available, Vec::new())
+    }
+
+    /// Three independent holds with no cooldown; the primary state is evidence unavailable,
+    /// which outranks both the local and the reserve hold.
     pub(crate) fn simultaneous() -> QuotaDecision {
-        let mut held = decision(vec![
-            blocker(QuotaState::EvidenceUnavailable, None, None),
-            blocker(
-                QuotaState::LocalWindowHeld,
-                Some(QuotaDimension::Requests),
-                Some(EVALUATED_AT + 2_000_000),
-            ),
-            blocker(
-                QuotaState::ServerReserveHeld,
-                Some(QuotaDimension::EndpointRequests),
-                Some(EVALUATED_AT + 500_000),
-            ),
-        ]);
+        let mut held = decision(
+            QuotaState::EvidenceUnavailable,
+            vec![
+                blocker(QuotaState::EvidenceUnavailable, None, None),
+                blocker(
+                    QuotaState::LocalWindowHeld,
+                    Some(QuotaDimension::Requests),
+                    Some(EVALUATED_AT + 2_000_000),
+                ),
+                blocker(
+                    QuotaState::ServerReserveHeld,
+                    Some(QuotaDimension::EndpointRequests),
+                    Some(EVALUATED_AT + 500_000),
+                ),
+            ],
+        );
         held.legacy_pending_reservations = 4;
         held
     }
@@ -400,7 +524,10 @@ pub(crate) mod fixture {
 mod tests {
     use ix_trace_rs::trace;
 
-    use super::fixture::{blocker, decision, local_held, quarantined, reserve_held, simultaneous};
+    use super::fixture::{
+        blocker, decision, evidence_only, local_held, mixed_backoff, quarantined, rejected,
+        reserve_held, simultaneous, unexplained,
+    };
     use super::*;
 
     /// Every decision state maps to its own cause, and only a server backoff is a rate limit.
@@ -408,7 +535,7 @@ mod tests {
     #[test]
     fn each_decision_state_maps_to_one_cause_and_only_backoff_is_a_rate_limit() {
         let cause = |state, legacy| {
-            let mut decision = decision(vec![blocker(state, None, None)]);
+            let mut decision = decision(state, vec![blocker(state, None, None)]);
             decision.legacy_pending_reservations = legacy;
             Cause::of_decision(&decision)
         };
@@ -474,6 +601,7 @@ mod tests {
             "{}",
             notice.detail
         );
+        assert!(notice.actions.is_empty());
     }
 
     /// A local window hold is its own cause, with its own exhausted usage.
@@ -494,7 +622,7 @@ mod tests {
         );
     }
 
-    /// Simultaneous blockers all stay in the detail, in reported order, and the primary summary
+    /// Simultaneous blockers all stay in the facts, in reported order, and the primary summary
     /// names only the decision's primary state.
     #[trace("FR-048-AC-5")]
     #[test]
@@ -513,9 +641,42 @@ mod tests {
             .unwrap();
         assert!(evidence < local && local < reserve, "{}", notice.detail);
         assert!(notice.detail.contains("no reevaluation time"));
-        assert!(notice.detail.contains("4 pre-fence reservations pending"));
+        assert!(
+            notice
+                .detail
+                .contains("4 pre-fence reservations are pending reconciliation")
+        );
         assert!(notice.detail.contains("earliest reevaluation 8m 20s after"));
+        assert_eq!(notice.actions, [Action::ReconcileEvidence]);
+    }
+
+    /// An explicit backoff that outranks quarantined reservations stays a rate limit, keeps
+    /// every other blocker and shows the reconcile action; the reservations do not qualify
+    /// the backoff.
+    #[trace("FR-048-AC-5")]
+    #[test]
+    fn a_backoff_with_pending_reservations_keeps_the_backoff_every_blocker_and_the_action() {
+        let decision = mixed_backoff();
+        let cause = Cause::of_decision(&decision);
+        assert_eq!(cause, Cause::ServerBackoff);
+        let notice = Notice::new(cause, Some(&decision), true);
+        assert_eq!(
+            notice.summary,
+            "Linear rate limited; showing the last snapshot"
+        );
+        assert_eq!(notice.actions, [Action::ReconcileEvidence]);
+        for fact in [
+            "hold: server backoff (reevaluate after 1m 30s)",
+            "hold: evidence unavailable (no reevaluation time)",
+            "hold: local allocation held requests (capacity 8, charge 2, local usage 7",
+            "3 pre-fence reservations are pending reconciliation by the quota owner",
+            "earliest reevaluation 1m 30s after the attempt",
+        ] {
+            assert!(notice.detail.contains(fact), "{fact}: {}", notice.detail);
+        }
         assert!(notice.detail.contains("reconcile the quota evidence"));
+        assert!(!notice.detail.contains("not a server limit"));
+        assert_eq!(notice.facts.len(), 6, "{:?}", notice.facts);
     }
 
     /// No reevaluation time stays unknown: no countdown and no timer is invented.
@@ -527,8 +688,37 @@ mod tests {
         let notice = Notice::new(Cause::of_decision(&decision), Some(&decision), false);
         assert!(notice.detail.contains("reevaluation time unknown"));
         assert!(!notice.detail.contains("earliest reevaluation"));
-        assert!(notice.detail.contains("2 pre-fence reservations pending"));
+        assert!(
+            notice
+                .detail
+                .contains("2 pre-fence reservations are pending")
+        );
         assert!(!Cause::of_decision(&decision).waits());
+    }
+
+    /// Each action follows from the blockers and pending reservations a decision reports.
+    #[trace("FR-048-AC-5")]
+    #[test]
+    fn actions_follow_each_reported_blocker_and_pending_reservation() {
+        let actions = |decision: QuotaDecision| {
+            Notice::new(Cause::of_decision(&decision), Some(&decision), false).actions
+        };
+        assert!(actions(reserve_held()).is_empty());
+        assert!(actions(local_held()).is_empty());
+        assert_eq!(actions(evidence_only()), [Action::ReconcileEvidence]);
+        assert_eq!(actions(quarantined()), [Action::ReconcileEvidence]);
+        assert_eq!(actions(mixed_backoff()), [Action::ReconcileEvidence]);
+        assert_eq!(actions(rejected()), [Action::InspectRequest]);
+        assert_eq!(actions(unexplained()), [Action::InspectSource]);
+        assert_eq!(
+            Notice::new(Cause::EvidenceQuarantined, None, false).actions,
+            [Action::ReconcileEvidence]
+        );
+        assert!(
+            Notice::new(Cause::ServerBackoff, None, false)
+                .actions
+                .is_empty()
+        );
     }
 
     /// A refresh failure with no quota decision names no cause and carries no raw detail.
@@ -542,6 +732,7 @@ mod tests {
                 "Linear refresh failed; showing the last snapshot"
             );
             assert!(notice.detail.contains("Linear refresh failed"));
+            assert_eq!(notice.actions, [Action::InspectSource]);
             assert!(!cause.waits());
         }
     }

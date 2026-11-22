@@ -1179,7 +1179,7 @@ pub(crate) mod tests {
             ..App::default()
         };
         app.department.failure("Department health/retro unavailable: supply --retro-config with department policies matching the selected scope, or open --report");
-        app.apply_tracker_refresh(Err(ix_board::Error::MissingApiKey), Instant::now());
+        app.apply_tracker_refresh(Err(ix_board::Error::MissingApiKey.into()), Instant::now());
         app.runtime.failure(format!(
             "ambiguous requested lead; {}",
             "native identity must remain unknown. ".repeat(12)
@@ -1282,7 +1282,7 @@ pub(crate) mod tests {
             ..App::default()
         };
         app.department.failure(long.clone());
-        app.apply_tracker_refresh(Err(ix_board::Error::MissingApiKey), Instant::now());
+        app.apply_tracker_refresh(Err(ix_board::Error::MissingApiKey.into()), Instant::now());
         app.runtime.failure("ambiguous requested lead");
         app.report.failure("Redis unavailable");
         app.session_ended = true;

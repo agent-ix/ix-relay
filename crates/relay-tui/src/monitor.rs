@@ -98,6 +98,12 @@ impl View {
         }
     }
 
+    /// Whether the view belongs to the department monitor, which has its own source
+    /// diagnostics, rather than to the lead views.
+    pub const fn is_department(self) -> bool {
+        matches!(self, View::Status | View::Health | View::Retro)
+    }
+
     /// Compatibility shortcut that selects this view without the dropdown.
     pub const fn key(self) -> char {
         match self {
@@ -124,6 +130,11 @@ pub enum Popup {
     /// Help popup scrolled by `scroll` lines, clamped when drawn.
     Help {
         /// First visible help line.
+        scroll: u16,
+    },
+    /// Tracker inspector of the lead views, scrolled by `scroll` lines, clamped when drawn.
+    Tracker {
+        /// First visible inspector line.
         scroll: u16,
     },
 }
@@ -185,6 +196,9 @@ pub struct App {
     /// Typed state of the latest tracker attempt: clear, a snapshot not certified fresh with no
     /// failure claimed, or the typed cause of the failed attempt.
     pub tracker_status: crate::monitor_ops::TrackerStatus,
+    /// What the service reported for the failed attempt behind `tracker_status`: the summary,
+    /// every fact and each action. `None` for a failure that is not a quota matter.
+    pub tracker_notice: Option<crate::monitor_ops::quota::Notice>,
     /// Human-readable identity of the current team lead.
     pub lead_name: String,
     /// Set by `q` or Escape.
@@ -274,7 +288,7 @@ impl App {
     /// Applies an independently refreshed Linear tracker result.
     pub fn apply_tracker_refresh(
         &mut self,
-        tracker: Result<crate::monitor_ops::TrackerRead, ix_board::Error>,
+        tracker: Result<crate::monitor_ops::TrackerRead, crate::monitor_ops::TrackerFailure>,
         now: Instant,
     ) {
         use crate::monitor_ops::{
@@ -282,6 +296,7 @@ impl App {
             quota::{Cause, Notice},
         };
         self.collection_failed |= tracker.is_err();
+        self.tracker_notice = None;
         match tracker {
             Ok(read) => {
                 // A snapshot kept after a failed refresh keeps its source timestamp; the
@@ -300,9 +315,9 @@ impl App {
                     }
                 };
             }
-            Err(error) => match Cause::of_error(&error) {
+            Err(failure) => match failure.cause() {
                 Some(cause) => {
-                    let notice = Notice::new(cause, error.quota_decision(), false);
+                    let notice = Notice::new(cause, failure.decision(), false);
                     self.hold_tracker(cause, notice, now);
                     self.tracker_status = TrackerStatus::Failed(cause);
                 }
@@ -310,8 +325,8 @@ impl App {
                     self.tracker_retry_at = None;
                     self.tracker_status = TrackerStatus::Failed(Cause::SourceFailed);
                     self.tracker.failure_with_summary(
-                        crate::monitor_ops::source_summary(&error),
-                        crate::monitor_ops::source_diagnostic(&error),
+                        crate::monitor_ops::source_summary(&failure.error),
+                        crate::monitor_ops::source_diagnostic(&failure.error),
                     );
                 }
             },
@@ -332,7 +347,8 @@ impl App {
             None
         };
         self.tracker
-            .failure_with_summary(notice.summary, notice.detail);
+            .failure_with_summary(notice.summary.clone(), notice.detail.clone());
+        self.tracker_notice = Some(notice);
     }
 }
 
@@ -356,6 +372,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('r') => app.refresh_now = true,
         KeyCode::Char('d') | KeyCode::Enter => app.details = !app.details,
         KeyCode::Char('s') => app.show_status = !app.show_status,
+        KeyCode::Char('e') if !app.view.is_department() => {
+            app.popup = Some(Popup::Tracker { scroll: 0 });
+        }
         KeyCode::Char('e') => {
             app.show_diagnostics = !app.show_diagnostics;
             app.table = Default::default();

@@ -93,6 +93,58 @@ pub struct TrackerRead {
     pub outcome: RefreshOutcome,
 }
 
+/// One failed tracker read: the SDK error and the typed outcome of the attempt that raised it.
+///
+/// The service records its outcome before it returns the error, so an actual server backoff or
+/// a refused refresh lock keeps its whole typed decision here even though the error with no
+/// stored snapshot is the SDK's legacy rate-limit or lock error. An error raised before a
+/// service exists, such as a missing credential, carries the `Unknown` outcome.
+#[derive(Debug)]
+pub struct TrackerFailure {
+    /// The error the read returned; authentication errors keep their redacted handling.
+    pub error: ix_board::Error,
+    /// Typed outcome of the attempt, `Unknown` when no service ran. Boxed because a quota
+    /// refusal carries a whole decision, which would make every `Err` of a read large.
+    pub outcome: Box<RefreshOutcome>,
+}
+
+impl From<ix_board::Error> for TrackerFailure {
+    fn from(error: ix_board::Error) -> Self {
+        Self {
+            error,
+            outcome: Box::new(RefreshOutcome::Unknown),
+        }
+    }
+}
+
+impl TrackerFailure {
+    /// The quota cause: the typed outcome decides first, then the SDK's legacy typed errors.
+    /// `None` when the failure is not a quota matter and keeps the generic handling.
+    pub(crate) fn cause(&self) -> Option<Cause> {
+        match &*self.outcome {
+            RefreshOutcome::QuotaRefused { decision } => Some(Cause::of_decision(decision)),
+            RefreshOutcome::RefreshLockRefused => Some(Cause::RefreshLockBusy),
+            RefreshOutcome::Unknown
+            | RefreshOutcome::CacheReused
+            | RefreshOutcome::Refreshed
+            | RefreshOutcome::SourceFailed => Cause::of_error(&self.error),
+        }
+    }
+
+    /// The decision the service captured for the attempt, from the typed outcome first and
+    /// from an error that carries its own decision second.
+    pub(crate) fn decision(&self) -> Option<&QuotaDecision> {
+        match &*self.outcome {
+            RefreshOutcome::QuotaRefused { decision } => Some(decision),
+            RefreshOutcome::Unknown
+            | RefreshOutcome::CacheReused
+            | RefreshOutcome::Refreshed
+            | RefreshOutcome::SourceFailed
+            | RefreshOutcome::RefreshLockRefused => self.error.quota_decision(),
+        }
+    }
+}
+
 /// What a successful read says about the freshness of its snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Provenance {
@@ -194,7 +246,7 @@ impl TrackerRead {
 /// Independent Linear snapshot refresh worker.
 pub struct TrackerWorker {
     /// Latest available Linear refresh results.
-    pub events: Receiver<Result<TrackerRead, ix_board::Error>>,
+    pub events: Receiver<Result<TrackerRead, TrackerFailure>>,
     commands: SyncSender<TrackerCommand>,
     stop_requested: Arc<AtomicBool>,
     handle: JoinHandle<()>,
@@ -212,7 +264,7 @@ impl TrackerWorker {
     }
 
     pub(crate) fn spawn_with_read(
-        read: impl FnMut(bool) -> Result<TrackerRead, ix_board::Error> + Send + 'static,
+        read: impl FnMut(bool) -> Result<TrackerRead, TrackerFailure> + Send + 'static,
     ) -> std::io::Result<Self> {
         Self::spawn_with_read_and_intervals(
             read,
@@ -222,7 +274,7 @@ impl TrackerWorker {
     }
 
     fn spawn_with_read_and_intervals(
-        mut read: impl FnMut(bool) -> Result<TrackerRead, ix_board::Error> + Send + 'static,
+        mut read: impl FnMut(bool) -> Result<TrackerRead, TrackerFailure> + Send + 'static,
         refresh_interval: Duration,
         max_retry_interval: Duration,
     ) -> std::io::Result<Self> {
@@ -316,7 +368,7 @@ enum WaitOutcome {
 
 impl RefreshWait {
     fn after_read(
-        result: &Result<TrackerRead, ix_board::Error>,
+        result: &Result<TrackerRead, TrackerFailure>,
         refresh: Duration,
         retry: Duration,
     ) -> Self {
@@ -326,7 +378,7 @@ impl RefreshWait {
         // follows from a decision's reevaluation time: it does not grant eligibility. A kept
         // snapshot counts only when the service typed its cause; none is otherwise assumed.
         let protected = match result {
-            Err(error) => Cause::of_error(error).is_some_and(Cause::waits),
+            Err(failure) => failure.cause().is_some_and(Cause::waits),
             Ok(read) => read.provenance().cause().is_some_and(Cause::waits),
         };
         Self {
@@ -362,27 +414,37 @@ fn next_interval(success: bool, previous: Duration, refresh: Duration, cap: Dura
     }
 }
 
-fn read_tracker(force: bool) -> Result<TrackerRead, ix_board::Error> {
+fn read_tracker(force: bool) -> Result<TrackerRead, TrackerFailure> {
     read_tracker_with_factory(force, || {
         ReadService::open_default(LinearGraphQlSource::from_env()?)
     })
 }
 
+/// One read through the shared service. The outcome is taken after the read, whether it
+/// returned a snapshot or an error, before the service is dropped; an error from the factory
+/// has no service and so no outcome.
 fn read_tracker_with_factory<S: ix_board::WorkspaceSource>(
     force: bool,
     factory: impl FnOnce() -> Result<ReadService<S>, ix_board::Error>,
-) -> Result<TrackerRead, ix_board::Error> {
+) -> Result<TrackerRead, TrackerFailure> {
     let mut service = factory()?;
-    let snapshot = if force {
-        service.force_refresh_workspace()?
+    let read = if force {
+        service.force_refresh_workspace()
     } else {
-        service.workspace_snapshot()?
+        service.workspace_snapshot()
     };
-    Ok(TrackerRead {
-        snapshot,
-        freshness: service.cache_freshness().cloned(),
-        outcome: service.refresh_outcome().clone(),
-    })
+    let outcome = service.refresh_outcome().clone();
+    match read {
+        Ok(snapshot) => Ok(TrackerRead {
+            snapshot,
+            freshness: service.cache_freshness().cloned(),
+            outcome,
+        }),
+        Err(error) => Err(TrackerFailure {
+            error,
+            outcome: Box::new(outcome),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -391,6 +453,7 @@ mod tests {
     use ix_trace_rs::trace;
     use std::{sync::mpsc, thread, time::Duration};
 
+    use super::quota::Action;
     use super::*;
 
     struct FixtureSource {
@@ -446,26 +509,12 @@ mod tests {
         ReserveHeld,
         LocalHeld,
         ServerBackoff,
+        MixedBackoff,
         Quarantined,
+        EvidenceOnly,
+        Rejected,
+        Unexplained,
         Simultaneous,
-    }
-
-    impl Scenario {
-        /// The decision a typed refusal carries; `None` for every other answer.
-        fn decision(self) -> Option<QuotaDecision> {
-            match self {
-                Self::ReserveHeld => Some(quota::fixture::reserve_held()),
-                Self::LocalHeld => Some(quota::fixture::local_held()),
-                Self::ServerBackoff => Some(quota::fixture::server_backoff()),
-                Self::Quarantined => Some(quota::fixture::quarantined()),
-                Self::Simultaneous => Some(quota::fixture::simultaneous()),
-                Self::Succeeds
-                | Self::RateLimited
-                | Self::GraphQlFailure
-                | Self::LocalBudgetExhausted
-                | Self::LockRefused => None,
-            }
-        }
     }
 
     struct ScenarioSource {
@@ -474,13 +523,13 @@ mod tests {
 
     impl ix_board::WorkspaceSource for ScenarioSource {
         fn fetch_workspace(&self) -> Result<TrackerState, ix_board::Error> {
-            let scenario = *self.scenario.lock().unwrap();
-            if let Some(decision) = scenario.decision() {
-                return Err(ix_board::Error::QuotaAdmissionRefused {
+            let refused = |decision| {
+                Err(ix_board::Error::QuotaAdmissionRefused {
                     decision: Box::new(decision),
-                });
-            }
-            match scenario {
+                })
+            };
+            match *self.scenario.lock().unwrap() {
+                Scenario::Succeeds => Ok(TrackerState::default()),
                 Scenario::RateLimited => Err(ix_board::Error::LinearRateLimited {
                     retry_after: Duration::from_secs(60),
                 }),
@@ -493,7 +542,15 @@ mod tests {
                     })
                 }
                 Scenario::LockRefused => Err(ix_board::Error::RefreshLockTimeout),
-                _ => Ok(TrackerState::default()),
+                Scenario::ReserveHeld => refused(quota::fixture::reserve_held()),
+                Scenario::LocalHeld => refused(quota::fixture::local_held()),
+                Scenario::ServerBackoff => refused(quota::fixture::server_backoff()),
+                Scenario::MixedBackoff => refused(quota::fixture::mixed_backoff()),
+                Scenario::Quarantined => refused(quota::fixture::quarantined()),
+                Scenario::EvidenceOnly => refused(quota::fixture::evidence_only()),
+                Scenario::Rejected => refused(quota::fixture::rejected()),
+                Scenario::Unexplained => refused(quota::fixture::unexplained()),
+                Scenario::Simultaneous => refused(quota::fixture::simultaneous()),
             }
         }
     }
@@ -531,11 +588,7 @@ mod tests {
         }
 
         /// One tracker read, as the worker does it, with the source answering `scenario`.
-        fn try_read(
-            &self,
-            scenario: Scenario,
-            force: bool,
-        ) -> Result<TrackerRead, ix_board::Error> {
+        fn try_read(&self, scenario: Scenario, force: bool) -> Result<TrackerRead, TrackerFailure> {
             *self.scenario.lock().unwrap() = scenario;
             read_tracker_with_factory(force, || {
                 ReadService::open(
@@ -562,11 +615,36 @@ mod tests {
             );
             app
         }
+
+        /// The failure of one forced read with no snapshot to keep.
+        fn failure(&self, scenario: Scenario) -> TrackerFailure {
+            let Err(failure) = self.try_read(scenario, true) else {
+                panic!("{scenario:?} must fail on a cold cache");
+            };
+            failure
+        }
+
+        /// The dashboard after one forced read with no snapshot to keep.
+        fn applied_cold(&self, scenario: Scenario, now: std::time::Instant) -> crate::monitor::App {
+            let mut app = crate::monitor::App::default();
+            app.apply_tracker_refresh(Err(self.failure(scenario)), now);
+            assert!(app.tracker.value.is_none() && app.collection_failed);
+            app
+        }
     }
 
     fn protected_after(read: TrackerRead) -> bool {
         RefreshWait::after_read(
             &Ok(read),
+            TRACKER_REFRESH_INTERVAL,
+            TRACKER_MAX_RETRY_INTERVAL,
+        )
+        .protected
+    }
+
+    fn protected_after_failure(failure: TrackerFailure) -> bool {
+        RefreshWait::after_read(
+            &Err(failure),
             TRACKER_REFRESH_INTERVAL,
             TRACKER_MAX_RETRY_INTERVAL,
         )
@@ -857,9 +935,13 @@ mod tests {
         assert!(app.tracker_retry_at.is_none(), "no timer is invented");
         let detail = app.tracker.error.as_deref().unwrap();
         assert!(detail.starts_with("Linear quota evidence quarantined; showing the last snapshot"));
-        assert!(detail.contains("2 pre-fence reservations pending"));
+        assert!(detail.contains("2 pre-fence reservations are pending"));
         assert!(detail.contains("reevaluation time unknown"));
         assert!(!detail.contains("rate limited"), "{detail}");
+        assert_eq!(
+            app.tracker_notice.as_ref().unwrap().actions,
+            [Action::ReconcileEvidence]
+        );
     }
 
     /// Every simultaneous blocker reaches the dashboard under the one primary summary.
@@ -924,24 +1006,86 @@ mod tests {
         );
     }
 
-    /// With no snapshot to keep, a typed refusal travels on the error and its decision is read
-    /// from `quota_decision`, not from text; an actual backoff arrives as the SDK's legacy
-    /// typed rate-limit error and stays the only rate limit.
+    /// An explicit backoff that outranks quarantined reservations and a local hold keeps its
+    /// primary state, every blocker, the pending reservations, the earliest reevaluation and
+    /// the reconcile action, and still counts down: the action stays in the notice.
     #[trace("FR-048-AC-5", "FR-059-AC-5")]
     #[test]
-    fn without_a_snapshot_the_error_carries_the_typed_decision() {
+    fn a_backoff_with_quarantine_shows_every_decision_fact_and_the_reconcile_action() {
+        let fixture = KeptSnapshot::seeded();
+        let now = std::time::Instant::now();
+        let read = fixture.read(Scenario::MixedBackoff, true);
+        assert!(protected_after(read));
+        let app = fixture.applied(Scenario::MixedBackoff, now);
+        assert_eq!(
+            app.tracker_status,
+            TrackerStatus::Failed(Cause::ServerBackoff)
+        );
+        assert_eq!(
+            app.tracker_retry_at,
+            now.checked_add(TRACKER_REFRESH_INTERVAL)
+        );
+        let notice = app.tracker_notice.as_ref().unwrap();
+        assert_eq!(notice.actions, [Action::ReconcileEvidence]);
+        assert_eq!(notice.facts.len(), 6, "{:?}", notice.facts);
+        let detail = app.tracker.error.as_deref().unwrap();
+        assert!(detail.starts_with("Linear rate limited; showing the last snapshot"));
+        assert!(detail.contains("reconcile the quota evidence"), "{detail}");
+        assert!(!detail.contains("not a server limit"), "{detail}");
+    }
+
+    /// With no snapshot the typed outcome the service recorded survives the error, so a cold
+    /// actual backoff carries the same decision facts and action as the warm one, not only the
+    /// SDK's legacy retry duration.
+    #[trace("FR-048-AC-5", "FR-064-AC-10")]
+    #[test]
+    fn a_cold_backoff_with_quarantine_carries_the_same_facts_as_a_warm_one() {
+        let warm =
+            KeptSnapshot::seeded().applied(Scenario::MixedBackoff, std::time::Instant::now());
+        let cold_fixture = KeptSnapshot::cold();
+        let failure = cold_fixture.failure(Scenario::MixedBackoff);
+        assert!(
+            matches!(failure.error, ix_board::Error::LinearRateLimited { .. }),
+            "the SDK keeps its legacy typed error for a backoff with no snapshot"
+        );
+        assert!(matches!(
+            *failure.outcome,
+            RefreshOutcome::QuotaRefused { .. }
+        ));
+        assert!(protected_after_failure(failure));
+
+        let cold = cold_fixture.applied_cold(Scenario::MixedBackoff, std::time::Instant::now());
+        assert_eq!(
+            cold.tracker_status,
+            TrackerStatus::Failed(Cause::ServerBackoff)
+        );
+        assert!(cold.tracker_retry_at.is_some());
+        let (cold_notice, warm_notice) = (
+            cold.tracker_notice.as_ref().unwrap(),
+            warm.tracker_notice.as_ref().unwrap(),
+        );
+        assert_eq!(cold_notice.facts, warm_notice.facts);
+        assert_eq!(cold_notice.actions, warm_notice.actions);
+        assert_eq!(cold_notice.summary, "Linear rate limited");
+        let detail = cold.tracker.error.as_deref().unwrap();
+        for shown in [
+            "hold: evidence unavailable",
+            "hold: local allocation held requests",
+            "3 pre-fence reservations are pending",
+            "reconcile the quota evidence",
+        ] {
+            assert!(detail.contains(shown), "{shown}: {detail}");
+        }
+        assert!(!detail.contains("showing the last"), "{detail}");
+    }
+
+    /// With no snapshot, every non-backoff refusal also keeps its decision and its waiting rule.
+    #[trace("FR-048-AC-5", "FR-064-AC-10")]
+    #[test]
+    fn a_cold_refusal_keeps_its_decision_and_its_waiting_rule() {
         let fixture = KeptSnapshot::cold();
         let now = std::time::Instant::now();
-        let apply = |scenario| {
-            let error = fixture.try_read(scenario, true).err().unwrap();
-            let mut app = crate::monitor::App::default();
-            app.apply_tracker_refresh(Err(error), now);
-            assert!(app.tracker.value.is_none());
-            assert!(app.collection_failed);
-            app
-        };
-
-        let reserve = apply(Scenario::ReserveHeld);
+        let reserve = fixture.applied_cold(Scenario::ReserveHeld, now);
         assert_eq!(
             reserve.tracker_status,
             TrackerStatus::Failed(Cause::ServerReserve)
@@ -951,29 +1095,116 @@ mod tests {
         assert!(detail.starts_with("Linear server reserve held"), "{detail}");
         assert!(detail.contains("local usage 0") && !detail.contains("showing the last"));
 
-        let quarantine = apply(Scenario::Quarantined);
+        let quarantine = fixture.applied_cold(Scenario::Quarantined, now);
         assert_eq!(
             quarantine.tracker_status,
             TrackerStatus::Failed(Cause::EvidenceQuarantined)
         );
         assert!(quarantine.tracker_retry_at.is_none());
+        assert!(!protected_after_failure(
+            fixture.failure(Scenario::Quarantined)
+        ));
+    }
 
-        let backoff = fixture
-            .try_read(Scenario::ServerBackoff, true)
-            .err()
-            .unwrap();
-        assert!(
-            matches!(backoff, ix_board::Error::LinearRateLimited { .. }),
-            "the SDK keeps its legacy typed error for an actual backoff with no snapshot"
-        );
-        let backoff = apply(Scenario::ServerBackoff);
+    /// A refused refresh lock is the same typed lock notice with and without a snapshot.
+    #[trace("FR-048-AC-5", "FR-064-AC-10")]
+    #[test]
+    fn a_cold_refused_refresh_lock_is_the_lock_notice() {
+        let fixture = KeptSnapshot::cold();
+        let failure = fixture.failure(Scenario::LockRefused);
+        assert!(matches!(failure.error, ix_board::Error::RefreshLockTimeout));
+        assert_eq!(*failure.outcome, RefreshOutcome::RefreshLockRefused);
+        assert!(!protected_after_failure(failure));
+        let app = fixture.applied_cold(Scenario::LockRefused, std::time::Instant::now());
         assert_eq!(
-            backoff.tracker_status,
+            app.tracker_status,
+            TrackerStatus::Failed(Cause::RefreshLockBusy)
+        );
+        assert_eq!(
+            app.tracker.error.as_deref(),
+            Some("Linear refresh lock busy")
+        );
+        assert!(app.tracker_retry_at.is_none());
+    }
+
+    /// An error with no typed decision stays what it was: a legacy rate limit is the only rate
+    /// limit and keeps no invented detail, and a source failure keeps the generic handling.
+    #[trace("FR-048-AC-5", "FR-059-AC-5")]
+    #[test]
+    fn a_cold_legacy_error_stays_legacy_and_a_source_failure_stays_generic() {
+        let fixture = KeptSnapshot::cold();
+        let now = std::time::Instant::now();
+        let limited = fixture.applied_cold(Scenario::RateLimited, now);
+        assert_eq!(
+            limited.tracker_status,
             TrackerStatus::Failed(Cause::ServerBackoff)
         );
         assert_eq!(
-            backoff.tracker.error.as_deref(),
+            limited.tracker.error.as_deref(),
             Some("Linear rate limited")
+        );
+        assert!(limited.tracker_retry_at.is_some());
+
+        let failed = fixture.applied_cold(Scenario::GraphQlFailure, now);
+        assert_eq!(
+            failed.tracker_status,
+            TrackerStatus::Failed(Cause::SourceFailed)
+        );
+        assert!(failed.tracker_notice.is_none());
+        let error = failed.tracker.error.as_deref().unwrap();
+        assert!(error.contains("Structured tracker read failed"), "{error}");
+        assert!(!error.contains("upstream"), "{error}");
+        assert!(failed.tracker_retry_at.is_none());
+    }
+
+    /// Refusals that do not wait show their own notice and actions at the dashboard, start no
+    /// countdown and do not coalesce manual refreshes, with and without a snapshot.
+    fn assert_does_not_wait(scenario: Scenario, cause: Cause, actions: &[Action]) {
+        let warm = KeptSnapshot::seeded();
+        assert!(!protected_after(warm.read(scenario, true)), "{scenario:?}");
+        let app = warm.applied(scenario, std::time::Instant::now());
+        assert_eq!(app.tracker_status, TrackerStatus::Failed(cause));
+        assert!(app.tracker_retry_at.is_none(), "{scenario:?}: no countdown");
+        assert_eq!(app.tracker_notice.as_ref().unwrap().actions, actions);
+
+        let cold = KeptSnapshot::cold();
+        assert!(!protected_after_failure(cold.failure(scenario)));
+        let app = cold.applied_cold(scenario, std::time::Instant::now());
+        assert_eq!(app.tracker_status, TrackerStatus::Failed(cause));
+        assert!(app.tracker_retry_at.is_none());
+        assert_eq!(app.tracker_notice.as_ref().unwrap().actions, actions);
+        let detail = app.tracker.error.as_deref().unwrap();
+        assert!(detail.starts_with(cause.summary()), "{detail}");
+        assert!(!detail.contains("rate limited"), "{detail}");
+    }
+
+    #[trace("FR-048-AC-5")]
+    #[test]
+    fn a_rejected_request_does_not_wait_and_names_the_request_action() {
+        assert_does_not_wait(
+            Scenario::Rejected,
+            Cause::RequestRejected,
+            &[Action::InspectRequest],
+        );
+    }
+
+    #[trace("FR-048-AC-5")]
+    #[test]
+    fn unavailable_evidence_without_pending_reservations_does_not_wait() {
+        assert_does_not_wait(
+            Scenario::EvidenceOnly,
+            Cause::EvidenceUnavailable,
+            &[Action::ReconcileEvidence],
+        );
+    }
+
+    #[trace("FR-048-AC-5")]
+    #[test]
+    fn an_unexplained_refusal_does_not_wait_and_names_the_source_action() {
+        assert_does_not_wait(
+            Scenario::Unexplained,
+            Cause::RefusalUnexplained,
+            &[Action::InspectSource],
         );
     }
 
@@ -1008,6 +1239,31 @@ mod tests {
         assert!(missing.contains("--report"));
     }
 
+    /// A credential error keeps its redacted handling whatever outcome the service recorded:
+    /// the typed outcome decides only a quota refusal or a lock refusal.
+    #[trace("FR-059-AC-6")]
+    #[test]
+    fn a_credential_error_keeps_its_redacted_handling_whatever_the_outcome() {
+        let credential = || ix_board::Error::Credential(ix_cli_kit::secrets::SecretError::Locked);
+        for outcome in [RefreshOutcome::Unknown, RefreshOutcome::SourceFailed] {
+            let failure = TrackerFailure {
+                error: credential(),
+                outcome: Box::new(outcome),
+            };
+            assert_eq!(failure.cause(), None);
+            let mut app = crate::monitor::App::default();
+            app.apply_tracker_refresh(Err(failure), std::time::Instant::now());
+            assert!(app.tracker_notice.is_none() && app.tracker_retry_at.is_none());
+            assert!(
+                app.tracker
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("credential owner")
+            );
+        }
+    }
+
     #[test]
     fn stopping_does_not_wait_for_an_in_flight_linear_read() {
         let (entered_tx, entered_rx) = mpsc::channel();
@@ -1017,7 +1273,7 @@ mod tests {
             entered_tx.send(()).unwrap();
             let _ = release_rx.recv();
             read_finished_tx.send(()).unwrap();
-            Err(ix_board::Error::MissingApiKey)
+            Err(ix_board::Error::MissingApiKey.into())
         })
         .unwrap();
         entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -1055,7 +1311,8 @@ mod tests {
         assert_eq!(TRACKER_REFRESH_INTERVAL, Duration::from_secs(1800));
         let rate_limit = Err(ix_board::Error::LinearRateLimited {
             retry_after: Duration::from_secs(3600),
-        });
+        }
+        .into());
         let wait = RefreshWait::after_read(
             &rate_limit,
             TRACKER_REFRESH_INTERVAL,
@@ -1073,7 +1330,7 @@ mod tests {
             Duration::from_secs(1800)
         );
         let wait = RefreshWait::after_read(
-            &Err(ix_board::Error::MissingApiKey),
+            &Err(ix_board::Error::MissingApiKey.into()),
             TRACKER_REFRESH_INTERVAL,
             TRACKER_MAX_RETRY_INTERVAL,
         );
@@ -1089,8 +1346,10 @@ mod tests {
     #[trace("FR-048-AC-5")]
     #[test]
     fn local_budget_exhaustion_without_a_snapshot_is_protected_like_a_rate_limit() {
-        let exhausted = || ix_board::Error::LinearLocalBudgetExhausted {
-            retry_after: Duration::from_secs(60),
+        let exhausted = || {
+            TrackerFailure::from(ix_board::Error::LinearLocalBudgetExhausted {
+                retry_after: Duration::from_secs(60),
+            })
         };
         let wait = RefreshWait::after_read(
             &Err(exhausted()),
@@ -1156,7 +1415,7 @@ mod tests {
         let worker = TrackerWorker::spawn_with_read(move |force| {
             call_number += 1;
             calls_tx.send((call_number, force)).unwrap();
-            Err(ix_board::Error::MissingApiKey)
+            Err(ix_board::Error::MissingApiKey.into())
         })
         .unwrap();
 
