@@ -67,7 +67,7 @@ fn texts(bus: &mut Bus, lead: &str) -> Vec<String> {
         .unwrap()
         .messages
         .into_iter()
-        .map(|m| m.text)
+        .map(|m| m.message.text)
         .collect()
 }
 

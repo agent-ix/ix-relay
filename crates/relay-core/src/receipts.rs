@@ -129,6 +129,8 @@ pub enum ReceiptCoverageReason {
     Retention,
     /// A continuation's position has already been evicted.
     CursorEvicted,
+    /// The supplied position is not part of the available source history.
+    CursorUnavailable,
     /// A recorded observation may be missing after an interrupted attempt.
     RecordingGap,
     /// A current attempt has not yet persisted its transport observation.

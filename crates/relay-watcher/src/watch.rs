@@ -403,10 +403,10 @@ mod evidence;
 mod tests {
     use std::{cell::RefCell, collections::VecDeque};
 
-    use crate::herdr::AgentGet;
+    use relay_core::PaneId;
 
     use super::*;
-    use relay_core::PaneId;
+    use crate::herdr::AgentGet;
 
     /// A scripted [`Herdr`] and [`Deliverer`]: each call to `get` returns the
     /// next queued response; `deliver`/`notify` record their calls and return
@@ -476,7 +476,7 @@ mod tests {
             target: &BatchTarget<'_>,
             pane: &PaneId,
             text: &str,
-        ) -> Result<(), DeliverError> {
+        ) -> Result<relay_core::receipts::DeliveryEvidence, DeliverError> {
             self.targets.borrow_mut().push((
                 target.lead.to_owned(),
                 target.session.map(ToString::to_string),
@@ -490,7 +490,9 @@ mod tests {
             }
             match &self.held {
                 Some(why) => Err(DeliverError::Held(why.clone())),
-                None => self.deliver(pane, text),
+                None => self
+                    .deliver(pane, text)
+                    .map(|()| relay_core::receipts::DeliveryEvidence::HerdrPrompt),
             }
         }
 

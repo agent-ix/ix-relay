@@ -134,7 +134,7 @@ fn concurrent_consumers_never_deliver_a_message_twice() {
                 if batch.messages.is_empty() {
                     return seen;
                 }
-                seen.extend(batch.messages.into_iter().map(|m| m.text));
+                seen.extend(batch.messages.into_iter().map(|m| m.message.text));
             }
         })
     });

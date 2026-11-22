@@ -165,6 +165,11 @@ impl Relay {
             .arg(RECEIPT_EVENT_CAP + 1);
         let (metadata, stream): (BTreeMap<String, String>, StreamRangeReply) =
             pipeline.query(&mut self.conn)?;
+        if metadata.get("last_cursor") != stream.ids.last().map(|row| &row.id) {
+            return Err(Error::InvalidName {
+                name: "receipt stream does not match its persisted observation boundary".into(),
+            });
+        }
         if stream.ids.len() > RECEIPT_EVENT_CAP {
             return Err(Error::InvalidName {
                 name: "receipt event bound exceeded".into(),
@@ -273,14 +278,23 @@ fn populate_export(
         .is_some_and(|(after, first)| after < first)
     {
         export.reasons.push(ReceiptCoverageReason::CursorEvicted);
+    } else if request
+        .after
+        .as_ref()
+        .is_some_and(|cursor| !records.iter().any(|record| &record.cursor == cursor))
+    {
+        export
+            .reasons
+            .push(ReceiptCoverageReason::CursorUnavailable);
     }
-    export.covered_since_ms = Some(
-        request
-            .since_ms
-            .max(start)
-            .max(export.retention_boundary_ms),
-    );
-    export.covered_until_ms = Some(request.until_ms);
+    let covered_start = request
+        .since_ms
+        .max(start)
+        .max(export.retention_boundary_ms);
+    if covered_start <= request.until_ms {
+        export.covered_since_ms = Some(covered_start);
+        export.covered_until_ms = Some(request.until_ms);
+    }
     for record in records {
         let Some(position) = cursor_parts(&record.cursor) else {
             return Err(Error::InvalidName {

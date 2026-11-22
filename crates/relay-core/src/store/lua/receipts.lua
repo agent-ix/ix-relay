@@ -53,7 +53,7 @@ receipt_append = function(entry, outcome, now, evidence, reason)
         reason = reason or cjson.null
     }
     local cursor = redis.call('XADD', receipt_stream, '*', 'event', cjson.encode(event))
-    redis.call('HSET', receipt_meta, 'event:' .. event_id, cursor)
+    redis.call('HSET', receipt_meta, 'event:' .. event_id, cursor, 'last_cursor', cursor)
     local count = redis.call('XLEN', receipt_stream)
     if count > 10000 then
         local evicted = redis.call('XRANGE', receipt_stream, '-', '+', 'COUNT', count - 10000)
