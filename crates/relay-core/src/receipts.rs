@@ -59,6 +59,27 @@ pub enum DeliveryEvidence {
     SocketUnconfirmed,
 }
 
+/// Source-reported cause of an explicit batch dead-letter decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeadLetterReason {
+    /// The receiver explicitly denied the delivery.
+    ReceiverDenied,
+    /// The receiver's approval hold expired unanswered.
+    HoldExpired,
+    /// Persisted settlement evidence did not retain a more specific cause.
+    Unknown,
+}
+
+impl DeadLetterReason {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::ReceiverDenied => "receiver_denied",
+            Self::HoldExpired => "hold_expired",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// The actual transition recorded by the relay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

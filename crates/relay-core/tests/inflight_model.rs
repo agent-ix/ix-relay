@@ -38,7 +38,6 @@ use relay_core::{
     AgentName, BatchId, Claim, DEAD_LETTER_CAP, MAX_INFLIGHT_BATCHES, MAX_REDELIVERIES, Message,
     Now, Popper, Registration, Target,
 };
-
 use relay_test_support::Bus;
 
 const START_MS: i64 = 1_000_000;
@@ -926,14 +925,24 @@ fn tc_044_05_a_denied_batch_goes_to_the_dead_letters_and_only_that_batch() {
     assert_eq!(
         run.bus
             .relay
-            .dead_letter_batch(&lead(1), denied, Popper::Hook)
+            .dead_letter_batch(
+                &lead(1),
+                denied,
+                Popper::Hook,
+                relay_core::receipts::DeadLetterReason::ReceiverDenied
+            )
             .unwrap(),
         1
     );
     assert_eq!(
         run.bus
             .relay
-            .dead_letter_batch(&lead(1), denied, Popper::Hook)
+            .dead_letter_batch(
+                &lead(1),
+                denied,
+                Popper::Hook,
+                relay_core::receipts::DeadLetterReason::ReceiverDenied
+            )
             .unwrap(),
         0
     );
@@ -958,7 +967,12 @@ fn tc_044_05_a_denied_batch_goes_to_the_dead_letters_and_only_that_batch() {
     assert_eq!(
         run.bus
             .relay
-            .dead_letter_batch(&lead(1), other, Popper::Hook)
+            .dead_letter_batch(
+                &lead(1),
+                other,
+                Popper::Hook,
+                relay_core::receipts::DeadLetterReason::ReceiverDenied
+            )
             .unwrap(),
         0
     );
@@ -1051,7 +1065,12 @@ fn tc_044_05_renew_and_dead_letter_refuse_a_key_of_the_wrong_type_and_change_not
     let err = run
         .bus
         .relay
-        .dead_letter_batch(&lead(1), id, Popper::Hook)
+        .dead_letter_batch(
+            &lead(1),
+            id,
+            Popper::Hook,
+            relay_core::receipts::DeadLetterReason::ReceiverDenied,
+        )
         .unwrap_err();
     assert!(unreadable(&err), "{err}");
     assert_eq!(
@@ -1065,7 +1084,12 @@ fn tc_044_05_renew_and_dead_letter_refuse_a_key_of_the_wrong_type_and_change_not
     let err = run
         .bus
         .relay
-        .dead_letter_batch(&lead(1), id, Popper::Hook)
+        .dead_letter_batch(
+            &lead(1),
+            id,
+            Popper::Hook,
+            relay_core::receipts::DeadLetterReason::ReceiverDenied,
+        )
         .unwrap_err();
     assert!(unreadable(&err), "{err}");
     let err = run
@@ -1114,7 +1138,12 @@ fn tc_044_05_a_renew_or_dead_letter_for_another_poppers_batch_touches_nothing() 
     assert_eq!(
         run.bus
             .relay
-            .dead_letter_batch(&lead(1), id, Popper::Watcher)
+            .dead_letter_batch(
+                &lead(1),
+                id,
+                Popper::Watcher,
+                relay_core::receipts::DeadLetterReason::ReceiverDenied
+            )
             .unwrap(),
         0
     );
@@ -1136,7 +1165,12 @@ fn tc_044_05_a_renew_or_dead_letter_for_another_poppers_batch_touches_nothing() 
     assert_eq!(
         run.bus
             .relay
-            .dead_letter_batch(&lead(1), id, Popper::Hook)
+            .dead_letter_batch(
+                &lead(1),
+                id,
+                Popper::Hook,
+                relay_core::receipts::DeadLetterReason::ReceiverDenied
+            )
             .unwrap(),
         1
     );

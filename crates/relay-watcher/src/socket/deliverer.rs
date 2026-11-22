@@ -1649,6 +1649,7 @@ impl SocketDeliverer {
                     action: SettleAction::Renew(HELD_RENEW_LEASE),
                     why: "held behind an approval prompt".to_owned(),
                     notice: None,
+                    dead_letter_reason: None,
                 });
             }
             let due = p.next_try.is_none_or(|t| Instant::now() >= t);
@@ -1659,6 +1660,15 @@ impl SocketDeliverer {
                     action: r.action,
                     why: r.why.clone(),
                     notice: r.notice.clone(),
+                    dead_letter_reason: match r.reason {
+                        Some("denied") => {
+                            Some(relay_core::receipts::DeadLetterReason::ReceiverDenied)
+                        }
+                        Some("hold_expired") => {
+                            Some(relay_core::receipts::DeadLetterReason::HoldExpired)
+                        }
+                        _ => None,
+                    },
                 });
             }
         }

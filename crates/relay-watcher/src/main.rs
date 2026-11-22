@@ -1089,7 +1089,13 @@ fn apply_settlements<H: Herdr + Deliverer>(
                     .map(usize::from)
             }
             SettleAction::Requeue => relay.requeue_batch(&lead, s.batch, Popper::Watcher),
-            SettleAction::DeadLetter => relay.dead_letter_batch(&lead, s.batch, Popper::Watcher),
+            SettleAction::DeadLetter => relay.dead_letter_batch(
+                &lead,
+                s.batch,
+                Popper::Watcher,
+                s.dead_letter_reason
+                    .unwrap_or(relay_core::receipts::DeadLetterReason::Unknown),
+            ),
             SettleAction::Renew(lease) => relay.renew_batch(
                 &lead,
                 s.batch,
@@ -1480,10 +1486,12 @@ impl Inbox for RelayInbox<'_> {
     }
 
     fn dead_letter(&mut self, batch: &PoppedBatch) {
-        if let Err(e) =
-            self.relay
-                .dead_letter_batch(self.lead, batch.batch, relay_core::Popper::Watcher)
-        {
+        if let Err(e) = self.relay.dead_letter_batch(
+            self.lead,
+            batch.batch,
+            relay_core::Popper::Watcher,
+            relay_core::receipts::DeadLetterReason::ReceiverDenied,
+        ) {
             // Still in flight: its lease returns it, and it would be shown again.
             let text = self.record(e);
             eprintln!(
@@ -1524,7 +1532,7 @@ impl RelayInbox<'_> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use relay_core::{Message, Target};
+    use relay_core::{MachineName, Message, PaneId, Target};
 
     use super::*;
     use crate::{
@@ -1533,7 +1541,6 @@ mod tests {
         herdr::{AgentGet, AgentStatus, ProcessError},
         test_support::{Fault, FaultProxy, raw_command},
     };
-    use relay_core::{MachineName, PaneId};
 
     // ---- tick ---------------------------------------------------------
 

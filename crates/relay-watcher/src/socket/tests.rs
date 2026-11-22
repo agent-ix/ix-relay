@@ -4011,6 +4011,7 @@ fn tc_044_11_a_settlement_failed_note_is_cleared_only_by_its_own_batch() {
         action: SettleAction::Ack,
         why: "x".into(),
         notice: None,
+        dead_letter_reason: None,
     };
     rig.deliverer.applied(&other, &Ok(1));
     let _ = rig.deliverer.settle();

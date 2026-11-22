@@ -499,13 +499,13 @@ mod tests {
     };
 
     use proptest::prelude::*;
+    use relay_core::PaneId;
 
     use super::*;
     use crate::{
         herdr::{AgentGet, ProcessError},
         test_support::{connection_error, data_error, interrupted_error},
     };
-    use relay_core::PaneId;
 
     /// A clock that only moves when the loop sleeps.
     #[derive(Clone, Default)]

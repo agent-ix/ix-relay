@@ -483,6 +483,7 @@ impl Relay {
         agent: &AgentName,
         batch: BatchId,
         popper: Popper,
+        reason: crate::receipts::DeadLetterReason,
     ) -> Result<usize> {
         let moved: i64 = redis::cmd("EVAL")
             .arg(DEAD_LETTER_SCRIPT.as_str())
@@ -492,6 +493,7 @@ impl Relay {
             .arg(batch.0)
             .arg(DEAD_LETTER_CAP)
             .arg(popper.letter().to_string())
+            .arg(reason.code())
             .arg(self.keys.receipt_stream_key())
             .arg(self.keys.receipt_meta_key())
             .query(&mut self.conn)?;

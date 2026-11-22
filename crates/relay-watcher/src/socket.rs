@@ -27,13 +27,13 @@ mod tests;
 
 use std::sync::Arc;
 
+use deliverer::SocketDeliverer;
 use relay_core::PaneId;
 
 use crate::{
     deliver::{BatchTarget, DeliverError, Deliverer, RegisteredLead, Settlement},
     herdr::{AgentGet, CheckJob, Herdr, Layout, ProcessError},
 };
-use deliverer::SocketDeliverer;
 
 /// The watcher's delivery: `herdr` alone, or the socket first with herdr behind
 /// it. With no socket (the default, `DeliveryMode::Herdr`) this is `herdr`

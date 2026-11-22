@@ -597,7 +597,12 @@ fn receipts_plain_pop_requeue_preserves_original_without_inventing_delivery() {
     let at = now(&mut bus);
     let batch = claim(&mut bus, at).batch.unwrap();
     bus.relay
-        .dead_letter_batch(&name("receiver"), batch, Popper::Watcher)
+        .dead_letter_batch(
+            &name("receiver"),
+            batch,
+            Popper::Watcher,
+            relay_core::receipts::DeadLetterReason::ReceiverDenied,
+        )
         .unwrap();
     let report = export(&mut bus);
     assert!(
@@ -623,4 +628,32 @@ fn receipts_plain_pop_requeue_preserves_original_without_inventing_delivery() {
         ReceiptOutcome::Delivered | ReceiptOutcome::Acknowledged
     )));
     assert_eq!(bus.relay.log_since(0).unwrap().len(), 1);
+}
+
+#[test]
+#[trace("FR-067-AC-2", "FR-067-AC-8")]
+fn receipts_expired_approval_retains_its_typed_reason_without_claiming_denial() {
+    let mut bus = bus();
+    send(&mut bus);
+    let at = now(&mut bus);
+    let batch = claim(&mut bus, at).batch.unwrap();
+    bus.relay
+        .dead_letter_batch(
+            &name("receiver"),
+            batch,
+            Popper::Watcher,
+            relay_core::receipts::DeadLetterReason::HoldExpired,
+        )
+        .unwrap();
+    let report = export(&mut bus);
+    let dead = report
+        .events
+        .iter()
+        .find(|row| row.event.outcome == ReceiptOutcome::DeadLettered)
+        .unwrap();
+    assert_eq!(dead.event.reason.as_deref(), Some("hold_expired"));
+    assert!(!report.events.iter().any(|row| matches!(
+        row.event.outcome,
+        ReceiptOutcome::Delivered | ReceiptOutcome::Acknowledged
+    )));
 }

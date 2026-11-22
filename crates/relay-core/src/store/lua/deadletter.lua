@@ -13,7 +13,7 @@ local buried, rows = {}, {}
 for _, row in ipairs(redis.call('LRANGE', KEYS[1], 0, -1)) do
     local id, who, deadline, entry = parse(row)
     if id == target and who == ARGV[3] then
-        receipt_append(entry, 'dead_lettered', now, nil, 'receiver_denied')
+        receipt_append(entry, 'dead_lettered', now, nil, ARGV[4])
         receipt_finish(entry, now, false)
         local core = split_count(entry)
         buried[#buried + 1] = core

@@ -110,6 +110,8 @@ pub struct Settlement {
     pub why: String,
     /// A desktop notification to show (title, body), when the operator must be told.
     pub notice: Option<(String, String)>,
+    /// Typed source cause for a dead-letter decision, when it is known.
+    pub dead_letter_reason: Option<relay_core::receipts::DeadLetterReason>,
 }
 
 /// What a [`Settlement`] does to its batch.
