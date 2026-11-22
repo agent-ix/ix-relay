@@ -97,7 +97,7 @@ pub struct ReceiptEvent {
     pub outcome: ReceiptOutcome,
     /// Source-native sender identity at enqueue.
     pub sender: String,
-    /// Public target snapshot at enqueue.
+    /// Source-native immutable recipient queue identity at enqueue.
     pub target: String,
     /// Source event time, unknown when it cannot be established.
     pub event_time_ms: Option<i64>,

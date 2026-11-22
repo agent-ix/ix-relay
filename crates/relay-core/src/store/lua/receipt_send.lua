@@ -16,7 +16,7 @@ local now = now_ms(ARGV[fences + 5])
 local entry = ARGV[fences + 3]
 local id = redis.call('XADD', log, 'MAXLEN', '~', ARGV[fences + 4], '*', 'msg', entry)
 for i = 1, recipients do
-    local marked = receipt_enqueue(entry, id .. '/' .. i, now)
+    local marked = receipt_enqueue(entry, id .. '/' .. i, now, ARGV[fences + 5 + i])
     redis.call('RPUSH', KEYS[fences + i], marked)
 end
 return 1

@@ -47,7 +47,7 @@ receipt_append = function(entry, outcome, now, evidence, reason)
     local event = {
         event_id = event_id,
         original_id = meta.original, attempt_id = attempt, outcome = outcome,
-        sender = message.from, target = message.to,
+        sender = message.from, target = meta.recipient or message.to,
         event_time_ms = outcome == 'delivered' and cjson.null or now,
         observed_at_ms = now, evidence = evidence or cjson.null,
         reason = reason or cjson.null
@@ -96,8 +96,8 @@ receipt_finish = function(entry, now, uncertain)
     end
 end
 
-receipt_enqueue = function(entry, original, now)
-    local marked = receipt_entry(entry, {original = original})
+receipt_enqueue = function(entry, original, now, recipient)
+    local marked = receipt_entry(entry, {original = original, recipient = recipient})
     receipt_append(marked, 'queued', now)
     return marked
 end

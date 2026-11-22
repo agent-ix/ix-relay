@@ -314,6 +314,44 @@ fn receipts_lifecycle_separates_observation_from_settlement_without_content() {
 }
 
 #[test]
+#[trace("FR-067-AC-1", "FR-067-AC-8")]
+fn receipts_broadcast_retains_each_native_recipient_without_changing_message_history() {
+    let mut bus = bus();
+    bus.relay
+        .register(&Registration {
+            name: name("second"),
+            machine: "fixture".parse().unwrap(),
+            kind: "codex".into(),
+            session_id: None,
+            cwd: None,
+            herdr_pane: None,
+            place: None,
+            last_seen_ms: 0,
+        })
+        .unwrap();
+    bus.relay
+        .send(&Message {
+            from: name("sender"),
+            to: "all".parse().unwrap(),
+            text: "broadcast".into(),
+            sent_at_ms: 42,
+            forwarded: false,
+        })
+        .unwrap();
+    let report = export(&mut bus);
+    assert_eq!(report.events.len(), 2);
+    assert_eq!(report.events[0].event.target, "receiver");
+    assert_eq!(report.events[1].event.target, "second");
+    assert_ne!(
+        report.events[0].event.original_id,
+        report.events[1].event.original_id
+    );
+    let history = bus.relay.log_since(0).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].to, relay_core::Target::All);
+}
+
+#[test]
 #[trace("FR-067-AC-2", "FR-067-AC-3", "FR-067-AC-8")]
 fn receipts_identical_sends_recover_with_distinct_attempts_and_stale_ack_is_inert() {
     let mut bus = bus();

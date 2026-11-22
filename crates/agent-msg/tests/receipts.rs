@@ -1,5 +1,4 @@
 //! The receipt selection in the history CLI exposes content-free evidence.
-#![expect(clippy::unwrap_used, clippy::expect_used, reason = "test assertions")]
 
 use std::process::Command;
 

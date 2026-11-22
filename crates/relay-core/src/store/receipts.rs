@@ -46,6 +46,7 @@ struct StoredMessage {
 #[serde(deny_unknown_fields)]
 struct StoredMetadata {
     original: String,
+    recipient: String,
     #[serde(default)]
     attempt: Option<String>,
     #[serde(default)]
@@ -56,7 +57,7 @@ pub(crate) fn decode_message(bytes: &[u8]) -> std::result::Result<Message, serde
     let stored: StoredMessage = serde_json::from_slice(bytes)?;
     // Metadata belongs to persistence, never to the recipient's public payload.
     if let Some(meta) = stored.metadata {
-        let _ = (meta.original, meta.attempt, meta.delivered);
+        let _ = (meta.original, meta.recipient, meta.attempt, meta.delivered);
     }
     Ok(Message {
         from: stored.from,
@@ -91,10 +92,11 @@ impl Relay {
         for (_, publication) in publications {
             command.arg(publication);
         }
+        command.arg(encode(message)).arg(LOG_CAP).arg("");
+        for recipient in recipients {
+            command.arg(recipient.as_str());
+        }
         Ok(command
-            .arg(encode(message))
-            .arg(LOG_CAP)
-            .arg("")
             .arg(self.keys.receipt_stream_key())
             .arg(self.keys.receipt_meta_key())
             .query(&mut self.conn)?)
