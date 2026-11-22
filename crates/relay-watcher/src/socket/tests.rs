@@ -3193,7 +3193,7 @@ fn tc_044_12_a_delivered_message_with_no_transcript_line_is_acked_after_the_grac
         thread::sleep(Duration::from_millis(10));
     }
     let s = acked.expect("acknowledged after the grace");
-    assert_eq!(s.action, SettleAction::Ack, "{s:?}");
+    assert_eq!(s.action, SettleAction::AckUnconfirmed, "{s:?}");
     assert!(s.why.contains("delivered_unconfirmed"), "{s:?}");
     assert!(s.notice.is_none(), "not a 'never approved' notice");
     let notes = SocketStatus::read(&rig.home.status())
@@ -3475,7 +3475,7 @@ fn tc_044_12_an_approved_batch_adopted_after_a_restart_continues_its_grace() {
                 SettleAction::DeadLetter,
                 "an approved message is never dead-lettered as never approved: {s:?}"
             );
-            if s.action == SettleAction::Ack {
+            if s.action == SettleAction::AckUnconfirmed {
                 acked = Some(s);
             }
         }
@@ -4213,7 +4213,7 @@ fn tc_046_12_settle_acks_an_unrecognised_shape_with_a_note() {
     let settlements = rig.deliverer.settle();
     let acks: Vec<_> = settlements
         .iter()
-        .filter(|s| matches!(s.action, SettleAction::Ack))
+        .filter(|s| matches!(s.action, SettleAction::AckUnconfirmed))
         .collect();
     assert_eq!(acks.len(), 1);
     assert!(
