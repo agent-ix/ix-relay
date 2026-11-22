@@ -474,9 +474,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 after,
                 ..
             } = &cli.cmd
-                && error
-                    .downcast_ref::<relay_core::Error>()
-                    .is_some_and(relay_core::Error::is_connection)
+                && error.is_connection()
             {
                 let window = i64::try_from(since.0.as_millis()).unwrap_or(i64::MAX);
                 let now = now_ms();
@@ -491,7 +489,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 json::write_line(&mut out, &report)?;
                 return Ok(());
             }
-            return Err(error);
+            return Err(error.into());
         }
     };
     match cli.cmd {
