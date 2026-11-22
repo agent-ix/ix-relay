@@ -133,6 +133,9 @@ fn reason_of(error: &ix_board::Error) -> SourceReason {
         | E::LinearRateLimited { .. }
         // The shared quota protection refused or could not run the read; no snapshot was read.
         | E::LinearLocalBudgetExhausted { .. }
+        // The shared quota protection refused admission with a typed decision; the bounded read
+        // returns no snapshot, so the read failed whatever the decision's hold.
+        | E::QuotaAdmissionRefused { .. }
         | E::RefreshLockTimeout
         | E::LinearQueryComplexityExceeded { .. }
         | E::InvalidQuotaConfig { .. }

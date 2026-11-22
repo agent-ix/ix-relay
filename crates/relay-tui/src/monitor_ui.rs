@@ -4,6 +4,7 @@
 
 use crate::{
     monitor::{App, Source, View, display_text},
+    monitor_ops::{TrackerStatus, quota::Cause},
     monitor_tracker::{DashboardView, TicketSummary},
 };
 use ix_board::{Clock, SystemClock};
@@ -331,7 +332,7 @@ pub(crate) struct Evidence {
 enum EvidenceSeverity {
     /// A failed source or a replaced binding.
     Failure,
-    /// A rate-limit countdown.
+    /// A quota hold or rate-limit with a next scheduled attempt.
     RateLimit,
     /// A stale source or retained last snapshot.
     Stale,
@@ -396,22 +397,48 @@ pub(crate) fn evidence_items(
         ));
     }
     if let Some(error) = &app.tracker.error {
+        // The label names the typed cause; only an actual server cooldown is "rate-limited".
+        // A failure with no typed status (such as a worker that never started) is a failure.
+        let cause = match app.tracker_status {
+            TrackerStatus::Failed(cause) => cause,
+            TrackerStatus::Clear | TrackerStatus::Unconfirmed => Cause::SourceFailed,
+        };
         if let Some(deadline) = app.tracker_retry_at {
             let seconds = deadline.saturating_duration_since(now).as_secs();
             items.push(item(
                 EvidenceSeverity::RateLimit,
                 format!(
-                    "Tracker rate-limited (next attempt in {}m {:02}s)",
+                    "{} (next attempt in {}m {:02}s)",
+                    cause.label(),
                     seconds / 60,
                     seconds % 60
                 ),
-                display_text(error, 4096),
+                text(&app.tracker.error_summary, error),
             ));
         } else {
             items.push(item(
                 EvidenceSeverity::Failure,
-                "Tracker failed",
+                cause.label(),
                 text(&app.tracker.error_summary, error),
+            ));
+        }
+        // An action a reported blocker calls for stays in view beside any countdown.
+        let actions = app
+            .tracker_notice
+            .iter()
+            .flat_map(|notice| notice.actions.iter())
+            .filter(|action| action.is_prominent())
+            .map(|action| action.label())
+            .collect::<Vec<_>>();
+        if !actions.is_empty() {
+            items.push(item(
+                EvidenceSeverity::Failure,
+                format!("Tracker action: {}", actions.join(", ")),
+                if department_view {
+                    "e lists source errors"
+                } else {
+                    "e shows every hold"
+                },
             ));
         }
     } else if let Some(snapshot) = &app.tracker.value
@@ -426,7 +453,7 @@ pub(crate) fn evidence_items(
             ),
         ));
     }
-    if app.tracker_freshness_unconfirmed && app.tracker.error.is_none() {
+    if app.tracker_status == TrackerStatus::Unconfirmed && app.tracker.error.is_none() {
         items.push(item(
             EvidenceSeverity::Stale,
             "Tracker freshness unconfirmed",
@@ -1287,7 +1314,8 @@ pub(crate) mod tests {
         app.apply_tracker_refresh(
             Err(ix_board::Error::LinearRateLimited {
                 retry_after: std::time::Duration::from_secs(3600),
-            }),
+            }
+            .into()),
             now,
         );
         assert_eq!(
@@ -1342,6 +1370,7 @@ pub(crate) mod tests {
                 failure_reason: Some("transport detail".into()),
             }),
             snapshot,
+            outcome: ix_board::RefreshOutcome::Unknown,
         }
     }
 
@@ -1390,7 +1419,7 @@ pub(crate) mod tests {
             app.tracker.value.as_ref().unwrap().clone(),
         );
         app.apply_tracker_refresh(Ok(clean), Instant::now());
-        assert!(!app.tracker_freshness_unconfirmed);
+        assert_eq!(app.tracker_status, TrackerStatus::Clear);
         let text = screen(&mut app, 90, 15);
         assert!(!text.contains("Tracker freshness unconfirmed"), "{text}");
     }
@@ -1404,9 +1433,133 @@ pub(crate) mod tests {
         app.apply_tracker_refresh(Ok(read), Instant::now());
         assert!(app.tracker_retry_at.is_some());
         assert!(app.collection_failed);
-        assert!(!app.tracker_freshness_unconfirmed);
+        assert_eq!(
+            app.tracker_status,
+            TrackerStatus::Failed(Cause::ServerBackoff)
+        );
         let text = screen(&mut app, 90, 15);
         assert!(text.contains("Tracker rate-limited"), "{text}");
+    }
+
+    /// A kept snapshot whose latest attempt the service typed as refused with `decision`.
+    fn refused_read(
+        app: &App,
+        decision: ix_board::quota::QuotaDecision,
+    ) -> crate::monitor_ops::TrackerRead {
+        let mut read = stale_read(app, Some(120), None);
+        read.outcome = ix_board::RefreshOutcome::QuotaRefused { decision };
+        read
+    }
+
+    /// A server reserve hold is labelled as that hold with the dashboard's next attempt, keeps
+    /// the snapshot and its last-snapshot label, and is never worded as a rate limit.
+    #[trace("FR-048-AC-5", "FR-064-AC-10")]
+    #[test]
+    fn a_reserve_hold_is_labelled_as_a_hold_and_never_as_a_rate_limit() {
+        let mut app = app();
+        let read = refused_read(&app, crate::monitor_ops::quota::fixture::reserve_held());
+        app.apply_tracker_refresh(Ok(read), Instant::now());
+        let text = screen(&mut app, 100, 15);
+        assert!(text.contains("Tracker held: server reserve"), "{text}");
+        assert!(text.contains("next attempt in"), "{text}");
+        assert!(text.contains("last snapshot"), "{text}");
+        assert!(text.contains("Tasks: 1/2 done"), "{text}");
+        for absent in ["rate-limited", "rate limited", "429", "transport detail"] {
+            assert!(!text.contains(absent), "{absent}\n{text}");
+        }
+    }
+
+    /// Unavailable evidence has an unknown reevaluation time: no countdown is invented and the
+    /// label says what is unavailable, not that Linear limited the request.
+    #[trace("FR-048-AC-5", "FR-064-AC-10")]
+    #[test]
+    fn quarantined_quota_evidence_shows_no_countdown_and_is_not_a_rate_limit() {
+        let mut app = app();
+        let read = refused_read(&app, crate::monitor_ops::quota::fixture::quarantined());
+        app.apply_tracker_refresh(Ok(read), Instant::now());
+        let text = screen(&mut app, 100, 15);
+        assert!(
+            text.contains("Tracker quota evidence quarantined"),
+            "{text}"
+        );
+        assert!(text.contains("Tasks: 1/2 done"), "{text}");
+        assert!(
+            text.contains("Tracker action: reconcile quota evidence"),
+            "{text}"
+        );
+        for absent in ["next attempt", "rate-limited", "rate limited", "429"] {
+            assert!(!text.contains(absent), "{absent}\n{text}");
+        }
+    }
+
+    /// Refusals that do not wait show their own label and no countdown at the screen. Only
+    /// the ones that call for an action also show it.
+    #[trace("FR-048-AC-5", "FR-064-AC-10")]
+    #[test]
+    fn refusals_that_do_not_wait_show_their_label_and_no_countdown() {
+        use crate::monitor_ops::quota::fixture;
+        for (decision, label, action) in [
+            (
+                fixture::rejected(),
+                "Tracker request cannot be admitted",
+                Some("Tracker action: inspect request"),
+            ),
+            (
+                fixture::evidence_only(),
+                "Tracker quota evidence unavailable",
+                Some("Tracker action: reconcile quota evidence"),
+            ),
+            (fixture::unexplained(), "Tracker quota refused", None),
+        ] {
+            let mut app = app();
+            let read = refused_read(&app, decision);
+            app.apply_tracker_refresh(Ok(read), Instant::now());
+            let text = screen(&mut app, 100, 15);
+            assert!(text.contains(label), "{label}\n{text}");
+            assert!(text.contains("Tasks: 1/2 done"), "{text}");
+            match action {
+                Some(row) => assert!(text.contains(row), "{row}\n{text}"),
+                None => assert!(!text.contains("Tracker action"), "{text}"),
+            }
+            for absent in ["next attempt", "rate-limited", "rate limited", "429"] {
+                assert!(!text.contains(absent), "{absent}\n{text}");
+            }
+        }
+    }
+
+    /// An explicit backoff that also carries quarantined reservations keeps its own countdown
+    /// and, beside it, the reconcile action.
+    #[trace("FR-048-AC-5", "FR-064-AC-10")]
+    #[test]
+    fn a_backoff_with_quarantine_keeps_the_countdown_and_the_reconcile_action_in_view() {
+        let mut app = app();
+        let read = refused_read(&app, crate::monitor_ops::quota::fixture::mixed_backoff());
+        app.apply_tracker_refresh(Ok(read), Instant::now());
+        let text = screen(&mut app, 100, 15);
+        assert!(
+            text.contains("Tracker rate-limited (next attempt in"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Tracker action: reconcile quota evidence"),
+            "{text}"
+        );
+        assert!(text.contains("Tasks: 1/2 done"), "{text}");
+    }
+
+    /// Only a typed server backoff decision carries the rate-limited label and its countdown.
+    #[trace("FR-048-AC-5", "FR-064-AC-10")]
+    #[test]
+    fn a_server_backoff_decision_alone_carries_the_rate_limited_label() {
+        let mut app = app();
+        let read = refused_read(&app, crate::monitor_ops::quota::fixture::server_backoff());
+        app.apply_tracker_refresh(Ok(read), Instant::now());
+        let text = screen(&mut app, 100, 15);
+        assert!(
+            text.contains("Tracker rate-limited (next attempt in"),
+            "{text}"
+        );
+        assert!(text.contains("Tasks: 1/2 done"), "{text}");
     }
 
     /// Trace: FR-048-AC-3, FR-048-AC-4
@@ -1909,7 +2062,8 @@ pub(crate) mod tests {
         app.apply_tracker_refresh(
             Err(ix_board::Error::LinearRateLimited {
                 retry_after: std::time::Duration::from_secs(3600),
-            }),
+            }
+            .into()),
             Instant::now(),
         );
         app.runtime
@@ -2096,7 +2250,8 @@ pub(crate) mod tests {
         app.apply_tracker_refresh(
             Err(ix_board::Error::LinearRateLimited {
                 retry_after: std::time::Duration::from_secs(3600),
-            }),
+            }
+            .into()),
             Instant::now(),
         );
         app.report.value.as_mut().unwrap().as_mut().unwrap().agents = (0..3).map(agent).collect();
@@ -2207,7 +2362,8 @@ pub(crate) mod tests {
         limited.apply_tracker_refresh(
             Err(ix_board::Error::LinearRateLimited {
                 retry_after: std::time::Duration::from_secs(3600),
-            }),
+            }
+            .into()),
             Instant::now(),
         );
         limited.runtime.failure("Herdr unreachable");

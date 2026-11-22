@@ -597,7 +597,7 @@ fn source_states_keep_rows_and_never_show_a_zero_count_without_a_model() {
     );
     assert!(!waiting.contains("hidden"));
     assert!(!waiting.contains("📁"));
-    app.apply_tracker_refresh(Err(ix_board::Error::MissingApiKey), Instant::now());
+    app.apply_tracker_refresh(Err(ix_board::Error::MissingApiKey.into()), Instant::now());
     let failed = screen(&mut app, 120, 24);
     assert!(failed.contains("Scope progress unavailable"), "{failed}");
     assert!(!failed.contains("hidden"));
@@ -606,7 +606,7 @@ fn source_states_keep_rows_and_never_show_a_zero_count_without_a_model() {
     app.view = View::Scope;
     let good = screen(&mut app, 120, 24);
     assert!(good.contains("📁") && good.contains(FILTER_UNAVAILABLE));
-    app.apply_tracker_refresh(Err(ix_board::Error::MissingApiKey), Instant::now());
+    app.apply_tracker_refresh(Err(ix_board::Error::MissingApiKey.into()), Instant::now());
     let retained = screen(&mut app, 120, 24);
     assert!(retained.contains("📁"), "{retained}");
     assert!(retained.contains(FILTER_UNAVAILABLE));
@@ -864,7 +864,7 @@ fn an_all_unknown_scope_is_unavailable_at_80x24_and_a_real_summary_hides_nothing
 #[test]
 fn error_with_last_snapshot_keeps_rows_counts_footer_mode_and_the_error_at_80x24() {
     let mut app = categorized_app();
-    app.apply_tracker_refresh(Err(ix_board::Error::MissingApiKey), Instant::now());
+    app.apply_tracker_refresh(Err(ix_board::Error::MissingApiKey.into()), Instant::now());
     let text = screen(&mut app, 80, 24);
     assert_scope_essentials(&text, "hiding completed");
     assert_count_statements(&text);
@@ -921,7 +921,7 @@ fn many_long_stage_names_cannot_push_the_essential_text_out_at_80x24() {
         snapshot.issues.push(issue);
     }
     app.scope.invalidate();
-    app.apply_tracker_refresh(Err(ix_board::Error::MissingApiKey), Instant::now());
+    app.apply_tracker_refresh(Err(ix_board::Error::MissingApiKey.into()), Instant::now());
     let text = screen(&mut app, 80, 24);
     assert!(text.contains("Tasks:"), "{text}");
     assert_scope_essentials(&text, "hiding completed");
@@ -1066,7 +1066,8 @@ fn rate_limit_replaced_session_stale_source_and_active_filter_fit_at_80x24() {
     limited.apply_tracker_refresh(
         Err(ix_board::Error::LinearRateLimited {
             retry_after: std::time::Duration::from_secs(3600),
-        }),
+        }
+        .into()),
         Instant::now(),
     );
     limited.report.failure("Redis unavailable");

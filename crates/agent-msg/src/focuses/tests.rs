@@ -1910,6 +1910,24 @@ fn each_sdk_failure_is_placed_under_one_of_the_contract_reasons() {
             },
             "failed",
         ),
+        (
+            // A typed refusal of any hold is a failed read; the decision is not parsed.
+            E::QuotaAdmissionRefused {
+                decision: Box::new(ix_board::quota::QuotaDecision {
+                    state: ix_board::quota::QuotaState::ServerReserveHeld,
+                    blockers: Vec::new(),
+                    evidence: Vec::new(),
+                    evaluated_at: 1_000,
+                    next_reevaluation_at: None,
+                    estimated_complexity: 10_000,
+                    endpoint: "graphql".into(),
+                    legacy_pending_reservations: 0,
+                    local_generation: 1,
+                    local_window_reset_at: 2_000,
+                }),
+            },
+            "failed",
+        ),
         (E::RefreshLockTimeout, "failed"),
         (
             E::LinearQueryComplexityExceeded {
