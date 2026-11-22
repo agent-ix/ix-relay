@@ -7,13 +7,18 @@
 -- Returns {status, moved}: status 1 done, 0 the registration changed or is gone,
 -- 2 a batch is in flight, -1 a key is of the wrong type (nothing is changed then).
 if not (readable(KEYS[1], 'hash') and readable(KEYS[2], 'list')
-    and readable(KEYS[3], 'list') and readable(KEYS[4], 'list')) then
+    and readable(KEYS[3], 'list') and readable(KEYS[4], 'list')) or not receipt_ready() then
     return { -1, 0 }
 end
 if redis.call('HGET', KEYS[1], ARGV[1]) ~= ARGV[2] then return { 0, 0 } end
 if redis.call('LLEN', KEYS[3]) > 0 then return { 2, 0 } end
 local items = redis.call('LRANGE', KEYS[2], 0, -1)
-for _, entry in ipairs(items) do redis.call('RPUSH', KEYS[4], entry) end
+local now = now_ms('')
+for _, entry in ipairs(items) do
+    receipt_append(entry, 'dead_lettered', now, nil, 'recipient_pruned')
+    receipt_finish(entry, now, false)
+    redis.call('RPUSH', KEYS[4], entry)
+end
 if #items > 0 then
     redis.call('LTRIM', KEYS[2], #items, -1)
     local over = redis.call('LLEN', KEYS[4]) - tonumber(ARGV[3])

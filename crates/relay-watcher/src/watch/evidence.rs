@@ -70,7 +70,7 @@ impl Inbox for Counting {
         self.pop.take().expect("try_deliver popped twice")
     }
 
-    fn ack(&mut self, batch: &PoppedBatch) {
+    fn ack(&mut self, batch: &PoppedBatch, _evidence: relay_core::receipts::DeliveryEvidence) {
         self.acked.push(batch.batch);
     }
 

@@ -19,6 +19,7 @@ mod message;
 pub mod moves;
 mod name;
 pub mod named_focus;
+pub mod receipts;
 mod resolve;
 pub mod socket_status;
 pub mod status;

@@ -107,6 +107,7 @@ pub const BACKLOG_SCAN_BOUND: usize = 1_000;
 pub(super) fn script(common: &str, own: &str) -> String {
     common
         .lines()
+        .chain(include_str!("lua/receipts.lua").lines())
         .chain(own.lines())
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with("--"))
@@ -149,7 +150,7 @@ pub enum Popper {
 }
 
 impl Popper {
-    fn letter(self) -> char {
+    pub(super) fn letter(self) -> char {
         match self {
             Self::Hook => 'h',
             Self::Watcher => 'w',
@@ -179,7 +180,7 @@ pub enum Now {
 
 impl Now {
     /// The script argument: empty for the server's clock.
-    fn arg(self) -> String {
+    pub(super) fn arg(self) -> String {
         match self {
             Self::Server => String::new(),
             Self::AtMs(ms) => ms.to_string(),
@@ -380,6 +381,9 @@ impl Relay {
             .arg(MAX_INFLIGHT_BYTES)
             .arg(INFLIGHT_ROW_OVERHEAD)
             .arg(crate::message::FORWARDED_NOTICE_MAX)
+            .arg(agent.as_str())
+            .arg(self.keys.receipt_stream_key())
+            .arg(self.keys.receipt_meta_key())
             .query(&mut self.conn)?;
         if status < 0 {
             return Err(Error::InflightUnreadable {
@@ -417,6 +421,8 @@ impl Relay {
             .arg(self.keys.inflight_key(agent))
             .arg(batch.0)
             .arg(popper.letter().to_string())
+            .arg(self.keys.receipt_stream_key())
+            .arg(self.keys.receipt_meta_key())
             .query(&mut self.conn)?;
         if removed < 0 {
             return Err(Error::InflightUnreadable {
@@ -455,6 +461,8 @@ impl Relay {
             .arg(agent.as_str())
             .arg(LOG_CAP)
             .arg(popper.letter().to_string())
+            .arg(self.keys.receipt_stream_key())
+            .arg(self.keys.receipt_meta_key())
             .query(&mut self.conn)?;
         usize::try_from(moved).map_err(|_| Error::InflightUnreadable {
             lead: agent.clone(),
@@ -476,6 +484,7 @@ impl Relay {
         agent: &AgentName,
         batch: BatchId,
         popper: Popper,
+        reason: crate::receipts::DeadLetterReason,
     ) -> Result<usize> {
         let moved: i64 = redis::cmd("EVAL")
             .arg(DEAD_LETTER_SCRIPT.as_str())
@@ -485,6 +494,9 @@ impl Relay {
             .arg(batch.0)
             .arg(DEAD_LETTER_CAP)
             .arg(popper.letter().to_string())
+            .arg(reason.code())
+            .arg(self.keys.receipt_stream_key())
+            .arg(self.keys.receipt_meta_key())
             .query(&mut self.conn)?;
         usize::try_from(moved).map_err(|_| Error::InflightUnreadable {
             lead: agent.clone(),
@@ -520,6 +532,8 @@ impl Relay {
             .arg(u64::try_from(lease.as_millis()).unwrap_or(u64::MAX))
             .arg(u64::try_from(MAX_LEASE.as_millis()).unwrap_or(u64::MAX))
             .arg(popper.letter().to_string())
+            .arg(self.keys.receipt_stream_key())
+            .arg(self.keys.receipt_meta_key())
             .query(&mut self.conn)?;
         usize::try_from(moved).map_err(|_| Error::InflightUnreadable {
             lead: agent.clone(),
@@ -548,7 +562,9 @@ impl Relay {
         }
         cmd.arg(now.arg())
             .arg(MAX_REDELIVERIES)
-            .arg(DEAD_LETTER_CAP);
+            .arg(DEAD_LETTER_CAP)
+            .arg(self.keys.receipt_stream_key())
+            .arg(self.keys.receipt_meta_key());
         cmd
     }
 
@@ -713,7 +729,7 @@ fn decode_claimed(
     let mut redelivered = Vec::new();
     let mut rejected = Vec::new();
     for (entry, count) in raw.into_iter().zip(counts) {
-        match serde_json::from_slice(&entry) {
+        match super::receipts::decode_message(&entry) {
             Ok(m) => {
                 messages.push(m);
                 redelivered.push(*count > 0);

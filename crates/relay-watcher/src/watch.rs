@@ -56,7 +56,7 @@ pub trait Inbox {
     /// Acknowledges `batch`: the transport reported success, so its in-flight
     /// record is dropped. Never called for a failed or ambiguous delivery, whose
     /// batch stays in flight and is redelivered when its lease expires.
-    fn ack(&mut self, batch: &PoppedBatch);
+    fn ack(&mut self, batch: &PoppedBatch, _evidence: relay_core::receipts::DeliveryEvidence);
     /// Puts `batch` back at the front of the inbox. Called only when the
     /// transport is certain no input was sent for it.
     fn requeue(&mut self, batch: &PoppedBatch);
@@ -344,8 +344,8 @@ pub fn try_deliver<H: Herdr + Deliverer>(
                     pane,
                     &batch.rendered,
                 ) {
-                    Ok(()) => {
-                        inbox.ack(&batch);
+                    Ok(evidence) => {
+                        inbox.ack(&batch, evidence);
                         Outcome::Delivered {
                             messages: batch.messages.len(),
                         }
@@ -403,10 +403,10 @@ mod evidence;
 mod tests {
     use std::{cell::RefCell, collections::VecDeque};
 
-    use crate::herdr::AgentGet;
+    use relay_core::PaneId;
 
     use super::*;
-    use relay_core::PaneId;
+    use crate::herdr::AgentGet;
 
     /// A scripted [`Herdr`] and [`Deliverer`]: each call to `get` returns the
     /// next queued response; `deliver`/`notify` record their calls and return
@@ -476,7 +476,7 @@ mod tests {
             target: &BatchTarget<'_>,
             pane: &PaneId,
             text: &str,
-        ) -> Result<(), DeliverError> {
+        ) -> Result<relay_core::receipts::DeliveryEvidence, DeliverError> {
             self.targets.borrow_mut().push((
                 target.lead.to_owned(),
                 target.session.map(ToString::to_string),
@@ -490,7 +490,9 @@ mod tests {
             }
             match &self.held {
                 Some(why) => Err(DeliverError::Held(why.clone())),
-                None => self.deliver(pane, text),
+                None => self
+                    .deliver(pane, text)
+                    .map(|()| relay_core::receipts::DeliveryEvidence::HerdrPrompt),
             }
         }
 
@@ -566,7 +568,7 @@ mod tests {
                 .expect("try_deliver popped more times than the test scripted")
         }
 
-        fn ack(&mut self, batch: &PoppedBatch) {
+        fn ack(&mut self, batch: &PoppedBatch, _evidence: relay_core::receipts::DeliveryEvidence) {
             self.acked.push(batch.batch);
         }
 

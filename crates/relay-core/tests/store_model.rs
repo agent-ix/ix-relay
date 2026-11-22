@@ -138,6 +138,7 @@ enum Slot {
 struct Held {
     inbox: usize,
     batch: Vec<Message>,
+    entries: Vec<relay_core::receipts::InboxEntry>,
     /// Everything the pop took, undecodable entries too: what a requeue of the
     /// in-flight batch puts back, byte for byte.
     taken: Vec<Entry>,
@@ -421,7 +422,7 @@ fn apply(bus: &mut Bus, model: &mut Model, op: &Op, n: u64) -> Result<(), String
                 .collect();
             let want_rejected = taken.len() - want_messages.len();
             let max = NonZeroUsize::new(*count).expect("count is at least 1");
-            let (messages, rejected, pending, id) = if *budgeted {
+            let (messages, entries, rejected, pending, id) = if *budgeted {
                 let r = bus
                     .relay
                     .pop_inbox_budget(
@@ -431,13 +432,25 @@ fn apply(bus: &mut Bus, model: &mut Model, op: &Op, n: u64) -> Result<(), String
                         Claim::new(Popper::Hook),
                     )
                     .map_err(|e| e.to_string())?;
-                (r.messages, r.rejected.len(), Some(r.pending), r.batch)
+                (
+                    r.messages,
+                    Vec::new(),
+                    r.rejected.len(),
+                    Some(r.pending),
+                    r.batch,
+                )
             } else {
                 let r = bus
                     .relay
                     .pop_inbox(&lead(*who), max)
                     .map_err(|e| e.to_string())?;
-                (r.messages, r.rejected.len(), None, None)
+                (
+                    r.messages.iter().map(|m| m.message.clone()).collect(),
+                    r.messages,
+                    r.rejected.len(),
+                    None,
+                    None,
+                )
             };
             // The contract the budget exists for: a batch of more than one
             // message renders within it, whatever the exact weight rule.
@@ -475,6 +488,7 @@ fn apply(bus: &mut Bus, model: &mut Model, op: &Op, n: u64) -> Result<(), String
                 Held {
                     inbox: *who,
                     batch: messages,
+                    entries,
                     taken,
                     id,
                 },
@@ -500,7 +514,7 @@ fn apply(bus: &mut Bus, model: &mut Model, op: &Op, n: u64) -> Result<(), String
                     }
                     None => bus
                         .relay
-                        .requeue_front(&lead(held.inbox), &held.batch)
+                        .requeue_front(&lead(held.inbox), &held.entries)
                         .map_err(|e| e.to_string())?,
                 }
                 let queue = model.inbox.entry(held.inbox).or_default();
@@ -632,7 +646,9 @@ fn drain_and_compare(bus: &mut Bus, model: &mut Model) -> Result<(), TestCaseErr
             .collect();
         prop_assert_eq!(&got.messages, &want_msgs, "drain of lead-{}", i);
         prop_assert_eq!(got.rejected.len(), want.len() - want_msgs.len());
-        model.delivered.extend(got.messages);
+        model
+            .delivered
+            .extend(got.messages.into_iter().map(|entry| entry.message));
     }
     for held in model.held.values() {
         model.delivered.extend(held.batch.clone());
@@ -742,7 +758,10 @@ fn tc_012_05_a_non_utf8_entry_is_rejected_and_the_neighbouring_messages_survive(
                 .relay
                 .pop_inbox(&lead(1), max)
                 .expect("pop must not fail as a whole");
-            (r.messages, r.rejected.len())
+            (
+                r.messages.into_iter().map(|entry| entry.message).collect(),
+                r.rejected.len(),
+            )
         };
         assert_eq!(messages, vec![good(1), good(2)], "budgeted={budgeted}");
         assert_eq!(rejected, 1, "budgeted={budgeted}");
