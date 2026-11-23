@@ -1,0 +1,9 @@
+{
+  "files": [
+    "delivery-light.svg",
+    "delivery-dark.svg",
+    "lifecycle-light.svg",
+    "lifecycle-dark.svg"
+  ],
+  "generated_by": "ixd build"
+}

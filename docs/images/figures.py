@@ -7,10 +7,11 @@ Regenerate from the repository root with the agent-ix/dev-tools skill:
     python3 -m pip install fonttools
     python3 <dev-tools>/skills/docs-figures/scripts/render.py docs/images/figures.py
 
-Add --check to confirm the committed SVGs are current. Lease durations, the
-redelivery limit and the in-flight caps are read from crates/relay-core, the
-escalation states from crates/relay-core/src/escalation.rs, and the bus address
-from scripts/relay-admin.
+Add --check to confirm the committed SVGs are current. Only topology and escalation are
+defined here: both print the escalation states lower-cased from the enum names in
+crates/relay-core/src/escalation.rs, which docs/images/figures.json cannot yet express
+(no text transforms in value bindings). The delivery and lifecycle figures are in
+docs/images/figures.json and rendered by `make figures`.
 """
 
 import re
@@ -63,11 +64,6 @@ def escalation_states():
     return [name.lower() for name in re.findall(r"^\s*([A-Z][a-z]+),", enum, re.M)]
 
 
-INFLIGHT = "crates/relay-core/src/store/inflight.rs"
-HOOK_LEASE = rust_const(INFLIGHT, "HOOK_LEASE")
-WATCHER_LEASE = rust_const(INFLIGHT, "WATCHER_LEASE")
-MAX_REDELIVERIES = rust_const(INFLIGHT, "MAX_REDELIVERIES")
-DEAD_LETTER_CAP = rust_const(INFLIGHT, "DEAD_LETTER_CAP")
 DIRECTORY_LEASE = rust_const("crates/relay-core/src/store/directory.rs", "DIRECTORY_LEASE")
 HUB_ADDR = shell_var("HUB_ADDR").replace("$WG_NET", shell_var("WG_NET"))
 BUS_PORT = shell_var("BUS_PORT")
@@ -105,65 +101,6 @@ def topology():
     return f
 
 
-def delivery():
-    """How a message reaches a lead, by the lead's state."""
-    f = Figure(
-        "delivery",
-        980,
-        290,
-        "A send looks up the recipient in the directory and queues the message in the "
-        "recipient's inbox. A working lead gets it from a hook, a starting lead from the "
-        "SessionStart hook, an idle lead from relay-watcher, and a blocked lead keeps it "
-        "queued while the operator is notified once.",
-    )
-    f.box(0, 108, 140, 56, "ink", "agent-msg send", "to an address")
-    f.box(190, 108, 160, 56, "model", "directory", "address to session")
-    f.box(400, 108, 130, 56, "model", "inbox", "queue per session")
-    f.line([(140, 136), (187, 136)], "ink")
-    f.line([(350, 136), (397, 136)], "model")
-    f.note(190, 98, "checks the lease", "muted")
-    rows = [
-        ("working", "PostToolUse or Stop hook", "mid-turn, in the lead's output", "code"),
-        ("starting", "SessionStart hook", "delivers the backlog", "code"),
-        ("idle or done", "relay-watcher", "herdr agent prompt", "logic"),
-        ("blocked on a dialog", "held in the inbox", "operator notified once", "evidence"),
-    ]
-    f.line([(530, 136), (570, 136)], "model", arrow=False)
-    f.line([(570, 36), (570, 246)], "model", arrow=False)
-    for i, (state, by, sub, role) in enumerate(rows):
-        y = 8 + i * 70
-        f.line([(570, y + 28), (597, y + 28)], "model")
-        f.box(600, y, 150, 56, "ink", "lead is", state)
-        f.line([(750, y + 28), (797, y + 28)], role)
-        f.box(800, y, 180, 56, role, by, sub, dashed=role == "evidence")
-    return f
-
-
-def lifecycle():
-    """The lease, acknowledgement, redelivery and dead-letter path of one batch."""
-    f = Figure(
-        "lifecycle",
-        980,
-        290,
-        f"A popped batch moves from the inbox to in flight under a lease of {HOOK_LEASE} s for "
-        f"a hook or {WATCHER_LEASE} s for the watcher. An acknowledgement ends it. An expired "
-        f"lease returns the batch to the inbox, up to {MAX_REDELIVERIES} times, and the next "
-        "expiry moves it to the dead-letter list.",
-    )
-    f.box(0, 90, 170, 62, "model", "inbox", "pending, in order")
-    f.box(330, 90, 200, 62, "logic", "in flight", f"lease: hook {HOOK_LEASE} s, watcher {WATCHER_LEASE} s")
-    f.box(690, 90, 170, 62, "evidence", "acknowledged", "removed from in flight")
-    f.box(330, 214, 200, 62, "ink", "dead letters", f"newest {DEAD_LETTER_CAP:,} kept")
-    f.line([(170, 121), (327, 121)], "model")
-    f.note(190, 111, "pop", "muted")
-    f.line([(530, 121), (687, 121)], "logic", weight=2.4)
-    f.note(550, 111, "acknowledge", "muted")
-    f.line([(430, 90), (430, 36), (85, 36), (85, 87)], "logic", dashed=True)
-    f.note(110, 28, f"lease expires: back to the inbox, marked redelivered, up to {MAX_REDELIVERIES} times", "muted")
-    f.line([(430, 152), (430, 211)], "ink", dashed=True)
-    f.note(446, 186, f"expires after {MAX_REDELIVERIES} redeliveries", "muted")
-    return f
-
 
 def escalation():
     """An escalation from filing to resolution."""
@@ -197,4 +134,4 @@ def escalation():
     return f
 
 
-FIGURES = [topology, delivery, lifecycle, escalation]
+FIGURES = [topology, escalation]
