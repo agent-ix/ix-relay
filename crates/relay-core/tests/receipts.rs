@@ -1017,10 +1017,12 @@ fn receipts_failed_observation_survives_recovery_as_an_explicit_gap() {
 #[trace("FR-067-AC-5", "FR-067-AC-6", "FR-067-AC-7")]
 fn receipts_pages_retention_and_empty_coverage_remain_truthful_and_read_only() {
     let Some(mut bus) = bus() else { return };
+    let since_ms = now(&mut bus);
     for _ in 0..1_003 {
         send(&mut bus);
     }
     let mut request = request(&mut bus);
+    request.since_ms = since_ms;
     request.page_size = 1_000;
     let first = bus.relay.receipt_export(&request).unwrap();
     assert_eq!(first.events.len(), 1_000);
@@ -1075,6 +1077,7 @@ fn receipts_pages_retention_and_empty_coverage_remain_truthful_and_read_only() {
 #[trace("FR-067-AC-5", "FR-067-AC-6")]
 fn receipts_count_bound_marks_an_evicted_continuation_incomplete() {
     let Some(mut bus) = bus() else { return };
+    let since_ms = now(&mut bus);
     send(&mut bus);
     let oldest = export(&mut bus).events[0].cursor.clone();
     for _ in 0..RECEIPT_EVENT_CAP {
@@ -1083,6 +1086,7 @@ fn receipts_count_bound_marks_an_evicted_continuation_incomplete() {
     let count: usize = bus.raw.xlen(bus.key("receipts")).unwrap();
     assert_eq!(count, RECEIPT_EVENT_CAP);
     let mut request = request(&mut bus);
+    request.since_ms = since_ms;
     request.after = Some(oldest);
     let report = bus.relay.receipt_export(&request).unwrap();
     assert!(
