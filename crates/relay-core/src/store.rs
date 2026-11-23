@@ -102,9 +102,14 @@ pub use stranded::Buried;
 /// whole, never split mid-text.
 pub const MAX_MESSAGE_BYTES: usize = 4 * 1024;
 
+#[cfg(not(feature = "test-support"))]
+type Connection = redis::Connection;
+#[cfg(feature = "test-support")]
+type Connection = crate::test_support::ObservedConnection;
+
 /// A connection to the bus.
 pub struct Relay {
-    conn: redis::Connection,
+    conn: Connection,
     keys: Keys,
     /// The read/write timeout currently armed on `conn`, so a blocking call
     /// can widen it and put it back.
@@ -130,12 +135,21 @@ impl Relay {
         let conn = redis::Client::open(info)?.get_connection_with_timeout(timeout)?;
         conn.set_read_timeout(Some(timeout))?;
         conn.set_write_timeout(Some(timeout))?;
+        #[cfg(feature = "test-support")]
+        let conn = Connection::new(conn);
         Ok(Self {
             conn,
             keys: Keys::new(DEFAULT_PREFIX),
             timeout: Cell::new(timeout),
             scan_deadline: Cell::new(None),
         })
+    }
+
+    /// Starts recording packed requests at the client call boundary for test assertions.
+    /// Available only with the opt-in `test-support` feature; transport behavior is delegated.
+    #[cfg(feature = "test-support")]
+    pub fn observe_requests(&mut self) -> crate::test_support::RequestLog {
+        self.conn.observe_requests()
     }
 
     /// Checks that `url` is a well-formed Redis URL without connecting, so a

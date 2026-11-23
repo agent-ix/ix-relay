@@ -1,12 +1,9 @@
 //! Test-only helpers shared by the watcher's unit tests.
 
 use std::{
-    io::{BufReader, Read, Write},
+    io::{Read, Write},
     net::TcpStream,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
     thread,
 };
 
@@ -41,40 +38,28 @@ pub(crate) enum Fault {
     Silent,
 }
 
-/// Observe a new request only when reading new client bytes after a backend reply.
-/// Commands already buffered by the RESP parser stay in their existing pipeline.
-struct RequestReader<R> {
-    stream: BufReader<R>,
-    replied: Arc<AtomicBool>,
-    new_request: bool,
-    command_start: bool,
-}
-
-impl<R: Read> Read for RequestReader<R> {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        if buffer.is_empty() {
-            return Ok(0);
-        }
-        let fresh_command = self.command_start && self.stream.buffer().is_empty();
-        // Keep decoder lookahead in this buffer, where command-start attribution is visible.
-        // Socket reads remain buffered; this does not issue a syscall per byte.
-        let count = self.stream.read(&mut buffer[..1])?;
-        if count > 0 {
-            if fresh_command && self.replied.swap(false, Ordering::SeqCst) {
-                self.new_request = true;
-            }
-            self.command_start = false;
-        }
-        Ok(count)
-    }
-}
-
-fn read_command<R: Read>(
-    parser: &mut redis::Parser,
-    reader: &mut RequestReader<R>,
-) -> Option<Vec<Vec<u8>>> {
-    reader.command_start = true;
+fn read_command(parser: &mut redis::Parser, reader: impl Read) -> Option<Vec<Vec<u8>>> {
     redis::from_redis_value(parser.parse_value(reader).ok()?).ok()
+}
+
+/// Command names grouped by actual client calls, independent of TCP framing and replies.
+pub(crate) fn request_groups(log: &relay_core::test_support::RequestLog) -> Vec<Vec<String>> {
+    log.snapshot()
+        .into_iter()
+        .map(|packed| {
+            let mut parser = redis::Parser::new();
+            let mut reader = std::io::Cursor::new(packed);
+            let mut names = Vec::new();
+            while let Some(command) = read_command(&mut parser, &mut reader) {
+                names.push(
+                    String::from_utf8(command[0].clone())
+                        .unwrap()
+                        .to_ascii_uppercase(),
+                );
+            }
+            names
+        })
+        .collect()
 }
 
 /// A TCP proxy in front of a real Redis that injects faults per command, so a
@@ -85,9 +70,6 @@ pub(crate) struct FaultProxy {
     pub(crate) url: String,
     /// Every command name that reached the proxy, in order, faulted or not.
     pub(crate) seen: Arc<Mutex<Vec<String>>>,
-    /// The same names grouped by request: a pipeline is one entry, so the entry
-    /// count is the number of round trips.
-    pub(crate) requests: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
 impl FaultProxy {
@@ -103,8 +85,6 @@ impl FaultProxy {
         let policy = Arc::new(Mutex::new(policy));
         let seen = Arc::new(Mutex::new(Vec::new()));
         let seen_by_thread = Arc::clone(&seen);
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let requests_by_thread = Arc::clone(&requests);
         thread::spawn(move || {
             for client in listener.incoming().flatten() {
                 let Ok(server) = TcpStream::connect(&upstream) else {
@@ -112,11 +92,8 @@ impl FaultProxy {
                 };
                 let (policy, client_read) = (Arc::clone(&policy), client.try_clone().unwrap());
                 let seen = Arc::clone(&seen_by_thread);
-                let requests = Arc::clone(&requests_by_thread);
                 let (server_read, mut client_write) =
                     (server.try_clone().unwrap(), client.try_clone().unwrap());
-                let replied = Arc::new(AtomicBool::new(true));
-                let response_seen = Arc::clone(&replied);
                 // Redis to client: straight through.
                 thread::spawn(move || {
                     let mut server_read = server_read;
@@ -125,7 +102,6 @@ impl FaultProxy {
                         if n == 0 {
                             break;
                         }
-                        response_seen.store(true, Ordering::SeqCst);
                         if client_write.write_all(&buf[..n]).is_err() {
                             break;
                         }
@@ -133,28 +109,14 @@ impl FaultProxy {
                 });
                 // Client to Redis: consult the policy per command.
                 thread::spawn(move || {
-                    let mut client_read = RequestReader {
-                        stream: BufReader::new(client_read),
-                        replied,
-                        new_request: true,
-                        command_start: true,
-                    };
+                    let mut client_read = client_read;
                     let mut server = server;
                     let mut parser = redis::Parser::new();
                     let mut silent = false;
-                    let mut request_index = None;
                     while let Some(command) = read_command(&mut parser, &mut client_read) {
                         let Some(name) = command.first() else { break };
                         let name = String::from_utf8_lossy(name).to_ascii_uppercase();
                         seen.lock().unwrap().push(name.clone());
-                        let mut groups = requests.lock().unwrap();
-                        if client_read.new_request || request_index.is_none() {
-                            groups.push(Vec::new());
-                            request_index = Some(groups.len() - 1);
-                            client_read.new_request = false;
-                        }
-                        groups[request_index.unwrap()].push(name.clone());
-                        drop(groups);
                         if silent {
                             continue;
                         }
@@ -166,10 +128,7 @@ impl FaultProxy {
                                 }
                             }
                             Fault::Cut => {
-                                let _ = client_read
-                                    .stream
-                                    .get_ref()
-                                    .shutdown(std::net::Shutdown::Both);
+                                let _ = client_read.shutdown(std::net::Shutdown::Both);
                                 let _ = server.shutdown(std::net::Shutdown::Both);
                                 break;
                             }
@@ -179,11 +138,7 @@ impl FaultProxy {
                 });
             }
         });
-        Self {
-            url,
-            seen,
-            requests,
-        }
+        Self { url, seen }
     }
 }
 
@@ -220,7 +175,7 @@ mod tests {
 
     #[test]
     #[trace("FR-038-AC-5", "FR-045-AC-22")]
-    fn fragmented_script_and_buffered_pipeline_commands_keep_one_request() {
+    fn fragmented_script_and_coalesced_commands_keep_their_command_boundaries() {
         struct Fragments(Cursor<Vec<u8>>);
         impl Read for Fragments {
             fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
@@ -243,38 +198,24 @@ mod tests {
             .arg("b")
             .get_packed_pipeline();
         assert!(pipeline.len() > 4096);
-        let replied = Arc::new(AtomicBool::new(true));
-        let mut reader = RequestReader {
-            stream: BufReader::new(Fragments(Cursor::new(pipeline))),
-            replied: Arc::clone(&replied),
-            new_request: true,
-            command_start: true,
-        };
+        let mut reader = Fragments(Cursor::new(pipeline));
         let mut parser = redis::Parser::new();
         assert_eq!(
             read_command(&mut parser, &mut reader).unwrap(),
             [b"PING".to_vec()]
         );
-        reader.new_request = false;
-        // The next command starts in the current buffer but extends across later reads.
-        replied.store(true, Ordering::SeqCst);
         let first = read_command(&mut parser, &mut reader).unwrap();
         assert_eq!(first[0], b"EVAL");
         assert_eq!(first[1], script.as_bytes());
-        assert!(!reader.new_request);
-        reader.new_request = false;
-        // Even an immediate backend reply must not split already buffered commands.
-        replied.store(true, Ordering::SeqCst);
         for key in [b"a", b"b"] {
             let command = read_command(&mut parser, &mut reader).unwrap();
             assert_eq!(command, [b"LLEN".to_vec(), key.to_vec()]);
-            assert!(!reader.new_request);
         }
     }
 
     #[test]
     #[trace("FR-038-AC-5", "FR-045-AC-22")]
-    fn proxy_records_complete_large_and_coalesced_commands_without_inventing_requests() {
+    fn proxy_forwards_complete_large_and_coalesced_commands() {
         let Some(bus) = Bus::connect("watcher-proxy-frames") else {
             return;
         };
@@ -300,10 +241,6 @@ mod tests {
         assert_eq!(
             *proxy.seen.lock().unwrap(),
             ["EVAL", "LLEN", "LLEN", "PING"]
-        );
-        assert_eq!(
-            *proxy.requests.lock().unwrap(),
-            [vec!["EVAL", "LLEN", "LLEN"], vec!["PING"]]
         );
     }
 
@@ -337,7 +274,6 @@ mod tests {
                 assert_eq!(stored, None);
             }
             assert_eq!(*proxy.seen.lock().unwrap(), ["SET"]);
-            assert_eq!(*proxy.requests.lock().unwrap(), [vec!["SET"]]);
         }
     }
 }

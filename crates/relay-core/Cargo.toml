@@ -12,6 +12,9 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 relay-work-wire.workspace = true
 gethostname.workspace = true
