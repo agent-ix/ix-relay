@@ -97,3 +97,23 @@ Independent focused command cargo test --locked --offline -p relay-core --lib st
 No new findings. All previous finding dispositions remain fixed. Local merge-tree completed conflict-free and yielded tree1b5fbc046e98fa6293ce6e0b97b99813edb679e3. Latest scoped verdict: PASS/MERGEABLE at acd36c66812aa1d05fdd6be424290a78396a8d38, subject to the lead's final gate and exact-head merge.
 
 Examined source unit: store::keys::tests::every_key_carries_its_prefix_and_nothing_else_changes at crates/relay-core/src/store/keys.rs; count check: assert_eq!(default.len(), moved.len());
+
+## Additional review (disposition pass 5)
+
+Reviewed06149e0a369dc3eefcd2bf00e86c40b09f35846e against85349f3. The cfg(test) stranded helper now projects canonical InboxEntry.message.text, preserving the existing public-text assertions. New proxy framing/fault tests meaningfully cover command fragments, coalescing and Forward/Cut/Silent behavior; all3 pass independently, along with15 stranded and2 existing exact count tests.
+
+No separate new gap finding is added because the request-grouping oracle defect and missing exact-buffer-boundary case are owned by SR1859FND002. The old gap findings remain fixed. The supplied full338-test watcher result is external evidence and does not disprove the deterministic counterexample. This supplemental gap pass cannot certify exact RPC counts until SR1859FND002 is fixed. Plan completion: not assessed. No aggregate gate or production edits by reviewer.
+
+## Additional review (disposition pass 6)
+
+Inspected frozen041b96d1def75896cad3b134cc3a4c299a278940 against06149e0. SR1859FND002 is fixed; its original finding and prior still-open outcome remain unchanged, with the new fixed row now the latest outcome. Original history findings remain fixed; no new findings.
+
+The default-off test-support feature selects ObservedConnection only when explicitly enabled. Without it, Relay retains concrete redis::Connection and exposes no observation API. The watcher enables it only in dev-dependencies. The internal status adapter uses that same alias; no alternate production protocol or network branch was added. The log is inert until explicitly attached.
+
+The decorator records at req_command, req_packed_command or req_packed_commands entry, then calls the corresponding method on the inner Redis connection exactly once. It forwards the original Cmd reference, including no-response flags, packed bytes, pipeline offset and count; result/error handling is unchanged. The inner method is invoked directly, so its internal calls do not recursively double-count. Timeout setters and connection properties are delegated. Existing watcher request-group/no-SCAN/no-Herdr expectations are unchanged; only their measurement source moved from network timing to the observer.
+
+FaultProxy retains complete RESP command forwarding and fault injection but no longer guesses request groups. The observer regressions exercise the exact8192-byte ECHO+PING boundary, a larger Lua payload with fake command framing, ignored responses, atomic transaction offsets, Redis errors and CLIENT REPLY OFF/ON. These check both replies and exact packed request records. The former deterministic timing counterexample no longer applies because logical requests are recorded before TCP fragmentation or replies.
+
+Independent isolated Redis checks:2 observer tests,3 proxy tests,1 idle request-count and1 push request-count test passed. Independent cargo check --locked --offline -p relay-core --lib --no-default-features passed. Worker full affected770-pass/6-ignore evidence and clippy/fmt logs were inspected as external evidence; the aggregate gate was not rerun here.
+
+Local merge simulation is clean (tree97be4ce4ca1db612210a173ec17ac2d1aabe95a4). Latest scoped verdict: PASS/MERGEABLE at041b96d1def75896cad3b134cc3a4c299a278940, subject to the lead's final aggregate gate and exact-head merge. Plan completion: not assessed.

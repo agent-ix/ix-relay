@@ -44,6 +44,8 @@ Round1, verified fix10999dacefe7eafe310e4d5765272a94735bf18f and final frozen ca
 | FND | outcome | reason |
 | --- | --- | --- |
 | FND-001 | fixed | work_events computes the Redis server-time cutoff before XRANGE, excludes expired rows from events and coverage, advances empty cursors and reports truncation. The idle regression passes; FR066 now explicitly distinguishes the strict readable seven-day horizon from bounded lazy physical cleanup and inactive-stream expiry. |
+| FND-002 | still-open | Round5: response timing and buffer occupancy misclassify a single client pipeline at the8192-byte boundary; true client request-boundary observation is required. |
+| FND-002 | fixed | Round6: default-off ObservedConnection records actual Redis request API calls and delegates unchanged commands/offset/count/flags to the inner connection; proxy timing inference was removed and original request-group assertions now use the observer. |
 
 Latest scoped code verdict: PASS, no new findings. Seven real Redis work tests passed independently at10999da; final7316c04 changes only requirement wording and a source comment, so no repeated behavioral test was needed. The final requirement passes quire validation. Local git merge-tree --write-tree against origin/mainff618de succeeded without conflicts for7316c04, yielding tree0d5b33abfc69a8aa4a57e65ff3445ccc5466e285. No live GitHub API mergeability probe or aggregate gate was run. The lead owns the final gate and exact-head merge.
 
@@ -93,3 +95,35 @@ Independent focused command cargo test --locked --offline -p relay-core --lib st
 No new findings. All previous finding dispositions remain fixed. Local merge-tree completed conflict-free and yielded tree1b5fbc046e98fa6293ce6e0b97b99813edb679e3. Latest scoped verdict: PASS/MERGEABLE at acd36c66812aa1d05fdd6be424290a78396a8d38, subject to the lead's final gate and exact-head merge.
 
 Examined source unit: store::keys::tests::every_key_carries_its_prefix_and_nothing_else_changes at crates/relay-core/src/store/keys.rs; count check: assert_eq!(default.len(), moved.len());
+
+## New findings (disposition pass 5)
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-002 | medium | One client pipeline is split into multiple measured requests when a command ends on the buffer boundary and its backend reply precedes the next parse. | RequestReader::read; crates/relay-watcher/src/test_support.rs:60-67; FR-038-AC-5; FR-045-AC-22 |
+
+The response_seen boolean plus BufReader state is not a client request boundary. A deterministic offline reproduction compiled the candidate's unchanged RequestReader/read_command with the actual redis parser. It constructs a single redis::pipe containing ECHO and PING, choosing the ECHO argument length so its full RESP frame is exactly the default8192-byte BufReader capacity. After parsing ECHO, the internal buffer is empty. Set replied=true to simulate the legal scheduling interleaving in which Redis replies to forwarded ECHO before the proxy starts parsing PING. Parsing PING now incorrectly sets new_request=true. Output: one client pipeline; buffer capacity=8192; PING incorrectly starts new request=true. No sleeps, network timing assumption, source edits or provider access were needed. The temporary executable is /private/tmp/swm180-watcher-boundary-repro.
+
+The new regression only checks siblings already buffered at a command start; it omits this exact-boundary case. Complete RESP framing correctly prevents fake SCAN/EVAL command names inside bulk arguments, but it cannot infer whether later TCP bytes came from the same client write or a subsequent request made after waiting for a reply. Therefore the current requests array cannot certify the original exact logical round-trip claims.
+
+The lead authorized the fix direction: observe actual req_packed_command/req_packed_commands boundaries with a narrowly delegating test-only ConnectionLike decorator. Keep ordinary production I/O concrete and unchanged, retain FaultProxy for complete RESP fault injection and seen-command assertions, and migrate existing exact request groups to that true boundary observer. Do not replace the defect with timing sleeps, a weaker count assertion or hardcoded grouping by expected command sequences.
+
+### Round5 evidence and disposition
+
+Reviewed frozen06149e0a369dc3eefcd2bf00e86c40b09f35846e against85349f3. No production execution path changed: stranded text projection is inside cfg(test), helper changes are test-only, and ix-trace-rs is a dev dependency. Canonical InboxEntry retains the original public text assertions without assuming private receipt metadata belongs in Message. Fault Forward/Cut/Silent choices now apply to complete commands; forward preserves binary argument bytes, cut closes sockets before forwarding the chosen command, and silent drops that command and subsequent traffic. These aspects are sound.
+
+Independent focused tests pass:3 proxy helper regressions,15 stranded tests,1 idle request-count test and1 push request-count test. Their success does not discharge the demonstrated grouping counterexample. The worker's supplied full watcher338-test run was inspected as external evidence, not repeated. The structural local merge simulation is clean (tree33597869f0de63d9be033223ddae76298e39b859), but the latest review verdict is CHANGES REQUESTED until FND002 is fixed. Original FND001 remains fixed.
+
+## Additional review (disposition pass 6)
+
+Inspected frozen041b96d1def75896cad3b134cc3a4c299a278940 against06149e0. SR1859FND002 is fixed; its original finding and prior still-open outcome remain unchanged, with the new fixed row now the latest outcome. Original history findings remain fixed; no new findings.
+
+The default-off test-support feature selects ObservedConnection only when explicitly enabled. Without it, Relay retains concrete redis::Connection and exposes no observation API. The watcher enables it only in dev-dependencies. The internal status adapter uses that same alias; no alternate production protocol or network branch was added. The log is inert until explicitly attached.
+
+The decorator records at req_command, req_packed_command or req_packed_commands entry, then calls the corresponding method on the inner Redis connection exactly once. It forwards the original Cmd reference, including no-response flags, packed bytes, pipeline offset and count; result/error handling is unchanged. The inner method is invoked directly, so its internal calls do not recursively double-count. Timeout setters and connection properties are delegated. Existing watcher request-group/no-SCAN/no-Herdr expectations are unchanged; only their measurement source moved from network timing to the observer.
+
+FaultProxy retains complete RESP command forwarding and fault injection but no longer guesses request groups. The observer regressions exercise the exact8192-byte ECHO+PING boundary, a larger Lua payload with fake command framing, ignored responses, atomic transaction offsets, Redis errors and CLIENT REPLY OFF/ON. These check both replies and exact packed request records. The former deterministic timing counterexample no longer applies because logical requests are recorded before TCP fragmentation or replies.
+
+Independent isolated Redis checks:2 observer tests,3 proxy tests,1 idle request-count and1 push request-count test passed. Independent cargo check --locked --offline -p relay-core --lib --no-default-features passed. Worker full affected770-pass/6-ignore evidence and clippy/fmt logs were inspected as external evidence; the aggregate gate was not rerun here.
+
+Local merge simulation is clean (tree97be4ce4ca1db612210a173ec17ac2d1aabe95a4). Latest scoped verdict: PASS/MERGEABLE at041b96d1def75896cad3b134cc3a4c299a278940, subject to the lead's final aggregate gate and exact-head merge. Plan completion: not assessed.
