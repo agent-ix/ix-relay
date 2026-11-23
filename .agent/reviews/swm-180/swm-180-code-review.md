@@ -81,3 +81,15 @@ The existing degradation test still asserts status0, exact plain queued output, 
 Examined FR-041-AC-3, spec/functional/FR-041-send-prints-the-recipients-state.md: Given a Redis that stops answering once the message is queued, `send` prints the plain `queued for <name>`, exits 0, takes no more than the same send against a healthy Redis plus 250 ms and a margin of 150 ms (so a bound of a second, or one per reply, fails), and the message is in the inbox.
 
 Latest scoped verdict: PASS/MERGEABLE at f0b4137517de4cbbb77791b50b28a5c56994fbd2, subject to the lead's final gate and exact-head merge.
+
+## Additional review (disposition pass 4)
+
+Inspected be2629b..acd36c66812aa1d05fdd6be424290a78396a8d38: exactly two additions in the cfg(test) alternate-prefix key array, receipt_stream_key and receipt_meta_key, immediately after log_key. The production builders, default table and expected key strings already include both entries in that same order. No production behavior or assertion changed.
+
+The test still compares complete array counts before pairing every default key with its alternate-prefix key, then checks exact equality after replacing only the prefix. Adding the missing two calls restores the intended test domain; it does not reduce coverage or relax count/equality assertions. The supplied exact-main failure log reports39 versus37, matching this inherited omission; the feature branch has three additional history keys but the same two-entry omission. This is a narrowly justified test-fixture repair.
+
+Independent focused command cargo test --locked --offline -p relay-core --lib store::keys::tests passed5/5, including prefix preservation, documented keys, builder coverage and the existing key guards. The worker-provided full affected relay-core log records415 passed,6 ignored,0 failed; that broader run was inspected as worker evidence and was not rerun by this reviewer. No aggregate gate ran here.
+
+No new findings. All previous finding dispositions remain fixed. Local merge-tree completed conflict-free and yielded tree1b5fbc046e98fa6293ce6e0b97b99813edb679e3. Latest scoped verdict: PASS/MERGEABLE at acd36c66812aa1d05fdd6be424290a78396a8d38, subject to the lead's final gate and exact-head merge.
+
+Examined source unit: store::keys::tests::every_key_carries_its_prefix_and_nothing_else_changes at crates/relay-core/src/store/keys.rs; count check: assert_eq!(default.len(), moved.len());
