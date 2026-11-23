@@ -29,6 +29,7 @@ end
 "#;
 // Exact count cap and per-event input bounds keep this separate from the mail log.
 // Server time establishes ordering even when producer clocks disagree.
+// Writes prune age and renew the inactivity TTL; reads independently enforce the age horizon.
 const HISTORY: &str = r#"
 if ARGV[5] ~= '' then
   local t = redis.call('TIME')

@@ -20,10 +20,17 @@ remain outside this event stream.
 
 Redis server time and native stream IDs establish event observation and order.
 The stream retains at most 4,096 entries, each bounded to 8,192 producer JSON
-bytes, with a seven-day age limit. Read-only pages expose retained coverage,
-source observation time, truncation and an exclusive next cursor. History reads
-require no caller pane, never consume inboxes, and reject malformed cursors or
-page sizes outside 1..1000.
+bytes. History reads enforce a strict seven-day readable horizon using Redis
+server time, including during idle intervals. Read-only pages expose retained
+coverage, source observation time, truncation and an exclusive next cursor.
+History reads require no caller pane, never consume inboxes, and reject malformed
+cursors or page sizes outside 1..1000.
+
+Writes prune entries older than seven days and renew the stream's seven-day
+inactivity TTL. Physical cleanup is lazy: an entry retained by the last write
+can remain stored until that TTL expires, approaching fourteen days after its
+observation. Expired entries are excluded from readable coverage; reads do not
+trim storage or renew the TTL.
 
 A current snapshot exposes verified identity and current reports, omitting
 private focus text. Snapshot observation time does not establish historical
