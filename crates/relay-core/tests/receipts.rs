@@ -454,6 +454,298 @@ fn receipts_enqueue_and_ack_remain_atomic_when_committed_replies_are_lost() {
 }
 
 #[test]
+#[trace("FR-067-AC-1", "FR-067-AC-3", "FR-067-AC-8")]
+fn combined_hook_ack_records_ordered_delivery_and_settlement_with_stable_identities() {
+    let Some(mut bus) = bus() else { return };
+    send(&mut bus);
+    send(&mut bus);
+    let recipient = name("receiver");
+    let batch = bus
+        .relay
+        .pop_inbox_budget(
+            &recipient,
+            NonZeroUsize::new(2).unwrap(),
+            10_000,
+            Claim::new(Popper::Hook),
+        )
+        .unwrap()
+        .batch
+        .unwrap();
+    let before = snapshot(&mut bus);
+    for (token, popper) in [
+        (relay_core::BatchId::new(batch.get() + 1), Popper::Hook),
+        (batch, Popper::Watcher),
+    ] {
+        assert!(
+            !bus.relay
+                .ack_delivered(&recipient, token, popper, DeliveryEvidence::HookStdout)
+                .unwrap()
+        );
+        assert_eq!(
+            snapshot(&mut bus),
+            before,
+            "an invalid token must neither observe nor settle"
+        );
+    }
+    assert!(
+        bus.relay
+            .ack_delivered(
+                &recipient,
+                batch,
+                Popper::Hook,
+                DeliveryEvidence::HookStdout
+            )
+            .unwrap()
+    );
+    assert_eq!(bus.relay.inflight_len(&recipient).unwrap(), 0);
+    assert_eq!(bus.relay.inbox_len(&recipient).unwrap(), 0);
+    let report = export(&mut bus);
+    assert_eq!(report.events.len(), 8);
+    assert!(
+        !report
+            .reasons
+            .contains(&ReceiptCoverageReason::RecordingGap)
+    );
+    let originals: Vec<_> = report
+        .events
+        .iter()
+        .filter(|row| row.event.outcome == ReceiptOutcome::Queued)
+        .map(|row| row.event.original_id.as_str())
+        .collect();
+    assert_ne!(originals[0], originals[1]);
+    for original in originals {
+        let events: Vec<_> = report
+            .events
+            .iter()
+            .filter(|row| row.event.original_id == original)
+            .map(|row| &row.event)
+            .collect();
+        assert_eq!(
+            events.iter().map(|event| event.outcome).collect::<Vec<_>>(),
+            [
+                ReceiptOutcome::Queued,
+                ReceiptOutcome::AttemptStarted,
+                ReceiptOutcome::Delivered,
+                ReceiptOutcome::Acknowledged
+            ]
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.sender == "sender" && event.target == "receiver")
+        );
+        assert!(events[1].attempt_id.is_some());
+        assert_eq!(events[1].attempt_id, events[2].attempt_id);
+        assert_eq!(events[2].attempt_id, events[3].attempt_id);
+        assert_ne!(events[2].event_id, events[3].event_id);
+        assert_eq!(events[2].evidence, Some(DeliveryEvidence::HookStdout));
+        assert_eq!(events[2].event_time_ms, None);
+        assert!(events[3].event_time_ms.is_some());
+    }
+    let settled = snapshot(&mut bus);
+    assert!(
+        !bus.relay
+            .ack_delivered(
+                &recipient,
+                batch,
+                Popper::Hook,
+                DeliveryEvidence::HookStdout
+            )
+            .unwrap()
+    );
+    assert_eq!(snapshot(&mut bus), settled, "repeated settlement is inert");
+}
+
+#[test]
+#[trace("FR-067-AC-3", "FR-067-AC-4", "FR-067-AC-8")]
+fn combined_ack_rejects_wrong_storage_types_without_partial_observation_or_settlement() {
+    for tail in ["receipts", "receipt-meta", "inflight:receiver"] {
+        let Some(mut bus) = bus() else { return };
+        send(&mut bus);
+        let at = now(&mut bus);
+        let batch = claim(&mut bus, at).batch.unwrap();
+        let key = bus.key(tail);
+        let saved = bus.key("saved");
+        let _: () = bus.raw.rename(&key, &saved).unwrap();
+        let _: () = bus.raw.set(&key, "wrong type").unwrap();
+        let before = snapshot(&mut bus);
+        assert!(matches!(
+            bus.relay.ack_delivered(
+                &name("receiver"),
+                batch,
+                Popper::Watcher,
+                DeliveryEvidence::HerdrPrompt
+            ),
+            Err(relay_core::Error::InflightUnreadable { .. })
+        ));
+        assert_eq!(
+            snapshot(&mut bus),
+            before,
+            "wrong-type {tail} must fail before any writes"
+        );
+        let _: () = bus.raw.del(&key).unwrap();
+        let _: () = bus.raw.rename(&saved, &key).unwrap();
+        assert_eq!(bus.relay.inflight_len(&name("receiver")).unwrap(), 1);
+        assert!(
+            bus.relay
+                .ack_delivered(
+                    &name("receiver"),
+                    batch,
+                    Popper::Watcher,
+                    DeliveryEvidence::HerdrPrompt
+                )
+                .unwrap()
+        );
+        let report = export(&mut bus);
+        assert_eq!(
+            report
+                .events
+                .iter()
+                .map(|row| row.event.outcome)
+                .collect::<Vec<_>>(),
+            [
+                ReceiptOutcome::Queued,
+                ReceiptOutcome::AttemptStarted,
+                ReceiptOutcome::Delivered,
+                ReceiptOutcome::Acknowledged
+            ]
+        );
+        assert!(
+            !report
+                .reasons
+                .contains(&ReceiptCoverageReason::RecordingGap)
+        );
+    }
+}
+
+#[test]
+#[trace("FR-067-AC-1", "FR-067-AC-4")]
+fn combined_ack_commits_both_receipts_once_when_the_response_is_lost() {
+    let Some(mut bus) = bus() else { return };
+    send(&mut bus);
+    let at = now(&mut bus);
+    let batch = claim(&mut bus, at).batch.unwrap();
+    let (mut disconnected, worker) = lose_eval_reply(&bus);
+    assert!(
+        disconnected
+            .ack_delivered(
+                &name("receiver"),
+                batch,
+                Popper::Watcher,
+                DeliveryEvidence::HerdrPrompt
+            )
+            .is_err()
+    );
+    worker.join().unwrap();
+    assert_eq!(bus.relay.inflight_len(&name("receiver")).unwrap(), 0);
+    let settled = snapshot(&mut bus);
+    assert!(
+        !bus.relay
+            .ack_delivered(
+                &name("receiver"),
+                batch,
+                Popper::Watcher,
+                DeliveryEvidence::HerdrPrompt
+            )
+            .unwrap()
+    );
+    assert_eq!(snapshot(&mut bus), settled);
+    let report = export(&mut bus);
+    assert_eq!(
+        report
+            .events
+            .iter()
+            .map(|row| row.event.outcome)
+            .collect::<Vec<_>>(),
+        [
+            ReceiptOutcome::Queued,
+            ReceiptOutcome::AttemptStarted,
+            ReceiptOutcome::Delivered,
+            ReceiptOutcome::Acknowledged
+        ]
+    );
+    assert_eq!(
+        report.events[2].event.evidence,
+        Some(DeliveryEvidence::HerdrPrompt)
+    );
+    assert!(
+        !report
+            .reasons
+            .contains(&ReceiptCoverageReason::RecordingGap)
+    );
+}
+
+#[test]
+#[trace("FR-067-AC-2", "FR-067-AC-3", "FR-067-AC-8")]
+fn combined_ack_does_not_settle_a_replacement_attempt_or_duplicate_existing_observation() {
+    let Some(mut bus) = bus() else { return };
+    send(&mut bus);
+    let at = now(&mut bus) - 100;
+    let expired = claim(&mut bus, at).batch.unwrap();
+    assert_eq!(
+        bus.relay
+            .reap_expired(&name("receiver"), Now::AtMs(at + 20))
+            .unwrap()
+            .requeued,
+        1
+    );
+    let current = claim(&mut bus, at + 21).batch.unwrap();
+    let before = snapshot(&mut bus);
+    assert!(
+        !bus.relay
+            .ack_delivered(
+                &name("receiver"),
+                expired,
+                Popper::Watcher,
+                DeliveryEvidence::HerdrPrompt
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        snapshot(&mut bus),
+        before,
+        "an old attempt cannot observe or settle a replacement"
+    );
+    bus.relay
+        .observe_delivery(
+            &name("receiver"),
+            current,
+            Popper::Watcher,
+            DeliveryEvidence::SocketConfirmed,
+            Now::Server,
+        )
+        .unwrap();
+    let observed = export(&mut bus);
+    assert!(
+        bus.relay
+            .ack_delivered(
+                &name("receiver"),
+                current,
+                Popper::Watcher,
+                DeliveryEvidence::HerdrPrompt
+            )
+            .unwrap()
+    );
+    let report = export(&mut bus);
+    assert_eq!(report.events.len(), observed.events.len() + 1);
+    assert_eq!(&report.events[..observed.events.len()], observed.events);
+    assert_eq!(
+        report.events.last().unwrap().event.outcome,
+        ReceiptOutcome::Acknowledged
+    );
+    let delivered: Vec<_> = report
+        .events
+        .iter()
+        .filter(|row| row.event.outcome == ReceiptOutcome::Delivered)
+        .collect();
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(
+        delivered[0].event.evidence,
+        Some(DeliveryEvidence::SocketConfirmed)
+    );
+}
+
+#[test]
 #[trace("FR-067-AC-1", "FR-067-AC-7")]
 fn receipts_lifecycle_separates_observation_from_settlement_without_content() {
     let Some(mut bus) = bus() else { return };
@@ -725,10 +1017,12 @@ fn receipts_failed_observation_survives_recovery_as_an_explicit_gap() {
 #[trace("FR-067-AC-5", "FR-067-AC-6", "FR-067-AC-7")]
 fn receipts_pages_retention_and_empty_coverage_remain_truthful_and_read_only() {
     let Some(mut bus) = bus() else { return };
+    let since_ms = now(&mut bus);
     for _ in 0..1_003 {
         send(&mut bus);
     }
     let mut request = request(&mut bus);
+    request.since_ms = since_ms;
     request.page_size = 1_000;
     let first = bus.relay.receipt_export(&request).unwrap();
     assert_eq!(first.events.len(), 1_000);
@@ -783,6 +1077,7 @@ fn receipts_pages_retention_and_empty_coverage_remain_truthful_and_read_only() {
 #[trace("FR-067-AC-5", "FR-067-AC-6")]
 fn receipts_count_bound_marks_an_evicted_continuation_incomplete() {
     let Some(mut bus) = bus() else { return };
+    let since_ms = now(&mut bus);
     send(&mut bus);
     let oldest = export(&mut bus).events[0].cursor.clone();
     for _ in 0..RECEIPT_EVENT_CAP {
@@ -791,6 +1086,7 @@ fn receipts_count_bound_marks_an_evicted_continuation_incomplete() {
     let count: usize = bus.raw.xlen(bus.key("receipts")).unwrap();
     assert_eq!(count, RECEIPT_EVENT_CAP);
     let mut request = request(&mut bus);
+    request.since_ms = since_ms;
     request.after = Some(oldest);
     let report = bus.relay.receipt_export(&request).unwrap();
     assert!(

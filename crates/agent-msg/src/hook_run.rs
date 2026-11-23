@@ -280,14 +280,12 @@ impl Bus for RelayBus {
     }
 
     fn ack(&mut self, name: &AgentName, batch: BatchId) -> relay_core::Result<bool> {
-        self.relay.observe_delivery(
+        self.relay.ack_delivered(
             name,
             batch,
             relay_core::Popper::Hook,
             relay_core::receipts::DeliveryEvidence::HookStdout,
-            relay_core::Now::Server,
-        )?;
-        self.relay.ack(name, batch, relay_core::Popper::Hook)
+        )
     }
 
     fn requeue_batch(&mut self, name: &AgentName, batch: BatchId) -> relay_core::Result<usize> {

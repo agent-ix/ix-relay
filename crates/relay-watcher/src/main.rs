@@ -1539,7 +1539,7 @@ mod tests {
         deliver::DeliverError,
         episodes::EpisodeKind,
         herdr::{AgentGet, AgentStatus, ProcessError},
-        test_support::{Fault, FaultProxy, raw_command},
+        test_support::{Fault, FaultProxy, raw_command, request_groups},
     };
 
     // ---- tick ---------------------------------------------------------
@@ -3884,6 +3884,7 @@ mod tests {
         }
         let proxy = FaultProxy::start(&url, |_| Fault::Forward);
         let mut via = relay_via(&proxy, "idle-tick");
+        let requests = via.observe_requests();
         let herdr = CountingHerdr::new(AgentStatus::Idle, "s1");
         tick(
             &mut via,
@@ -3894,7 +3895,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            *proxy.requests.lock().unwrap(),
+            request_groups(&requests),
             [
                 vec!["HGETALL"],
                 // A sweep (a tick's default wake) returns every lead's expired
@@ -3932,6 +3933,7 @@ mod tests {
         }
         let proxy = FaultProxy::start(&url, |_| Fault::Forward);
         let mut via = relay_via(&proxy, "push-tick");
+        let requests = via.observe_requests();
         let herdr = CountingHerdr::new(AgentStatus::Idle, "s1");
         let node_a: MachineName = "node-a".parse().unwrap();
         let (publisher, bodies) = recording_publisher(&node_a, Duration::from_secs(30));
@@ -3940,7 +3942,7 @@ mod tests {
             ..WatcherState::default()
         };
         tick(&mut via, &herdr, &node_a, &mut state, &mut |_| {}).unwrap();
-        let first = proxy.requests.lock().unwrap().clone();
+        let first = request_groups(&requests);
         assert_eq!(
             first,
             [
@@ -3958,10 +3960,10 @@ mod tests {
             bodies.recv().is_ok(),
             "and the push was handed to the exporter"
         );
-        proxy.requests.lock().unwrap().clear();
+        requests.clear();
         tick(&mut via, &herdr, &node_a, &mut state, &mut |_| {}).unwrap();
         assert_eq!(
-            proxy.requests.lock().unwrap().len(),
+            request_groups(&requests).len(),
             2,
             "inside the interval: no push"
         );
@@ -4285,7 +4287,7 @@ mod tests {
             .iter()
             .filter(|c| *c == "HGETALL")
             .count();
-        assert_eq!(hgetall, 1, "{:?}", proxy.requests.lock().unwrap());
+        assert_eq!(hgetall, 1, "{:?}", proxy.seen.lock().unwrap());
     }
 
     /// Tracing: TC-038-08

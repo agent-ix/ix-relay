@@ -168,6 +168,16 @@ receipt_finish = function(entry, now, uncertain)
     end
 end
 
+-- Shared by observation-only and combined observation/settlement operations.
+-- Return the marked entry so a caller can retain it or settle it in the same script.
+receipt_observe = function(entry, now, evidence)
+    local metadata = receipt_metadata(entry)
+    if not metadata or metadata.delivered then return entry, false end
+    receipt_append(entry, 'delivered', now, evidence)
+    metadata.delivered = evidence
+    return receipt_entry(entry, metadata), true
+end
+
 receipt_enqueue = function(entry, original, now, recipient)
     local marked = receipt_entry(entry, {original = original, recipient = recipient})
     receipt_append(marked, 'queued', now)

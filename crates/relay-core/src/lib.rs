@@ -26,8 +26,11 @@ pub mod status;
 mod store;
 #[cfg(test)]
 mod test_env;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub mod text;
 pub mod work;
+pub mod work_history;
 
 pub use address::{Address, AddressBook, HerdrPlaceIds, MAX_LABEL_BYTES, Place, duplicated};
 pub use env::machine_name;

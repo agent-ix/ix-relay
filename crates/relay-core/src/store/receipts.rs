@@ -113,19 +113,13 @@ impl Relay {
         evidence: DeliveryEvidence,
         now: Now,
     ) -> Result<usize> {
-        let evidence = match evidence {
-            DeliveryEvidence::HookStdout => "hook_stdout",
-            DeliveryEvidence::HerdrPrompt => "herdr_prompt",
-            DeliveryEvidence::SocketConfirmed => "socket_confirmed",
-            DeliveryEvidence::SocketUnconfirmed => "socket_unconfirmed",
-        };
         let count: i64 = redis::cmd("EVAL")
             .arg(OBSERVE_SCRIPT.as_str())
             .arg(1)
             .arg(self.keys.inflight_key(agent))
             .arg(batch.get())
             .arg(popper.letter().to_string())
-            .arg(evidence)
+            .arg(evidence.code())
             .arg(now.arg())
             .arg(self.keys.receipt_stream_key())
             .arg(self.keys.receipt_meta_key())

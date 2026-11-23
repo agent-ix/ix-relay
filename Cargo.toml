@@ -14,6 +14,7 @@ license = "AGPL-3.0-or-later"
 repository = "https://github.com/agent-ix/ix-relay"
 
 [workspace.dependencies]
+relay-work-wire = { path = "crates/relay-work-wire" }
 relay-core = { path = "crates/relay-core" }
 herdr-cli = { path = "crates/herdr-cli" }
 relay-ops = { path = "crates/relay-ops" }

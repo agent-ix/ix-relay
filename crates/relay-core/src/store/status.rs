@@ -2,7 +2,7 @@
 
 use redis::Commands;
 
-use super::keys::Keys;
+use super::{Connection, keys::Keys};
 use crate::{
     AgentName,
     status::{
@@ -13,7 +13,7 @@ use crate::{
 
 /// Redis-backed status request store. Keys are isolated under the supplied bus prefix.
 pub(super) struct StatusStore<'a> {
-    conn: &'a mut redis::Connection,
+    conn: &'a mut Connection,
     keys: &'a Keys,
 }
 
@@ -28,7 +28,7 @@ pub enum ReplyOutcome {
 
 impl<'a> StatusStore<'a> {
     /// Creates a store view using the parent's centralized key builders.
-    pub(super) fn new(conn: &'a mut redis::Connection, keys: &'a Keys) -> Self {
+    pub(super) fn new(conn: &'a mut Connection, keys: &'a Keys) -> Self {
         Self { conn, keys }
     }
 
@@ -142,7 +142,7 @@ impl<'a> StatusStore<'a> {
     }
 }
 
-fn redis_now_ms(conn: &mut redis::Connection) -> Result<u64, StatusError> {
+fn redis_now_ms(conn: &mut Connection) -> Result<u64, StatusError> {
     let (seconds, microseconds): (u64, u64) = redis::cmd("TIME").query(conn)?;
     seconds
         .checked_mul(1_000)

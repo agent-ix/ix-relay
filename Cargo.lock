@@ -2609,6 +2609,7 @@ dependencies = [
  "proptest",
  "redis",
  "relay-test-support",
+ "relay-work-wire",
  "serde",
  "serde_json",
  "tempfile",
@@ -2668,6 +2669,7 @@ dependencies = [
  "claude-wire",
  "herdr-cli",
  "ix-cli-kit",
+ "ix-trace-rs",
  "nix",
  "proptest",
  "redis",
@@ -2678,6 +2680,13 @@ dependencies = [
  "serde_json",
  "signal-hook",
  "tempfile",
+]
+
+[[package]]
+name = "relay-work-wire"
+version = "0.3.4"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

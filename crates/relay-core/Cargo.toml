@@ -12,7 +12,11 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
+relay-work-wire.workspace = true
 gethostname.workspace = true
 jiff.workspace = true
 nix.workspace = true

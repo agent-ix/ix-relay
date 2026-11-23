@@ -79,6 +79,21 @@ enum WorkCommand {
     },
     /// Print the current session-qualified report as structured JSON.
     Show,
+    /// Print verified current scope/assignments without private focus text.
+    Snapshot,
+    /// Read bounded transition history as JSON, without resolving a caller pane.
+    Events {
+        /// Exclusive Redis stream cursor from the previous page.
+        #[arg(long, default_value = "0-0")]
+        after: String,
+        /// Maximum transitions in this page (1..1000).
+        #[arg(long, default_value_t = 500)]
+        limit: usize,
+    },
+    /// Explicitly pause expected activity for the bound scope.
+    Pause,
+    /// Remove the explicit pause; actual execution still requires observation.
+    Resume,
 }
 
 fn parse_status(value: &str) -> Result<WorkStatus, String> {
@@ -134,6 +149,10 @@ pub(crate) fn run(
     settings: &relay_core::config::CoreSettings,
     out: &mut impl Write,
 ) -> Result<(), BoxError> {
+    if let WorkCommand::Events { after, limit } = &args.command {
+        crate::json::write_line(out, &relay.work_events(after, *limit)?)?;
+        return Ok(());
+    }
     let runner = herdr_cli::RealProcessRunner;
     let observation = resolve_work_target(&runner, args.lead.as_deref(), &settings.machine.value)?;
     let binding = observation.binding;
@@ -210,6 +229,13 @@ pub(crate) fn run(
             relay.report_work_agent(&binding, &agent)?;
         }
         WorkCommand::Remove { id } => relay.remove_work_agent(&binding, &id)?,
+        WorkCommand::Pause => relay.report_work_activity(&binding, true)?,
+        WorkCommand::Resume => relay.report_work_activity(&binding, false)?,
+        WorkCommand::Events { .. } => unreachable!("history returned before binding"),
+        WorkCommand::Snapshot => {
+            crate::json::write_line(out, &relay.work_snapshot(&binding, crate::now_ms())?)?;
+            return Ok(());
+        }
         WorkCommand::Show => {
             crate::json::write_line(out, &relay.work_report(&binding)?)?;
             return Ok(());

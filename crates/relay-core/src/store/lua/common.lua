@@ -12,7 +12,7 @@
 -- destination of each move before it deletes the source.
 
 local receipt_ready, receipt_metadata, receipt_entry, receipt_gap, receipt_append
-local receipt_pending, receipt_finish, receipt_enqueue
+local receipt_pending, receipt_finish, receipt_enqueue, receipt_observe
 local receipt_without_metadata
 
 local function now_ms(override)

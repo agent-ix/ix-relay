@@ -18,6 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ix_trace_rs::trace;
 use relay_core::{Registration, Relay, health::WatcherHeartbeat};
 use support::{base_cmd, run};
 
@@ -223,10 +224,17 @@ fn tc_041_04_the_state_line_never_reaches_the_recipient_and_a_broadcast_has_none
     assert_eq!(broadcast.stdout.trim(), "queued for hub:EA:code");
 }
 
-/// A proxy that forwards everything until the client sends the recipient-state
-/// read (the only `LLEN` `send` makes), then answers nothing: a Redis that
-/// stalls after the message was queued.
-fn stall_on_llen(upstream: SocketAddr) -> String {
+fn is_recipient_probe(command: &[Vec<u8>], inbox: &[u8], heartbeat: &[u8]) -> bool {
+    command.len() == 5
+        && command[0].eq_ignore_ascii_case(b"EVAL")
+        && command[2] == b"2"
+        && command[3] == inbox
+        && command[4] == heartbeat
+}
+
+/// Forwards complete commands until the recipient-probe EVAL names the expected
+/// inbox and heartbeat keys, then stalls after the message was queued.
+fn stall_on_recipient_probe(upstream: SocketAddr, inbox: String, heartbeat: String) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     thread::spawn(move || {
@@ -239,14 +247,19 @@ fn stall_on_llen(upstream: SocketAddr) -> String {
             let (mut client_r, mut client_w) = (client.try_clone().unwrap(), client);
             let (mut server_r, mut server_w) = (server.try_clone().unwrap(), server);
             let flag = Arc::clone(&stalled);
+            let inbox = inbox.clone();
+            let heartbeat = heartbeat.clone();
             thread::spawn(move || {
-                let mut buf = [0u8; 16 * 1024];
-                while let Ok(n @ 1..) = client_r.read(&mut buf) {
-                    if buf[..n].windows(4).any(|w| w == b"LLEN") {
+                let mut parser = redis::Parser::new();
+                while let Ok(value) = parser.parse_value(&mut client_r) {
+                    let Ok(command) = redis::from_redis_value::<Vec<Vec<u8>>>(value) else {
+                        return;
+                    };
+                    if is_recipient_probe(&command, inbox.as_bytes(), heartbeat.as_bytes()) {
                         flag.store(true, Ordering::SeqCst);
                         continue;
                     }
-                    if server_w.write_all(&buf[..n]).is_err() {
+                    if server_w.write_all(&redis::pack_command(&command)).is_err() {
                         return;
                     }
                 }
@@ -262,6 +275,34 @@ fn stall_on_llen(upstream: SocketAddr) -> String {
         }
     });
     format!("redis://{addr}")
+}
+
+#[trace("FR-041-AC-3")]
+#[test]
+fn recipient_probe_classification_ignores_llen_inside_unrelated_eval_arguments() {
+    let inbox = b"test:inbox:receiver";
+    let heartbeat = b"test:health:watcher:hub";
+    let enqueue = redis::cmd("EVAL")
+        .arg("return redis.call('LLEN', KEYS[1])")
+        .arg(1)
+        .arg(inbox.as_slice())
+        .get_packed_command();
+    let probe = redis::cmd("EVAL")
+        .arg("return {redis.call('LLEN', KEYS[1]), redis.call('GET', KEYS[2])}")
+        .arg(2)
+        .arg(inbox.as_slice())
+        .arg(heartbeat.as_slice())
+        .get_packed_command();
+    let mut reader = std::io::Cursor::new([enqueue, probe].concat());
+    let mut parser = redis::Parser::new();
+    let first: Vec<Vec<u8>> =
+        redis::from_redis_value(parser.parse_value(&mut reader).unwrap()).unwrap();
+    assert!(!is_recipient_probe(&first, inbox, heartbeat));
+    let second: Vec<Vec<u8>> =
+        redis::from_redis_value(parser.parse_value(&mut reader).unwrap()).unwrap();
+    assert!(is_recipient_probe(&second, inbox, heartbeat));
+    assert!(!is_recipient_probe(&second, b"other-inbox", heartbeat));
+    assert!(!is_recipient_probe(&second, inbox, b"other-heartbeat"));
 }
 
 /// Tracing: TC-041-03
@@ -292,7 +333,15 @@ fn tc_041_03_a_stalled_redis_degrades_to_the_plain_line_within_the_probe_bound()
         "{}",
         healthy.stdout
     );
-    let proxy = stall_on_llen(upstream);
+    let proxy = stall_on_recipient_probe(
+        upstream,
+        format!(
+            "{}inbox:{}",
+            bus.prefix,
+            relay_core::AgentName::for_session(&"hub".parse().unwrap(), &"s1".parse().unwrap(),)
+        ),
+        format!("{}health:watcher:hub", bus.prefix),
+    );
     let started = Instant::now();
     let out = bus.send(&proxy, "hub:EA:code");
     let took = started.elapsed();

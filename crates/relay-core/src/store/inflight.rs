@@ -415,12 +415,42 @@ impl Relay {
     /// [`Error::InflightUnreadable`] when the in-flight key holds a value of
     /// the wrong type.
     pub fn ack(&mut self, agent: &AgentName, batch: BatchId, popper: Popper) -> Result<bool> {
+        self.settle_batch(agent, batch, popper, None)
+    }
+
+    /// Records successful transport delivery and acknowledges its matching batch in one request.
+    /// The delivered receipt precedes the atomic acknowledged receipt and in-flight removal.
+    /// A stale batch or mismatched popper returns `false` without recording either outcome.
+    /// Repeated settlement creates no duplicate receipts, including after a lost reply.
+    ///
+    /// # Errors
+    ///
+    /// Wrong-type in-flight or receipt keys return [`Error::InflightUnreadable`] without
+    /// mutation. An entry remains in flight until its receipt writes succeed.
+    pub fn ack_delivered(
+        &mut self,
+        agent: &AgentName,
+        batch: BatchId,
+        popper: Popper,
+        evidence: crate::receipts::DeliveryEvidence,
+    ) -> Result<bool> {
+        self.settle_batch(agent, batch, popper, Some(evidence))
+    }
+
+    fn settle_batch(
+        &mut self,
+        agent: &AgentName,
+        batch: BatchId,
+        popper: Popper,
+        evidence: Option<crate::receipts::DeliveryEvidence>,
+    ) -> Result<bool> {
         let removed: i64 = redis::cmd("EVAL")
             .arg(ACK_SCRIPT.as_str())
             .arg(1)
             .arg(self.keys.inflight_key(agent))
             .arg(batch.0)
             .arg(popper.letter().to_string())
+            .arg(evidence.map_or("", crate::receipts::DeliveryEvidence::code))
             .arg(self.keys.receipt_stream_key())
             .arg(self.keys.receipt_meta_key())
             .query(&mut self.conn)?;
