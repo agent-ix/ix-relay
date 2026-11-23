@@ -738,6 +738,12 @@ fn tc_040_02_a_message_never_acknowledged_is_dead_lettered_after_four_deliveries
     let Some(mut run) = seeded("inflight-dead", 1) else {
         return;
     };
+    let original: Vec<Vec<u8>> = redis::cmd("LRANGE")
+        .arg(run.bus.key("inbox:lead-1"))
+        .arg(0)
+        .arg(-1)
+        .query(&mut run.bus.raw)
+        .unwrap();
     let mut deliveries = Vec::new();
     for _ in 0..8 {
         let shown = pop(&mut run, 1, 1_000);
@@ -767,7 +773,8 @@ fn tc_040_02_a_message_never_acknowledged_is_dead_lettered_after_four_deliveries
         .arg(-1)
         .query(&mut run.bus.raw)
         .unwrap();
-    assert_eq!(raw, [serde_json::to_vec(&message(0)).unwrap()]);
+    assert!(raw.iter().all(|entry| !entry.ends_with(b" ")));
+    assert_eq!(raw, original);
 }
 
 /// Tracing: TC-040-03
@@ -1524,8 +1531,17 @@ fn tc_020_08_a_pop_that_would_exceed_the_byte_cap_takes_nothing_and_one_that_fit
         let Some(mut run) = seeded("inflight-bytes", 2) else {
             return;
         };
-        let entry = serde_json::to_vec(&message(0)).unwrap().len();
-        let projected = 2 * (entry + relay_core::INFLIGHT_ROW_OVERHEAD);
+        let queued: Vec<Vec<u8>> = redis::cmd("LRANGE")
+            .arg(run.bus.key("inbox:lead-1"))
+            .arg(0)
+            .arg(-1)
+            .query(&mut run.bus.raw)
+            .unwrap();
+        assert_eq!(queued.len(), 2);
+        let projected: usize = queued
+            .iter()
+            .map(|entry| entry.len() + relay_core::INFLIGHT_ROW_OVERHEAD)
+            .sum();
         let in_flight = relay_core::MAX_INFLIGHT_BYTES - projected + over;
         redis::cmd("LPUSH")
             .arg(run.bus.key("inflight:lead-1"))
