@@ -3,7 +3,10 @@
 use std::{
     io::{Read, Write},
     net::TcpStream,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
 };
 
@@ -38,24 +41,26 @@ pub(crate) enum Fault {
     Silent,
 }
 
-/// The command names (upper-cased) in one chunk of client-to-server bytes.
-fn command_names(chunk: &[u8]) -> Vec<String> {
-    let text = String::from_utf8_lossy(chunk);
-    let mut names = Vec::new();
-    for command in text.split("\r\n*").enumerate().map(|(i, part)| {
-        if i == 0 {
-            part.strip_prefix('*').unwrap_or(part)
-        } else {
-            part
+/// Observe a new request only when reading new client bytes after a backend reply.
+/// Commands already buffered by the RESP parser stay in their existing pipeline.
+struct RequestReader<R> {
+    stream: R,
+    replied: Arc<AtomicBool>,
+    new_request: bool,
+}
+
+impl<R: Read> Read for RequestReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.stream.read(buffer)?;
+        if count > 0 && self.replied.swap(false, Ordering::SeqCst) {
+            self.new_request = true;
         }
-    }) {
-        // `<n>\r\n$<len>\r\n<NAME>\r\n...`
-        let mut lines = command.split("\r\n");
-        if let (Some(_count), Some(_len), Some(name)) = (lines.next(), lines.next(), lines.next()) {
-            names.push(name.to_ascii_uppercase());
-        }
+        Ok(count)
     }
-    names
+}
+
+fn read_command(parser: &mut redis::Parser, reader: impl Read) -> Option<Vec<Vec<u8>>> {
+    redis::from_redis_value(parser.parse_value(reader).ok()?).ok()
 }
 
 /// A TCP proxy in front of a real Redis that injects faults per command, so a
@@ -96,44 +101,55 @@ impl FaultProxy {
                 let requests = Arc::clone(&requests_by_thread);
                 let (server_read, mut client_write) =
                     (server.try_clone().unwrap(), client.try_clone().unwrap());
+                let replied = Arc::new(AtomicBool::new(true));
+                let response_seen = Arc::clone(&replied);
                 // Redis to client: straight through.
                 thread::spawn(move || {
                     let mut server_read = server_read;
                     let mut buf = [0u8; 4096];
                     while let Ok(n) = server_read.read(&mut buf) {
-                        if n == 0 || client_write.write_all(&buf[..n]).is_err() {
+                        if n == 0 {
+                            break;
+                        }
+                        response_seen.store(true, Ordering::SeqCst);
+                        if client_write.write_all(&buf[..n]).is_err() {
                             break;
                         }
                     }
                 });
                 // Client to Redis: consult the policy per command.
                 thread::spawn(move || {
-                    let (mut client_read, mut server) = (client_read, server);
-                    let mut buf = [0u8; 4096];
+                    let mut client_read = RequestReader {
+                        stream: client_read,
+                        replied,
+                        new_request: true,
+                    };
+                    let mut server = server;
+                    let mut parser = redis::Parser::new();
                     let mut silent = false;
-                    while let Ok(n) = client_read.read(&mut buf) {
-                        if n == 0 {
-                            break;
+                    while let Some(command) = read_command(&mut parser, &mut client_read) {
+                        let Some(name) = command.first() else { break };
+                        let name = String::from_utf8_lossy(name).to_ascii_uppercase();
+                        seen.lock().unwrap().push(name.clone());
+                        let mut groups = requests.lock().unwrap();
+                        if client_read.new_request || groups.is_empty() {
+                            groups.push(Vec::new());
+                            client_read.new_request = false;
                         }
-                        let names = command_names(&buf[..n]);
-                        seen.lock().unwrap().extend(names.iter().cloned());
-                        requests.lock().unwrap().push(names.clone());
+                        groups.last_mut().unwrap().push(name.clone());
+                        drop(groups);
                         if silent {
                             continue;
                         }
-                        let fault = names
-                            .iter()
-                            .map(|name| (policy.lock().unwrap())(name))
-                            .find(|fault| *fault != Fault::Forward)
-                            .unwrap_or(Fault::Forward);
+                        let fault = (policy.lock().unwrap())(&name);
                         match fault {
                             Fault::Forward => {
-                                if server.write_all(&buf[..n]).is_err() {
+                                if server.write_all(&redis::pack_command(&command)).is_err() {
                                     break;
                                 }
                             }
                             Fault::Cut => {
-                                let _ = client_read.shutdown(std::net::Shutdown::Both);
+                                let _ = client_read.stream.shutdown(std::net::Shutdown::Both);
                                 let _ = server.shutdown(std::net::Shutdown::Both);
                                 break;
                             }
@@ -168,16 +184,124 @@ pub(crate) fn raw_command(url: &str, args: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ix_trace_rs::trace;
+    use redis::Commands;
+    use relay_test_support::Bus;
+    use std::{io::Cursor, time::Duration};
 
     #[test]
-    fn command_names_reads_single_and_pipelined_commands() {
-        assert_eq!(command_names(b"*1\r\n$7\r\nHGETALL\r\n"), ["HGETALL"]);
-        assert_eq!(
-            command_names(
-                b"*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$2\r\nab\r\n\
-                  *2\r\n$4\r\nllen\r\n$1\r\nk\r\n"
-            ),
-            ["CLIENT", "LLEN"]
+    #[trace("FR-038-AC-5", "FR-045-AC-22")]
+    fn fragmented_script_and_buffered_pipeline_commands_keep_one_request() {
+        struct Fragments(Cursor<Vec<u8>>);
+        impl Read for Fragments {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let length = buffer.len().min(4096);
+                self.0.read(&mut buffer[..length])
+            }
+        }
+        let script = format!(
+            "local x = [=[{}]=]; return 1",
+            "\r\n*1\r\n$4\r\nSCAN\r\n".repeat(1024)
         );
+        let pipeline = redis::pipe()
+            .cmd("EVAL")
+            .arg(&script)
+            .arg(0)
+            .cmd("LLEN")
+            .arg("a")
+            .cmd("LLEN")
+            .arg("b")
+            .get_packed_pipeline();
+        assert!(pipeline.len() > 4096);
+        let replied = Arc::new(AtomicBool::new(true));
+        let mut reader = RequestReader {
+            stream: Fragments(Cursor::new(pipeline)),
+            replied: Arc::clone(&replied),
+            new_request: true,
+        };
+        let mut parser = redis::Parser::new();
+        let first = read_command(&mut parser, &mut reader).unwrap();
+        assert_eq!(first[0], b"EVAL");
+        assert_eq!(first[1], script.as_bytes());
+        assert!(reader.new_request);
+        reader.new_request = false;
+        // Even an immediate backend reply must not split already buffered commands.
+        replied.store(true, Ordering::SeqCst);
+        for key in [b"a", b"b"] {
+            let command = read_command(&mut parser, &mut reader).unwrap();
+            assert_eq!(command, [b"LLEN".to_vec(), key.to_vec()]);
+            assert!(!reader.new_request);
+        }
+    }
+
+    #[test]
+    #[trace("FR-038-AC-5", "FR-045-AC-22")]
+    fn proxy_records_complete_large_and_coalesced_commands_without_inventing_requests() {
+        let Some(bus) = Bus::connect("watcher-proxy-frames") else {
+            return;
+        };
+        let proxy = FaultProxy::start(&bus.url, |_| Fault::Forward);
+        let mut connection = redis::Client::open(proxy.url.as_str())
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        let script = format!(
+            "local x = [=[{}]=]; return 1",
+            "\r\n*1\r\n$4\r\nSCAN\r\n".repeat(1024)
+        );
+        let result: Vec<usize> = redis::pipe()
+            .cmd("EVAL")
+            .arg(script)
+            .arg(0)
+            .cmd("LLEN")
+            .arg(bus.key("a"))
+            .cmd("LLEN")
+            .arg(bus.key("b"))
+            .query(&mut connection)
+            .unwrap();
+        assert_eq!(result, [1, 0, 0]);
+        let pong: String = redis::cmd("PING").query(&mut connection).unwrap();
+        assert_eq!(pong, "PONG");
+        assert_eq!(
+            *proxy.seen.lock().unwrap(),
+            ["EVAL", "LLEN", "LLEN", "PING"]
+        );
+        assert_eq!(
+            *proxy.requests.lock().unwrap(),
+            [vec!["EVAL", "LLEN", "LLEN"], vec!["PING"]]
+        );
+    }
+
+    #[test]
+    fn proxy_faults_apply_once_to_complete_commands_with_arbitrary_bulk_arguments() {
+        let Some(mut bus) = Bus::connect("watcher-proxy-faults") else {
+            return;
+        };
+        for fault in [Fault::Forward, Fault::Cut, Fault::Silent] {
+            let key = bus.key(&format!("{fault:?}"));
+            let proxy = FaultProxy::start(&bus.url, move |_| fault);
+            let mut connection = redis::Client::open(proxy.url.as_str())
+                .unwrap()
+                .get_connection()
+                .unwrap();
+            connection
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .unwrap();
+            let value = "\r\n*1\r\n$4\r\nSCAN\r\n".repeat(1024);
+            let result: redis::RedisResult<String> = redis::cmd("SET")
+                .arg(&key)
+                .arg(&value)
+                .query(&mut connection);
+            let stored: Option<String> = bus.raw.get(&key).unwrap();
+            if fault == Fault::Forward {
+                assert_eq!(result.unwrap(), "OK");
+                assert_eq!(stored.as_deref(), Some(value.as_str()));
+            } else {
+                assert!(result.is_err());
+                assert_eq!(stored, None);
+            }
+            assert_eq!(*proxy.seen.lock().unwrap(), ["SET"]);
+            assert_eq!(*proxy.requests.lock().unwrap(), [vec!["SET"]]);
+        }
     }
 }

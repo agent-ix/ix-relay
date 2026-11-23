@@ -28,6 +28,7 @@ signal-hook.workspace = true
 nix.workspace = true
 
 [dev-dependencies]
+ix-trace-rs = { git = "https://github.com/agent-ix/ix-trace-rs", tag = "v0.1.1" }
 ix-cli-kit.workspace = true
 proptest.workspace = true
 redis.workspace = true

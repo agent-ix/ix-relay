@@ -2669,6 +2669,7 @@ dependencies = [
  "claude-wire",
  "herdr-cli",
  "ix-cli-kit",
+ "ix-trace-rs",
  "nix",
  "proptest",
  "redis",
