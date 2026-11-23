@@ -46,5 +46,3 @@ Round1, verified fix10999dacefe7eafe310e4d5765272a94735bf18f and final frozen ca
 | FND-001 | fixed | work_events computes the Redis server-time cutoff before XRANGE, excludes expired rows from events and coverage, advances empty cursors and reports truncation. The idle regression passes; FR066 now explicitly distinguishes the strict readable seven-day horizon from bounded lazy physical cleanup and inactive-stream expiry. |
 
 Latest scoped code verdict: PASS, no new findings. Seven real Redis work tests passed independently at10999da; final7316c04 changes only requirement wording and a source comment, so no repeated behavioral test was needed. The final requirement passes quire validation. Local git merge-tree --write-tree against origin/mainff618de succeeded without conflicts for7316c04, yielding tree0d5b33abfc69a8aa4a57e65ff3445ccc5466e285. No live GitHub API mergeability probe or aggregate gate was run. The lead owns the final gate and exact-head merge.
-
-

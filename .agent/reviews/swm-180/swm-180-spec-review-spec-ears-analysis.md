@@ -30,4 +30,3 @@ PASS: no findings in the scoped analysis. Reviewed candidate0761f1baa421337a9419
 The new normative Description is an event-triggered When statement with one SHALL, named subject the relay, and concrete response append an immutable session-qualified transition atomically with current-state update. The disjunctive triggers are event kinds of that same operation. This is momentary, not a continuous While condition. quire validate --scope . spec/functional/FR-066-bounded-work-history.md --summary reported1/1 docs grammar-clean, zero grammar findings.
 
 The source diff contains13 changed files. Review artifacts are reviewer custody files only; the lead must retain them under reviews/ when landing. GitHub metadata showed the reviewed head is MERGEABLE, which does not override these findings or the final gate.
-

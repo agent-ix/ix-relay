@@ -30,4 +30,3 @@ PASS: no findings in the scoped analysis. Reviewed candidate0761f1baa421337a9419
 The sole new explicit edge is FR048 -> FR066 (depends_on). FR048 exists and defines the verified current reporting identity on which history relies. FR066 is a user-visible read/export feature, with relay-work-wire its internal enablement. Order: existing FR048 identity/reporting, shared wire plus atomic history, then CLI consumers. FR048 has no reverse relationship to FR066; the new edge introduces no cycle. No cross-repository implementation or unmerged exporter dependency is required by this requirement.
 
 The source diff contains13 changed files. Review artifacts are reviewer custody files only; the lead must retain them under reviews/ when landing. GitHub metadata showed the reviewed head is MERGEABLE, which does not override these findings or the final gate.
-

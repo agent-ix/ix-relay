@@ -50,5 +50,3 @@ Round1, inspected frozen fix10999dacefe7eafe310e4d5765272a94735bf18f. Seven focu
 | FND-003 | fixed | All four new FR066 criteria now bind through recognized #[trace] attributes; the computed matrix reports each tagged. Inherited untagged criteria remain outside this PR scope. |
 
 Latest scoped gap verdict: PASS. Plan completion: not assessed. This verdict does not certify inherited repository-wide coverage or run evidence.
-
-
