@@ -1,0 +1,118 @@
+{
+  "style": "pencil",
+  "data": {
+    "directory_lease": {"from":"regex","path":"crates/relay-core/src/store/directory.rs","pattern":"DIRECTORY_LEASE: Duration = Duration::from_secs\\((\\d+)\\)"},
+    "wg_net": {"from":"regex","path":"scripts/relay-admin","pattern":"(?m)^WG_NET=(\\S+)"},
+    "hub_raw": {"from":"regex","path":"scripts/relay-admin","pattern":"(?m)^HUB_ADDR=(\\S+)"},
+    "hub_addr": {"from":"expr","value":"replace(hub_raw, '$WG_NET', wg_net)"},
+    "bus_port": {"from":"regex","path":"scripts/relay-admin","pattern":"(?m)^BUS_PORT=(\\S+)"},
+    "escalation_body": {"from":"regex","path":"crates/relay-core/src/escalation.rs","pattern":"(?s)pub enum EscalationStatus \\{(.*?)\\}"},
+    "states": {"from":"expr","value":"lower(findall(escalation_body, '(?m)^\\s*([A-Z][a-z]+),'))"},
+    "hook_lease": {"from":"regex","path":"crates/relay-core/src/store/inflight.rs","pattern":"HOOK_LEASE: Duration = Duration::from_secs\\((\\d+)\\)"},
+    "watcher_lease": {"from":"regex","path":"crates/relay-core/src/store/inflight.rs","pattern":"WATCHER_LEASE: Duration = Duration::from_secs\\((\\d+)\\)"},
+    "max_redeliveries": {"from":"regex","path":"crates/relay-core/src/store/inflight.rs","pattern":"MAX_REDELIVERIES: u32 = (\\d+);"},
+    "dead_cap_thousands": {"from":"regex","path":"crates/relay-core/src/store/inflight.rs","pattern":"DEAD_LETTER_CAP: usize = (\\d+)_\\d{3};"},
+    "dead_cap_units": {"from":"regex","path":"crates/relay-core/src/store/inflight.rs","pattern":"DEAD_LETTER_CAP: usize = \\d+_(\\d{3});"}
+  },
+  "figures": [
+    {
+      "id": "delivery",
+      "width": 980, "height": 290,
+      "label": "A send looks up the recipient in the directory and queues the message in the recipient's inbox. A working lead gets it from a hook, a starting lead from the SessionStart hook, an idle lead from relay-watcher, and a blocked lead keeps it queued while the operator is notified once.",
+      "items": [
+        {"k":"box","at":[0,108,140,56],"role":"ink","title":"agent-msg send","subs":["to an address"]},
+        {"k":"box","at":[190,108,160,56],"role":"model","title":"directory","subs":["address to session"]},
+        {"k":"box","at":[400,108,130,56],"role":"model","title":"inbox","subs":["queue per session"]},
+        {"k":"line","points":[[140,136],[187,136]]},
+        {"k":"line","points":[[350,136],[397,136]],"role":"model"},
+        {"k":"note","at":[190,98],"text":"checks the lease","role":"muted"},
+        {"k":"line","points":[[530,136],[570,136]],"role":"model","arrow":false},
+        {"k":"line","points":[[570,36],[570,246]],"role":"model","arrow":false},
+        {"k":"line","points":[[570,36],[597,36]],"role":"model"},
+        {"k":"box","at":[600,8,150,56],"role":"ink","title":"lead is","subs":["working"]},
+        {"k":"line","points":[[750,36],[777,36]],"role":"code"},
+        {"k":"box","at":[780,8,200,56],"role":"code","title":"PostToolUse or Stop hook","subs":["mid-turn, in the lead's output"]},
+        {"k":"line","points":[[570,106],[597,106]],"role":"model"},
+        {"k":"box","at":[600,78,150,56],"role":"ink","title":"lead is","subs":["starting"]},
+        {"k":"line","points":[[750,106],[777,106]],"role":"code"},
+        {"k":"box","at":[780,78,200,56],"role":"code","title":"SessionStart hook","subs":["delivers the backlog"]},
+        {"k":"line","points":[[570,176],[597,176]],"role":"model"},
+        {"k":"box","at":[600,148,150,56],"role":"ink","title":"lead is","subs":["idle or done"]},
+        {"k":"line","points":[[750,176],[777,176]],"role":"logic"},
+        {"k":"box","at":[780,148,200,56],"role":"logic","title":"relay-watcher","subs":["herdr agent prompt"]},
+        {"k":"line","points":[[570,246],[597,246]],"role":"model"},
+        {"k":"box","at":[600,218,150,56],"role":"ink","title":"lead is","subs":["blocked on a dialog"]},
+        {"k":"line","points":[[750,246],[777,246]],"role":"evidence"},
+        {"k":"box","at":[780,218,200,56],"role":"evidence","title":"held in the inbox","subs":["operator notified once"],"dashed":true}
+      ]
+    },
+    {
+      "id": "lifecycle",
+      "width": 980, "height": 290,
+      "label": "A popped batch moves from the inbox to in flight under a lease of {hook_lease} s for a hook or {watcher_lease} s for the watcher. An acknowledgement ends it. An expired lease returns the batch to the inbox, up to {max_redeliveries} times, and the next expiry moves it to the dead-letter list.",
+      "items": [
+        {"k":"box","at":[0,90,170,62],"role":"model","title":"inbox","subs":["pending, in order"]},
+        {"k":"box","at":[330,90,200,62],"role":"logic","title":"in flight","subs":["lease: hook {hook_lease} s, watcher {watcher_lease} s"]},
+        {"k":"box","at":[690,90,170,62],"role":"evidence","title":"acknowledged","subs":["removed from in flight"]},
+        {"k":"box","at":[330,214,200,62],"role":"ink","title":"dead letters","subs":["newest {dead_cap_thousands},{dead_cap_units} kept"]},
+        {"k":"line","points":[[170,121],[327,121]],"role":"model"},
+        {"k":"note","at":[190,111],"text":"pop","role":"muted"},
+        {"k":"line","points":[[530,121],[687,121]],"role":"logic","weight":2.4},
+        {"k":"note","at":[550,111],"text":"acknowledge","role":"muted"},
+        {"k":"line","points":[[430,90],[430,36],[85,36],[85,87]],"role":"logic","dashed":true},
+        {"k":"note","at":[110,28],"text":"lease expires: back to the inbox, marked redelivered, up to {max_redeliveries} times","role":"muted"},
+        {"k":"line","points":[[430,152],[430,211]],"dashed":true},
+        {"k":"note","at":[446,186],"text":"expires after {max_redeliveries} redeliveries","role":"muted"}
+      ]
+    },
+    {
+      "id": "topology",
+      "width": 980, "height": 336,
+      "let": {"machines": ["machine A", "machine B", "machine C"]},
+      "label": "Team leads run in Herdr tabs on each machine. On every machine, agent-msg and relay-watcher connect over WireGuard to relay-redis on the hub, which holds the inbox queues, the address directory and the escalations.",
+      "items": [
+        {"k":"repeat","over":"machines","let":{"y":"=20 + i * 100"},"items":[
+          {"k":"box","at":[0,"=y",200,64],"role":"code","title":"=row","subs":["leads in Herdr tabs"]},
+          {"k":"box","at":[250,"=y",200,64],"role":"logic","title":"agent-msg","subs":["relay-watcher"]},
+          {"k":"line","points":[[200,"=y + 32"],[247,"=y + 32"]],"role":"code"},
+          {"k":"line","points":[[450,"=y + 32"],[470,"=y + 32"]],"role":"logic","arrow":false}
+        ]},
+        {"k":"line","points":[[470,52],[470,252]],"role":"logic","arrow":false},
+        {"k":"line","points":[[470,152],[647,152]],"role":"logic"},
+        {"k":"text","at":[490,140],"text":"WireGuard","role":"ink","size":13},
+        {"k":"text","at":[490,176],"text":"{hub_addr}:{bus_port}","role":"muted","size":13},
+        {"k":"rect","at":[650,4,330,296],"role":"ink","dashed":true,"fill":false},
+        {"k":"text","at":[670,30],"text":"hub: relay-redis","role":"ink","font":"title"},
+        {"k":"box","at":[675,52,280,62],"role":"model","title":"inbox queues","subs":["one queue per lead"]},
+        {"k":"box","at":[675,134,280,62],"role":"model","title":"directory","subs":["address leases, {directory_lease} s"]},
+        {"k":"box","at":[675,216,280,62],"role":"evidence","title":"escalations","subs":["=join(states, ' > ')"]},
+        {"k":"legend","at":[0,330],"entries":[["code","lead session in a Herdr tab","box"],["logic","relay process on a machine","box"],["model","data held in relay-redis","box"],["evidence","operator decision","box"],["ink","sender, state or transport","box"]]}
+      ]
+    },
+    {
+      "id": "escalation",
+      "width": 980, "height": 250,
+      "label": "A lead files an escalation and keeps working. The operator lists it, investigates it in a Claude Code session, and resolves it. The decision goes back to the lead over the bus and is posted as a comment on the Linear ticket.",
+      "items": [
+        {"k":"box","at":[0,70,160,62],"role":"code","title":"lead","subs":["agent-msg escalate"]},
+        {"k":"box","at":[240,70,170,62],"role":"model","title":"=states[0]","subs":["stored in relay-redis"]},
+        {"k":"box","at":[490,70,180,62],"role":"evidence","title":"=states[1]","subs":["session in the lead's cwd"]},
+        {"k":"box","at":[750,70,130,62],"role":"evidence","title":"=states[2]","subs":["decision recorded"]},
+        {"k":"line","points":[[160,101],[237,101]],"role":"code"},
+        {"k":"line","points":[[410,101],[487,101]],"role":"model"},
+        {"k":"line","points":[[670,101],[747,101]],"role":"evidence"},
+        {"k":"note","at":[176,91],"text":"file","role":"muted"},
+        {"k":"note","at":[418,91],"text":"investigate","role":"muted"},
+        {"k":"note","at":[692,91],"text":"resolve","role":"muted"},
+        {"k":"box","at":[0,170,170,56],"role":"ink","title":"lead keeps working","subs":["other tasks meanwhile"],"dashed":true},
+        {"k":"line","points":[[80,132],[80,167]],"role":"code","dashed":true},
+        {"k":"line","points":[[815,132],[815,150]],"role":"evidence","arrow":false},
+        {"k":"line","points":[[690,150],[865,150]],"role":"evidence","arrow":false},
+        {"k":"line","points":[[690,150],[690,167]],"role":"evidence"},
+        {"k":"line","points":[[865,150],[865,167]],"role":"evidence"},
+        {"k":"box","at":[620,170,140,56],"role":"code","title":"the lead","subs":["gets the decision"]},
+        {"k":"box","at":[790,170,150,56],"role":"ink","title":"Linear ticket","subs":["decision comment"]}
+      ]
+    }
+  ]
+}

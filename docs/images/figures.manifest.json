@@ -1,0 +1,13 @@
+{
+  "files": [
+    "delivery-light.svg",
+    "delivery-dark.svg",
+    "lifecycle-light.svg",
+    "lifecycle-dark.svg",
+    "topology-light.svg",
+    "topology-dark.svg",
+    "escalation-light.svg",
+    "escalation-dark.svg"
+  ],
+  "generated_by": "ixd build"
+}

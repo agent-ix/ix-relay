@@ -7,6 +7,8 @@ CARGO ?= cargo
 .PHONY: help
 help:
 	@echo "Available targets:"
+	@echo "  make figures          - Regenerate docs/images from docs/images/figures.json (ixd build)"
+	@echo "  make figures-check    - Fail when docs/images are stale; writes nothing"
 	@echo "  make fmt              - Format with rustfmt"
 	@echo "  make fmt-check        - Verify formatting (CI gate)"
 	@echo "  make lint             - Clippy with -D warnings"
@@ -110,3 +112,19 @@ test-native-redis:
 .PHONY: test-native-readiness
 test-native-readiness:
 	bash scripts/test-native-readiness.sh
+
+# =============================================================================
+# Documentation figures
+# =============================================================================
+# docs/images/figures.json defines the figures; `ixd build` (agent-ix/ix-diagrams) renders them.
+# Install it with: cargo install --git https://github.com/agent-ix/ix-diagrams ix-diagrams
+
+IXD ?= ixd
+
+.PHONY: figures
+figures:
+	$(IXD) build docs/images/figures.json --out docs/images
+
+.PHONY: figures-check
+figures-check:
+	$(IXD) build docs/images/figures.json --out docs/images --check
