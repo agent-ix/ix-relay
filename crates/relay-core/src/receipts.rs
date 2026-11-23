@@ -59,6 +59,17 @@ pub enum DeliveryEvidence {
     SocketUnconfirmed,
 }
 
+impl DeliveryEvidence {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::HookStdout => "hook_stdout",
+            Self::HerdrPrompt => "herdr_prompt",
+            Self::SocketConfirmed => "socket_confirmed",
+            Self::SocketUnconfirmed => "socket_unconfirmed",
+        }
+    }
+}
+
 /// Source-reported cause of an explicit batch dead-letter decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeadLetterReason {
