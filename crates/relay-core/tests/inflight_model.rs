@@ -738,19 +738,46 @@ fn tc_040_02_a_message_never_acknowledged_is_dead_lettered_after_four_deliveries
     let Some(mut run) = seeded("inflight-dead", 1) else {
         return;
     };
-    let original: Vec<Vec<u8>> = redis::cmd("LRANGE")
-        .arg(run.bus.key("inbox:lead-1"))
-        .arg(0)
-        .arg(-1)
-        .query(&mut run.bus.raw)
+    let (seconds, micros): (i64, i64) = redis::cmd("TIME").query(&mut run.bus.raw).unwrap();
+    let observed_at = seconds * 1_000 + micros / 1_000;
+    let queued = run
+        .bus
+        .relay
+        .receipt_export(&relay_core::receipts::ReceiptRequest {
+            since_ms: 0,
+            until_ms: observed_at,
+            now_ms: observed_at,
+            page_size: 1_000,
+            after: None,
+        })
         .unwrap();
+    assert_eq!(queued.events.len(), 1);
+    let original_id = &queued.events[0].event.original_id;
     let mut deliveries = Vec::new();
+    let mut final_entry = None;
     for _ in 0..8 {
         let shown = pop(&mut run, 1, 1_000);
         if shown.is_empty() {
             break;
         }
         deliveries.push(shown[0]);
+        let rows: Vec<String> = redis::cmd("LRANGE")
+            .arg(run.bus.key("inflight:lead-1"))
+            .arg(0)
+            .arg(-1)
+            .query(&mut run.bus.raw)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        // The list row's three fields and the trailing redelivery spaces are transport framing.
+        final_entry = Some(
+            rows[0]
+                .splitn(4, ' ')
+                .nth(3)
+                .unwrap()
+                .trim_end_matches(' ')
+                .as_bytes()
+                .to_vec(),
+        );
         run.model.now += 1_001;
     }
     assert_eq!(
@@ -774,7 +801,37 @@ fn tc_040_02_a_message_never_acknowledged_is_dead_lettered_after_four_deliveries
         .query(&mut run.bus.raw)
         .unwrap();
     assert!(raw.iter().all(|entry| !entry.ends_with(b" ")));
-    assert_eq!(raw, original);
+    assert_eq!(raw, [final_entry.unwrap()]);
+    let receipts = run
+        .bus
+        .relay
+        .receipt_export(&relay_core::receipts::ReceiptRequest {
+            since_ms: START_MS,
+            until_ms: run.model.now,
+            now_ms: run.model.now,
+            page_size: 1_000,
+            after: None,
+        })
+        .unwrap();
+    assert!(
+        receipts
+            .events
+            .iter()
+            .all(|row| row.event.original_id == *original_id && row.event.target == "lead-1")
+    );
+    let attempts: Vec<_> = receipts
+        .events
+        .iter()
+        .filter(|row| row.event.outcome == relay_core::receipts::ReceiptOutcome::AttemptStarted)
+        .collect();
+    assert_eq!(attempts.len(), 4);
+    let buried = receipts.events.last().unwrap();
+    assert_eq!(
+        buried.event.outcome,
+        relay_core::receipts::ReceiptOutcome::DeadLettered
+    );
+    assert!(attempts[3].event.attempt_id.is_some());
+    assert_eq!(buried.event.attempt_id, attempts[3].event.attempt_id);
 }
 
 /// Tracing: TC-040-03
