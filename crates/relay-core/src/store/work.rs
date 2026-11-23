@@ -188,11 +188,16 @@ impl Relay {
         }
         let script = redis::Script::new(
             r#"
-local first = redis.call('XRANGE', KEYS[1], '-', '+', 'COUNT', 1)
-local rows = redis.call('XRANGE', KEYS[1], '(' .. ARGV[1], '+', 'COUNT', ARGV[2])
 local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local cutoff = math.max(0, now - 604800000)
+local floor = string.format('%.0f', cutoff) .. '-0'
+local lower = '(' .. ARGV[1]
+if tonumber(string.match(ARGV[1], '^(%d+)%-')) < cutoff then lower = floor end
+local first = redis.call('XRANGE', KEYS[1], floor, '+', 'COUNT', 1)
+local rows = redis.call('XRANGE', KEYS[1], lower, '+', 'COUNT', ARGV[2])
 return {redis.call('GET', KEYS[2]) or '', first, rows,
-  tostring(tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000))}
+  string.format('%.0f', now)}
 "#,
         );
         let (start, first, rows, now): (
@@ -206,6 +211,11 @@ return {redis.call('GET', KEYS[2]) or '', first, rows,
             .arg(after)
             .arg(limit + 1)
             .invoke(&mut self.conn)?;
+        let observed_at_ms: i64 = now.parse().map_err(|_| WorkError::InvalidField {
+            field: "history server time",
+        })?;
+        let cutoff_ms = observed_at_ms.saturating_sub(604800000).max(0);
+        let floor_cursor = format!("{cutoff_ms}-0");
         let oldest = first.ids.first().map(|row| row.id.as_str());
         let tuple = |s: &str| -> (u64, u64) {
             s.split_once('-')
@@ -215,12 +225,13 @@ return {redis.call('GET', KEYS[2]) or '', first, rows,
         let oldest_ms = oldest
             .map(|id| tuple(id).0)
             .and_then(|ms| i64::try_from(ms).ok());
-        let available_from_ms = start.parse::<i64>().ok().map(|start| {
-            start
-                .max(oldest_ms.unwrap_or(start))
-                .max(now.parse::<i64>().unwrap_or(0).saturating_sub(604800000))
-        });
-        let truncated = after != "0-0" && oldest.is_some_and(|first| tuple(after) < tuple(first));
+        let available_from_ms = start
+            .parse::<i64>()
+            .ok()
+            .map(|start| start.max(oldest_ms.unwrap_or(start)).max(cutoff_ms));
+        let retained_lower = oldest.unwrap_or(&floor_cursor);
+        let truncated =
+            after != "0-0" && available_from_ms.is_some() && tuple(after) < tuple(retained_lower);
         let has_more = rows.ids.len() > limit;
         let mut events = Vec::new();
         for row in rows.ids.into_iter().take(limit) {
@@ -245,13 +256,20 @@ return {redis.call('GET', KEYS[2]) or '', first, rows,
             let binding: WorkBinding = decode("work history", &field("binding")?)?;
             binding.validate()?;
             let change: WorkChange = decode("work history", &field("change")?)?;
+            let at_ms = field("at_ms")?
+                .parse::<i64>()
+                .map_err(|_| WorkError::InvalidField {
+                    field: "history timestamp",
+                })?;
+            if u64::try_from(at_ms).ok() != Some(tuple(&row.id).0) {
+                return Err(WorkError::InvalidField {
+                    field: "history timestamp",
+                }
+                .into());
+            }
             events.push(WorkEvent {
                 id: row.id.clone(),
-                at_ms: field("at_ms")?
-                    .parse()
-                    .map_err(|_| WorkError::InvalidField {
-                        field: "history timestamp",
-                    })?,
+                at_ms,
                 binding: (&binding).into(),
                 change,
             });
@@ -259,13 +277,18 @@ return {redis.call('GET', KEYS[2]) or '', first, rows,
         Ok(WorkEventPage {
             version: 1,
             available_from_ms,
-            observed_at_ms: now.parse().map_err(|_| WorkError::InvalidField {
-                field: "history server time",
-            })?,
+            observed_at_ms,
             truncated,
-            next_cursor: events
-                .last()
-                .map_or_else(|| after.to_owned(), |e| e.id.clone()),
+            next_cursor: events.last().map_or_else(
+                || {
+                    if tuple(after) < tuple(&floor_cursor) {
+                        floor_cursor
+                    } else {
+                        after.to_owned()
+                    }
+                },
+                |e| e.id.clone(),
+            ),
             has_more,
             events,
         })
