@@ -417,6 +417,8 @@ mod tests {
             other.status_request_key(&request),
             other.status_reply_key(&request, &agent),
             other.log_key(),
+            other.receipt_stream_key(),
+            other.receipt_meta_key(),
             other.health_hooks_key(),
             other.health_hooks_shipped_key(),
             other.esc_key(&id),
