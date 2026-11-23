@@ -1,7 +1,7 @@
 //! Test-only helpers shared by the watcher's unit tests.
 
 use std::{
-    io::{Read, Write},
+    io::{BufReader, Read, Write},
     net::TcpStream,
     sync::{
         Arc, Mutex,
@@ -44,22 +44,36 @@ pub(crate) enum Fault {
 /// Observe a new request only when reading new client bytes after a backend reply.
 /// Commands already buffered by the RESP parser stay in their existing pipeline.
 struct RequestReader<R> {
-    stream: R,
+    stream: BufReader<R>,
     replied: Arc<AtomicBool>,
     new_request: bool,
+    command_start: bool,
 }
 
 impl<R: Read> Read for RequestReader<R> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        let count = self.stream.read(buffer)?;
-        if count > 0 && self.replied.swap(false, Ordering::SeqCst) {
-            self.new_request = true;
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let fresh_command = self.command_start && self.stream.buffer().is_empty();
+        // Keep decoder lookahead in this buffer, where command-start attribution is visible.
+        // Socket reads remain buffered; this does not issue a syscall per byte.
+        let count = self.stream.read(&mut buffer[..1])?;
+        if count > 0 {
+            if fresh_command && self.replied.swap(false, Ordering::SeqCst) {
+                self.new_request = true;
+            }
+            self.command_start = false;
         }
         Ok(count)
     }
 }
 
-fn read_command(parser: &mut redis::Parser, reader: impl Read) -> Option<Vec<Vec<u8>>> {
+fn read_command<R: Read>(
+    parser: &mut redis::Parser,
+    reader: &mut RequestReader<R>,
+) -> Option<Vec<Vec<u8>>> {
+    reader.command_start = true;
     redis::from_redis_value(parser.parse_value(reader).ok()?).ok()
 }
 
@@ -120,23 +134,26 @@ impl FaultProxy {
                 // Client to Redis: consult the policy per command.
                 thread::spawn(move || {
                     let mut client_read = RequestReader {
-                        stream: client_read,
+                        stream: BufReader::new(client_read),
                         replied,
                         new_request: true,
+                        command_start: true,
                     };
                     let mut server = server;
                     let mut parser = redis::Parser::new();
                     let mut silent = false;
+                    let mut request_index = None;
                     while let Some(command) = read_command(&mut parser, &mut client_read) {
                         let Some(name) = command.first() else { break };
                         let name = String::from_utf8_lossy(name).to_ascii_uppercase();
                         seen.lock().unwrap().push(name.clone());
                         let mut groups = requests.lock().unwrap();
-                        if client_read.new_request || groups.is_empty() {
+                        if client_read.new_request || request_index.is_none() {
                             groups.push(Vec::new());
+                            request_index = Some(groups.len() - 1);
                             client_read.new_request = false;
                         }
-                        groups.last_mut().unwrap().push(name.clone());
+                        groups[request_index.unwrap()].push(name.clone());
                         drop(groups);
                         if silent {
                             continue;
@@ -149,7 +166,10 @@ impl FaultProxy {
                                 }
                             }
                             Fault::Cut => {
-                                let _ = client_read.stream.shutdown(std::net::Shutdown::Both);
+                                let _ = client_read
+                                    .stream
+                                    .get_ref()
+                                    .shutdown(std::net::Shutdown::Both);
                                 let _ = server.shutdown(std::net::Shutdown::Both);
                                 break;
                             }
@@ -185,9 +205,18 @@ pub(crate) fn raw_command(url: &str, args: &[&str]) -> String {
 mod tests {
     use super::*;
     use ix_trace_rs::trace;
-    use redis::Commands;
+    use redis::{Commands, IntoConnectionInfo};
     use relay_test_support::Bus;
     use std::{io::Cursor, time::Duration};
+
+    fn connection(proxy: &FaultProxy) -> redis::Connection {
+        let info = proxy.url.as_str().into_connection_info().unwrap();
+        let settings = info.redis_settings().clone().set_skip_set_lib_name();
+        redis::Client::open(info.set_redis_settings(settings))
+            .unwrap()
+            .get_connection()
+            .unwrap()
+    }
 
     #[test]
     #[trace("FR-038-AC-5", "FR-045-AC-22")]
@@ -204,6 +233,7 @@ mod tests {
             "\r\n*1\r\n$4\r\nSCAN\r\n".repeat(1024)
         );
         let pipeline = redis::pipe()
+            .cmd("PING")
             .cmd("EVAL")
             .arg(&script)
             .arg(0)
@@ -215,15 +245,23 @@ mod tests {
         assert!(pipeline.len() > 4096);
         let replied = Arc::new(AtomicBool::new(true));
         let mut reader = RequestReader {
-            stream: Fragments(Cursor::new(pipeline)),
+            stream: BufReader::new(Fragments(Cursor::new(pipeline))),
             replied: Arc::clone(&replied),
             new_request: true,
+            command_start: true,
         };
         let mut parser = redis::Parser::new();
+        assert_eq!(
+            read_command(&mut parser, &mut reader).unwrap(),
+            [b"PING".to_vec()]
+        );
+        reader.new_request = false;
+        // The next command starts in the current buffer but extends across later reads.
+        replied.store(true, Ordering::SeqCst);
         let first = read_command(&mut parser, &mut reader).unwrap();
         assert_eq!(first[0], b"EVAL");
         assert_eq!(first[1], script.as_bytes());
-        assert!(reader.new_request);
+        assert!(!reader.new_request);
         reader.new_request = false;
         // Even an immediate backend reply must not split already buffered commands.
         replied.store(true, Ordering::SeqCst);
@@ -241,10 +279,7 @@ mod tests {
             return;
         };
         let proxy = FaultProxy::start(&bus.url, |_| Fault::Forward);
-        let mut connection = redis::Client::open(proxy.url.as_str())
-            .unwrap()
-            .get_connection()
-            .unwrap();
+        let mut connection = connection(&proxy);
         let script = format!(
             "local x = [=[{}]=]; return 1",
             "\r\n*1\r\n$4\r\nSCAN\r\n".repeat(1024)
@@ -279,11 +314,12 @@ mod tests {
         };
         for fault in [Fault::Forward, Fault::Cut, Fault::Silent] {
             let key = bus.key(&format!("{fault:?}"));
-            let proxy = FaultProxy::start(&bus.url, move |_| fault);
-            let mut connection = redis::Client::open(proxy.url.as_str())
-                .unwrap()
-                .get_connection()
-                .unwrap();
+            let proxy =
+                FaultProxy::start(
+                    &bus.url,
+                    move |name| if name == "SET" { fault } else { Fault::Forward },
+                );
+            let mut connection = connection(&proxy);
             connection
                 .set_read_timeout(Some(Duration::from_millis(100)))
                 .unwrap();
