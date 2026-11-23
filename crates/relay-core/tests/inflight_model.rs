@@ -510,7 +510,9 @@ impl Run {
 }
 
 fn decode(raw: &[u8]) -> Message {
-    serde_json::from_slice(raw).expect("a stored message")
+    relay_core::receipts::InboxEntry::try_from(raw)
+        .expect("a stored message")
+        .message
 }
 
 fn cases() -> ProptestConfig {
