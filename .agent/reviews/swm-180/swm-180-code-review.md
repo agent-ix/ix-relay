@@ -69,3 +69,15 @@ The computed matrix reports all4 FR066 criteria and all8 FR067 criteria tagged. 
 - FR-067-AC-6: Request an interval before instrumentation, an interval with a known recording gap, a source that cannot be read, and a covered interval with no events. Only the last is complete empty history. A request with more than 1,000 matching events returns bounded pages and continuation metadata without silently dropping the remainder.
 - FR-067-AC-7: Snapshot inbox, in-flight and receipt state, export all pages twice and compare state byte for byte. Reads leave all three unchanged, including events past their retention age that have not yet been trimmed by a writer. Exported data contains none of a seeded secret message body, transcript or credential value and no prose-derived semantic classification.
 - FR-067-AC-8: Exercise successful delivery, definite failure, ambiguous failure, lease recovery, exhausted redelivery, stale acknowledgement and a plain-inbox pop with receipt collection enabled. Existing ordering, markings and recovery outcomes remain unchanged; ordinary message-history JSON still contains each original send once and no requeue entry.
+
+## Additional review (disposition pass 3)
+
+Inspected only dea4cf..f0b4137517de4cbbb77791b50b28a5c56994fbd2: one test file, crates/agent-msg/tests/send_state.rs. No production behavior changed, no new findings, and original findings remain fixed.
+
+The stalled-Redis fixture previously searched raw TCP chunks for LLEN, which can occur inside the enqueue Lua script. That interception could prevent enqueue rather than stall the subsequent bounded state probe. The supplied exact-main reproduction log shows exit1/error35 from that mistaken interception. The replacement uses the existing redis::Parser to read complete RESP commands and repacks binary arguments unchanged. It stalls only an EVAL with exactly two keys matching the expected session inbox and watcher heartbeat, which agrees with Relay::recipient_probe. Unrelated scripts containing LLEN are forwarded. Its classification regression checks two framed commands, positive classification and both wrong-key exclusions.
+
+The existing degradation test still asserts status0, exact plain queued output, a lower200ms wait, upper healthy baseline plus250ms+150ms, and two queued inbox messages. No assertion, deadline or request-count oracle is relaxed. Independent isolated loopback Redis run passed all5 send_state tests and all4 round_trips tests. Local merge-tree is conflict-free (treef970beb08add204d991d21cd18ec219918edfed4). Aggregate gate remains with the lead.
+
+Examined FR-041-AC-3, spec/functional/FR-041-send-prints-the-recipients-state.md: Given a Redis that stops answering once the message is queued, `send` prints the plain `queued for <name>`, exits 0, takes no more than the same send against a healthy Redis plus 250 ms and a margin of 150 ms (so a bound of a second, or one per reply, fails), and the message is in the inbox.
+
+Latest scoped verdict: PASS/MERGEABLE at f0b4137517de4cbbb77791b50b28a5c56994fbd2, subject to the lead's final gate and exact-head merge.
