@@ -27,13 +27,13 @@ mod tests;
 
 use std::sync::Arc;
 
+use deliverer::SocketDeliverer;
 use relay_core::PaneId;
 
 use crate::{
     deliver::{BatchTarget, DeliverError, Deliverer, RegisteredLead, Settlement},
     herdr::{AgentGet, CheckJob, Herdr, Layout, ProcessError},
 };
-use deliverer::SocketDeliverer;
 
 /// The watcher's delivery: `herdr` alone, or the socket first with herdr behind
 /// it. With no socket (the default, `DeliveryMode::Herdr`) this is `herdr`
@@ -105,7 +105,7 @@ impl<H: Deliverer> Deliverer for Routed<H> {
         target: &BatchTarget<'_>,
         pane: &PaneId,
         text: &str,
-    ) -> Result<(), DeliverError> {
+    ) -> Result<relay_core::receipts::DeliveryEvidence, DeliverError> {
         let Some(socket) = &self.socket else {
             return self.herdr.deliver_to(target, pane, text);
         };
@@ -117,7 +117,7 @@ impl<H: Deliverer> Deliverer for Routed<H> {
             return self.herdr.deliver_to(target, pane, text);
         }
         match socket.deliver(target, text) {
-            Ok(()) => Ok(()),
+            Ok(evidence) => Ok(evidence),
             Err(deliverer::SocketError::NotSent(why)) => {
                 eprintln!(
                     "relay-watcher: {}: inbox socket not used ({why}); typing it in through herdr",

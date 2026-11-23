@@ -129,6 +129,14 @@ impl Keys {
         format!("{}log", self.prefix)
     }
 
+    pub(super) fn receipt_stream_key(&self) -> String {
+        format!("{}receipts", self.prefix)
+    }
+
+    pub(super) fn receipt_meta_key(&self) -> String {
+        format!("{}receipt-meta", self.prefix)
+    }
+
     pub(super) fn health_hooks_key(&self) -> String {
         format!("{}health:hooks", self.prefix)
     }
@@ -283,6 +291,8 @@ mod tests {
             ("status_request_key", relay.status_request_key(&request)),
             ("status_reply_key", relay.status_reply_key(&request, &agent)),
             ("log_key", relay.log_key()),
+            ("receipt_stream_key", relay.receipt_stream_key()),
+            ("receipt_meta_key", relay.receipt_meta_key()),
             ("health_hooks_key", relay.health_hooks_key()),
             ("health_hooks_shipped_key", relay.health_hooks_shipped_key()),
             ("esc_key", relay.esc_key(&id)),
@@ -332,6 +342,8 @@ mod tests {
             ("status_request_key", "p:status:request:r1"),
             ("status_reply_key", "p:status:reply:r1:lead-a"),
             ("log_key", "p:log"),
+            ("receipt_stream_key", "p:receipts"),
+            ("receipt_meta_key", "p:receipt-meta"),
             ("health_hooks_key", "p:health:hooks"),
             ("health_hooks_shipped_key", "p:health:hooks-shipped"),
             ("esc_key", "p:esc:e1"),

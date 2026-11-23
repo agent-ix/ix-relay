@@ -143,7 +143,8 @@ fn message() -> impl Strategy<Value = Message> {
 /// `messages` written to `r`'s inbox exactly as they are (no send-time
 /// checks, so hostile text reaches the pop too), then popped once.
 fn pop_once(r: &mut Relay, messages: &[Message], budget: usize) -> crate::BudgetPopResult {
-    r.requeue_front(&name("r"), messages).unwrap();
+    r.requeue_front(&name("r"), &inbox_entries(messages))
+        .unwrap();
     pop_acked(r, budget)
 }
 
@@ -308,4 +309,14 @@ fn tc_018_04_newline_heavy_messages_are_counted_as_printed() {
     let popped = pop_once(&mut r, &vec![heavy; 3], HOOK_BUDGET);
     assert_eq!(popped.messages.len(), 1, "5,000 printed bytes each");
     assert_eq!(popped.pending, 2);
+}
+
+fn inbox_entries(messages: &[Message]) -> Vec<crate::receipts::InboxEntry> {
+    messages
+        .iter()
+        .map(|message| {
+            let json = serde_json::to_vec(message).unwrap();
+            crate::receipts::InboxEntry::try_from(json.as_slice()).unwrap()
+        })
+        .collect()
 }

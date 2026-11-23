@@ -16,7 +16,12 @@ use std::{
     time::Duration,
 };
 
-use relay_core::{BatchId, PaneId, SessionId, socket_status::SocketStatus};
+use claude_wire::{
+    ControlLine, DriftReason, Ignored, TranscriptMatch, Verdict, parse_control_line,
+};
+use relay_core::{
+    BatchId, PaneId, SessionId, receipts::DeliveryEvidence, socket_status::SocketStatus,
+};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -27,9 +32,6 @@ use super::{
     transcript,
 };
 use crate::deliver::{BatchTarget, DeliverError, Deliverer, SettleAction};
-use claude_wire::{
-    ControlLine, DriftReason, Ignored, TranscriptMatch, Verdict, parse_control_line,
-};
 
 const SESSION: &str = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
 const DOMAIN: &str = "linux:machine:pid:[1]";
@@ -278,16 +280,18 @@ impl Rig {
     }
 
     fn send(&self, text: &str) -> Result<(), SocketError> {
-        self.deliverer.deliver(
-            &BatchTarget {
-                kind: "claude",
-                batch: BatchId::new(1),
-                lead: "ea",
-                session: Some(&self.session),
-                senders: "hub:EA:1",
-            },
-            text,
-        )
+        self.deliverer
+            .deliver(
+                &BatchTarget {
+                    kind: "claude",
+                    batch: BatchId::new(1),
+                    lead: "ea",
+                    session: Some(&self.session),
+                    senders: "hub:EA:1",
+                },
+                text,
+            )
+            .map(drop)
     }
 }
 
@@ -901,7 +905,7 @@ fn routed_send(
         &pane,
         text,
     );
-    (result, claude, home.dir)
+    (result.map(drop), claude, home.dir)
 }
 
 /// Tracing: TC-044-06
@@ -957,13 +961,19 @@ fn tc_044_06_a_missing_session_a_refused_connection_and_no_registry_go_to_herdr(
     };
     assert_eq!(
         routed.deliver_to(&target(Some(&session)), &pane, "a"),
-        Ok(())
+        Ok(DeliveryEvidence::HerdrPrompt)
     );
     // A lead that registered no session id.
-    assert_eq!(routed.deliver_to(&target(None), &pane, "b"), Ok(()));
+    assert_eq!(
+        routed.deliver_to(&target(None), &pane, "b"),
+        Ok(DeliveryEvidence::HerdrPrompt)
+    );
     // A session no record names.
     let other: SessionId = "cccccccc-3333-4333-8333-cccccccccccc".parse().unwrap();
-    assert_eq!(routed.deliver_to(&target(Some(&other)), &pane, "c"), Ok(()));
+    assert_eq!(
+        routed.deliver_to(&target(Some(&other)), &pane, "c"),
+        Ok(DeliveryEvidence::HerdrPrompt)
+    );
     assert_eq!(*herdr.typed.lock().unwrap(), ["a", "b", "c"]);
     let status = SocketStatus::read(&home.status()).unwrap();
     assert!(
@@ -1187,7 +1197,7 @@ fn tc_044_01_herdr_alone_passes_every_batch_straight_through() {
         &pane,
         "typed",
     );
-    assert_eq!(got, Ok(()));
+    assert_eq!(got, Ok(DeliveryEvidence::HerdrPrompt));
     assert_eq!(*herdr.typed.lock().unwrap(), ["typed"]);
 }
 
@@ -1457,7 +1467,10 @@ fn tc_044_06_an_ambiguous_socket_attempt_sends_the_redelivery_through_herdr() {
         session: Some(&session),
         senders: "s",
     };
-    assert_eq!(routed.deliver_to(&target, &pane, "two"), Ok(()));
+    assert_eq!(
+        routed.deliver_to(&target, &pane, "two"),
+        Ok(DeliveryEvidence::HerdrPrompt)
+    );
     assert_eq!(*herdr.typed.lock().unwrap(), ["two"]);
 }
 
@@ -1512,7 +1525,10 @@ fn tc_044_16_the_reply_socket_is_bound_later_when_its_directory_appears() {
     // The directory appears, with a session in it.
     fs::create_dir(&sockets).unwrap();
     let claude = FakeClaude::start(&home.socket(4242), home.transcript(SESSION), Act::Consume);
-    assert_eq!(deliverer.deliver(&target, "two"), Ok(()));
+    assert_eq!(
+        deliverer.deliver(&target, "two"),
+        Ok(DeliveryEvidence::SocketConfirmed)
+    );
     assert!(deliverer.reply_path().is_some());
     assert_eq!(claude.received().len(), 1);
     assert!(
@@ -2582,9 +2598,12 @@ fn tc_044_06_a_receiver_that_never_confirms_gets_one_post_and_then_herdr_at_prod
     let _ = routed.settle();
     assert_eq!(
         routed.deliver_to(&target(2), &pane, "one (redelivered)"),
-        Ok(())
+        Ok(DeliveryEvidence::HerdrPrompt)
     );
-    assert_eq!(routed.deliver_to(&target(3), &pane, "two"), Ok(()));
+    assert_eq!(
+        routed.deliver_to(&target(3), &pane, "two"),
+        Ok(DeliveryEvidence::HerdrPrompt)
+    );
     assert_eq!(claude.received().len(), 1, "exactly one socket post");
     assert_eq!(*herdr.typed.lock().unwrap(), ["one (redelivered)", "two"]);
 }
@@ -2641,7 +2660,10 @@ fn tc_044_14_a_healthy_lead_after_a_wedged_one_is_deferred_not_flagged() {
     assert!(h.received().is_empty(), "not posted");
     // Next tick: a fresh budget, and the healthy lead is not suspect.
     let _ = deliverer.settle();
-    assert_eq!(send("healthy", &healthy, 2), Ok(()));
+    assert_eq!(
+        send("healthy", &healthy, 2),
+        Ok(DeliveryEvidence::SocketConfirmed)
+    );
     assert_eq!(h.received().len(), 1);
 }
 
@@ -3171,7 +3193,7 @@ fn tc_044_12_a_delivered_message_with_no_transcript_line_is_acked_after_the_grac
         thread::sleep(Duration::from_millis(10));
     }
     let s = acked.expect("acknowledged after the grace");
-    assert_eq!(s.action, SettleAction::Ack, "{s:?}");
+    assert_eq!(s.action, SettleAction::AckUnconfirmed, "{s:?}");
     assert!(s.why.contains("delivered_unconfirmed"), "{s:?}");
     assert!(s.notice.is_none(), "not a 'never approved' notice");
     let notes = SocketStatus::read(&rig.home.status())
@@ -3453,7 +3475,7 @@ fn tc_044_12_an_approved_batch_adopted_after_a_restart_continues_its_grace() {
                 SettleAction::DeadLetter,
                 "an approved message is never dead-lettered as never approved: {s:?}"
             );
-            if s.action == SettleAction::Ack {
+            if s.action == SettleAction::AckUnconfirmed {
                 acked = Some(s);
             }
         }
@@ -3989,6 +4011,7 @@ fn tc_044_11_a_settlement_failed_note_is_cleared_only_by_its_own_batch() {
         action: SettleAction::Ack,
         why: "x".into(),
         notice: None,
+        dead_letter_reason: None,
     };
     rig.deliverer.applied(&other, &Ok(1));
     let _ = rig.deliverer.settle();
@@ -4034,7 +4057,11 @@ fn tc_044_15_an_untrusted_status_directory_is_alerted_once_and_delivery_goes_on(
             },
             &format!("m{n}"),
         );
-        assert_eq!(got, Ok(()), "delivery goes on");
+        assert_eq!(
+            got,
+            Ok(DeliveryEvidence::SocketConfirmed),
+            "delivery goes on"
+        );
     }
     // A successful socket write can precede the receiver thread parsing it.
     // Observe all three arrivals rather than racing an immediate snapshot.
@@ -4187,7 +4214,7 @@ fn tc_046_12_settle_acks_an_unrecognised_shape_with_a_note() {
     let settlements = rig.deliverer.settle();
     let acks: Vec<_> = settlements
         .iter()
-        .filter(|s| matches!(s.action, SettleAction::Ack))
+        .filter(|s| matches!(s.action, SettleAction::AckUnconfirmed))
         .collect();
     assert_eq!(acks.len(), 1);
     assert!(
@@ -4386,7 +4413,7 @@ fn route_as(routed: &Routed<FakeHerdr>, kind: &str, session: &SessionId, text: &
         &pane,
         text,
     );
-    assert_eq!(got, Ok(()), "{kind}");
+    assert!(got.is_ok(), "{kind}: {got:?}");
 }
 
 /// Tracing: TC-054-01
@@ -4710,7 +4737,10 @@ fn tc_055_05_the_process_lookup_runs_unlocked_and_at_most_once_per_period() {
         session: Some(&session),
         senders: "hub:EA:1",
     };
-    assert_eq!(deliverer.deliver(&target, "one"), Ok(()));
+    assert_eq!(
+        deliverer.deliver(&target, "one"),
+        Ok(DeliveryEvidence::SocketConfirmed)
+    );
     probe.lookups.lock().unwrap().clear();
 
     for _ in 0..5 {
@@ -5021,7 +5051,11 @@ fn tc_046_19_drift_is_kept_for_at_most_sixteen_versions_without_affecting_delive
             },
             &format!("message {n}"),
         );
-        assert_eq!(sent, Ok(()), "delivery {n} proceeds as without drift");
+        assert_eq!(
+            sent,
+            Ok(DeliveryEvidence::SocketUnconfirmed),
+            "delivery {n} proceeds as without drift"
+        );
     }
     let status = SocketStatus::read(&home.status()).unwrap();
     assert_eq!(status.versions.len(), 16);

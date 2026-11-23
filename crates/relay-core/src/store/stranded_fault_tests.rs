@@ -117,7 +117,7 @@ fn tc_053_07_a_registration_changed_in_the_window_between_read_and_move_moves_no
     for lead in [&a, &b] {
         r.register(lead).unwrap();
     }
-    r.requeue_front(&a.name, &[message("one"), message("two")])
+    r.requeue_front(&a.name, &inbox_entries(&[message("one"), message("two")]))
         .unwrap();
     let inbox_a = r.keys.inbox_key(&a.name);
 
@@ -228,13 +228,13 @@ proptest! {
                     // Mail is sent only to a registration that exists: a send to a
                     // pruned one fails with `UnknownAgent` and queues nothing.
                     if registered {
-                        r.requeue_front(&old, &[message(&text)]).unwrap();
+                        r.requeue_front(&old, &inbox_entries(&[message(&text)])).unwrap();
                         sent.push(text);
                     }
                 }
                 Step::SendNew => {
                     let text = format!("m{}", sent.len());
-                    r.requeue_front(&new, &[message(&text)]).unwrap();
+                    r.requeue_front(&new, &inbox_entries(&[message(&text)])).unwrap();
                     sent.push(text);
                 }
                 Step::ReadNew => {
@@ -291,6 +291,8 @@ proptest! {
                             .arg("old-lead")
                             .arg(raw_a)
                             .arg(1000)
+                            .arg(r.keys.receipt_stream_key())
+                            .arg(r.keys.receipt_meta_key())
                             .invoke(&mut r.conn);
                     }
                 }
@@ -346,4 +348,14 @@ impl Relay {
     fn bury_stranded_for_model(&mut self, seen: &Registration) -> bool {
         matches!(self.dead_letter_stranded(seen), Ok(Buried::Done(_)))
     }
+}
+
+fn inbox_entries(messages: &[Message]) -> Vec<crate::receipts::InboxEntry> {
+    messages
+        .iter()
+        .map(|message| {
+            let json = serde_json::to_vec(message).unwrap();
+            crate::receipts::InboxEntry::try_from(json.as_slice()).unwrap()
+        })
+        .collect()
 }

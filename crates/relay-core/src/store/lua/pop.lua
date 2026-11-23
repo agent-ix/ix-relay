@@ -1,7 +1,8 @@
 -- KEYS: inbox, inflight, dead letters, batch id counter
 -- ARGV: max count, max bytes, weight slack, popper letter, lease ms, now override,
 --       max redeliveries, dead letter cap, max in-flight batches, max in-flight bytes,
---       in-flight row overhead, forwarded notice bytes
+--       in-flight row overhead, forwarded notice bytes, native queue identity,
+--       receipt stream, receipt metadata
 -- Returns {status, pending, batch id (0 for none), {entries}, {redelivery counts},
 --          stuck, evicted}. Status 0 took what it returned (maybe nothing: an empty
 -- inbox), 1 took nothing because the in-flight caps would be exceeded, -1 took
@@ -14,7 +15,7 @@ local function unreadable()
     local counter = redis.call('GET', KEYS[4])
     return counter and (#counter > 17 or string.find(counter, '%D')) and true or false
 end
-if unreadable() then return { -1, 0, 0, {}, {}, 0, 0 } end
+if unreadable() or not receipt_ready() then return { -1, 0, 0, {}, {}, 0, 0 } end
 local now = now_ms(ARGV[6])
 local reaped = reap(KEYS[1], KEYS[2], KEYS[3], now, tonumber(ARGV[7]), tonumber(ARGV[8]))
 local stuck, evicted = reaped[3], reaped[4]
@@ -46,13 +47,14 @@ local function count(s, pattern)
 end
 local total, n, stored = 0, 0, 0
 for i, v in ipairs(items) do
-    local w = #v + slack
-        + 3 * count(v, '\\n')
-        + count(v, '\\[rbf]')
-        + 2 * count(v, '[%z\1-\31\127]')
-        + count(v, '\194[\128-\159]')
-        + count(v, '\216\156')
-        + (string.find(v, ',"forwarded":true', 1, true) and tonumber(ARGV[12]) or 0)
+    local visible = receipt_without_metadata(v)
+    local w = #visible + slack
+        + 3 * count(visible, '\\n')
+        + count(visible, '\\[rbf]')
+        + 2 * count(visible, '[%z\1-\31\127]')
+        + count(visible, '\194[\128-\159]')
+        + count(visible, '\216\156')
+        + (string.find(visible, ',"forwarded":true', 1, true) and tonumber(ARGV[12]) or 0)
     if i > 1 and total + w > budget then break end
     total = total + w
     stored = stored + #v + tonumber(ARGV[11])
@@ -71,8 +73,20 @@ local deadline = now + tonumber(ARGV[5])
 local taken, counts = {}, {}
 for i = 1, n do
     local _, c = split_count(items[i])
-    redis.call('RPUSH', KEYS[2], make_row(id, ARGV[4], deadline, items[i]))
-    taken[i] = items[i]
+    local entry = items[i]
+    local metadata = receipt_metadata(entry)
+    if metadata then
+        metadata.attempt = 'claim/' .. ARGV[13] .. '/' .. tostring(id)
+        metadata.delivered = nil
+        entry = receipt_entry(entry, metadata)
+        receipt_append(entry, 'attempt_started', now)
+        if c > 0 then receipt_append(entry, 'redelivered', now, nil, 'lease_recovery') end
+        receipt_pending(entry, now)
+    else
+        receipt_gap(now)
+    end
+    redis.call('RPUSH', KEYS[2], make_row(id, ARGV[4], deadline, entry))
+    taken[i] = entry
     counts[i] = c
 end
 redis.call('LTRIM', KEYS[1], n, -1)

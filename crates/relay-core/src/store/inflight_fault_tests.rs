@@ -39,7 +39,7 @@ fn a_requeue_that_fails_after_its_first_write_never_leaves_a_message_nowhere() {
         .unwrap()
         .with_prefix(format!("test:{}:inflight-fault:", std::process::id()));
     let lead = name("r");
-    r.requeue_front(&lead, &[message("one"), message("two")])
+    r.requeue_front(&lead, &inbox_entries(&[message("one"), message("two")]))
         .unwrap();
     let batch = r
         .pop_inbox_budget(
@@ -64,6 +64,8 @@ fn a_requeue_that_fails_after_its_first_write_never_leaves_a_message_nowhere() {
         .arg("r")
         .arg("not-a-number")
         .arg("h")
+        .arg(r.keys.receipt_stream_key())
+        .arg(r.keys.receipt_meta_key())
         .query(&mut r.conn);
     assert!(failed.is_err(), "XADD refuses a cap that is not a number");
 
@@ -84,4 +86,14 @@ fn a_requeue_that_fails_after_its_first_write_never_leaves_a_message_nowhere() {
         .arg(r.keys.inflight_seq_key())
         .exec(&mut r.conn)
         .unwrap();
+}
+
+fn inbox_entries(messages: &[Message]) -> Vec<crate::receipts::InboxEntry> {
+    messages
+        .iter()
+        .map(|message| {
+            let json = serde_json::to_vec(message).unwrap();
+            crate::receipts::InboxEntry::try_from(json.as_slice()).unwrap()
+        })
+        .collect()
 }

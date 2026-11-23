@@ -70,6 +70,7 @@ mod named_focus;
 mod named_focus_scripts;
 #[cfg(test)]
 mod pop_budget_tests;
+pub(crate) mod receipts;
 mod scan;
 mod status;
 mod stranded;
@@ -637,22 +638,7 @@ return added
         {
             stored.to = Target::Agent(address.to_string().parse()?);
         }
-        let json = encode(&stored);
-        let mut pipe = redis::pipe();
-        pipe.atomic();
-        for name in &recipients {
-            pipe.rpush(self.keys.inbox_key(name), &json).ignore();
-        }
-        pipe.cmd("XADD")
-            .arg(self.keys.log_key())
-            .arg("MAXLEN")
-            .arg("~")
-            .arg(LOG_CAP)
-            .arg("*")
-            .arg("msg")
-            .arg(&json)
-            .ignore();
-        let () = pipe.query(&mut self.conn)?;
+        self.enqueue_receipted(&stored, &recipients, &[])?;
         Ok(recipients)
     }
 
@@ -744,28 +730,33 @@ return added
     /// Also appends a wake entry (field `requeued`, no `msg`) to the message log
     /// in the same transaction, so a watcher blocked on the log looks at the
     /// inbox now instead of at its next sweep; [`Relay::log`] skips it.
-    pub fn requeue_front(&mut self, agent: &AgentName, messages: &[Message]) -> Result<()> {
+    pub fn requeue_front(
+        &mut self,
+        agent: &AgentName,
+        messages: &[crate::receipts::InboxEntry],
+    ) -> Result<()> {
         if messages.is_empty() {
             return Ok(());
         }
-        let key = self.keys.inbox_key(agent);
-        // LPUSH pushes each argument onto the head in turn, so the last
-        // argument ends up first; pushing in reverse restores the original
-        // front-to-back order.
-        let jsons: Vec<String> = messages.iter().rev().map(encode).collect();
-        let mut pipe = redis::pipe();
-        pipe.atomic();
-        pipe.lpush(key, jsons).ignore();
-        pipe.cmd("XADD")
+        let body = inflight::script(
+            include_str!("store/lua/common.lua"),
+            include_str!("store/lua/receipt_front.lua"),
+        );
+        let mut command = redis::cmd("EVAL");
+        command
+            .arg(body)
+            .arg(2)
+            .arg(self.keys.inbox_key(agent))
             .arg(self.keys.log_key())
-            .arg("MAXLEN")
-            .arg("~")
-            .arg(LOG_CAP)
-            .arg("*")
-            .arg("requeued")
             .arg(agent.as_str())
-            .ignore();
-        let () = pipe.query(&mut self.conn)?;
+            .arg(LOG_CAP);
+        for entry in messages {
+            command.arg(&entry.stored);
+        }
+        let _: i64 = command
+            .arg(self.keys.receipt_stream_key())
+            .arg(self.keys.receipt_meta_key())
+            .query(&mut self.conn)?;
         Ok(())
     }
 
@@ -785,8 +776,19 @@ return added
         // Bytes, not `String`: the server has already removed the batch when
         // the reply is converted, so an entry that is not UTF-8 must be
         // reported as rejected, not fail the pop and lose its neighbours.
-        let raw: Option<Vec<Vec<u8>>> = self.conn.lpop(&key, Some(max))?;
-        let (messages, rejected) = decode_entries(&key, raw.unwrap_or_default());
+        let body = inflight::script(
+            include_str!("store/lua/common.lua"),
+            include_str!("store/lua/receipt_plain_pop.lua"),
+        );
+        let raw: Vec<Vec<u8>> = redis::cmd("EVAL")
+            .arg(body)
+            .arg(1)
+            .arg(&key)
+            .arg(max.get())
+            .arg(self.keys.receipt_stream_key())
+            .arg(self.keys.receipt_meta_key())
+            .query(&mut self.conn)?;
+        let (messages, rejected) = decode_entries(&key, raw);
         Ok(PopResult { messages, rejected })
     }
 
@@ -1265,7 +1267,7 @@ pub struct HookHealthEntry {
 #[derive(Debug, Default)]
 pub struct PopResult {
     /// Messages ready for the caller, oldest first. Already removed from Redis.
-    pub messages: Vec<Message>,
+    pub messages: Vec<crate::receipts::InboxEntry>,
     /// Entries popped alongside `messages` that failed to decode. Also already
     /// removed from Redis; the caller decides how to surface them.
     pub rejected: Vec<Error>,
@@ -1380,11 +1382,11 @@ pub struct BudgetPopResult {
 /// Decodes popped inbox entries: the messages that decode, in order, and an
 /// error for each entry that does not (not JSON, an unknown member, or not
 /// UTF-8).
-fn decode_entries(key: &str, raw: Vec<Vec<u8>>) -> (Vec<Message>, Vec<Error>) {
+fn decode_entries(key: &str, raw: Vec<Vec<u8>>) -> (Vec<crate::receipts::InboxEntry>, Vec<Error>) {
     let mut messages = Vec::new();
     let mut rejected = Vec::new();
     for entry in raw {
-        match serde_json::from_slice(&entry) {
+        match crate::receipts::InboxEntry::try_from(entry.as_slice()) {
             Ok(m) => messages.push(m),
             Err(source) => rejected.push(Error::Decode {
                 key: key.to_owned(),
