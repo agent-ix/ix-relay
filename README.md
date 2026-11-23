@@ -132,11 +132,7 @@ agent-msg resolve <id> "<decision>"
 
 Build and test with `make test`. `make test-redis` runs every test against a throwaway `redis:7` container and needs Docker. `make ci` runs every gate: formatting, clippy, tests, `cargo deny`, the unsafe-comment audit, docs and the spec matrix check. The matrix check needs `python3`.
 
-Regenerate the figures with `make figures`, and confirm they are current with `make figures-check`. Both run `ixd build docs/images/figures.json --out docs/images` (install with `cargo install --git https://github.com/agent-ix/ix-diagrams ix-diagrams`). The topology and escalation figures are still defined in `docs/images/figures.py`; regenerate those with the docs-figures skill from `agent-ix/dev-tools`:
-
-```bash
-python3 <dev-tools>/skills/docs-figures/scripts/render.py docs/images/figures.py
-```
+Regenerate the figures with `make figures`, and confirm they are current with `make figures-check`. Both run `ixd build docs/images/figures.json --out docs/images` (install with `cargo install --git https://github.com/agent-ix/ix-diagrams ix-diagrams`).
 
 ## License
 
