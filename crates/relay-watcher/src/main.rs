@@ -430,7 +430,24 @@ fn refresh_fleet(
     };
     let activity_ok = activity.is_ok();
     collector.set_activity(Instant::now(), activity, log);
-    collector.set_refresh_redis(published.is_ok() && read && activity_ok, log);
+    let defects_ok =
+        apply_stale_defects(collector, Instant::now(), relay.assignment_probe_defects());
+    collector.set_refresh_redis(published.is_ok() && read && activity_ok && defects_ok, log);
+}
+
+/// Feeds the stored FR-072 stale-host defects to the collector; true when the read worked.
+/// A failed read keeps the last known defects and is reported through the `redis` source.
+fn apply_stale_defects<E>(
+    collector: &mut fleet::Collector,
+    now: Instant,
+    read: Result<Vec<relay_core::assignment::ProbeDefect>, E>,
+) -> bool {
+    let Ok(defects) = read else {
+        return false;
+    };
+    let hosts: Vec<String> = defects.into_iter().map(|d| d.host).collect();
+    collector.set_stale_hosts(now, &hosts);
+    true
 }
 
 /// The least time between two rename events of one lead. A label that flaps is
@@ -2228,6 +2245,186 @@ mod tests {
                 .failed_sources()
                 .contains(&fleet::health::Source::HookEvents)
         );
+    }
+
+    /// A refused write to a lane of a host with an expired registry lease is exported as
+    /// `probe_ok` 0 for that host's `host_registry_stale` source, and as 1 once the host
+    /// publishes its lane list again. Redis lane.
+    #[trace("FR-072-AC-9")]
+    #[test]
+    fn tc_072_09_a_stale_host_assignment_refusal_exports_probe_ok_0_until_the_host_refreshes() {
+        use relay_core::{
+            assignment::{AssignWrite, AssignWriter, AssignedTicket},
+            fleet::HostLaneList,
+        };
+        let Some(mut relay) = test_relay("stale-probe-ok") else {
+            eprintln!("skipping: IX_RELAY_TEST_URL unset (run `make test-redis`)");
+            return;
+        };
+        let url = std::env::var("IX_RELAY_TEST_URL").expect("set: test_relay returned Some");
+        let mut raw = redis::Client::open(url)
+            .and_then(|c| c.get_connection())
+            .expect("raw connection to test redis");
+        let old = HostLaneList {
+            machine: "oldhost".parse().unwrap(),
+            refreshed_ms: 1,
+            lanes: vec!["oldhost:SWM:code".into()],
+        };
+        redis::cmd("HSET")
+            .arg(format!("{}fleet-lanes", test_prefix("stale-probe-ok")))
+            .arg("oldhost")
+            .arg(serde_json::to_string(&old).unwrap())
+            .exec(&mut raw)
+            .expect("plant the expired lane list");
+        let writer = AssignWriter {
+            name: "draco:SWM:plan".into(),
+            orchestrator: true,
+            caller_lane: None,
+        };
+        let write = AssignWrite::Set(vec![AssignedTicket {
+            id: "A-1".into(),
+            reference: "https://linear.app/t/A-1".into(),
+        }]);
+        assert!(
+            relay
+                .assign(&writer, "oldhost:SWM:code", &write, None)
+                .is_err()
+        );
+        let here: MachineName = "here".parse().unwrap();
+        let view = relay_ops::find::MachineView {
+            machine: here.clone(),
+            agents: vec![],
+            workspaces: vec![],
+            tabs: vec![],
+            dropped: 0,
+        };
+        let mut collector = fleet::Collector::new(
+            here.clone(),
+            fleet::health::Profile::default(),
+            fleet::fixtures::sources(None),
+            fleet::fixtures::INTERVAL,
+        );
+        let stale_probe = |collector: &fleet::Collector| {
+            let mut registry = otlp::registry::Registry::new(2, 1);
+            collector.fill(&mut registry, Instant::now());
+            registry.points().iter().find_map(|p| {
+                let pairs = p.instrument.name == "ix.fleet.probe_ok" && {
+                    let pairs = p.attrs.pairs();
+                    pairs.iter().any(|(k, v)| *k == "host" && v == "oldhost")
+                        && pairs
+                            .iter()
+                            .any(|(k, v)| *k == "source" && v == "host_registry_stale")
+                };
+                match (&p.value, pairs) {
+                    (otlp::registry::Value::Int(v), true) => Some(*v),
+                    _ => None,
+                }
+            })
+        };
+        assert_eq!(stale_probe(&collector), None, "no defect, no series yet");
+        refresh_fleet(&mut relay, &mut collector, &view, &[], &here, &mut |_| {});
+        assert_eq!(stale_probe(&collector), Some(0));
+        relay
+            .publish_lane_list(
+                &"oldhost".parse().unwrap(),
+                &["oldhost:SWM:code".to_owned()],
+            )
+            .unwrap();
+        refresh_fleet(&mut relay, &mut collector, &view, &[], &here, &mut |_| {});
+        assert_eq!(stale_probe(&collector), Some(1));
+    }
+
+    fn stale_series(collector: &fleet::Collector, now: Instant) -> Option<i64> {
+        let mut registry = otlp::registry::Registry::new(2, 1);
+        collector.fill(&mut registry, now);
+        registry.points().iter().find_map(|p| {
+            let pairs = p.attrs.pairs();
+            let hit = p.instrument.name == "ix.fleet.probe_ok"
+                && pairs.iter().any(|(k, v)| *k == "host" && v == "oldhost")
+                && pairs
+                    .iter()
+                    .any(|(k, v)| *k == "source" && v == "host_registry_stale");
+            match (&p.value, hit) {
+                (otlp::registry::Value::Int(v), true) => Some(*v),
+                _ => None,
+            }
+        })
+    }
+
+    fn defect(host: &str) -> relay_core::assignment::ProbeDefect {
+        relay_core::assignment::ProbeDefect {
+            host: host.into(),
+            refused: 1,
+            last_ms: 1,
+        }
+    }
+
+    /// A failed defect read keeps the last known defects and fails the `redis` source,
+    /// so `probe_ok{source=redis}` reads 0 while the stale export keeps its value.
+    #[trace("FR-072-AC-9")]
+    #[test]
+    fn tc_072_10_a_failed_defect_read_keeps_the_last_defects_and_fails_the_redis_source() {
+        let here: MachineName = "here".parse().unwrap();
+        let mut collector = fleet::Collector::new(
+            here,
+            fleet::health::Profile::default(),
+            fleet::fixtures::sources(None),
+            fleet::fixtures::INTERVAL,
+        );
+        let now = Instant::now();
+        assert!(apply_stale_defects(
+            &mut collector,
+            now,
+            Ok::<_, ()>(vec![defect("oldhost")])
+        ));
+        collector.set_refresh_redis(true, &mut |_| {});
+        collector.set_push_redis(true, &mut |_| {});
+        let redis_probe = |c: &fleet::Collector| {
+            let mut registry = otlp::registry::Registry::new(2, 1);
+            c.fill(&mut registry, now);
+            registry.points().iter().find_map(|p| {
+                let hit = p.instrument.name == "ix.fleet.probe_ok"
+                    && p.attrs
+                        .pairs()
+                        .iter()
+                        .any(|(k, v)| *k == "source" && v == "redis");
+                match (&p.value, hit) {
+                    (otlp::registry::Value::Int(v), true) => Some(*v),
+                    _ => None,
+                }
+            })
+        };
+        assert_eq!(redis_probe(&collector), Some(1));
+        let ok = apply_stale_defects(&mut collector, now, Err::<Vec<_>, _>("redis down"));
+        assert!(!ok);
+        collector.set_refresh_redis(ok, &mut |_| {});
+        assert_eq!(redis_probe(&collector), Some(0));
+        assert_eq!(stale_series(&collector, now), Some(0));
+    }
+
+    /// A recovered host exports 1 for the bounded period and is then dropped.
+    #[trace("FR-072-AC-9")]
+    #[test]
+    fn tc_072_11_a_recovered_host_exports_1_for_an_hour_and_is_then_dropped() {
+        let here: MachineName = "here".parse().unwrap();
+        let mut collector = fleet::Collector::new(
+            here,
+            fleet::health::Profile::default(),
+            fleet::fixtures::sources(None),
+            fleet::fixtures::INTERVAL,
+        );
+        let t0 = Instant::now();
+        apply_stale_defects(&mut collector, t0, Ok::<_, ()>(vec![defect("oldhost")]));
+        assert_eq!(stale_series(&collector, t0), Some(0));
+        let t1 = t0 + Duration::from_secs(30);
+        apply_stale_defects(&mut collector, t1, Ok::<_, ()>(vec![]));
+        assert_eq!(stale_series(&collector, t1), Some(1));
+        let almost = t1 + fleet::STALE_RECOVERED_EXPORT - Duration::from_secs(1);
+        apply_stale_defects(&mut collector, almost, Ok::<_, ()>(vec![]));
+        assert_eq!(stale_series(&collector, almost), Some(1));
+        let gone = t1 + fleet::STALE_RECOVERED_EXPORT;
+        apply_stale_defects(&mut collector, gone, Ok::<_, ()>(vec![]));
+        assert_eq!(stale_series(&collector, gone), None);
     }
 
     fn test_relay(test: &str) -> Option<Relay> {
