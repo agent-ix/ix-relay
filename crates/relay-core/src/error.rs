@@ -14,6 +14,9 @@ pub enum Error {
     /// Work reporting validation failed.
     #[error(transparent)]
     Work(#[from] crate::work::WorkError),
+    /// An assignment list write or read was refused (FR-072).
+    #[error(transparent)]
+    Assign(#[from] crate::assignment::AssignError),
     /// An opaque storage identity or actor value was malformed.
     #[error("invalid storage identity {name:?}")]
     InvalidName {
@@ -302,6 +305,7 @@ impl Error {
         match self {
             Self::Redis(e) => e.is_io_error() || e.is_unrecoverable_error(),
             Self::Work(_)
+            | Self::Assign(_)
             | Self::InvalidName { .. }
             | Self::UnverifiedEnrollment { .. }
             | Self::DirectoryChanged

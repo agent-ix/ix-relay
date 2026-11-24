@@ -204,6 +204,9 @@ impl Relay {
                 Ok(())
             },
         )?;
+        if swapped {
+            self.follow_assignments(reg.place.as_ref(), place, &reg.machine);
+        }
         Ok(match (swapped, event) {
             (false, _) => PlaceRefresh::Unchanged,
             (true, Some(event)) => PlaceRefresh::Renamed(Box::new(event)),
@@ -288,6 +291,9 @@ impl Relay {
                 Ok(())
             },
         )?;
+        if swapped {
+            self.follow_assignments(seen.place.as_ref(), place, &seen.machine);
+        }
         Ok(swapped.then_some(event))
     }
 

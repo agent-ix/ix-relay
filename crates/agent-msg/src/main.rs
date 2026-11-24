@@ -11,6 +11,7 @@
 
 mod activity;
 mod activity_state;
+mod assign;
 mod budget;
 mod doctor;
 mod find;
@@ -86,6 +87,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Write and read the ordered per-lane assignment list: set, append, remove, reorder,
+    /// show and history. Writes need `[assign] orchestrator = true` in config.toml.
+    Assign(assign::AssignArgs),
     /// Report session scope, focus and agent assignments for the dashboard.
     Work(work::WorkArgs),
     /// Durable, revisioned named focus definitions with one owner: create, list, show,
@@ -514,6 +518,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
     };
     match cli.cmd {
         Cmd::Work(args) => work::run(args, &mut relay, settings, &mut out)?,
+        Cmd::Assign(args) => assign::run(args, &mut relay, settings, &mut out)?,
         Cmd::Send {
             to,
             text,

@@ -267,6 +267,18 @@ pub(crate) struct RedisUp {
     pub hook_unreadable: usize,
     /// The relinks and renames the watchers recorded in the last 24 hours (FR-043).
     pub moves: Result<MovesRead, String>,
+    /// Assignment-list defects (FR-072): refused writes to stale hosts, lists that did not
+    /// follow their lane.
+    pub assignments: Result<AssignmentDefects, String>,
+}
+
+/// The standing defects of the assignment lists (FR-072).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AssignmentDefects {
+    /// Hosts whose stale lanes refused a write.
+    pub hosts: Vec<relay_core::assignment::ProbeDefect>,
+    /// Lists that stayed under a lane's old address.
+    pub moves: Vec<relay_core::assignment::MoveDefect>,
 }
 
 /// What reading the recent moves found.
@@ -492,6 +504,12 @@ fn gather_redis(env: &Env) -> RedisFacts {
     let moves = reader
         .run(&mut relay, |r| r.moves_since(day_ago, MAX_MOVES))
         .map(|(moves, more)| MovesRead { moves, more });
+    let assignments = reader.run(&mut relay, |r| {
+        Ok(AssignmentDefects {
+            hosts: r.assignment_probe_defects()?,
+            moves: r.assignment_move_defects()?,
+        })
+    });
     let health = reader.run(&mut relay, |r| r.hook_health(MAX_HOOK_RECORDS));
     let hook_unreadable = health.as_ref().map_or(0, |h| h.unreadable);
     let hook_failures = health.map(|h| bus_failures_of(&h));
@@ -505,6 +523,7 @@ fn gather_redis(env: &Env) -> RedisFacts {
         hook_failures,
         hook_unreadable,
         moves,
+        assignments,
     }))
 }
 

@@ -50,6 +50,8 @@ pub(crate) enum Family {
     HookFailures,
     /// Panes moved and places renamed, as the watcher recorded them (FR-043).
     Moves,
+    /// Assignment lists (FR-072).
+    Assignments,
     /// The `herdr` binary.
     Herdr,
     /// Registrations.
@@ -100,6 +102,12 @@ pub(crate) enum Code {
     CollectorSourceFailed,
     /// A watcher left registry lanes out of its per-lane series past the cap (FR-045).
     FleetLanesDropped,
+    /// A write to a lane of a host with an expired registry lease was refused (FR-072).
+    AssignmentHostRegistryStale,
+    /// An assignment list did not follow its lane to the lane's new address (FR-072).
+    AssignmentMoveFailed,
+    /// The assignment defects could not be read.
+    AssignmentsUnreadable,
     /// `watcher.json` is absent.
     WatcherFileMissing,
     /// There is no config location, so no `watcher.json` is looked for.
@@ -429,6 +437,9 @@ mod tests {
             Code::WatcherOtlpFailing => "watcher_otlp_failing",
             Code::CollectorSourceFailed => "collector_source_failed",
             Code::FleetLanesDropped => "fleet_lanes_dropped",
+            Code::AssignmentHostRegistryStale => "assignment_host_registry_stale",
+            Code::AssignmentMoveFailed => "assignment_move_failed",
+            Code::AssignmentsUnreadable => "assignments_unreadable",
             Code::WatcherFileMissing => "watcher_file_missing",
             Code::WatcherFileUnlocated => "watcher_file_unlocated",
             Code::WatcherFileUnreadable => "watcher_file_unreadable",
@@ -485,6 +496,9 @@ mod tests {
             Code::WatcherOtlpFailing,
             Code::CollectorSourceFailed,
             Code::FleetLanesDropped,
+            Code::AssignmentHostRegistryStale,
+            Code::AssignmentMoveFailed,
+            Code::AssignmentsUnreadable,
             Code::WatcherFileMissing,
             Code::WatcherFileUnlocated,
             Code::WatcherFileUnreadable,

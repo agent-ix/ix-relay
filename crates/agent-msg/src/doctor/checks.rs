@@ -138,6 +138,7 @@ pub(crate) fn evaluate(f: &Facts) -> Vec<Check> {
     if let Some(up) = up {
         bus_failures(f, up, &mut checks);
         recent_moves(f, up, &mut checks);
+        assignments(up, &mut checks);
     }
     herdr(f, &mut checks);
     if let Some(up) = up {
@@ -905,6 +906,56 @@ fn fleet_checks(machine: &MachineName, beat: Option<&MachineHeartbeat>) -> Vec<C
         ));
     }
     out
+}
+
+/// The standing defects of the assignment lists (FR-072): a warning for each host whose stale
+/// lanes refused a write and for each list that did not follow its lane. Nothing is added
+/// while there are none.
+fn assignments(up: &RedisUp, checks: &mut Vec<Check>) {
+    let defects = match &up.assignments {
+        Ok(defects) => defects,
+        Err(error) => {
+            checks.push(Check::unknown(
+                Family::Assignments,
+                Code::AssignmentsUnreadable,
+                None,
+                format!("could not read the assignment list defects: {error}"),
+                "read the `assign-defects` and `assign-move-defects` keys with redis-cli",
+            ));
+            return;
+        }
+    };
+    for host in &defects.hosts {
+        let name = relay_core::text::neutralise(&host.host);
+        checks.push(Check::warn(
+            Family::Assignments,
+            Code::AssignmentHostRegistryStale,
+            Some(&name),
+            format!(
+                "{} write(s) to assignment lists of lanes on {name} were refused as host_registry_stale",
+                host.refused
+            ),
+            "the registry lease of that host has expired, so its lanes are stale and the orchestrator cannot assign to them",
+            "restart or repair the watcher on that host; the defect ends when it publishes its lane list again",
+        ));
+    }
+    for defect in &defects.moves {
+        let (from, to) = (
+            relay_core::text::neutralise(&defect.from),
+            relay_core::text::neutralise(&defect.to),
+        );
+        checks.push(Check::warn(
+            Family::Assignments,
+            Code::AssignmentMoveFailed,
+            Some(&from),
+            format!(
+                "the assignment list of {from} did not follow its lane to {to}: {}",
+                relay_core::text::neutralise(&defect.reason)
+            ),
+            "the lane was renamed or moved while the new address held a list or the store could not take the move, so the list is still under the old address",
+            "write the list again with `agent-msg assign set` under the lane's current address; a write to that address ends this warning",
+        ));
+    }
 }
 
 /// No key: the wording and the severity depend on whether anything there needs
@@ -1985,7 +2036,7 @@ fn service(f: &Facts, up: Option<&RedisUp>, checks: &mut Vec<Check>) {
 
 #[cfg(test)]
 mod tests {
-    use crate::doctor::facts::MovesRead;
+    use crate::doctor::facts::{AssignmentDefects, MovesRead};
     use ix_trace_rs::trace;
     use std::{collections::HashSet, time::Duration};
 
@@ -2130,6 +2181,7 @@ mod tests {
                 hook_failures: Ok(vec![]),
                 hook_unreadable: 0,
                 moves: Ok(MovesRead::default()),
+                assignments: Ok(AssignmentDefects::default()),
             })),
             watcher_file: FileState::Read {
                 file: WatcherFile {
@@ -3210,6 +3262,39 @@ mod tests {
             "{:?}",
             check.details
         );
+    }
+
+    /// Tracing: TC-072-12
+    /// ACs: FR-072-AC-9
+    #[trace("FR-072-AC-9")]
+    #[test]
+    fn tc_072_12_stale_host_refusals_and_unfollowed_lists_are_warnings_and_none_adds_nothing() {
+        use relay_core::assignment::{MoveDefect, ProbeDefect};
+        let mut f = healthy();
+        assert!(
+            evaluate(&f).iter().all(|c| c.check != Family::Assignments),
+            "no defect, no check"
+        );
+        up(&mut f).assignments = Ok(AssignmentDefects {
+            hosts: vec![ProbeDefect {
+                host: "oldhost".into(),
+                refused: 3,
+                last_ms: 1,
+            }],
+            moves: vec![MoveDefect {
+                from: "hub:EA:code".into(),
+                to: "hub:EA:review".into(),
+                reason: "target_occupied".into(),
+                at_ms: 1,
+            }],
+        });
+        assert_eq!(
+            status_of(&f, Code::AssignmentHostRegistryStale),
+            Status::Warn
+        );
+        assert_eq!(status_of(&f, Code::AssignmentMoveFailed), Status::Warn);
+        up(&mut f).assignments = Err("boom".into());
+        assert_eq!(status_of(&f, Code::AssignmentsUnreadable), Status::Unknown);
     }
 
     /// Tracing: TC-043-07

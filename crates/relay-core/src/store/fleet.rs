@@ -52,6 +52,7 @@ impl Relay {
         let () = self
             .conn
             .hset(self.keys.fleet_lanes_key(), machine.as_str(), encode(&list))?;
+        self.host_refreshed(machine.as_str())?;
         Ok(list)
     }
 

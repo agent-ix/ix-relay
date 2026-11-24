@@ -158,6 +158,30 @@ impl SendFile {
     }
 }
 
+/// The `[assign]` table in `config.toml` (FR-072): whether this machine's callers hold the
+/// orchestrator role. A guard against accidental writes, not authentication.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssignFile {
+    /// `true` lets `agent-msg assign` write lists. Raw like the other tables, so a typo
+    /// never stops a hook.
+    pub orchestrator: Option<toml::Value>,
+}
+
+impl AssignFile {
+    /// Whether the orchestrator role is set; absent means it is not.
+    ///
+    /// # Errors
+    /// Fails when the value is not a boolean.
+    pub fn is_orchestrator(&self) -> Result<bool, String> {
+        match &self.orchestrator {
+            None => Ok(false),
+            Some(toml::Value::Boolean(on)) => Ok(*on),
+            Some(_) => Err("[assign] orchestrator: expected true or false".into()),
+        }
+    }
+}
+
 /// The shape of `config.toml`. Every field is optional: an absent key falls
 /// through to the next layer down (env, then the compiled-in default), same
 /// as an absent file does. A key that *is* present but an empty string
@@ -182,6 +206,9 @@ pub struct FileConfig {
     /// Send settings.
     #[serde(default)]
     pub send: SendFile,
+    /// Assignment-list role.
+    #[serde(default)]
+    pub assign: AssignFile,
 }
 
 /// Values an invoking CLI got on its own command line, to feed the flag tier
