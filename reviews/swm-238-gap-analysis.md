@@ -36,3 +36,12 @@ Ticket: SWM-238. PR agent-ix/ix-relay#58 at `a4caeb0ff9bd213c8025134c37587245976
 - Criteria examined: FR-069-AC-1, AC-2, AC-3, AC-4, AC-17, AC-18, AC-19, AC-20; FR-070-AC-1, FR-070-AC-7. All tagged.
 - Semantic review (intent to test to code): not run as a separate opt-in pass. The tests for the new ACs were read against the AC text by hand.
 - Plan completion: not assessed
+
+## Dispositions
+
+Round 1, fix head `0fb73d636d2f908dfb1efece9063a092309a321a`.
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | `tc_069_20` now carries only `#[trace("FR-069-AC-20")]`. FR-070-AC-7 stays tagged by `tc_070_07`. |
+| FND-002 | deferred | The PR body states that SWM-238 stays open for script retirement and ix-build use. The locked-build probes and reading model are tracked in SWM-275. |
