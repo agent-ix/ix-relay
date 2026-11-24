@@ -3,7 +3,7 @@
 //! The collector measures this host natively (no shell, no ssh), keeps the
 //! lane registry of the host, classifies each lane's pane tail, and fills the
 //! `ix.fleet.*` series of FR-045 for the push. Every source runs under its own
-//! time budget ([`bound`]) and reports its own health ([`health`]): a failing
+//! time budget ([`host_probe::bound`]) and reports its own health ([`health`]): a failing
 //! source exports `probe_ok` 0 and leaves its measured series out, never an old
 //! value, never an absent `probe_ok`.
 //!
