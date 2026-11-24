@@ -113,6 +113,10 @@ impl Keys {
         format!("{}lane:server-capacity", self.prefix)
     }
 
+    pub(super) fn fleet_lanes_key(&self) -> String {
+        format!("{}fleet-lanes", self.prefix)
+    }
+
     pub(super) fn status_sequence_key(&self) -> String {
         format!("{}status:sequence", self.prefix)
     }
@@ -287,6 +291,7 @@ mod tests {
             ("agents_key", relay.agents_key()),
             ("lane_focus_key", relay.lane_focus_key()),
             ("server_capacity_key", relay.server_capacity_key()),
+            ("fleet_lanes_key", relay.fleet_lanes_key()),
             ("status_sequence_key", relay.status_sequence_key()),
             ("status_request_key", relay.status_request_key(&request)),
             ("status_reply_key", relay.status_reply_key(&request, &agent)),
@@ -338,6 +343,7 @@ mod tests {
             ("agents_key", "p:agents"),
             ("lane_focus_key", "p:lane:focus"),
             ("server_capacity_key", "p:lane:server-capacity"),
+            ("fleet_lanes_key", "p:fleet-lanes"),
             ("status_sequence_key", "p:status:sequence"),
             ("status_request_key", "p:status:request:r1"),
             ("status_reply_key", "p:status:reply:r1:lead-a"),
@@ -413,6 +419,7 @@ mod tests {
             other.agents_key(),
             other.lane_focus_key(),
             other.server_capacity_key(),
+            other.fleet_lanes_key(),
             other.status_sequence_key(),
             other.status_request_key(&request),
             other.status_reply_key(&request, &agent),

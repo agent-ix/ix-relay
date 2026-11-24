@@ -205,6 +205,9 @@ exports.
 | `ix.fleet.lane.focus_info` | gauge | `1` | host, lane, ticket, branch | Value 1 per lane; `ticket` parsed from the lane's hook-reported branch or cwd, empty when none. |
 | `ix.fleet.lane.dropped` | gauge | `{lane}` | host | Registry lanes left out of the per-lane series because more than 50 exist; nonzero is a defect and `agent-msg doctor` warns. |
 | `ix.fleet.host.busy_ratio` | gauge | `1` | host | Measured CPU busy ratio, 0 to 1. Absent when its source fails. |
+| `ix.fleet.host.memory_used_bytes` | gauge | `By` | host | Memory in use on the host (total minus available); absent when its source fails. |
+| `ix.fleet.host.memory_total_bytes` | gauge | `By` | host | Total memory of the host; absent when its source fails. |
+| `ix.fleet.host.temperature` | gauge | `Cel` | host | Highest CPU package or `Tctl` temperature in degrees Celsius; present only where the host profile expects `temperature` and it reads. |
 | `ix.fleet.host.capacity_slots` | gauge | `{slot}` | host | Operator-entered capacity slots ([FR-058](./FR-058-explicit-server-capacity.md)); absent when none is entered. |
 | `ix.fleet.host.capacity_configured` | gauge | `1` | host | 1 when capacity is entered, 0 otherwise; always exported. |
 | `ix.fleet.host.native_windows_agents` | gauge | `{process}` | host | On a WSL host, native Windows agent, herdr or build processes seen; nonzero is a defect. |

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add the host collector to `relay-watcher`: measured CPU busy ratio, memory and temperature, a per-lane state, last-activity and blocked reason from pane-tail classification, the leased per-host lane list in Redis, `ix.fleet.probe_ok` per collector source, and the `[fleet]` host profile. Hook-event lane state, `no_events` and per-lane compile seconds follow with the hook feed.
 - Add `agent-msg focuses` with `create`, `list`, `show`, `update`, `archive`, `claim` and `transfer`: named focus definitions with immutable revisions, one owner session per definition and typed errors with `--json`. `agent-msg focus` and `agent-msg work focus` are unchanged.
 
 ## 0.3.4

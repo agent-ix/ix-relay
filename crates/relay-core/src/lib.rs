@@ -12,6 +12,7 @@ pub mod directory;
 mod env;
 mod error;
 mod escalation;
+pub mod fleet;
 pub mod health;
 mod ids;
 pub mod lane_registry;
@@ -51,9 +52,9 @@ pub use store::{
     AgentList, AgentSlot, BACKLOG_SCAN_BOUND, Backlog, BatchId, BudgetPopResult, Buried, Claim,
     CommitOutcome, DEAD_LETTER_CAP, DEFAULT_PREFIX, DIRECTORY_LEASE, DirectoryRead,
     DirectoryRecipient, HERDR_FAILED_TTL_SECS, HOOK_LEASE, Heartbeats, HookHealth, HookHealthEntry,
-    INFLIGHT_ROW_OVERHEAD, IdentityCommit, InboxOverview, LeadBacklog, LeadOverview, LeaseState,
-    MAX_HEARTBEAT_KEYS, MAX_INFLIGHT_BATCHES, MAX_INFLIGHT_BYTES, MAX_LEASE, MAX_MESSAGE_BYTES,
-    MAX_REDELIVERIES, Moves, Now, PanesReplaced, PlaceRefresh, PopResult, Popper, Reaped,
-    RecipientProbe, Relay, ReplyOutcome, Salvage, Salvaged, ScanCut, SessionProbe,
+    INFLIGHT_ROW_OVERHEAD, IdentityCommit, InboxOverview, LaneLists, LeadBacklog, LeadOverview,
+    LeaseState, MAX_HEARTBEAT_KEYS, MAX_INFLIGHT_BATCHES, MAX_INFLIGHT_BYTES, MAX_LEASE,
+    MAX_MESSAGE_BYTES, MAX_REDELIVERIES, Moves, Now, PanesReplaced, PlaceRefresh, PopResult,
+    Popper, Reaped, RecipientProbe, Relay, ReplyOutcome, Salvage, Salvaged, ScanCut, SessionProbe,
     SkippedRegistration, Sweep, WATCHER_LEASE,
 };

@@ -31,6 +31,7 @@
 
 mod deliver;
 mod episodes;
+mod fleet;
 mod herdr;
 mod herdr_gate;
 mod last_seen;
@@ -228,6 +229,8 @@ struct WatcherState {
     live: Liveness,
     /// The OTLP metrics push (FR-045); disabled when no endpoint is configured.
     otlp: otlp::Publisher,
+    /// The host collector (FR-069); `None` for `--once`.
+    fleet: Option<fleet::Collector>,
 }
 
 impl WatcherState {
@@ -261,6 +264,7 @@ impl WatcherState {
             reap_trouble: HashSet::new(),
             live: Liveness::default(),
             otlp: otlp::Publisher::disabled(),
+            fleet: None,
         }
     }
 
@@ -363,6 +367,38 @@ const PRUNE_RECHECK_EVERY: Duration = Duration::from_secs(10 * 60);
 /// two of a person noticing, not on every tick.
 const PLACE_REFRESH_EVERY: Duration = Duration::from_secs(30);
 
+/// Publishes this host's lane list under its lease and reads its entered capacity (FR-069,
+/// FR-070). A store failure here is recorded as the `redis` source failing and never ends
+/// the refresh: the rest of the tick meets the same error where it must.
+fn refresh_fleet(
+    relay: &mut Relay,
+    collector: &mut fleet::Collector,
+    view: &relay_ops::find::MachineView,
+    regs: &[relay_core::Registration],
+    machine: &MachineName,
+    log: &mut impl FnMut(String),
+) {
+    let lanes = fleet::lanes::lanes_of(machine, view, regs);
+    let addresses: Vec<String> = lanes.iter().map(|l| l.address.clone()).collect();
+    collector.set_lanes(Instant::now(), lanes);
+    let published = relay.publish_lane_list(machine, &addresses).is_ok();
+    let (capacity, read) = match relay.server_capacities() {
+        Ok(all) => (
+            all.iter()
+                .find(|c| c.machine == *machine)
+                .and_then(|c| c.max_agents)
+                .map_or(fleet::CapacityRead::NotEntered, fleet::CapacityRead::Slots),
+            true,
+        ),
+        Err(_) => (
+            fleet::CapacityRead::Failed(fleet::health::ErrorClass::Unreadable),
+            false,
+        ),
+    };
+    collector.set_capacity(capacity, log);
+    collector.set_refresh_redis(published && read, log);
+}
+
 /// The least time between two rename events of one lead. A label that flaps is
 /// followed (the address stays true) but recorded once per gap, so one workspace
 /// cannot fill the shared, capped moves stream.
@@ -399,6 +435,9 @@ fn refresh_places(
     };
     let layout = match herdr.layout(machine) {
         Ok(layout) => {
+            if let Some(collector) = &mut state.fleet {
+                collector.set_herdr(fleet::health::Outcome::Ok, log);
+            }
             if std::mem::take(&mut state.layout_failed_reported) {
                 log("herdr's layout is readable again".to_owned());
             }
@@ -406,6 +445,12 @@ fn refresh_places(
         }
         Err(e) => {
             // Nothing is relinked or renamed on an answer that did not come: one
+            if let Some(collector) = &mut state.fleet {
+                collector.set_herdr(
+                    fleet::health::Outcome::Failed(fleet::health::ErrorClass::Unreadable),
+                    log,
+                );
+            }
             // line per episode, the addresses stay as registered.
             if !std::mem::replace(&mut state.layout_failed_reported, true) {
                 log(format!(
@@ -479,6 +524,9 @@ fn refresh_places(
     // metrics cost no herdr call of their own (FR-045).
     if let Some(view) = &layout.view {
         state.otlp.set_panes(Instant::now(), view, regs);
+        if let Some(collector) = &mut state.fleet {
+            refresh_fleet(relay, collector, view, regs, machine, log);
+        }
     }
     // Before the loop below drops the place of a registration whose session left:
     // the address its queued mail was written to (FR-053).
@@ -617,6 +665,22 @@ fn main() -> ExitCode {
         env!("CARGO_PKG_VERSION"),
         cli.once,
     );
+    // The host collector and its profile (FR-069, FR-070); a bad `[fleet]` value is a
+    // configuration error like the OTLP ones.
+    let fleet_profile = match fleet::health::Profile::from_file(&settings.fleet) {
+        Ok(profile) => profile,
+        Err(e) => {
+            eprintln!("relay-watcher: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if !cli.once {
+        state.fleet = Some(fleet::Collector::new(
+            machine.clone(),
+            fleet_profile,
+            fleet::Sources::native(),
+        ));
+    }
     // `--once` is a manual check: like the state file, it must not publish a
     // heartbeat that a running watcher's would be overwritten by (or hide).
     if !cli.once {
@@ -1040,9 +1104,14 @@ fn tick<H: Herdr + Deliverer>(
     // Last, after the deliveries, the registry cache and the prune, and answering to
     // nobody: its store reads can neither delay nor skip any of them (FR-045).
     if let Some((_, regs)) = &state.registry {
-        state
-            .otlp
-            .publish_if_due(relay, regs, Instant::now(), now_ms(), log);
+        state.otlp.publish_if_due(
+            relay,
+            regs,
+            Instant::now(),
+            now_ms(),
+            state.fleet.as_mut(),
+            log,
+        );
     }
     Ok(())
 }

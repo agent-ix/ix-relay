@@ -155,6 +155,8 @@ impl HistogramData {
 pub enum Value {
     /// A whole number.
     Int(i64),
+    /// A finite real number (a ratio or a temperature).
+    Double(f64),
     /// A histogram.
     Histogram(HistogramData),
 }
@@ -224,6 +226,7 @@ impl Registry {
     pub fn add(&mut self, instrument: &'static Instrument, attrs: Attrs, value: Value) -> bool {
         let fits = match (&instrument.kind, &value) {
             (Kind::Gauge, Value::Int(_)) => true,
+            (Kind::Gauge, Value::Double(v)) => v.is_finite(),
             (Kind::Sum, Value::Int(v)) => *v >= 0,
             (Kind::Histogram { bounds }, Value::Histogram(h)) => *bounds == h.bounds,
             _ => false,
@@ -264,6 +267,11 @@ impl Registry {
     /// Adds a gauge point holding a whole number.
     pub fn gauge(&mut self, instrument: &'static Instrument, attrs: Attrs, value: i64) -> bool {
         self.add(instrument, attrs, Value::Int(value))
+    }
+
+    /// Adds a gauge point holding a finite real number.
+    pub fn gauge_f64(&mut self, instrument: &'static Instrument, attrs: Attrs, value: f64) -> bool {
+        self.add(instrument, attrs, Value::Double(value))
     }
 
     /// Adds a cumulative count.

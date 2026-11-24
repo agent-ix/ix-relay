@@ -300,6 +300,7 @@ impl Publisher {
         regs: &[Registration],
         now: Instant,
         now_ms: i64,
+        fleet: Option<&mut crate::fleet::Collector>,
         log: &mut impl FnMut(String),
     ) {
         let Some(a) = &mut self.active else {
@@ -319,6 +320,7 @@ impl Publisher {
             .read_failures
             .hook_health_newest
             .saturating_add(read_failures.hook_health_newest);
+        let failed_ok = failed.is_none();
         match failed {
             Some(e) if !std::mem::replace(&mut a.read_failed_reported, true) => log(format!(
                 "cannot read the relay's health for the metrics push ({e}); those series are \
@@ -327,7 +329,15 @@ impl Publisher {
             Some(_) => {}
             None => a.read_failed_reported = false,
         }
-        let registry = self.build(now, unix_nanos(), &health);
+        let mut fleet = fleet;
+        if let Some(f) = fleet.as_deref_mut() {
+            f.set_push_redis(failed_ok, log);
+            f.sample(now, log);
+        }
+        let mut registry = self.build(now, unix_nanos(), &health);
+        if let Some(f) = fleet {
+            f.fill(&mut registry, now);
+        }
         if let Some(a) = &self.active {
             a.exporter.submit(registry);
         }
@@ -420,7 +430,7 @@ mod tests {
     /// code, the catalogue and the spec agree.
     ///
     /// Tracing: TC-045-11
-    /// ACs: FR-045-AC-11
+    /// ACs: FR-045-AC-11, FR-045-AC-29
     #[test]
     fn tc_045_11_the_exported_series_are_the_catalogue_and_the_catalogue_is_the_spec() {
         let (mut p, _rx) = publisher();
@@ -429,7 +439,9 @@ mod tests {
         p.set_panes(now, &view, &[]);
         let health =
             relay::Health::for_test(&[("qsl-lead", 2, 30, 1, 4)], &[(("connect", "timeout"), 2)]);
-        let registry = p.build(now, 2, &health);
+        let mut registry = p.build(now, 2, &health);
+        let (collector, fleet_now) = crate::fleet::fixtures::full();
+        collector.fill(&mut registry, fleet_now);
         let mut exported: BTreeMap<&str, (Vec<&str>, &str)> = BTreeMap::new();
         for point in registry.points() {
             let keys: Vec<&str> = point.attrs.pairs().iter().map(|(k, _)| *k).collect();
@@ -467,15 +479,37 @@ mod tests {
             );
             assert!(spec.contains(&row), "FR-045 has no series row {row:?}");
         }
+        // Series the spec lists that belong to the hook feed and the order
+        // lanes (later changes) and are not exported yet.
+        const NOT_YET_EXPORTED: &[&str] = &[
+            "ix.fleet.lane.no_events",
+            "ix.fleet.lane.compile_seconds",
+            "ix.fleet.lane.focus_info",
+            "ix.fleet.config",
+            "ix.relay.hook.activity_skipped",
+            "ix.relay.orders.unacted",
+            "ix.relay.order.act_latency",
+        ];
         let rows = spec
             .lines()
-            .filter(|l| l.starts_with("| `herdr.") || l.starts_with("| `ix.relay."))
+            .filter(|l| {
+                l.starts_with("| `herdr.")
+                    || l.starts_with("| `ix.relay.")
+                    || l.starts_with("| `ix.fleet.")
+            })
             .count();
         assert_eq!(
             rows,
-            CATALOGUE.len(),
+            CATALOGUE.len() + NOT_YET_EXPORTED.len(),
             "a series in the spec that the code does not export"
         );
+        for name in NOT_YET_EXPORTED {
+            assert!(spec.contains(&format!("| `{name}` |")), "{name}");
+            assert!(
+                !exported.contains_key(name),
+                "{name} is exported: drop it from the list"
+            );
+        }
     }
 
     /// Through the watcher's own layout code and herdr's recorded output, on an

@@ -2670,6 +2670,7 @@ dependencies = [
  "herdr-cli",
  "ix-cli-kit",
  "ix-trace-rs",
+ "libc",
  "nix",
  "proptest",
  "redis",
@@ -2680,6 +2681,7 @@ dependencies = [
  "serde_json",
  "signal-hook",
  "tempfile",
+ "toml 1.1.6+spec-1.1.0",
 ]
 
 [[package]]
