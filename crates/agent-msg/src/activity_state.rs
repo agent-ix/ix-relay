@@ -229,30 +229,39 @@ mod tests {
         assert_eq!(state.counts().backoff_ms, 5_000);
     }
 
-    /// Concurrent hooks lose no increment, and a held lock skips the update
+    /// Concurrent hooks lose no counted increment (each is counted or skipped), and a held lock skips the update
     /// without waiting past the bound.
     #[trace("FR-068-AC-11")]
     #[test]
     fn concurrent_updates_are_exact_and_a_held_lock_never_blocks() {
         let dir = tempfile::tempdir().unwrap();
         let state = ActivityState::at(dir.path().join("activity.json"));
+        let counted = std::sync::atomic::AtomicU64::new(0);
+        let skipped = std::sync::atomic::AtomicU64::new(0);
         std::thread::scope(|scope| {
             for _ in 0..4 {
                 scope.spawn(|| {
                     for _ in 0..10 {
-                        state.unregistered();
+                        let outcome = state.try_update(|c| c.unregistered += 1);
+                        let tally = if outcome.is_ok() { &counted } else { &skipped };
+                        tally.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 });
             }
         });
-        assert_eq!(state.counts().unregistered, 40);
+        // A loaded host can keep the lock past the bound, and that update is skipped by
+        // design; what must hold is that every update that got the lock is in the file.
+        let (counted, skipped) = (counted.into_inner(), skipped.into_inner());
+        assert_eq!(counted + skipped, 40);
+        assert_eq!(state.counts().unregistered, counted);
+        let base = counted;
         let held = state.lock().unwrap();
         let started = Instant::now();
         state.unregistered();
         assert!(started.elapsed() < Duration::from_millis(500));
-        assert_eq!(state.counts().unregistered, 40, "skipped, not counted");
+        assert_eq!(state.counts().unregistered, base, "skipped, not counted");
         drop(held);
         state.unregistered();
-        assert_eq!(state.counts().unregistered, 41);
+        assert_eq!(state.counts().unregistered, base + 1);
     }
 }

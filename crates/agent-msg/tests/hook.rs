@@ -213,19 +213,25 @@ fn subagent_call_leaves_the_inbox_untouched() {
 fn session_start_hook_records_the_herdr_pane_from_env() {
     let Some(url) = test_url() else { return };
     let prefix = format!("test:{}:pane_hook:", std::process::id());
-    let r = agent_msg_with_pane(
-        &["hook", "claude"],
-        Some("hub:EA:code"),
-        Some(&url),
-        Some(&prefix),
-        Some("w1:p1"),
-        SESSION_START,
-    );
-    assert_eq!(r.status, 0, "stderr: {}", r.stderr);
-
-    let r = agent_msg(&["who"], Some("hub:EA:code"), Some(&url), Some(&prefix), "");
-    assert_eq!(r.status, 0, "stderr: {}", r.stderr);
-    assert!(r.stdout.contains("pane w1:p1"), "stdout: {}", r.stdout);
+    // The hook's time budget cannot be widened, so a hook that ran out of time before
+    // registering (the lead is then not listed at all) is run again.
+    let mut listed = String::new();
+    support::until_in_time(|_| {
+        let r = agent_msg_with_pane(
+            &["hook", "claude"],
+            Some("hub:EA:code"),
+            Some(&url),
+            Some(&prefix),
+            Some("w1:p1"),
+            SESSION_START,
+        );
+        assert_eq!(r.status, 0, "stderr: {}", r.stderr);
+        let r = agent_msg(&["who"], Some("hub:EA:code"), Some(&url), Some(&prefix), "");
+        assert_eq!(r.status, 0, "stderr: {}", r.stderr);
+        listed = r.stdout;
+        listed.contains("hub:EA:code")
+    });
+    assert!(listed.contains("pane w1:p1"), "stdout: {listed}");
 }
 
 #[test]

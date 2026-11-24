@@ -120,12 +120,22 @@ struct Hook {
 
 impl Hook {
     fn spawn(redis: &CountingRedis) -> Self {
+        Self::spawn_with(redis, Stdio::piped())
+    }
+
+    /// A hook whose stdin is at end of file from its first read: a pipe the test
+    /// closes after the spawn races the hook's own stdin deadline on a loaded host.
+    fn spawn_closed(redis: &CountingRedis) -> Self {
+        Self::spawn_with(redis, Stdio::null())
+    }
+
+    fn spawn_with(redis: &CountingRedis, stdin: Stdio) -> Self {
         let config = nonexistent_config_path();
         let mut cmd = base_cmd(&["hook", "claude"], Some("hub:EA:code"));
         cmd.env("IX_RELAY_CONFIG", &config);
         cmd.env("IX_RELAY_URL", &redis.url);
         cmd.env("IX_RELAY_PREFIX", "test:");
-        cmd.stdin(Stdio::piped());
+        cmd.stdin(stdin);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         let mut child = cmd.spawn().unwrap();
@@ -214,8 +224,7 @@ fn tc_n001_m_05_a_stdin_that_is_never_closed_or_written_ends_in_one_timeout_reco
 #[test]
 fn a_stdin_closed_empty_leaves_one_malformed_record() {
     let redis = CountingRedis::start();
-    let mut hook = Hook::spawn(&redis);
-    hook.close_stdin();
+    let hook = Hook::spawn_closed(&redis);
     let (_, records) = hook.finish();
     assert_eq!(records, rec("decode", "malformed"));
     // A persistent input fault makes exactly one attempt to ship the spool (see

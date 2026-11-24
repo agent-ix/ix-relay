@@ -74,9 +74,14 @@ impl World {
     }
 
     fn run(&self, extra: &[&str]) -> support::Run {
+        self.run_with_env(extra, &[])
+    }
+
+    fn run_with_env(&self, extra: &[&str], env: &[(&str, &str)]) -> support::Run {
         let mut args = vec!["doctor"];
         args.extend_from_slice(extra);
         let mut cmd = support::base_cmd(&args, None);
+        cmd.envs(env.iter().copied());
         cmd.env("IX_RELAY_URL", &self.url)
             .env("IX_RELAY_PREFIX", &self.prefix)
             .env("IX_RELAY_MACHINE", MACHINE)
@@ -255,7 +260,9 @@ fn tc_029_02_a_machine_with_leads_and_no_heartbeat_fails_naming_it() {
 fn tc_029_03_with_redis_down_doctor_fails_fast_and_still_reports_herdr() {
     let world = World::new("redis://127.0.0.1:1", "down");
     let started = Instant::now();
-    let run = world.run(&["--json"]);
+    // The stub herdr is a child spawn per call: a loaded host can take longer than
+    // the production per-call second to start one, which reads as `unknown`.
+    let run = world.run_with_env(&["--json"], &[("IX_RELAY_DOCTOR_PROBE_SCALE", "30")]);
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "{:?}",

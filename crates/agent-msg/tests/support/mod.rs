@@ -465,35 +465,24 @@ esac
 
 #[allow(dead_code, reason = "shared fixture")]
 fn write_transport_herdr(directory: &Path) {
-    let script = r#"#!/usr/bin/env python3
-import sys,json
-args=sys.argv[1:]
-if '--session' in args:
- i=args.index('--session'); del args[i:i+2]
-if '--machine' in args:
- i=args.index('--machine'); del args[i:i+2]
-key=args[0]
-if key=='machine':
- print(json.dumps([{'label':s,'enabled':True,'target':'fixture-'+s,'session':'default'} for s in ['hub','node-a','terra']]))
-else:
- data={
- 'agent': {'agents':[
-  {'pane_id':'w1:p1','tab_id':'w1:t1','workspace_id':'w1','agent_status':'idle','agent_session':{'kind':'id','value':'s1'}},
-  {'pane_id':'w1:p2','tab_id':'w1:t2','workspace_id':'w1','agent_status':'idle','agent_session':{'kind':'id','value':'sender-session'}}]},
- 'workspace': {'workspaces':[{'workspace_id':'w1','label':'EA'}]},
- 'tab': {'tabs':[{'tab_id':'w1:t1','label':'code'},{'tab_id':'w1:t2','label':'sender'}]}
- }
- print(json.dumps({'result':data[key]}))
+    // A shell script, not an interpreter: it runs inside a hook's 300 to 900 ms budget,
+    // and starting an interpreter on a loaded host can take most of that.
+    let script = r#"#!/bin/sh
+key=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session|--machine) shift 2 ;;
+    *) [ -z "$key" ] && key=$1; shift ;;
+  esac
+done
+case "$key" in
+  machine) echo '[{"label":"hub","enabled":true,"target":"fixture-hub","session":"default"},{"label":"node-a","enabled":true,"target":"fixture-node-a","session":"default"},{"label":"terra","enabled":true,"target":"fixture-terra","session":"default"}]' ;;
+  agent) echo '{"result":{"agents":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle","agent_session":{"kind":"id","value":"s1"}},{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1","agent_status":"idle","agent_session":{"kind":"id","value":"sender-session"}}]}}' ;;
+  workspace) echo '{"result":{"workspaces":[{"workspace_id":"w1","label":"EA"}]}}' ;;
+  tab) echo '{"result":{"tabs":[{"tab_id":"w1:t1","label":"code"},{"tab_id":"w1:t2","label":"sender"}]}}' ;;
+esac
 "#;
-    std::fs::write(
-        directory.join("ssh"),
-        r#"#!/usr/bin/env python3
-import os,sys,shlex,subprocess
-args=shlex.split(sys.argv[-1]);i=args.index('herdr');args=args[i+1:]
-raise SystemExit(subprocess.run([os.path.join(os.path.dirname(__file__),'herdr'),*args]).returncode)
-"#,
-    )
-    .unwrap();
+    std::fs::write(directory.join("ssh"), SSH_TO_HERDR).unwrap();
     std::fs::write(directory.join("herdr"), script).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(
@@ -507,3 +496,13 @@ raise SystemExit(subprocess.run([os.path.join(os.path.dirname(__file__),'herdr')
     )
     .unwrap();
 }
+
+/// An `ssh` stub: runs the `herdr` stub beside it with the arguments the remote command
+/// string carries after `herdr`.
+const SSH_TO_HERDR: &str = r#"#!/bin/sh
+for last; do :; done
+eval "set -- $last"
+while [ "$1" != herdr ]; do shift; done
+shift
+exec "$(dirname "$0")/herdr" "$@"
+"#;

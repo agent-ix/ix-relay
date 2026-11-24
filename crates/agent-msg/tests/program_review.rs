@@ -439,7 +439,10 @@ fn tc_057_focus_commands_set_clear_and_render_stale_focus() {
     let set = run(&set_args, "hub:EA:code", &url, &prefix);
     assert_success(&set, &set_args);
     assert_eq!(set.stdout.trim(), "focus updated");
-    let who_args = ["who", "--focus", "--stale-after", "0s"];
+    // Stale means older than the window: wait past a one-second window so the age only
+    // grows with load, rather than racing a zero window against the clock tick.
+    std::thread::sleep(Duration::from_millis(1_200));
+    let who_args = ["who", "--focus", "--stale-after", "1s"];
     let listed = run(&who_args, "hub:EA:code", &url, &prefix);
     assert_success(&listed, &who_args);
     assert!(
