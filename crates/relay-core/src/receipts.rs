@@ -315,6 +315,82 @@ pub struct ExpiredOrder {
     pub expect_ticket: Option<String>,
 }
 
+/// Most orders [`crate::Relay::expired_orders`] returns.
+pub const EXPIRED_ORDERS_CAP: usize = 500;
+
+/// Most index rows one [`crate::Relay::expired_orders`] call examines.
+pub const EXPIRED_ORDERS_SCAN_CAP: usize = 1_000;
+
+/// Where the escalation of an expired order stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderEscalationState {
+    /// Not filed yet; the watcher still retries it.
+    Pending,
+    /// Filed once.
+    Filed,
+    /// Given up after repeated failures.
+    Failed,
+    /// The relay stored a value this version does not know.
+    Unknown,
+}
+
+impl OrderEscalationState {
+    /// The name used in JSON and in plain output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Filed => "filed",
+            Self::Failed => "failed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// An order whose `AckExpired` the relay recorded and that was not `Acted`. Holds no
+/// message text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpiredOrderState {
+    /// The order's original message identity.
+    pub original_id: String,
+    /// Recipient lane address, in the spelling of the host lane lists (FR-069) when the
+    /// lane is listed, else as stored at send time; compare it as an [`crate::Address`].
+    pub recipient: String,
+    /// The ticket the order expected its recipient to take up.
+    pub expect_ticket: Option<String>,
+    /// Relay time the order was enqueued, in Unix milliseconds.
+    pub enqueued_at_ms: i64,
+    /// Relay time the ack deadline passed, in Unix milliseconds: from `Delivered`,
+    /// else from enqueue.
+    pub deadline_ms: i64,
+    /// Relay time `AckExpired` was recorded, in Unix milliseconds.
+    pub expired_at_ms: i64,
+    /// Whether a `Delivered` receipt was recorded before expiry; a delivery after expiry
+    /// does not set it.
+    pub delivered_before_expiry: bool,
+    /// The last receipt outcome before expiry.
+    pub last_state: String,
+    /// The escalation's state.
+    pub escalation: OrderEscalationState,
+}
+
+/// The expired, un-acted orders, newest expiry first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpiredOrders {
+    /// At most [`EXPIRED_ORDERS_CAP`] orders.
+    pub orders: Vec<ExpiredOrderState>,
+    /// Rows the relay could not decode; they are not in `orders`.
+    pub skipped: u64,
+    /// When the relay began indexing expiries, in Unix milliseconds. Orders that expired
+    /// earlier, or while a relay-watcher that predates the index recorded them, are not
+    /// listed. `None` until the first expiry scan has run.
+    pub indexed_since_ms: Option<i64>,
+    /// Qualifying orders may be missing: more exist than were returned, the scan stopped at
+    /// [`EXPIRED_ORDERS_SCAN_CAP`] index rows, or the index dropped live rows at its size bound.
+    pub truncated: bool,
+}
+
 /// Delivered-to-acted latency of orders, as per-bucket counts over
 /// [`ORDER_LATENCY_BOUNDS_SECS`] plus a last bucket for larger values.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

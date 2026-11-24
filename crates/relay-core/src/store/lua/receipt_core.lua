@@ -90,6 +90,13 @@ receipt_acted = function(queue_hex, session, now, limit)
                 sender = m.s, target = m.t, now = now, session = session,
                 expect = m.e, delivered_at = m.d,
             })
+            if fresh and m.ord then
+                local okey = order_key(m.o)
+                if redis.call('EXISTS', okey) == 1 then
+                    redis.call('HSET', okey, 'acted_at', now)
+                    redis.call('ZREM', receipt_meta .. ':orders-expired', m.o)
+                end
+            end
             if fresh and m.ord and order_close(m.o, 'acted') then
                 local ms, slot = now - m.d, #ORDER_LATENCY_BOUNDS
                 for i, bound in ipairs(ORDER_LATENCY_BOUNDS) do

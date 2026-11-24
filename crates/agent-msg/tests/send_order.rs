@@ -244,3 +244,49 @@ fn an_order_to_a_recipient_that_is_not_a_lane_address_is_refused_and_nothing_is_
     assert_eq!(bus.relay.inbox_len(&plain).unwrap(), 0);
     assert!(bus.deadlines().is_empty());
 }
+
+#[trace("FR-071-AC-11")]
+#[test]
+fn orders_expired_json_lists_the_expired_orders_and_changes_nothing() {
+    let Some(mut bus) = Bus::new("expired-cli") else {
+        return;
+    };
+    let out = bus.send(
+        &[
+            "--order",
+            "--ack-deadline",
+            "10s",
+            "--expect-ticket",
+            "SWM-5",
+        ],
+        None,
+    );
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    let list = |bus: &Bus| {
+        let mut cmd = base_cmd(&["orders", "expired", "--json"], Some("hub:EA:sender"));
+        cmd.env("IX_RELAY_URL", &bus.url)
+            .env("IX_RELAY_PREFIX", &bus.prefix);
+        run(cmd, "")
+    };
+    let out = list(&bus);
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    let empty: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(empty["orders"].as_array().unwrap().len(), 0);
+    assert_eq!(empty["truncated"], false);
+    let expired = bus
+        .relay
+        .expire_orders(relay_core::Now::AtMs(now_ms() + 20_000))
+        .unwrap();
+    assert_eq!(expired.len(), 1);
+    let out = list(&bus);
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    let json: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    let orders = json["orders"].as_array().unwrap();
+    assert_eq!(orders.len(), 1);
+    assert_eq!(orders[0]["recipient"], "hub:EA:code");
+    assert_eq!(orders[0]["expect_ticket"], "SWM-5");
+    assert_eq!(orders[0]["delivered_before_expiry"], false);
+    assert_eq!(orders[0]["escalation"], "pending");
+    assert_eq!(orders[0]["last_state"], "queued");
+    assert!(!out.stdout.contains("\"hi\""));
+}

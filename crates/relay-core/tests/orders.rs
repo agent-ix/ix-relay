@@ -7,7 +7,10 @@ use ix_trace_rs::trace;
 use relay_core::{
     ActivityEvent, ActivityKind, Address, AgentName, Claim, Harness, HerdrPlaceIds, Message, Now,
     Place, Popper, Registration,
-    receipts::{DeliveryEvidence, OrderSpec, ReceiptEvent, ReceiptOutcome, ReceiptRequest},
+    receipts::{
+        DeliveryEvidence, EXPIRED_ORDERS_CAP, OrderEscalationState, OrderSpec, ReceiptEvent,
+        ReceiptOutcome, ReceiptRequest,
+    },
 };
 use relay_test_support::Bus;
 
@@ -635,4 +638,335 @@ fn an_order_to_a_recipient_without_a_lane_address_is_refused_and_nothing_is_queu
     assert!(events(&mut bus).is_empty());
     // The same lead takes a plain message.
     bus.relay.send(&message(&plain)).unwrap();
+}
+
+fn dump_all(bus: &mut Bus) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut keys = bus.keys();
+    keys.sort();
+    keys.into_iter()
+        .map(|key| {
+            let bytes: Vec<u8> = redis::cmd("DUMP").arg(&key).query(&mut bus.raw).unwrap();
+            (key, bytes)
+        })
+        .collect()
+}
+
+#[trace("FR-071-AC-11")]
+#[test]
+fn expired_orders_lists_every_unacted_expired_order_and_changes_nothing() {
+    let Some(mut bus) = Bus::connect("order-expired-read") else {
+        return;
+    };
+    assert!(bus.relay.expired_orders().unwrap().orders.is_empty());
+    let (name, _) = lead(&mut bus, "s-1");
+    // A plain message and an open order never appear.
+    bus.relay.send_as(&message(&name), None).unwrap();
+    bus.relay
+        .send_as(&message(&name), Some(&order(10_000, None)))
+        .unwrap();
+    let at = deliver(&mut bus, &name, 2);
+    let at_first = at;
+    // Delivered, ticketed, expired, escalation filed.
+    let due = bus.relay.expire_orders(Now::AtMs(at + 10_001)).unwrap();
+    assert_eq!(due.len(), 1);
+    bus.relay.escalate_expired_order(&due[0], at).unwrap();
+    let delivered_id = due[0].original_id.clone();
+    // Never delivered, left pending.
+    bus.relay
+        .send_as(&message(&name), Some(&order(20_000, Some("SWM-9"))))
+        .unwrap();
+    let queued_at = server_ms(&mut bus);
+    let pending = bus
+        .relay
+        .expire_orders(Now::AtMs(queued_at + 30_000))
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    let pending_id = pending[0].original_id.clone();
+    // Acted after expiry: excluded.
+    let (other, other_lane) = lead(&mut bus, "s-2");
+    bus.relay
+        .send_as(&message(&other), Some(&order(10_000, None)))
+        .unwrap();
+    let at = deliver(&mut bus, &other, 1);
+    let acted = bus.relay.expire_orders(Now::AtMs(at + 10_001)).unwrap();
+    let acted = acted.iter().find(|o| o.original_id != pending_id).unwrap();
+    let acted_id = acted.original_id.clone();
+    bus.relay.escalate_expired_order(acted, at).unwrap();
+    bus.relay
+        .record_activity(&other_lane, &event(ActivityKind::PostTool, "s-2", 1))
+        .unwrap();
+    // A poisoned lane whose escalation fails.
+    let (poison, _) = lead_on(&mut bus, "terra", "bad_id");
+    bus.relay
+        .send_as(&message(&poison), Some(&order(10_000, None)))
+        .unwrap();
+    let at = server_ms(&mut bus);
+    let poisoned = bus.relay.expire_orders(Now::AtMs(at + 20_000)).unwrap();
+    for o in poisoned.iter().filter(|o| o.original_id != pending_id) {
+        for _ in 0..3 {
+            bus.relay.order_escalation_failed(o, 3).unwrap();
+        }
+    }
+
+    let before = dump_all(&mut bus);
+    let listed = bus.relay.expired_orders().unwrap();
+    assert_eq!(dump_all(&mut bus), before, "the read changes no key");
+    assert!(!listed.truncated);
+    assert!(listed.orders.iter().all(|o| o.original_id != acted_id));
+    assert_eq!(listed.orders.len(), 3);
+    let by = |id: &str| listed.orders.iter().find(|o| o.original_id == id).unwrap();
+    let first = by(&delivered_id);
+    assert_eq!(first.recipient, LANE);
+    assert!(first.delivered_before_expiry);
+    assert_eq!(first.last_state, "delivered");
+    assert_eq!(first.escalation, OrderEscalationState::Filed);
+    assert_eq!(first.deadline_ms, at_first + 10_000);
+    assert_eq!(first.expired_at_ms, first.deadline_ms + 1);
+    let second = by(&pending_id);
+    assert!(!second.delivered_before_expiry);
+    assert_eq!(second.last_state, "queued");
+    assert_eq!(second.expect_ticket.as_deref(), Some("SWM-9"));
+    assert_eq!(second.escalation, OrderEscalationState::Pending);
+    assert_eq!(second.deadline_ms, second.enqueued_at_ms + 20_000);
+    assert!(
+        listed
+            .orders
+            .iter()
+            .any(|o| o.escalation == OrderEscalationState::Failed)
+    );
+    assert!(
+        listed
+            .orders
+            .windows(2)
+            .all(|w| w[0].expired_at_ms >= w[1].expired_at_ms)
+    );
+}
+
+#[trace("FR-071-AC-11")]
+#[test]
+fn expired_orders_returns_at_most_the_cap_and_says_when_more_exist() {
+    let Some(mut bus) = Bus::connect("order-expired-cap") else {
+        return;
+    };
+    let (name, _) = lead(&mut bus, "s-1");
+    let total = EXPIRED_ORDERS_CAP + 1;
+    for _ in 0..total {
+        bus.relay
+            .send_as(&message(&name), Some(&order(10_000, None)))
+            .unwrap();
+    }
+    let at = server_ms(&mut bus);
+    let mut expired = 0;
+    while expired < total {
+        let batch = bus.relay.expire_orders(Now::AtMs(at + 20_000)).unwrap();
+        for o in &batch {
+            bus.relay.escalate_expired_order(o, at).unwrap();
+        }
+        expired = bus
+            .relay
+            .hook_health_and_order_stats(1, &"terra".parse().unwrap())
+            .map(|(_, s)| total - usize::try_from(s.unacted.values().sum::<u64>()).unwrap())
+            .unwrap();
+    }
+    let listed = bus.relay.expired_orders().unwrap();
+    assert_eq!(listed.orders.len(), EXPIRED_ORDERS_CAP);
+    assert!(listed.truncated);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Late {
+    Ack,
+    Requeue,
+    DeadLetter,
+    LeaseTimeout,
+}
+
+#[trace("FR-071-AC-11")]
+#[test]
+fn an_acted_order_stays_out_of_the_list_whatever_receipt_follows_its_acted() {
+    for late in [
+        Late::Ack,
+        Late::Requeue,
+        Late::DeadLetter,
+        Late::LeaseTimeout,
+    ] {
+        let Some(mut bus) = Bus::connect(&format!("order-late-{late:?}").to_lowercase()) else {
+            return;
+        };
+        let (name, lane) = lead(&mut bus, "s-1");
+        bus.relay
+            .send_as(&message(&name), Some(&order(10_000, None)))
+            .unwrap();
+        let at = server_ms(&mut bus);
+        let claim = || {
+            Claim::new(Popper::Watcher)
+                .with_lease(Duration::from_secs(600))
+                .at(Now::AtMs(at))
+        };
+        let size = NonZeroUsize::new(1).unwrap();
+        let batch = bus
+            .relay
+            .pop_inbox_budget(&name, size, 1_000_000, claim())
+            .unwrap()
+            .batch
+            .unwrap();
+        bus.relay
+            .observe_delivery(
+                &name,
+                batch,
+                Popper::Watcher,
+                DeliveryEvidence::HerdrPrompt,
+                Now::AtMs(at),
+            )
+            .unwrap();
+        let due = bus.relay.expire_orders(Now::AtMs(at + 10_001)).unwrap();
+        bus.relay.escalate_expired_order(&due[0], at).unwrap();
+        assert_eq!(bus.relay.expired_orders().unwrap().orders.len(), 1);
+        bus.relay
+            .record_activity(&lane, &event(ActivityKind::Prompt, "s-1", 1))
+            .unwrap();
+        assert!(bus.relay.expired_orders().unwrap().orders.is_empty());
+        match late {
+            Late::Ack => {
+                bus.relay.ack(&name, batch, Popper::Watcher).unwrap();
+            }
+            Late::Requeue => {
+                bus.relay
+                    .requeue_batch(&name, batch, Popper::Watcher)
+                    .unwrap();
+                let again = bus
+                    .relay
+                    .pop_inbox_budget(&name, size, 1_000_000, claim())
+                    .unwrap()
+                    .batch
+                    .unwrap();
+                bus.relay
+                    .observe_delivery(
+                        &name,
+                        again,
+                        Popper::Watcher,
+                        DeliveryEvidence::HerdrPrompt,
+                        Now::AtMs(at + 1),
+                    )
+                    .unwrap();
+            }
+            Late::DeadLetter => {
+                bus.relay
+                    .dead_letter_batch(
+                        &name,
+                        batch,
+                        Popper::Watcher,
+                        relay_core::receipts::DeadLetterReason::ReceiverDenied,
+                    )
+                    .unwrap();
+            }
+            Late::LeaseTimeout => {
+                bus.relay
+                    .reap_expired(&name, Now::AtMs(at + 700_000))
+                    .unwrap();
+            }
+        }
+        assert!(
+            bus.relay.expired_orders().unwrap().orders.is_empty(),
+            "{late:?} after Acted must not list the order again"
+        );
+    }
+}
+
+#[trace("FR-071-AC-11")]
+#[test]
+fn the_list_reports_its_coverage_unreadable_rows_and_the_spelling_of_the_lane_lists() {
+    let Some(mut bus) = Bus::connect("order-expired-coverage") else {
+        return;
+    };
+    let empty = bus.relay.expired_orders().unwrap();
+    assert_eq!(empty.indexed_since_ms, None);
+    let (name, _) = lead(&mut bus, "s-1");
+    bus.relay
+        .send_as(&message(&name), Some(&order(10_000, None)))
+        .unwrap();
+    let at = server_ms(&mut bus);
+    let due = bus.relay.expire_orders(Now::AtMs(at + 20_000)).unwrap();
+    let id = due[0].original_id.clone();
+    let listed = bus.relay.expired_orders().unwrap();
+    assert_eq!(listed.indexed_since_ms, Some(at + 20_000));
+    assert_eq!((listed.skipped, listed.truncated), (0, false));
+
+    // The lane lists spell the lane; the stored spelling is only a fallback.
+    let order_key = bus.key(&format!("receipt-meta:order:{id}"));
+    redis::cmd("HSET")
+        .arg(&order_key)
+        .arg("to")
+        .arg("TERRA:swm:CODE")
+        .exec(&mut bus.raw)
+        .unwrap();
+    assert_eq!(
+        bus.relay.expired_orders().unwrap().orders[0].recipient,
+        "TERRA:swm:CODE"
+    );
+    bus.relay
+        .publish_lane_list(&"terra".parse().unwrap(), &[LANE.to_owned()])
+        .unwrap();
+    assert_eq!(
+        bus.relay.expired_orders().unwrap().orders[0].recipient,
+        LANE
+    );
+
+    // A row that cannot be decoded is counted, never dropped silently.
+    let index = bus.key("receipt-meta:orders-expired");
+    redis::cmd("HSET")
+        .arg(bus.key("receipt-meta:order:corrupt"))
+        .arg("to")
+        .arg(LANE)
+        .arg("status")
+        .arg("expired")
+        .arg("enqueued_at")
+        .arg("not-a-number")
+        .arg("ack_ms")
+        .arg("1")
+        .exec(&mut bus.raw)
+        .unwrap();
+    redis::cmd("ZADD")
+        .arg(&index)
+        .arg(1)
+        .arg("corrupt")
+        .exec(&mut bus.raw)
+        .unwrap();
+    let with_corrupt = bus.relay.expired_orders().unwrap();
+    assert_eq!(with_corrupt.orders.len(), 1);
+    assert_eq!(with_corrupt.skipped, 1);
+
+    let floor = server_ms(&mut bus);
+    // More index rows than one call examines: the call says so.
+    let mut pipeline = redis::pipe();
+    for n in 0..1_500 {
+        pipeline
+            .cmd("ZADD")
+            .arg(&index)
+            .arg(floor)
+            .arg(format!("gone-{n}"));
+    }
+    pipeline.exec(&mut bus.raw).unwrap();
+    let wide = bus.relay.expired_orders().unwrap();
+    assert!(wide.truncated);
+    assert_eq!(wide.orders.len(), 1, "the newest rows are examined first");
+
+    // Past 10,000 index rows the oldest go and the list says it may be short.
+    let mut pipeline = redis::pipe();
+    for n in 0..10_000 {
+        pipeline
+            .cmd("ZADD")
+            .arg(&index)
+            .arg(floor)
+            .arg(format!("filler-{n}"));
+    }
+    pipeline.exec(&mut bus.raw).unwrap();
+    bus.relay
+        .send_as(&message(&name), Some(&order(10_000, None)))
+        .unwrap();
+    let at = server_ms(&mut bus);
+    bus.relay.expire_orders(Now::AtMs(at + 20_000)).unwrap();
+    let trimmed: i64 = redis::cmd("ZCARD").arg(&index).query(&mut bus.raw).unwrap();
+    assert_eq!(trimmed, 10_000);
+    assert!(bus.relay.expired_orders().unwrap().truncated);
 }
