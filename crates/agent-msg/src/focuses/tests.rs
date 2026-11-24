@@ -414,7 +414,7 @@ fn dump(bus: &mut Bus) -> BTreeMap<String, Vec<u8>> {
     bus.keys()
         .into_iter()
         .map(|key| {
-            let bytes: Vec<u8> = redis::cmd("DUMP").arg(&key).query(&mut bus.raw).unwrap();
+            let bytes: Vec<u8> = relay_test_support::canonical_dump(&mut bus.raw, &key);
             (key, bytes)
         })
         .collect()

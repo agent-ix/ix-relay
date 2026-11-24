@@ -363,7 +363,7 @@ fn tc_029_05_doctor_changes_nothing() {
         let mut state: Vec<(String, Vec<u8>, bool)> = keys
             .into_iter()
             .map(|k| {
-                let dump: Vec<u8> = redis::cmd("DUMP").arg(&k).query(raw).unwrap();
+                let dump: Vec<u8> = relay_test_support::canonical_dump(raw, &k);
                 let ttl: i64 = redis::cmd("PTTL").arg(&k).query(raw).unwrap();
                 (k, dump, ttl >= 0)
             })
