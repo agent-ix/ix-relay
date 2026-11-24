@@ -275,8 +275,8 @@ impl Publisher {
         self.build_from(now, unix_nanos, Some(health))
     }
 
-    /// [`Publisher::build`], with `health` `None` when the store was not read at all: the
-    /// store-backed series are then left out, not shown as zeros.
+    /// Builds the registry of a push. `health` is `None` when the store was not read at
+    /// all: the store-backed series are then left out, not shown as zeros.
     fn build_from(
         &self,
         now: Instant,

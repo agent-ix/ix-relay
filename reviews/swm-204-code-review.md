@@ -73,6 +73,7 @@ Round 1, fix head `d0f29dd11bac99e10da4f87414e9b48b3c01a472` (`da01f43..d0f29dd`
 | FND-010 | fixed | Round 2 (`0f0b65f`): `publish_offline` calls `push(now, None, ..)`, and `build_from` fills relay health only for `Some`, so an outage push carries no `ix.relay.registrations`. The guarding assertion is missing (FND-013). |
 | FND-011 | fixed | Round 2: `fleet_checks` runs once per live heartbeat, separate from `heartbeat_check`, and emits both warnings; the doctor test asserts both together. The `watcher_otlp_failing` early return inside `heartbeat_check` is pre-existing and now hides neither fleet warning, so it is out of scope. |
 | FND-012 | fixed | Round 2: FR-070-AC-10 is added (a class from an unhealthy `pane_tail` or older than one scan interval carries no `lane.blocked` value), and tc_070_10 is retagged to it; the matrix binds it. |
+| FND-013 | fixed | Round 3 (`eadc437`): tc_070_06_a_watcher_with_redis_down_... asserts `!body.contains("ix.relay.registrations")`; with `publish_offline` reverted to `Health::default()` the gauge is emitted and this fails. |
 
 ## New findings (disposition pass 1)
 
@@ -87,3 +88,9 @@ Round 1, fix head `d0f29dd11bac99e10da4f87414e9b48b3c01a472` (`da01f43..d0f29dd`
 | ID | Severity | Summary | Refs |
 | --- | --- | --- | --- |
 | FND-013 | low | The FND-010 fix has no regression guard: tc_070_06 (watcher level) still asserts only that `ix.relay.inbox.depth` is absent, not `ix.relay.registrations`, although the fix round reports that it does. Reverting `push(now, None, ..)` to `Health::default()` would pass. | crates/relay-watcher/src/main.rs:3907-3911 |
+
+## New findings (disposition pass 3)
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-014 | high | `make ci` is red at `eadc437`: the `docs` step (`RUSTDOCFLAGS=-D warnings`) fails with `unresolved link to Publisher::build`, because round 2 made `build` `#[cfg(test)]` while the doc comment of `build_from` still links to it. fmt-check, lint, test-redis, deny, audit-unsafe and check-matrix pass. | crates/relay-watcher/src/otlp/mod.rs:273-278 |
