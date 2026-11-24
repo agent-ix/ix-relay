@@ -41,7 +41,7 @@ reported as unavailable, which is not a failure.
   `ix.fleet.host.capacity_configured` SHALL be 0 then, so that unset capacity is a standing
   failure and not silence.
 - The watcher SHALL count a registry lane toward `hook_events` unhealthy only when both hold: its last known state is non-idle (an open `pre_tool`, a herdr status of working, or a `prompt` with no later `stop`), and it then emits no activity event for `no_events_after` (default 30 minutes). A lane whose newest event is `stop`, `idle` or `session_end` is quiet, not unhealthy.
-- The watcher SHALL export `ix.fleet.lane.no_events` for each lane counted unhealthy, and the host's `hook_events` SHALL read 0 when the registry has at least one lane and every lane that was non-idle is counted unhealthy, or when the hook failure stream holds an `activity` failure newer than the newest event of every lane. A host whose working lanes emit nothing is therefore unhealthy, and a host of quiet lanes is not.
+- The watcher SHALL export `ix.fleet.lane.no_events` for each lane counted unhealthy, and the host's `hook_events` SHALL read 0 only when at least one lane was non-idle and every such lane is counted unhealthy, or when the hook failure stream holds an `activity` failure newer than the newest event of every lane. A host whose working lanes emit nothing is therefore unhealthy, and a host of quiet lanes is not.
 - The watcher SHALL log one line when a source changes between ok and failed, naming the
   source and an error class from a fixed set (`timeout`, `unreadable`, `unsupported`,
   `parse`, `unavailable`), never a path content or pane text.

@@ -33,6 +33,12 @@ Ticket: SWM-201. New and edited requirement statements checked for EARS shape wi
 
 PASS with low findings: wording fixes only, none blocks merge.
 
+## New findings (disposition pass 2)
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-004 | low | The new FR-072 stale-host statement carries three SHALLs (refuse with host_registry_stale, raise the probe defect, never accept silently); quire flags ears:non-singular. Split it. | spec/functional/FR-072-ordered-lane-assignment-list.md:46 |
+
 ## Dispositions
 
 | FND | outcome | reason |

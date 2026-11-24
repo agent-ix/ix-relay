@@ -49,6 +49,12 @@ CHANGES REQUESTED. FND-001 and FND-002 contradict the purpose of W1 (missing dat
 | FND-010 | medium | `no_events` and host `hook_events` flag a legitimately idle lane or host: any lane whose newest event is older than `no_events_after` is a defect, and a host whose lanes all stopped overnight reads `hook_events`=0, which turns ProbeFailing into noise and invites silencing. Lead decision: a lane counts as unhealthy only when its last known state is not idle (an open `pre_tool`, herdr reporting working, or a `prompt` with no later `stop`) and it then emits no event for `no_events_after` (default 30 minutes). A lane whose newest event is `stop`, `idle` or `session_end` is quiet, not unhealthy. FR-070-AC-9 currently asserts the opposite and must change. | FR-070 Health series, FR-070-AC-9, FR-045 lane.no_events row |
 | FND-011 | low | FR-072 accepts writes only from a caller with the orchestrator role in the relay configuration, but the relay does not authenticate callers (every participant that can reach Redis is trusted, SR-003 FND-006). State that the role check guards against accidental writes by lanes and is not authentication. | FR-072 Behavior, FR-072-AC-3 |
 
+## New findings (disposition pass 2)
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-012 | low | FR-070 says host hook_events reads 0 when the registry has a lane and every lane that was non-idle is counted unhealthy. On a host of only quiet lanes that condition is vacuously true, which a literal implementation turns back into the idle-host false alarm; FR-070-AC-9 asserts the intended reading (quiet host is 1). Say at least one lane was non-idle and every such lane is unhealthy. | FR-070 Health series, FR-070-AC-9 |
+
 ## Dispositions
 
 | FND | outcome | reason |
@@ -62,3 +68,5 @@ CHANGES REQUESTED. FND-001 and FND-002 contradict the purpose of W1 (missing dat
 | FND-007 | fixed | `hook_events` is now defined (per-lane age against `no_events_after`, plus activity failures), so a host whose hooks are broken reads 0. Its handling of idle lanes is the subject of new finding FND-010. |
 | FND-008 | fixed | Acted ordering and deadlines use relay server (Redis) time; FR-067-AC-12 covers clocks 10 minutes behind and ahead. |
 | FND-009 | fixed | No folding: `ix.fleet.lane.dropped` plus the doctor warning `fleet_lanes_dropped` (FR-045-AC-31). |
+| FND-010 | fixed | FR-070 and the FR-045 no_events row count a lane only when its last known state is non-idle (open pre_tool, herdr working, prompt with no later stop) and it is silent past no_events_after; stop/idle/session_end lanes are quiet; FR-070-AC-9 tests all three cases. |
+| FND-011 | fixed | FR-072 states the role check guards against accidental lane writes and is not authentication. |

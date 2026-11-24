@@ -64,3 +64,6 @@ CHANGES REQUESTED. FND-001 must be fixed before merge (it corrupts the matrix to
 | FND-008 | fixed | FR-017-AC-5 lists all seven events; FR-017-AC-8 and FR-068-AC-12 assert empty stdout with no permission decision. |
 | FND-009 | fixed | Deterministic rule (trailing ? after stripping, fixed phrase list in last paragraph); FR-068-AC-4 tests each. |
 | FND-010 | fixed | FR-067 Dependencies has a headed Extended-by bullet; NFR-001 paragraph split into four statements. |
+| FND-011 | fixed | FR-069 adds a fleet registry: each watcher publishes its lane list to Redis under a 90 s lease; expired hosts' lanes stay listed as stale; FR-072 refuses writes to stale lanes with host_registry_stale (FR-069-AC-16, FR-072-AC-9). |
+| FND-012 | fixed | FR-071-AC-11 removed; Dependencies names ix-board#86 FR-035 as owner of acceptance by focus match. The FR-071 Behavior text still restates the consumer rule as a SHALL, now without an AC here. |
+| FND-013 | fixed | FR-068-AC-13 verification is Test. |

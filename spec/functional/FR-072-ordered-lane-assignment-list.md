@@ -43,7 +43,10 @@ lane.
   unchanged.
 - A write SHALL be `set` (replace the list), `append`, `remove` of one ticket, or
   `reorder`, and SHALL apply atomically with its transition record. A write naming a lane
-  address that is not in the fleet registry SHALL be refused by the relay. A write naming a lane of a host whose registry lease has expired (a `stale` lane, [FR-069](./FR-069-host-collector.md)) SHALL be refused with the error `host_registry_stale`, and the relay SHALL raise the collector probe defect of [FR-070](./FR-070-collector-source-health.md); the relay SHALL NOT accept it silently.
+  address that is not in the fleet registry SHALL be refused by the relay.
+- The relay SHALL refuse with the error `host_registry_stale` a write naming a lane of a host whose registry lease has expired (a `stale` lane, [FR-069](./FR-069-host-collector.md)).
+- When the relay refuses a write as `host_registry_stale`, it SHALL raise the collector probe defect of [FR-070](./FR-070-collector-source-health.md).
+- The relay SHALL NOT accept a write to a stale lane silently.
 - Each transition record SHALL hold the operation, the lane address, the writer, the list
   version after the write and the ticket ids, with the relay server's time. The history SHALL
   be retained and read under the bounds of FR-066 (4,096 entries, seven days, bounded
