@@ -53,3 +53,23 @@ What is sound:
 | FND-006 | low | `activity.json` is updated by an unlocked read-modify-write. Concurrent hooks on one host (four or more lanes) each read the counts, add one and rename their own copy, so increments are lost and `skipped`/`dropped` under-report. These counts are the outage signal FR-068 asks for. The rename makes the file safe from tearing, but the counts are not exact. A non-blocking `try_lock` on a sidecar file, or per-pid count files summed by the reader, would keep the counts exact without ever making a hook wait. | crates/agent-msg/src/activity_state.rs:71-122 |
 | FND-007 | low | The activity write now runs before `flush_health`. On an `EVAL` that stalls, `set_timeout(left)` gives the write the whole remaining budget, so that call ships no spooled failure records. Telemetry thus takes the window that FR-030 shipping had before. Capping the write's timeout, or flushing first on calls with a non-empty spool, would keep health shipping ahead of activity telemetry. | crates/agent-msg/src/hook_run.rs:800-812, crates/agent-msg/src/hook_run.rs:962-966 |
 | FND-008 | low | `_cx` keeps its unused-binding underscore although `try_run` now reads `_cx.harness` and `_cx.activity`. Rust style reserves the leading underscore for bindings that are intentionally unused. | crates/agent-msg/src/hook_run.rs:713, crates/agent-msg/src/hook_run.rs:805 |
+
+## New findings (disposition pass 1)
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-009 | low | `is_bus_fault` counts `HerdrFailed` and `BudgetExhausted` as bus faults. `HerdrFailed` means herdr could not name one session. `BudgetExhausted` covers a herdr call refused for time and a payload that arrived after its budget. Neither says anything about Redis, yet each starts the per-host activity backoff, so one broken pane or one slow payload skips every lane's events on the host for at least 5 s while the bus is healthy. Only connect, derive, register and pop failures, which do touch Redis, should start the backoff. The other failures should call `dropped()`. | crates/agent-msg/src/hook_run.rs:539-549, crates/agent-msg/src/hook_run.rs:704-715 |
+| FND-010 | low | `skill_versions` is now a JSON object (`{"dev-team":"0.4.1"}`), where the first head wrote `name=version` strings. FR-068 says the field holds "`name=version` pairs". An object can be read that way, but the spec does not fix the wire shape, and the FR-069 and dashboard consumers have to know which one to parse. Either the spec should name the object shape, or the code should keep the strings. | crates/relay-core/src/activity.rs:132-135, crates/agent-msg/src/activity.rs:127-142 |
+
+## Dispositions
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | Fix head 8755a8f checks the backoff before connecting, and every bus fault of a call with a pending event starts it. Re-measured against a paused redis:7: the first `PreToolUse` took 313 ms and the next two took 13 ms each, all exit 0 with no stdout. After the 5 s period, one call took 331 ms and the backoff doubled to 10 s. The refused case took 9–10 ms per call with one `connect` record. The `hook_activity.rs` real-binary tests pass. |
+| FND-002 | fixed | A lead with no lane address is now counted as `unregistered` and leaves the backoff unchanged. Test: `a_lead_with_no_verified_lane_address_is_counted_and_never_ends_a_backoff`. |
+| FND-003 | fixed | The lane now comes from `Registration::verified_place` in Rust, and `record_activity` refuses lanes longer than `MAX_LABEL_BYTES`. The Lua script no longer derives an address. |
+| FND-004 | fixed | The role is read from `AGENT_MSG_ROLE`, and `unknown` is used only when it is unset or empty. `skill_versions` is always present; its `dev-team` version is read from Claude's `installed_plugins.json` or from Codex's `plugins/cache/agent-ix/dev-team/<version>` (that directory exists on this host). |
+| FND-005 | fixed | `emit_activity` records only when the call has recorded nothing else, and a mail failure returns before the write. The `all_records` and proptest filters are reverted. |
+| FND-006 | fixed | Counter updates take a sidecar flock with a 50 ms bound. The concurrency test (4 threads x 10 updates = 40) and the held-lock test both pass. |
+| FND-007 | fixed | `flush_health` now runs before `emit_activity`. |
+| FND-008 | fixed | `_cx` is renamed to `cx`. |

@@ -2817,3 +2817,25 @@ fn a_session_start_event_carries_a_role_and_skill_versions() {
     assert!(evs[0]["role"].is_string());
     assert!(evs[0]["skill_versions"].is_object());
 }
+
+/// A herdr failure or a spent budget drops the event but says nothing about the
+/// bus, so it must not start the host-wide backoff: the next call still tries.
+#[trace("FR-068-AC-11")]
+#[test]
+fn a_herdr_failure_or_spent_budget_counts_a_drop_and_starts_no_backoff() {
+    for budget_spent in [false, true] {
+        let h = Harness::new();
+        h.world.borrow_mut().herdr_failed = Some(budget_spent);
+        h.run(true, &mut payload("PreToolUse", "").as_bytes(), false);
+        let c = h.state.counts();
+        assert_eq!((c.dropped, c.backoff_ms), (1, 0), "{budget_spent}");
+        let calls = h.world.borrow().calls.len();
+        h.clock.advance(ms(1_000));
+        h.run(true, &mut payload("PreToolUse", "").as_bytes(), false);
+        assert!(
+            h.world.borrow().calls.len() > calls,
+            "{budget_spent}: not skipped"
+        );
+        assert_eq!(h.state.counts().skipped, 0, "{budget_spent}");
+    }
+}

@@ -51,3 +51,12 @@ What holds:
 - Stubs: none.
 - Semantic review: AC-to-test intent was read for every FR-068 tagged test as part of this review. A separate fan-out semantic pass was not run.
 - Plan completion: not assessed
+
+## Dispositions
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | The new `tests/hook_activity.rs` runs the real binary against a refusing Redis and an accepting, never-answering Redis for `PreToolUse`, `Notification` and `SessionEnd`. It asserts `dropped=1, backoff=5000`, one spool record, then `skipped=1` and no new TCP connection on the next call. Both tests pass. |
+| FND-002 | fixed | The tests now carry `#[trace(...)]`. `quire matrix` binds FR-068-AC-1 to AC-12 (1 to 8 binders each) and FR-017-AC-8 (1). AC-13 stays deferred. |
+| FND-003 | fixed | NFR-001-M-7, M-8 and M-9 now have benchmarks in `hook_budget.rs`, bound in the matrix. Ignored lane run: M-7 took 310 ms, M-8 took 917 and 914 ms, M-9 took 8 ms. All pass. |
+| FND-004 | fixed | `activity_only_events_cost_the_session_read_and_one_write` pins `PreToolUse`, `Notification` and `SessionEnd` at 2 requests. It passes against redis:7. |

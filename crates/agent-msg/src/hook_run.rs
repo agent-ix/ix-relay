@@ -539,12 +539,7 @@ impl HookError {
     fn is_bus_fault(&self) -> bool {
         matches!(
             self,
-            Self::Connect(_)
-                | Self::Derive(_)
-                | Self::HerdrFailed
-                | Self::Register(_)
-                | Self::Pop(_)
-                | Self::BudgetExhausted { .. }
+            Self::Connect(_) | Self::Derive(_) | Self::Register(_) | Self::Pop(_)
         )
     }
 
