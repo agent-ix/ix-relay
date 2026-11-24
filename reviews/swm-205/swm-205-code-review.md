@@ -65,3 +65,18 @@ FR-069 gives a newer pane class precedence only to map it to its blocked reason.
 **FND-003.** The PR body names the skew as a known deviation. FR-068 has the relay record Redis server time on every write precisely so that consumers measure against one clock, as FR-067 and FR-071 do. `publish_lane_list` already queries Redis `TIME` in the same refresh, and `main.rs` discards the result (`.is_ok()`). Pass `refreshed_ms` as `now_ms` to `set_activity`. For the failure comparison, convert both sides to relay time, or compare the failure with the read's relay time.
 
 **FND-004.** `live_cwd` applies `MAPPING_TTL`, but `branch()` and `cwd()` do not. Apply the same expiry to focus_info. Once the mapping has expired, export an empty ticket and branch.
+
+## Dispositions
+
+Round 1, fix head `62c3ff017a4aaac7afd124ebef513b9ab0056c7f` (`6b34f2e..62c3ff0`), checked against the fix commit's code and tests.
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | `Signals::resolve` lets a pane class override the hook only when it maps to a reason and was read after the newest event. New tests run `sample()` then `fill()` for stuck, ended, working and question (lanes.rs:122-151; feed_tests tc_045_30_a_pane_class_of_none_never_overrides_the_hook_verdict_after_a_sample). |
+| FND-002 | fixed | herdr status is no longer an input to `resolve`. A lane with no event is idle unless a compiler is attributed, and it still carries no_events once silent (tc_045_30_a_lane_with_no_hook_event_is_idle_whatever_herdr_says_and_no_events_marks_it). |
+| FND-003 | fixed | Event ages are measured against `publish_lane_list().refreshed_ms` (Redis TIME) from the same refresh. Lead decision on `failure_newer`: the failure's `at_ms` and the watcher clock are on the same host, so the failure age and the relay-clock event ages both become monotonic instants and compare correctly. |
+| FND-004 | fixed | focus_info reads `LaneActivity::live_mapping(now)`, which is empty past `MAPPING_TTL`. FR-045 row updated. Covered by tc_069_06_focus_info_drops_branch_and_ticket_with_the_mapping_after_six_hours. |
+| FND-005 | fixed | FR-070 and the FR-045 no_events row now list `blocked` as quiet, with the reason. New FR-070-AC-11 is tested by tc_070_11_a_lane_waiting_on_a_permission_is_quiet_not_unhealthy. |
+| FND-006 | fixed | `Relay::activity_last_many` pipelines HGETALL in batches of 128 under one `SOURCE_BUDGET`. The connection timeout is re-armed per batch and restored, and a spent budget is a `Timeout` error class. A relay-core Redis test covers 130 lanes and the spent budget. |
+| FND-007 | fixed | Tickets match only configured team keys (`[fleet] ticket_prefixes`, which defaults to the fleet's Linear keys and is validated). `release-2026`, `fix-12-x` and `utf-8` give no ticket. |
+| FND-008 | fixed | New `activity_counters` source (FR-070 sources list and AC-12). An unreadable or unparsable file fails the source and logs a transition line. A missing file exports no series, not zeros. |

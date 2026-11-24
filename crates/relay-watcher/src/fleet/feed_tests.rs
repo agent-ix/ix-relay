@@ -608,7 +608,7 @@ fn tc_045_30_a_lane_with_no_hook_event_is_idle_whatever_herdr_says_and_no_events
     assert!(no_events(&r, "hub:S:a"), "FR-070 still flags it");
 }
 
-#[trace("FR-069-AC-6")]
+#[trace("FR-045-AC-29")]
 #[test]
 fn tc_069_06_focus_info_drops_branch_and_ticket_with_the_mapping_after_six_hours() {
     let mut c = Collector::new(host(), Profile::default(), sources(None), INTERVAL);

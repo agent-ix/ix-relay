@@ -31,3 +31,19 @@ The evidence is hollow in two places. The lane-state tests never put a pane clas
 - Run evidence: `cargo test -p relay-core -p agent-msg` passes. The relay-watcher feed, fleet, otlp and main-Redis tests this diff adds pass on macOS against a throwaway redis:7. The coder reports terra green.
 - Semantic review: skipped. This is a reviewer subagent run with no user to opt in. The code-review lane (SR-6106) did the intent-to-code check for the touched rules.
 - Plan completion: not assessed
+
+## New findings (disposition pass 1)
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-004 | low | The new focus_info TTL test is tagged FR-069-AC-6, which is about compilers being counted unattributed. The test asserts focus_info's ticket and branch expiry, which belongs to the FR-045 focus_info row (AC-29). No AC states the focus_info expiry. | crates/relay-watcher/src/fleet/feed_tests.rs:611-645 |
+
+## Dispositions
+
+Round 1, fix head `62c3ff017a4aaac7afd124ebef513b9ab0056c7f`.
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | New FR-045-AC-30 tests call `sample()` (pane class `none`, or a dialog with a reason) before `fill()`, so they exercise the production path. |
+| FND-002 | fixed | tc_045_30_a_lane_with_no_hook_event_is_idle_whatever_herdr_says_and_no_events_marks_it pins a no-event lane with herdr working as idle with no_events. |
+| FND-003 | fixed | The ticket-parser test is now tagged FR-045-AC-29. |
