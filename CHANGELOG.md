@@ -1,6 +1,6 @@
 # Release notes
 
-## Unreleased
+## 0.4.0
 
 - Add the host collector to `relay-watcher`: measured CPU busy ratio, memory and temperature, a per-lane state, last-activity and blocked reason from pane-tail classification, the leased per-host lane list in Redis, `ix.fleet.probe_ok` per collector source, and the `[fleet]` host profile. Hook-event lane state, `no_events` and per-lane compile seconds follow with the hook feed. `agent-msg doctor` warns `collector_source_failed` and `fleet_lanes_dropped` from the heartbeat. Upgrade `agent-msg` and the hook before adding `[fleet]` to a machine's `config.toml`.
 - Add `Acted` receipts and order ack deadlines. `Acted` records the first prompt or tool event of the recipient session after delivery. `agent-msg send --order [--ack-deadline AGE] [--expect-ticket ID]` (and `[send] ack_deadline`) gives a message to one lane address an ack deadline; when it passes without `Acted`, `relay-watcher` records `AckExpired` and files one escalation of kind `order`, and exports `ix.relay.orders.unacted`, `ix.relay.orders.escalation_failed` and `ix.relay.order.act_latency`. The first activity write after a Redis restart takes two round trips (script by SHA, then by body). Upgrade order: escalations of kind `order` have no ticket, so upgrade `agent-msg`, `relay-tui` and `ix-board` on every machine before any `relay-watcher` runs this version; an older build cannot read a ticketless escalation and lists it as unreadable.
