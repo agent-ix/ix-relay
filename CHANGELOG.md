@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Move the host readers (CPU busy ratio, memory, temperature, compiler processes, per-source read budgets and error classes) into the `host-probe` crate and add Linux pressure stall information: `ix.fleet.host.pressure{resource,kind}` from `/proc/pressure/{cpu,io,memory}` and a `pressure` collector source, reported as `probe_unavailable` on macOS and on kernels without PSI. Add `pressure` to `expected_sources` on a host that should report it off the default.
+- Add the ordered per-lane assignment list (FR-072). `agent-msg assign set|append|remove|reorder` writes a lane's list of up to 50 tickets (each with a text reference), an optional `--order-id` is stored in the transition record, and `assign show` and `assign history` read the lists and the bounded history without a role. Writes need `[assign] orchestrator = true` in `config.toml`, are refused for a lane's own list, an unknown lane and a lane of a host with an expired registry lease (`host_registry_stale`, which records the host's probe defect until it refreshes), and a lane's list follows it when its tab is renamed or its pane relinked. A list that cannot follow (the new address already holds one, or the store fails) stays put, records a `move_failed` transition and a defect, and `agent-msg doctor` warns `assignment_move_failed` and `assignment_host_registry_stale` until they are settled. An emptied list leaves the lane limit, and lists of lanes no registry lists are dropped after seven days when the limit is reached.
 
 ## 0.4.0
 

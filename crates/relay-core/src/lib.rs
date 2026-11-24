@@ -8,6 +8,7 @@
 
 pub mod activity;
 mod address;
+pub mod assignment;
 pub mod config;
 pub mod directory;
 mod env;

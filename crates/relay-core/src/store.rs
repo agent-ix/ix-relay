@@ -59,6 +59,7 @@ const SESSION_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 pub const HERDR_FAILED_TTL_SECS: u64 = 300;
 
 mod activity;
+mod assignment;
 mod commit;
 mod directory;
 mod fleet;

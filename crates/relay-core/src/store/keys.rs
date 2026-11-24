@@ -134,6 +134,51 @@ impl Keys {
         format!("{}fleet-lanes", self.prefix)
     }
 
+    /// One lane's ordered assignment list (FR-072): a list of JSON entries.
+    pub(super) fn assign_list_key(&self, lane: &Address) -> String {
+        format!("{}assign-list:{lane}", self.prefix)
+    }
+
+    /// What every [`Keys::assign_list_key`] starts with, for the read of all lists.
+    pub(super) fn assign_list_stem(&self) -> String {
+        format!("{}assign-list:", self.prefix)
+    }
+
+    /// One lane's list metadata: `version` and `at_ms`.
+    pub(super) fn assign_meta_key(&self, lane: &Address) -> String {
+        format!("{}assign-meta:{lane}", self.prefix)
+    }
+
+    /// What every [`Keys::assign_meta_key`] starts with.
+    pub(super) fn assign_meta_stem(&self) -> String {
+        format!("{}assign-meta:", self.prefix)
+    }
+
+    /// The set of lanes that hold a list, so a read of all lists needs no key scan.
+    pub(super) fn assign_lanes_key(&self) -> String {
+        format!("{}assign-lanes", self.prefix)
+    }
+
+    /// The capped stream of assignment transitions.
+    pub(super) fn assign_events_key(&self) -> String {
+        format!("{}assign-events", self.prefix)
+    }
+
+    /// When the transition stream began, for its retained lower bound.
+    pub(super) fn assign_events_start_key(&self) -> String {
+        format!("{}assign-events-start", self.prefix)
+    }
+
+    /// Hosts whose stale lanes were written to, until the host refreshes its lanes.
+    pub(super) fn assign_defects_key(&self) -> String {
+        format!("{}assign-defects", self.prefix)
+    }
+
+    /// Lists that did not follow their lane, under both addresses, until a write settles them.
+    pub(super) fn assign_move_defects_key(&self) -> String {
+        format!("{}assign-move-defects", self.prefix)
+    }
+
     pub(super) fn status_sequence_key(&self) -> String {
         format!("{}status:sequence", self.prefix)
     }
@@ -318,6 +363,15 @@ mod tests {
             ("lane_focus_key", relay.lane_focus_key()),
             ("server_capacity_key", relay.server_capacity_key()),
             ("fleet_lanes_key", relay.fleet_lanes_key()),
+            ("assign_list_key", relay.assign_list_key(&lane)),
+            ("assign_list_stem", relay.assign_list_stem()),
+            ("assign_meta_key", relay.assign_meta_key(&lane)),
+            ("assign_meta_stem", relay.assign_meta_stem()),
+            ("assign_lanes_key", relay.assign_lanes_key()),
+            ("assign_events_key", relay.assign_events_key()),
+            ("assign_events_start_key", relay.assign_events_start_key()),
+            ("assign_defects_key", relay.assign_defects_key()),
+            ("assign_move_defects_key", relay.assign_move_defects_key()),
             ("status_sequence_key", relay.status_sequence_key()),
             ("status_request_key", relay.status_request_key(&request)),
             ("status_reply_key", relay.status_reply_key(&request, &agent)),
@@ -374,6 +428,15 @@ mod tests {
             ("lane_focus_key", "p:lane:focus"),
             ("server_capacity_key", "p:lane:server-capacity"),
             ("fleet_lanes_key", "p:fleet-lanes"),
+            ("assign_list_key", "p:assign-list:node-a:EA:code"),
+            ("assign_list_stem", "p:assign-list:"),
+            ("assign_meta_key", "p:assign-meta:node-a:EA:code"),
+            ("assign_meta_stem", "p:assign-meta:"),
+            ("assign_lanes_key", "p:assign-lanes"),
+            ("assign_events_key", "p:assign-events"),
+            ("assign_events_start_key", "p:assign-events-start"),
+            ("assign_defects_key", "p:assign-defects"),
+            ("assign_move_defects_key", "p:assign-move-defects"),
             ("status_sequence_key", "p:status:sequence"),
             ("status_request_key", "p:status:request:r1"),
             ("status_reply_key", "p:status:reply:r1:lead-a"),
@@ -455,6 +518,15 @@ mod tests {
             other.lane_focus_key(),
             other.server_capacity_key(),
             other.fleet_lanes_key(),
+            other.assign_list_key(&lane),
+            other.assign_list_stem(),
+            other.assign_meta_key(&lane),
+            other.assign_meta_stem(),
+            other.assign_lanes_key(),
+            other.assign_events_key(),
+            other.assign_events_start_key(),
+            other.assign_defects_key(),
+            other.assign_move_defects_key(),
             other.status_sequence_key(),
             other.status_request_key(&request),
             other.status_reply_key(&request, &agent),

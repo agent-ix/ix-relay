@@ -200,7 +200,7 @@ impl ErrorKind {
             | E::InflightUnreadable { .. }
             | E::MoveUnreadable { .. } => Self::Corrupt,
             E::InvalidName { .. } => Self::InvalidName,
-            E::Work(_) => Self::Rejected,
+            E::Work(_) | E::Assign(_) => Self::Rejected,
             E::DirectoryChanged
             | E::UnverifiedEnrollment { .. }
             | E::UnknownAgent(_)
