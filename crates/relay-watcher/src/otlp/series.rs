@@ -103,6 +103,84 @@ pub static HEALTH_SNAPSHOT_READ_FAILURES: Instrument = Instrument {
     kind: Kind::Sum,
 };
 
+macro_rules! fleet_gauge {
+    ($(#[$doc:meta])* $id:ident, $name:literal, $unit:literal, $desc:literal) => {
+        $(#[$doc])*
+        pub static $id: Instrument = Instrument {
+            name: $name,
+            unit: $unit,
+            description: $desc,
+            kind: Kind::Gauge,
+        };
+    };
+}
+
+fleet_gauge!(
+    /// `ix.fleet.lane.state`: one series per registry lane.
+    FLEET_LANE_STATE, "ix.fleet.lane.state", "1",
+    "One series per lane of the lane registry, value 1, by state (working, idle, blocked)."
+);
+fleet_gauge!(
+    /// `ix.fleet.lane.last_activity`: seconds since the lane's newest activity.
+    FLEET_LANE_LAST_ACTIVITY, "ix.fleet.lane.last_activity", "s",
+    "Seconds since the lane's newest activity event, or since the watcher first saw the lane."
+);
+fleet_gauge!(
+    /// `ix.fleet.lane.blocked`: a blocked lane and why.
+    FLEET_LANE_BLOCKED, "ix.fleet.lane.blocked", "1",
+    "Value 1 for a blocked lane, by reason."
+);
+fleet_gauge!(
+    /// `ix.fleet.lane.dropped`: registry lanes left out past the cap.
+    FLEET_LANE_DROPPED, "ix.fleet.lane.dropped", "{lane}",
+    "Registry lanes left out of the per-lane series because more than 50 exist."
+);
+fleet_gauge!(
+    /// `ix.fleet.host.busy_ratio`: measured CPU busy ratio.
+    FLEET_BUSY_RATIO, "ix.fleet.host.busy_ratio", "1",
+    "Measured CPU busy ratio, 0 to 1; absent when its source fails."
+);
+fleet_gauge!(
+    /// `ix.fleet.host.memory_used_bytes`.
+    FLEET_MEMORY_USED, "ix.fleet.host.memory_used_bytes", "By",
+    "Memory in use on this host (total minus available); absent when its source fails."
+);
+fleet_gauge!(
+    /// `ix.fleet.host.memory_total_bytes`.
+    FLEET_MEMORY_TOTAL, "ix.fleet.host.memory_total_bytes", "By",
+    "Total memory of this host; absent when its source fails."
+);
+fleet_gauge!(
+    /// `ix.fleet.host.temperature`.
+    FLEET_TEMPERATURE, "ix.fleet.host.temperature", "Cel",
+    "Highest CPU package or Tctl temperature; absent unless the host profile expects it and it reads."
+);
+fleet_gauge!(
+    /// `ix.fleet.host.capacity_slots`.
+    FLEET_CAPACITY_SLOTS, "ix.fleet.host.capacity_slots", "{slot}",
+    "Operator-entered capacity slots; absent when none is entered."
+);
+fleet_gauge!(
+    /// `ix.fleet.host.capacity_configured`.
+    FLEET_CAPACITY_CONFIGURED, "ix.fleet.host.capacity_configured", "1",
+    "1 when capacity is entered, 0 otherwise; always exported."
+);
+fleet_gauge!(
+    /// `ix.fleet.host.native_windows_agents`.
+    FLEET_NATIVE_WINDOWS, "ix.fleet.host.native_windows_agents", "{process}",
+    "On a WSL host, native Windows agent, herdr or build processes seen; nonzero is a defect."
+);
+fleet_gauge!(
+    /// `ix.fleet.probe_ok`.
+    FLEET_PROBE_OK, "ix.fleet.probe_ok", "1",
+    "Source health, 1 or 0, for each source the host profile expects."
+);
+fleet_gauge!(
+    /// `ix.fleet.probe_unavailable`.
+    FLEET_PROBE_UNAVAILABLE, "ix.fleet.probe_unavailable", "1",
+    "Value 1 for a source the host profile declares absent on this host; not a failure."
+);
+
 /// Every instrument the watcher emits, with the attribute keys each carries.
 /// The spec (FR-045) lists the same, and tests compare the two and what a full
 /// push actually exports.
@@ -131,4 +209,17 @@ pub(crate) const CATALOGUE: &[(&Instrument, &[&str])] = &[
     (&TICK_DURATION, &[]),
     (&REGISTRATIONS, &["machine"]),
     (&HEALTH_SNAPSHOT_READ_FAILURES, &["snapshot"]),
+    (&FLEET_LANE_STATE, &["host", "lane", "state"]),
+    (&FLEET_LANE_LAST_ACTIVITY, &["host", "lane"]),
+    (&FLEET_LANE_BLOCKED, &["host", "lane", "reason"]),
+    (&FLEET_LANE_DROPPED, &["host"]),
+    (&FLEET_BUSY_RATIO, &["host"]),
+    (&FLEET_MEMORY_USED, &["host"]),
+    (&FLEET_MEMORY_TOTAL, &["host"]),
+    (&FLEET_TEMPERATURE, &["host"]),
+    (&FLEET_CAPACITY_SLOTS, &["host"]),
+    (&FLEET_CAPACITY_CONFIGURED, &["host"]),
+    (&FLEET_NATIVE_WINDOWS, &["host"]),
+    (&FLEET_PROBE_OK, &["host", "source"]),
+    (&FLEET_PROBE_UNAVAILABLE, &["host", "source"]),
 ];

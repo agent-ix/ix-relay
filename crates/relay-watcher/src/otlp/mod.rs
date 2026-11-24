@@ -270,7 +270,19 @@ impl Publisher {
     /// Builds the registry of a push from what was recorded and `health`,
     /// stamped `unix_nanos`. The panes are left out once older than
     /// [`PANES_MAX_AGE`] at `now`.
+    #[cfg(test)]
     pub(crate) fn build(&self, now: Instant, unix_nanos: u64, health: &relay::Health) -> Registry {
+        self.build_from(now, unix_nanos, Some(health))
+    }
+
+    /// Builds the registry of a push. `health` is `None` when the store was not read at
+    /// all: the store-backed series are then left out, not shown as zeros.
+    fn build_from(
+        &self,
+        now: Instant,
+        unix_nanos: u64,
+        health: Option<&relay::Health>,
+    ) -> Registry {
         let Some(a) = &self.active else {
             return Registry::new(unix_nanos, unix_nanos);
         };
@@ -280,7 +292,9 @@ impl Publisher {
         {
             panes::fill(&mut registry, panes);
         }
-        health.fill(&mut registry, &a.machine);
+        if let Some(health) = health {
+            health.fill(&mut registry, &a.machine);
+        }
         a.read_failures.fill(&mut registry);
         a.stats.fill(&mut registry);
         registry
@@ -300,6 +314,7 @@ impl Publisher {
         regs: &[Registration],
         now: Instant,
         now_ms: i64,
+        fleet: Option<&mut crate::fleet::Collector>,
         log: &mut impl FnMut(String),
     ) {
         let Some(a) = &mut self.active else {
@@ -319,6 +334,7 @@ impl Publisher {
             .read_failures
             .hook_health_newest
             .saturating_add(read_failures.hook_health_newest);
+        let failed_ok = failed.is_none();
         match failed {
             Some(e) if !std::mem::replace(&mut a.read_failed_reported, true) => log(format!(
                 "cannot read the relay's health for the metrics push ({e}); those series are \
@@ -327,7 +343,45 @@ impl Publisher {
             Some(_) => {}
             None => a.read_failed_reported = false,
         }
-        let registry = self.build(now, unix_nanos(), &health);
+        self.push(now, Some(&health), failed_ok, fleet, log);
+    }
+
+    /// The push of a watcher with no store connection (FR-070-AC-6): on the same
+    /// interval, with every store-backed series left out and the `redis` source
+    /// reading 0, so the collector sees the outage and the host's other sources.
+    pub fn publish_offline(
+        &mut self,
+        now: Instant,
+        fleet: Option<&mut crate::fleet::Collector>,
+        log: &mut impl FnMut(String),
+    ) {
+        let Some(a) = &mut self.active else {
+            return;
+        };
+        if a.next_due.is_some_and(|due| now < due) {
+            return;
+        }
+        a.next_due = Some(next_due_after(now, a.interval));
+        self.push(now, None, false, fleet, log);
+    }
+
+    /// Samples the collector, builds the registry and hands it to the exporter.
+    fn push(
+        &self,
+        now: Instant,
+        health: Option<&relay::Health>,
+        store_ok: bool,
+        mut fleet: Option<&mut crate::fleet::Collector>,
+        log: &mut impl FnMut(String),
+    ) {
+        if let Some(f) = fleet.as_deref_mut() {
+            f.set_push_redis(store_ok, log);
+            f.sample(now, log);
+        }
+        let mut registry = self.build_from(now, unix_nanos(), health);
+        if let Some(f) = fleet {
+            f.fill(&mut registry, now);
+        }
         if let Some(a) = &self.active {
             a.exporter.submit(registry);
         }
@@ -351,6 +405,7 @@ pub fn next_due_after(now: Instant, interval: Duration) -> Instant {
 
 #[cfg(test)]
 mod tests {
+    use ix_trace_rs::trace;
     use std::collections::BTreeMap;
 
     use relay_core::config::{
@@ -420,7 +475,10 @@ mod tests {
     /// code, the catalogue and the spec agree.
     ///
     /// Tracing: TC-045-11
-    /// ACs: FR-045-AC-11
+    ///
+    /// Caveat: the spec series in `NOT_YET_EXPORTED` below are not exported yet (SWM-205,
+    /// SWM-207), so this holds for the exported catalogue until that list is empty.
+    #[trace("FR-045-AC-11")]
     #[test]
     fn tc_045_11_the_exported_series_are_the_catalogue_and_the_catalogue_is_the_spec() {
         let (mut p, _rx) = publisher();
@@ -429,7 +487,9 @@ mod tests {
         p.set_panes(now, &view, &[]);
         let health =
             relay::Health::for_test(&[("qsl-lead", 2, 30, 1, 4)], &[(("connect", "timeout"), 2)]);
-        let registry = p.build(now, 2, &health);
+        let mut registry = p.build(now, 2, &health);
+        let (collector, fleet_now) = crate::fleet::fixtures::full();
+        collector.fill(&mut registry, fleet_now);
         let mut exported: BTreeMap<&str, (Vec<&str>, &str)> = BTreeMap::new();
         for point in registry.points() {
             let keys: Vec<&str> = point.attrs.pairs().iter().map(|(k, _)| *k).collect();
@@ -467,15 +527,44 @@ mod tests {
             );
             assert!(spec.contains(&row), "FR-045 has no series row {row:?}");
         }
+        // Series the spec lists that are not exported yet, each with the ticket that
+        // removes it from this list. FR-045-AC-11 and AC-29 are met only when it is empty.
+        const NOT_YET_EXPORTED: &[&str] = &[
+            // SWM-205: the hook feed.
+            "ix.fleet.lane.no_events",
+            // SWM-205: needs hook `cwd` for compiler attribution.
+            "ix.fleet.lane.compile_seconds",
+            // SWM-205: from the hook-reported branch or cwd.
+            "ix.fleet.lane.focus_info",
+            // SWM-205: the hook-state windows it reports.
+            "ix.fleet.config",
+            // SWM-205: the hook feed.
+            "ix.relay.hook.activity_skipped",
+            // SWM-207: order metrics.
+            "ix.relay.orders.unacted",
+            // SWM-207: order metrics.
+            "ix.relay.order.act_latency",
+        ];
         let rows = spec
             .lines()
-            .filter(|l| l.starts_with("| `herdr.") || l.starts_with("| `ix.relay."))
+            .filter(|l| {
+                l.starts_with("| `herdr.")
+                    || l.starts_with("| `ix.relay.")
+                    || l.starts_with("| `ix.fleet.")
+            })
             .count();
         assert_eq!(
             rows,
-            CATALOGUE.len(),
+            CATALOGUE.len() + NOT_YET_EXPORTED.len(),
             "a series in the spec that the code does not export"
         );
+        for name in NOT_YET_EXPORTED {
+            assert!(spec.contains(&format!("| `{name}` |")), "{name}");
+            assert!(
+                !exported.contains_key(name),
+                "{name} is exported: drop it from the list"
+            );
+        }
     }
 
     /// Through the watcher's own layout code and herdr's recorded output, on an

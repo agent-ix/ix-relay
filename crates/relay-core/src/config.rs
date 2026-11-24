@@ -113,6 +113,18 @@ pub struct WatcherFile {
     pub delivery: Option<toml::Value>,
 }
 
+/// The `[fleet]` table in `config.toml` (FR-070): the host profile of the watcher's
+/// collector. Raw values on purpose, like the watcher keys: only `relay-watcher`
+/// validates them, so a typo never stops `agent-msg` or a hook.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetFile {
+    /// Sources this host is expected to provide (an array of source names).
+    pub expected_sources: Option<toml::Value>,
+    /// Sources this host declares absent (an array of source names).
+    pub unavailable_sources: Option<toml::Value>,
+}
+
 /// The shape of `config.toml`. Every field is optional: an absent key falls
 /// through to the next layer down (env, then the compiled-in default), same
 /// as an absent file does. A key that *is* present but an empty string
@@ -131,6 +143,9 @@ pub struct FileConfig {
     /// Watcher settings.
     #[serde(default)]
     pub watcher: WatcherFile,
+    /// Collector host profile.
+    #[serde(default)]
+    pub fleet: FleetFile,
 }
 
 /// Values an invoking CLI got on its own command line, to feed the flag tier
@@ -186,6 +201,8 @@ pub struct Settings {
     pub watcher_otlp: otlp::OtlpSettings,
     /// `[watcher] delivery`: [`DeliveryMode::Herdr`] unless the file opts in.
     pub delivery: DeliveryMode,
+    /// `[fleet]`: the collector host profile, raw (validated by the watcher).
+    pub fleet: FleetFile,
 }
 
 /// Where `config.toml` lives: `$IX_RELAY_CONFIG` when set, else
@@ -280,6 +297,7 @@ pub fn load(flags: Flags) -> Result<Settings, ConfigError> {
         watcher_interval_secs,
         watcher_otlp,
         delivery: delivery_from_file(&file)?,
+        fleet: file.fleet.clone(),
     })
 }
 
@@ -1312,5 +1330,26 @@ mod tests {
             proptest::prop_assert!(!redacted.contains(&pass));
             proptest::prop_assert!(redacted.ends_with(&tail));
         }
+    }
+}
+
+#[cfg(test)]
+mod fleet_file_tests {
+    use super::*;
+    use ix_trace_rs::trace;
+
+    #[trace("FR-070-AC-1")]
+    #[test]
+    fn the_fleet_table_loads_raw_and_an_unknown_key_is_refused_like_the_other_tables() {
+        let file: FileConfig =
+            toml::from_str("[fleet]\nexpected_sources = [\"cpu\"]\nunavailable_sources = 3\n")
+                .unwrap();
+        assert!(file.fleet.expected_sources.is_some());
+        assert!(file.fleet.unavailable_sources.is_some());
+        assert!(toml::from_str::<FileConfig>("[fleet]\nbogus = 1\n").is_err());
+        assert_eq!(
+            toml::from_str::<FileConfig>("").unwrap().fleet,
+            FleetFile::default()
+        );
     }
 }

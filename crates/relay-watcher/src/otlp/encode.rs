@@ -170,7 +170,10 @@ struct NumberPoint<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     start_time_unix_nano: Option<String>,
     time_unix_nano: String,
-    as_int: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    as_int: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    as_double: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -204,8 +207,9 @@ fn number_point<'a>(
     point: &'a Point,
     cumulative: bool,
 ) -> Option<NumberPoint<'a>> {
-    let as_int = match &point.value {
-        Value::Int(v) => v.to_string(),
+    let (as_int, as_double) = match &point.value {
+        Value::Int(v) => (Some(v.to_string()), None),
+        Value::Double(v) => (None, Some(*v)),
         Value::Histogram(_) => return None,
     };
     Some(NumberPoint {
@@ -213,6 +217,7 @@ fn number_point<'a>(
         start_time_unix_nano: cumulative.then(|| registry.start_unix_nano.to_string()),
         time_unix_nano: registry.time_unix_nano.to_string(),
         as_int,
+        as_double,
     })
 }
 

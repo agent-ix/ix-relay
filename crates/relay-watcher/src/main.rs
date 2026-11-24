@@ -31,6 +31,7 @@
 
 mod deliver;
 mod episodes;
+mod fleet;
 mod herdr;
 mod herdr_gate;
 mod last_seen;
@@ -228,6 +229,8 @@ struct WatcherState {
     live: Liveness,
     /// The OTLP metrics push (FR-045); disabled when no endpoint is configured.
     otlp: otlp::Publisher,
+    /// The host collector (FR-069); `None` for `--once`.
+    fleet: Option<fleet::Collector>,
 }
 
 impl WatcherState {
@@ -261,6 +264,7 @@ impl WatcherState {
             reap_trouble: HashSet::new(),
             live: Liveness::default(),
             otlp: otlp::Publisher::disabled(),
+            fleet: None,
         }
     }
 
@@ -363,6 +367,38 @@ const PRUNE_RECHECK_EVERY: Duration = Duration::from_secs(10 * 60);
 /// two of a person noticing, not on every tick.
 const PLACE_REFRESH_EVERY: Duration = Duration::from_secs(30);
 
+/// Publishes this host's lane list under its lease and reads its entered capacity (FR-069,
+/// FR-070). A store failure here is recorded as the `redis` source failing and never ends
+/// the refresh: the rest of the tick meets the same error where it must.
+fn refresh_fleet(
+    relay: &mut Relay,
+    collector: &mut fleet::Collector,
+    view: &relay_ops::find::MachineView,
+    regs: &[relay_core::Registration],
+    machine: &MachineName,
+    log: &mut impl FnMut(String),
+) {
+    let lanes = fleet::lanes::lanes_of(machine, view, regs);
+    let addresses: Vec<String> = lanes.iter().map(|l| l.address.clone()).collect();
+    collector.set_lanes(Instant::now(), lanes);
+    let published = relay.publish_lane_list(machine, &addresses).is_ok();
+    let (capacity, read) = match relay.server_capacities() {
+        Ok(all) => (
+            all.iter()
+                .find(|c| c.machine == *machine)
+                .and_then(|c| c.max_agents)
+                .map_or(fleet::CapacityRead::NotEntered, fleet::CapacityRead::Slots),
+            true,
+        ),
+        Err(_) => (
+            fleet::CapacityRead::Failed(fleet::health::ErrorClass::Unreadable),
+            false,
+        ),
+    };
+    collector.set_capacity(capacity, log);
+    collector.set_refresh_redis(published && read, log);
+}
+
 /// The least time between two rename events of one lead. A label that flaps is
 /// followed (the address stays true) but recorded once per gap, so one workspace
 /// cannot fill the shared, capped moves stream.
@@ -399,12 +435,21 @@ fn refresh_places(
     };
     let layout = match herdr.layout(machine) {
         Ok(layout) => {
+            if let Some(collector) = &mut state.fleet {
+                collector.set_herdr(fleet::health::Outcome::Ok, log);
+            }
             if std::mem::take(&mut state.layout_failed_reported) {
                 log("herdr's layout is readable again".to_owned());
             }
             layout
         }
         Err(e) => {
+            if let Some(collector) = &mut state.fleet {
+                collector.set_herdr(
+                    fleet::health::Outcome::Failed(fleet::health::ErrorClass::Unreadable),
+                    log,
+                );
+            }
             // Nothing is relinked or renamed on an answer that did not come: one
             // line per episode, the addresses stay as registered.
             if !std::mem::replace(&mut state.layout_failed_reported, true) {
@@ -479,6 +524,9 @@ fn refresh_places(
     // metrics cost no herdr call of their own (FR-045).
     if let Some(view) = &layout.view {
         state.otlp.set_panes(Instant::now(), view, regs);
+        if let Some(collector) = &mut state.fleet {
+            refresh_fleet(relay, collector, view, regs, machine, log);
+        }
     }
     // Before the loop below drops the place of a registration whose session left:
     // the address its queued mail was written to (FR-053).
@@ -617,6 +665,23 @@ fn main() -> ExitCode {
         env!("CARGO_PKG_VERSION"),
         cli.once,
     );
+    // The host collector and its profile (FR-069, FR-070); a bad `[fleet]` value is a
+    // configuration error like the OTLP ones.
+    let fleet_profile = match fleet::health::Profile::from_file(&settings.fleet) {
+        Ok(profile) => profile,
+        Err(e) => {
+            eprintln!("relay-watcher: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if !cli.once {
+        state.fleet = Some(fleet::Collector::new(
+            machine.clone(),
+            fleet_profile,
+            fleet::Sources::native(),
+            Duration::from_secs(settings.watcher_otlp.interval_secs.value),
+        ));
+    }
     // `--once` is a manual check: like the state file, it must not publish a
     // heartbeat that a running watcher's would be overwritten by (or hide).
     if !cli.once {
@@ -628,6 +693,11 @@ fn main() -> ExitCode {
             sweep,
             ttl: relay_core::health::heartbeat_ttl(sweep),
             otlp: state.otlp.status(),
+            fleet: state
+                .fleet
+                .as_ref()
+                .map(fleet::Collector::status)
+                .unwrap_or_default(),
         });
     }
     let herdr = delivery(settings.delivery);
@@ -771,6 +841,16 @@ impl<H: Herdr + Deliverer> Bus for RedisBus<H> {
             },
         );
         self.state.live.finish_tick(conn, wake, ticked)
+    }
+
+    /// The metrics push without the store: the collector's sources and `redis` = 0
+    /// (FR-070-AC-6).
+    fn offline(&mut self) {
+        self.state
+            .otlp
+            .publish_offline(Instant::now(), self.state.fleet.as_mut(), &mut |line| {
+                eprintln!("relay-watcher: {line}");
+            });
     }
 
     /// Blocks on the message log until a send, a due retry or the sweep, in
@@ -1040,9 +1120,14 @@ fn tick<H: Herdr + Deliverer>(
     // Last, after the deliveries, the registry cache and the prune, and answering to
     // nobody: its store reads can neither delay nor skip any of them (FR-045).
     if let Some((_, regs)) = &state.registry {
-        state
-            .otlp
-            .publish_if_due(relay, regs, Instant::now(), now_ms(), log);
+        state.otlp.publish_if_due(
+            relay,
+            regs,
+            Instant::now(),
+            now_ms(),
+            state.fleet.as_mut(),
+            log,
+        );
     }
     Ok(())
 }
@@ -1530,6 +1615,7 @@ impl RelayInbox<'_> {
 
 #[cfg(test)]
 mod tests {
+    use ix_trace_rs::trace;
     use std::collections::BTreeMap;
 
     use relay_core::{MachineName, Message, PaneId, Target};
@@ -3749,6 +3835,84 @@ mod tests {
                 .push((pane.to_string(), text.to_owned()));
             Ok(())
         }
+    }
+
+    struct NoSink;
+
+    impl crate::supervise::StateSink for NoSink {
+        fn write(&mut self, _file: &crate::supervise::WatcherFile) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// With Redis unreachable the supervisor's failed step still pushes: `redis` is 0, the
+    /// host's other sources report, and no store-backed series is sent. Deleting the
+    /// `offline` hook of the failed step fails this.
+    #[trace("FR-070-AC-6")]
+    #[test]
+    fn tc_070_06_a_watcher_with_redis_down_still_pushes_redis_0_and_the_other_sources() {
+        let here: MachineName = "node-a".parse().unwrap();
+        let (publisher, rx) = recording_publisher(&here, Duration::ZERO);
+        let mut state = WatcherState::new(Duration::from_secs(1), Duration::from_secs(5));
+        state.otlp = publisher;
+        state.fleet = Some(fleet::Collector::new(
+            here.clone(),
+            fleet::health::Profile::default(),
+            fleet::fixtures::sources(None),
+            fleet::fixtures::INTERVAL,
+        ));
+        let bus = RedisBus {
+            url: "redis://127.0.0.1:1".to_owned(),
+            prefix: "ixr:test:".to_owned(),
+            machine: here,
+            herdr: StubHerdr {
+                session_id: None,
+                prompts: std::cell::RefCell::default(),
+            },
+            state,
+        };
+        let stub = StubHerdr {
+            session_id: None,
+            prompts: std::cell::RefCell::default(),
+        };
+        let mut sup = crate::supervise::Supervisor::new(
+            bus,
+            crate::supervise::SystemClock::new(),
+            stub,
+            NoSink,
+            1,
+        );
+        assert!(!sup.step().ok, "redis is unreachable");
+        let body = String::from_utf8(rx.recv_timeout(Duration::from_secs(5)).unwrap()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let probe = json["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == "ix.fleet.probe_ok")
+            .unwrap()["gauge"]["dataPoints"]
+            .clone();
+        let value = |source: &str| {
+            probe.as_array().unwrap().iter().find_map(|p| {
+                p["attributes"]
+                    .as_array()?
+                    .iter()
+                    .any(|a| a["key"] == "source" && a["value"]["stringValue"] == source)
+                    .then(|| p["asInt"].as_str().map(str::to_owned))
+                    .flatten()
+            })
+        };
+        assert_eq!(value("redis").as_deref(), Some("0"));
+        assert_eq!(value("memory").as_deref(), Some("1"));
+        assert_eq!(value("compilers").as_deref(), Some("1"));
+        assert!(
+            !body.contains("ix.relay.inbox.depth"),
+            "no store-backed series"
+        );
+        assert!(
+            !body.contains("ix.relay.registrations"),
+            "no store-backed series, not even a zero"
+        );
     }
 
     /// A bus for `test`'s keyspace with `herdr`, on machine `node-a`, whose

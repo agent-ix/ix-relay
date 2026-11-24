@@ -26,6 +26,10 @@ serde.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
 nix.workspace = true
+toml.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 relay-core = { workspace = true, features = ["test-support"] }

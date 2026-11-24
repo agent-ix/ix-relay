@@ -87,6 +87,8 @@ The push runs on its own thread, fed by a queue of two snapshots, and the oldest
 
 `agent-msg doctor` shows `otlp: sending to <host:port>` with the exporter's counters (pushes sent and failed, snapshots dropped, points rejected), `otlp: disabled` or `otlp: unknown`. It warns `watcher_otlp_failing` with a reason such as `connect_failed`, `timeout`, `http_503`, `rejected_points` or `stuck` when the collector cannot be reached. A name lookup has no deadline of its own, so a send that runs over 30 s shows as `stuck`. Header values and endpoint credentials are never printed.
 
+The watcher also lists the collector sources whose last read failed in its heartbeat. `agent-msg doctor` warns `collector_source_failed` naming each, and `fleet_lanes_dropped` when more than 50 lanes were left out of the per-lane series.
+
 ## Agent spend dashboard
 
 The Helm chart in `helm/agent-spend-dashboard` installs a `grafana-dashboards` ConfigMap holding the Grafana dashboard with UID `agent-spend`. Grafana reads it from the observability deployment. The dashboard shows cost, tokens, sessions and active agents by server, project, `machine:workspace:tab`, model and account. Both the native clients and the watcher push metrics, so add no scrape targets for Herdr machines.

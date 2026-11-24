@@ -96,6 +96,8 @@ and shall exit 0 unless a check failed.
 | | `watcher_heartbeat_unreadable` | warn |
 | | `watcher_herdr_problem` | fail when the watcher types into no pane, else warn |
 | | `watcher_otlp_failing` (the watcher cannot push metrics to its collector and is backing off; deliveries are not affected; [FR-045](./FR-045-watcher-pushes-metrics-over-otlp.md)) | warn |
+| | `collector_source_failed` (the heartbeat lists collector sources whose last read failed; [FR-070](./FR-070-collector-source-health.md)) | warn |
+| | `fleet_lanes_dropped` (the watcher left lanes out of its per-lane series past the cap of 50; [FR-045](./FR-045-watcher-pushes-metrics-over-otlp.md)) | warn |
 | | `heartbeat_scan_truncated` (says which bound: keys, calls, or the time budget) | warn |
 | `state/watcher.json` against the heartbeat | `watcher_pid_gone`, `watcher_file_stale` | fail |
 | | `watcher_file_missing` | fail without a live heartbeat, else warn |

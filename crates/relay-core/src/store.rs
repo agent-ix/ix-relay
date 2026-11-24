@@ -60,6 +60,7 @@ pub const HERDR_FAILED_TTL_SECS: u64 = 300;
 
 mod commit;
 mod directory;
+mod fleet;
 mod health;
 mod inflight;
 #[cfg(test)]
@@ -83,6 +84,7 @@ use status::StatusStore;
 
 pub use commit::{CommitOutcome, IdentityCommit};
 pub use directory::{DIRECTORY_LEASE, DirectoryRead, DirectoryRecipient};
+pub use fleet::LaneLists;
 pub use health::{
     Heartbeats, InboxOverview, LeadOverview, LeaseState, MAX_HEARTBEAT_KEYS, RecipientProbe,
 };

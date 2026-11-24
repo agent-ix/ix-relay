@@ -110,6 +110,8 @@ impl Bus {
             redis_ok: true,
             leads_watched: 1,
             otlp: Some(relay_core::health::OtlpStatus::Disabled),
+            fleet_failed_sources: Vec::new(),
+            fleet_lanes_dropped: 0,
             last_error: None,
         };
         self.relay

@@ -14,6 +14,10 @@ delivery = "herdr"          # or "socket"
 # otlp_endpoint = "http://collector:4318"
 # otlp_headers = "Authorization=Bearer%20token"
 # otlp_interval_secs = 30
+
+# [fleet]
+# expected_sources = ["cpu", "memory", "temperature", "capacity", "compilers", "pane_tail", "hook_events", "herdr", "redis"]
+# unavailable_sources = ["compilers"]
 ```
 
 ## Keys
@@ -29,6 +33,10 @@ delivery = "herdr"          # or "socket"
 | `[watcher] otlp_endpoint` | OTLP/HTTP collector base URL, `http://` only. Unset sends nothing. | unset |
 | `[watcher] otlp_headers` | Request headers, `name=value,name=value` | none |
 | `[watcher] otlp_interval_secs` | Seconds between pushes, 5 to 3600 | `30` |
+| `[fleet] expected_sources` | Collector sources this host provides, each exported as `ix_fleet_probe_ok`. A source not listed, or listed in `unavailable_sources`, is exported as `ix_fleet_probe_unavailable`. A host with a readable hwmon sensor adds `temperature`. | every source except `temperature` |
+| `[fleet] unavailable_sources` | Sources this host cannot provide, for example `compilers` on a host with no process list. | none |
+
+Upgrade `agent-msg`, the hook and `relay-watcher` on a machine before adding `[fleet]` to its `config.toml`: a binary built before this table existed refuses a file that has it.
 
 ## Environment variables and flags
 
