@@ -135,6 +135,29 @@ pub struct FleetFile {
     pub ticket_prefixes: Option<toml::Value>,
 }
 
+/// The `[send]` table in `config.toml` (FR-071). Raw like the watcher keys, so a typo
+/// never stops a hook; `agent-msg send --order` validates it when it needs it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendFile {
+    /// The default order ack deadline, a duration such as `5m` (10 seconds to 24 hours).
+    pub ack_deadline: Option<toml::Value>,
+}
+
+impl SendFile {
+    /// The configured default ack deadline text, if one is set.
+    ///
+    /// # Errors
+    /// Fails when the value is not a string.
+    pub fn ack_deadline_text(&self) -> Result<Option<&str>, String> {
+        match &self.ack_deadline {
+            None => Ok(None),
+            Some(toml::Value::String(text)) => Ok(Some(text)),
+            Some(_) => Err("[send] ack_deadline: expected a duration like 5m".into()),
+        }
+    }
+}
+
 /// The shape of `config.toml`. Every field is optional: an absent key falls
 /// through to the next layer down (env, then the compiled-in default), same
 /// as an absent file does. A key that *is* present but an empty string
@@ -156,6 +179,9 @@ pub struct FileConfig {
     /// Collector host profile.
     #[serde(default)]
     pub fleet: FleetFile,
+    /// Send settings.
+    #[serde(default)]
+    pub send: SendFile,
 }
 
 /// Values an invoking CLI got on its own command line, to feed the flag tier

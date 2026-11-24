@@ -497,7 +497,7 @@ mod tests {
         Escalation {
             id: eid(id),
             filing: EscalationFiling {
-                ticket: "AGE-2015".parse::<TicketId>().unwrap(),
+                ticket: Some("AGE-2015".parse::<TicketId>().unwrap()),
                 lead: "qsl-lead".parse().unwrap(),
                 machine: "node-a".parse().unwrap(),
                 session_id: "sid-1".parse().unwrap(),

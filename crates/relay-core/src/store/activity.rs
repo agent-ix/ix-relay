@@ -6,20 +6,17 @@ use std::{collections::BTreeMap, sync::LazyLock};
 
 use redis::{Commands, streams::StreamRangeReply};
 
-use super::{Relay, Result};
+use super::{
+    Relay, Result,
+    inflight::{CachedScript, slim_script},
+};
 use crate::{
     Address, MAX_LABEL_BYTES,
     activity::{ACTIVITY_LAST_TTL_SECS, ACTIVITY_MAX_AGE_MS, ACTIVITY_MAX_EVENTS, ActivityEvent},
 };
 
-static WRITE: LazyLock<String> = LazyLock::new(|| {
-    include_str!("lua/activity.lua")
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with("--"))
-        .collect::<Vec<_>>()
-        .join("\n")
-});
+pub(super) static WRITE: LazyLock<CachedScript> =
+    LazyLock::new(|| CachedScript::new(slim_script(include_str!("lua/activity.lua"))));
 
 impl Relay {
     /// Appends `event` for the lane at `lane` to the activity stream and updates
@@ -34,24 +31,34 @@ impl Relay {
     /// # Errors
     /// Fails when Redis cannot be reached or answers with an error.
     pub fn record_activity(&mut self, lane: &Address, event: &ActivityEvent) -> Result<bool> {
+        let machine = lane.server().to_owned();
         let lane = lane.to_string();
         if lane.len() > MAX_LABEL_BYTES {
             return Ok(false);
         }
-        // `EVAL` with the body, never `EVALSHA`: a cold server would make the
-        // write three sequential requests, and FR-068 allows the hook one.
-        let reply: i64 = redis::cmd("EVAL")
-            .arg(WRITE.as_str())
-            .arg(1)
-            .arg(self.keys.activity_key())
-            .arg(&lane)
-            .arg(event.kind.as_str())
-            .arg(event.encode())
-            .arg(self.keys.activity_last_stem())
-            .arg(ACTIVITY_MAX_EVENTS)
-            .arg(ACTIVITY_MAX_AGE_MS)
-            .arg(ACTIVITY_LAST_TTL_SECS)
-            .query(&mut self.conn)?;
+        // By SHA: the body goes only to a server that does not know it yet, so the
+        // write is one small request, and two only on the first call after a server start.
+        let (activity, last_stem) = (self.keys.activity_key(), self.keys.activity_last_stem());
+        let (stream, meta) = (self.keys.receipt_stream_key(), self.keys.receipt_meta_key());
+        let encoded = event.encode();
+        let queue = queue_hex(&machine, &event.session);
+        let acts = if event.delivered_mail { "0" } else { "1" };
+        let reply: i64 = WRITE.run(&mut self.conn, |cmd| {
+            cmd.arg(1)
+                .arg(&activity)
+                .arg(&lane)
+                .arg(event.kind.as_str())
+                .arg(&encoded)
+                .arg(&last_stem)
+                .arg(ACTIVITY_MAX_EVENTS)
+                .arg(ACTIVITY_MAX_AGE_MS)
+                .arg(ACTIVITY_LAST_TTL_SECS)
+                .arg(&queue)
+                .arg(&event.session)
+                .arg(acts)
+                .arg(&stream)
+                .arg(&meta);
+        })?;
         Ok(reply == 1)
     }
 
@@ -132,4 +139,15 @@ impl Relay {
         restored?;
         Ok(records)
     }
+}
+
+/// The machine and the session as the hex a session queue's name is made of
+/// ([`crate::AgentName::for_session`]), joined by a colon; empty for a session id too
+/// long to be one.
+fn queue_hex(machine: &str, session: &str) -> String {
+    if session.len() > crate::activity::ACTIVITY_MAX_FIELD_BYTES {
+        return String::new();
+    }
+    let hex = |text: &str| text.bytes().map(|b| format!("{b:02x}")).collect::<String>();
+    format!("{}:{}", hex(machine), hex(session))
 }

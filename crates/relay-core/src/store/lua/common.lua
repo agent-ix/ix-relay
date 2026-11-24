@@ -13,7 +13,7 @@
 
 local receipt_ready, receipt_metadata, receipt_entry, receipt_gap, receipt_append
 local receipt_pending, receipt_finish, receipt_enqueue, receipt_observe
-local receipt_without_metadata
+local receipt_without_metadata, receipt_emit, order_close, receipt_acted
 
 local function now_ms(override)
     if override ~= '' then return tonumber(override) end

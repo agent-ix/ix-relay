@@ -10,6 +10,8 @@ for i, entry in ipairs(taken) do
         metadata.attempt = 'plain/' .. redis.call('HINCRBY', receipt_meta, 'plain_sequence', 1)
         metadata.delivered = nil
         taken[i] = receipt_entry(entry, metadata)
+        -- The recipient took it: Delivered, so the order can be Acted or expire.
+        receipt_observe(taken[i], now, 'inbox_read')
         receipt_append(taken[i], 'removed', now, nil, 'plain_inbox_pop')
     else
         receipt_gap(now)

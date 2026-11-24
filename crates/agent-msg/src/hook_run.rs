@@ -842,14 +842,17 @@ fn try_call<B: Bus>(
     let mail = if event.delivers_mail() {
         deliver_mail(&mut bus, &budget, event, (rtt, sampled), &name, rec, out)
     } else {
-        Ok(())
+        Ok(false)
     };
-    mail?;
+    let delivered_mail = mail?;
     // Shipping the spool comes before telemetry, so an activity write that
     // stalls never takes the window FR-030 needs. Telemetry then gets only the
     // time left (NFR-001), and its failure never reaches the turn.
     flush_health(&mut bus, &budget, rec);
     if let Some(mut event) = pending.take() {
+        // An event of the call that delivered mail never records Acted: it is what the
+        // agent did before it saw the mail.
+        event.delivered_mail = delivered_mail;
         emit_activity(
             &mut bus,
             (clock, &budget),
@@ -872,7 +875,7 @@ fn deliver_mail<B: Bus>(
     name: &AgentName,
     rec: &mut Recorder<'_>,
     out: &mut dyn Write,
-) -> Result<(), HookError> {
+) -> Result<bool, HookError> {
     let window = if sampled {
         pop_window(rtt)
     } else {
@@ -887,7 +890,7 @@ fn deliver_mail<B: Bus>(
             Event::UserPromptSubmit
             | Event::PreToolUse
             | Event::Notification
-            | Event::SessionEnd => Ok(()),
+            | Event::SessionEnd => Ok(false),
             Event::SessionStart | Event::PostToolUse | Event::Stop => {
                 Err(HookError::BudgetExhausted {
                     step: "popping the inbox",
@@ -927,6 +930,7 @@ fn deliver_mail<B: Bus>(
     // where a missed acknowledgement costs a duplicate. Nothing between the write
     // and the acknowledgement needs the address book.
     let batch = popped.batch;
+    let delivered = !popped.messages.is_empty();
     let book = if popped.messages.is_empty()
         || !budget
             .remaining()
@@ -972,7 +976,7 @@ fn deliver_mail<B: Bus>(
         acknowledge(bus, budget, name, batch, rec);
     }
 
-    Ok(())
+    Ok(delivered)
 }
 
 /// Writes the activity event of this call after the mail work and the spool

@@ -611,6 +611,15 @@ return added
     /// [`crate::text::is_unsafe_char`] rejects, also checked before anything
     /// is queued.
     pub fn send(&mut self, msg: &Message) -> Result<Vec<AgentName>> {
+        self.send_as(msg, None)
+    }
+
+    /// [`Relay::send`], as an order (FR-071) when `order` is given.
+    pub fn send_as(
+        &mut self,
+        msg: &Message,
+        order: Option<&crate::receipts::OrderSpec>,
+    ) -> Result<Vec<AgentName>> {
         if msg.text.len() > MAX_MESSAGE_BYTES {
             return Err(Error::MessageTooLarge {
                 len: msg.text.len(),
@@ -663,7 +672,15 @@ return added
         {
             stored.to = Target::Agent(address.to_string().parse()?);
         }
-        self.enqueue_receipted(&stored, &recipients, &[])?;
+        // An order's unacted count and exporting host are kept by lane address.
+        if order.is_some()
+            && !matches!(&stored.to, Target::Agent(to) if to.as_str().parse::<crate::Address>().is_ok())
+        {
+            return Err(Error::InvalidName {
+                name: "an order goes to a lane address server:workspace:tab".into(),
+            });
+        }
+        self.enqueue_receipted(&stored, &recipients, &[], order)?;
         Ok(recipients)
     }
 
@@ -873,12 +890,7 @@ return added
     /// for why). Checked before anything is written: a rejected escalation
     /// is never partially stored.
     pub fn escalate(&mut self, new: EscalationFiling) -> Result<Escalation> {
-        crate::escalation::validate_session_id(new.session_id.as_str())?;
-        crate::escalation::validate_safe_text("context", &new.context)?;
-        for option in &new.options {
-            crate::escalation::validate_safe_text("option", option)?;
-        }
-        crate::escalation::validate_safe_text("recommendation", &new.recommendation)?;
+        new.validate()?;
 
         let n: u64 = self.conn.incr(self.keys.esc_seq_key(), 1)?;
         let id = EscalationId::from_counter(n);

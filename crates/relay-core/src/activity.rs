@@ -133,6 +133,11 @@ pub struct ActivityEvent {
     /// (an empty map when no version is known).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_versions: Option<BTreeMap<String, String>>,
+    /// Set by a hook call that delivered mail before writing this event: such an event
+    /// shows what the agent did before it saw the mail, so it never records `Acted`.
+    /// Not part of the stored event.
+    #[serde(skip)]
+    pub delivered_mail: bool,
 }
 
 impl ActivityEvent {
@@ -151,6 +156,7 @@ impl ActivityEvent {
             last_class: None,
             role: None,
             skill_versions: None,
+            delivered_mail: false,
         }
     }
 
@@ -187,6 +193,7 @@ impl ActivityEvent {
                     .map(|(name, version)| bound_pair(name, version))
                     .collect()
             }),
+            delivered_mail: self.delivered_mail,
         };
         loop {
             let json = serde_json::to_string(&bounded).unwrap_or_default();

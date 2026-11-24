@@ -160,6 +160,8 @@ fn per_lead(err: relay_core::Error, context: impl std::fmt::Display) -> relay_co
 /// keeps only leads it saw ([`Episodes::retain_present`]) and only records
 /// still reported.
 struct WatcherState {
+    /// Whether a failed order-deadline scan is already reported for the current episode.
+    order_scan_failed: bool,
     /// Ticks so far, for the fair rotation of the order leads are looked at in.
     rotation: usize,
     /// The condition each local lead is currently in, if any.
@@ -238,6 +240,7 @@ impl WatcherState {
     /// sweeps every `sweep_every`.
     fn new(retry_every: Duration, sweep_every: Duration) -> Self {
         Self {
+            order_scan_failed: false,
             episodes: Episodes::default(),
             skipped_reported: HashSet::new(),
             dropped_reported: false,
@@ -1158,6 +1161,7 @@ fn tick<H: Herdr + Deliverer>(
         .prune_checked
         .retain(|name, _| seen.contains(name) || state.refused.iter().any(|r| r.name == *name));
     state.live.retain_touched(&seen);
+    scan_orders(relay, state, log)?;
     for (name, kind) in state.episodes.retain_present(&seen) {
         log(format!(
             "{name}: no longer watched here; {} ended",
@@ -1175,6 +1179,51 @@ fn tick<H: Herdr + Deliverer>(
             state.fleet.as_mut(),
             log,
         );
+    }
+    Ok(())
+}
+
+/// Attempts to file an expired order's escalation before it is given up.
+const ORDER_ESCALATION_ATTEMPTS: u32 = 3;
+
+/// Records `AckExpired` for orders past their ack deadline and files each one's escalation
+/// (FR-071): one request when nothing is due. Only a lost connection ends the tick.
+fn scan_orders(
+    relay: &mut Relay,
+    state: &mut WatcherState,
+    log: &mut impl FnMut(String),
+) -> relay_core::Result<()> {
+    let due = match relay.expire_orders(Now::Server) {
+        Ok(due) => due,
+        Err(e) if e.is_connection() => return Err(e),
+        Err(e) => {
+            if !std::mem::replace(&mut state.order_scan_failed, true) {
+                log(format!("scanning order deadlines failed: {e}"));
+            }
+            return Ok(());
+        }
+    };
+    state.order_scan_failed = false;
+    for order in &due {
+        match relay.escalate_expired_order(order, now_ms()) {
+            Ok(true) => log(format!(
+                "order {} to {} from {} reached its ack deadline without Acted; escalated",
+                order.original_id, order.recipient, order.sender
+            )),
+            Ok(false) => {}
+            Err(e) if e.is_connection() => return Err(e),
+            Err(e) => {
+                // Counted in the store; after ORDER_ESCALATION_ATTEMPTS the order is given up
+                // and no longer blocks the orders behind it.
+                let attempts = relay
+                    .order_escalation_failed(order, ORDER_ESCALATION_ATTEMPTS)
+                    .unwrap_or(0);
+                log(format!(
+                    "escalating order {} failed (attempt {attempts} of {ORDER_ESCALATION_ATTEMPTS}): {e}",
+                    order.original_id
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -4144,10 +4193,12 @@ mod tests {
     /// Tracing: TC-038-05
     /// ACs: FR-038-AC-5
     ///
-    /// A tick with every inbox empty costs two requests however many leads are
-    /// local, and no herdr call: one registry read, one pipelined length check.
+    /// A tick with every inbox empty costs three requests however many leads are
+    /// local, and no herdr call: one registry read, one pipelined length check and the
+    /// order-deadline scan (FR-071-AC-9), none of them a key scan.
+    #[trace("FR-038-AC-5", "FR-071-AC-9")]
     #[test]
-    fn an_idle_tick_is_two_requests_and_no_herdr_call() {
+    fn an_idle_tick_is_three_requests_and_no_herdr_call() {
         let Some(url) = test_url() else {
             eprintln!("skipping: IX_RELAY_TEST_URL unset (run `make test-redis`)");
             return;
@@ -4182,19 +4233,158 @@ mod tests {
                 // A sweep (a tick's default wake) returns every lead's expired
                 // in-flight batches first (one EVAL), in the same request as the
                 // lengths.
-                vec!["EVAL", "LLEN", "LLEN", "LLEN"]
+                vec!["EVAL", "LLEN", "LLEN", "LLEN"],
+                // The order-deadline scan (FR-071): one EVAL, no key scan.
+                vec!["EVAL"],
             ],
         );
         assert_eq!(herdr.gets.get(), 0);
+    }
+
+    /// Tracing: TC-071-03
+    /// ACs: FR-071-AC-3, FR-071-AC-4, FR-071-AC-7
+    ///
+    /// An order to a pane that never acts and is never delivered to expires on a tick after
+    /// its deadline: one `AckExpired` receipt and one escalation, and a second tick (a
+    /// restarted watcher scans the same state) adds neither.
+    #[test]
+    fn tc_071_03_a_tick_expires_an_order_to_a_dead_pane_once_and_escalates_it_once() {
+        let Some(url) = test_url() else {
+            eprintln!("skipping: IX_RELAY_TEST_URL unset (run `make test-redis`)");
+            return;
+        };
+        let mut relay = test_relay("order-tick").unwrap();
+        let machine: MachineName = "node-a".parse().unwrap();
+        let session: relay_core::SessionId = "s1".parse().unwrap();
+        let elsewhere: MachineName = "node-b".parse().unwrap();
+        let dead = AgentName::for_session(&elsewhere, &session);
+        relay
+            .register(&relay_core::Registration {
+                name: dead.clone(),
+                machine: elsewhere.clone(),
+                kind: "claude".into(),
+                session_id: Some(session.clone()),
+                cwd: None,
+                herdr_pane: Some("w1:p1".parse().unwrap()),
+                place: Some(relay_core::Place {
+                    workspace: "SWM".into(),
+                    tab: "dead".into(),
+                    herdr_ids: Some(relay_core::HerdrPlaceIds {
+                        workspace: "w1".parse().unwrap(),
+                        tab: "w1:t1".parse().unwrap(),
+                        pane: "w1:p1".parse().unwrap(),
+                        session_id: session,
+                        verified_at_ms: 1,
+                    }),
+                }),
+                last_seen_ms: now_ms(),
+            })
+            .unwrap();
+        let order = relay_core::receipts::OrderSpec::new(10_000, Some("SWM-207".into())).unwrap();
+        relay
+            .send_as(
+                &Message {
+                    from: "sender".parse().unwrap(),
+                    to: Target::Agent(dead),
+                    text: "SECRET".into(),
+                    sent_at_ms: 0,
+                    forwarded: false,
+                },
+                Some(&order),
+            )
+            .unwrap();
+        let herdr = idle_herdr("s1");
+        let mut state = WatcherState::default();
+        tick(&mut relay, &herdr, &machine, &mut state, &mut |_| {}).unwrap();
+        let expired = |relay: &mut Relay| {
+            let now = now_ms() + 3_600_000;
+            relay
+                .receipt_export(&relay_core::receipts::ReceiptRequest {
+                    since_ms: now - 7_200_000,
+                    until_ms: now,
+                    now_ms: now,
+                    page_size: 1_000,
+                    after: None,
+                })
+                .unwrap()
+                .events
+                .iter()
+                .filter(|e| e.event.outcome == relay_core::receipts::ReceiptOutcome::AckExpired)
+                .count()
+        };
+        assert_eq!(expired(&mut relay), 0, "inside the deadline");
+        // The deadline passes: move the order's due time into the past.
+        let mut raw = redis::Client::open(url.as_str())
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        redis::cmd("ZADD")
+            .arg(format!(
+                "{}receipt-meta:orders-due",
+                test_prefix("order-tick")
+            ))
+            .arg(1)
+            .arg(
+                relay
+                    .receipt_export(&relay_core::receipts::ReceiptRequest {
+                        since_ms: now_ms() - 60_000,
+                        until_ms: now_ms(),
+                        now_ms: now_ms(),
+                        page_size: 10,
+                        after: None,
+                    })
+                    .unwrap()
+                    .events[0]
+                    .event
+                    .original_id
+                    .clone(),
+            )
+            .exec(&mut raw)
+            .unwrap();
+        let mut lines = Vec::new();
+        tick(&mut relay, &herdr, &machine, &mut state, &mut |l| {
+            lines.push(l)
+        })
+        .unwrap();
+        tick(
+            &mut relay,
+            &herdr,
+            &machine,
+            &mut WatcherState::default(),
+            &mut |l| lines.push(l),
+        )
+        .unwrap();
+        assert_eq!(expired(&mut relay), 1);
+        let escalations = relay.list(None).unwrap().escalations;
+        assert_eq!(escalations.len(), 1);
+        assert_eq!(escalations[0].filing.ticket_text(), "-");
+        assert_eq!(escalations[0].filing.kind, "order");
+        assert!(escalations[0].filing.context.contains("SWM-207"));
+        assert!(!escalations[0].filing.context.contains("SECRET"));
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("ack deadline")).count(),
+            1
+        );
+        redis::cmd("DEL")
+            .arg(raw_keys(&mut raw, &test_prefix("order-tick")))
+            .exec(&mut raw)
+            .unwrap();
+    }
+
+    fn raw_keys(raw: &mut redis::Connection, prefix: &str) -> Vec<String> {
+        redis::cmd("KEYS")
+            .arg(format!("{prefix}*"))
+            .query(raw)
+            .unwrap()
     }
 
     /// Tracing: TC-045-22
     /// ACs: FR-045-AC-22, FR-038-AC-5
     ///
     /// With OTLP on, the tick that pushes adds exactly the two pipelined requests
-    /// FR-045 pins (the local leads' queues, the newest hook failures) and no key
-    /// scan; the next tick, inside the interval, is the two requests of an idle
-    /// tick again. The tick with OTLP off stays at two (the test above).
+    /// FR-045 pins (the local leads' queues, the newest hook failures with the order metrics)
+    /// and no key scan; the next tick, inside the interval, is the three requests of an idle
+    /// tick again. The tick with OTLP off stays at three (the test above).
     #[test]
     fn tc_045_22_a_push_tick_adds_two_pipelined_requests_and_the_next_tick_none() {
         let Some(url) = test_url() else {
@@ -4229,14 +4419,16 @@ mod tests {
             [
                 vec!["HGETALL"],
                 vec!["EVAL", "LLEN", "LLEN", "LLEN"],
+                vec!["EVAL"],
                 // One pipeline over the three local leads: inbox length, oldest
                 // message, in-flight length and dead-letter length each.
                 ["LLEN", "LINDEX", "LLEN", "LLEN"].repeat(3),
-                vec!["XREVRANGE"],
+                // The newest hook failures with the order metrics of this machine.
+                vec!["XREVRANGE", "HGETALL", "HGETALL", "ZCARD"],
             ],
-            "2 + otlp::PUSH_REQUESTS requests, and no SCAN"
+            "3 + otlp::PUSH_REQUESTS requests, and no SCAN"
         );
-        assert_eq!(first.len(), 2 + otlp::PUSH_REQUESTS);
+        assert_eq!(first.len(), 3 + otlp::PUSH_REQUESTS);
         assert!(
             bodies.recv().is_ok(),
             "and the push was handed to the exporter"
@@ -4245,7 +4437,7 @@ mod tests {
         tick(&mut via, &herdr, &node_a, &mut state, &mut |_| {}).unwrap();
         assert_eq!(
             request_groups(&requests).len(),
-            2,
+            3,
             "inside the interval: no push"
         );
     }

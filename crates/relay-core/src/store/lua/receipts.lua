@@ -1,9 +1,3 @@
--- Receipt keys are the final two ARGV values of an instrumented script.
-local receipt_stream, receipt_meta = ARGV[#ARGV - 1], ARGV[#ARGV]
-
-receipt_ready = function()
-    return readable(receipt_stream, 'stream') and readable(receipt_meta, 'hash')
-end
 
 local function receipt_message(entry)
     local ok, message = pcall(cjson.decode, entry)
@@ -101,51 +95,17 @@ receipt_entry = function(entry, metadata)
         .. string.rep(' ', count)
 end
 
-receipt_gap = function(now)
-    local first = tonumber(redis.call('HGET', receipt_meta, 'gap_start'))
-    local last = tonumber(redis.call('HGET', receipt_meta, 'gap_end'))
-    redis.call('HSET', receipt_meta, 'gap_start', math.min(first or now, now),
-        'gap_end', math.max(last or now, now))
-end
 
 receipt_append = function(entry, outcome, now, evidence, reason)
     local message = receipt_message(entry)
     local meta = receipt_metadata(entry)
     if not meta or not message then receipt_gap(now); return true end
-    redis.call('HSETNX', receipt_meta, 'instrumentation_start_ms', now)
-    local attempt = meta.attempt or cjson.null
-    local event_id = meta.original .. '/' .. (meta.attempt or 'enqueue') .. '/' .. outcome
-    if redis.call('HEXISTS', receipt_meta, 'event:' .. event_id) == 1 then return false end
-    local event = {
-        event_id = event_id,
-        original_id = meta.original, attempt_id = attempt, outcome = outcome,
+    return receipt_emit({
+        original = meta.original, attempt = meta.attempt,
+        idpart = meta.attempt or 'enqueue', outcome = outcome,
         sender = message.from, target = meta.recipient or message.to,
-        event_time_ms = outcome == 'delivered' and cjson.null or now,
-        observed_at_ms = now, evidence = evidence or cjson.null,
-        reason = reason or cjson.null
-    }
-    local cursor = redis.call('XADD', receipt_stream, '*', 'event', cjson.encode(event))
-    redis.call('HSET', receipt_meta, 'event:' .. event_id, cursor, 'last_cursor', cursor)
-    local count = redis.call('XLEN', receipt_stream)
-    if count > 10000 then
-        local evicted = redis.call('XRANGE', receipt_stream, '-', '+', 'COUNT', count - 10000)
-        for _, row in ipairs(evicted) do
-            local valid, old = pcall(cjson.decode, row[2][2])
-            if not valid or type(old) ~= 'table' or type(old.observed_at_ms) ~= 'number'
-                or type(old.event_id) ~= 'string' then
-                receipt_gap(now)
-                old = {observed_at_ms = now}
-            else
-                redis.call('HDEL', receipt_meta, 'event:' .. old.event_id)
-            end
-            local boundary = tonumber(redis.call('HGET', receipt_meta, 'evicted_through_ms'))
-            redis.call('HSET', receipt_meta, 'evicted_through_ms',
-                math.max(boundary or old.observed_at_ms, old.observed_at_ms),
-                'evicted_through_cursor', row[1])
-        end
-        redis.call('XTRIM', receipt_stream, 'MAXLEN', 10000)
-    end
-    return true
+        now = now, evidence = evidence, reason = reason, expect = meta.expect,
+    })
 end
 
 receipt_pending = function(entry, now)
@@ -175,11 +135,59 @@ receipt_observe = function(entry, now, evidence)
     if not metadata or metadata.delivered then return entry, false end
     receipt_append(entry, 'delivered', now, evidence)
     metadata.delivered = evidence
+    local message = receipt_message(entry)
+    local machine, session = nil, nil
+    if type(metadata.recipient) == 'string' then
+        machine, session = string.match(metadata.recipient, '^session/(%x+)/(%x+)$')
+    end
+    if session and message then
+        local ukey = receipt_meta .. ':unacted:' .. machine .. ':' .. session
+        redis.call('ZADD', ukey, now, cjson.encode({
+            o = metadata.original, a = metadata.attempt, s = message.from,
+            t = metadata.recipient, e = metadata.expect, d = now,
+            ord = metadata.order and true or nil,
+        }))
+        redis.call('ZREMRANGEBYRANK', ukey, 0, -1001)
+        redis.call('EXPIRE', ukey, 604800)
+    end
+    if metadata.order then
+        local okey = order_key(metadata.original)
+        -- The deadline runs from the first Delivered; a redelivery or a lease
+        -- timeout does not move it.
+        if redis.call('HGET', okey, 'status') == 'open'
+            and redis.call('HSETNX', okey, 'delivered_at', now) == 1 then
+            redis.call('ZADD', receipt_meta .. ':orders-due', now + metadata.order,
+                metadata.original)
+        end
+    end
     return receipt_entry(entry, metadata), true
 end
 
-receipt_enqueue = function(entry, original, now, recipient)
-    local marked = receipt_entry(entry, {original = original, recipient = recipient})
+-- `order_ms` is the ack deadline of an order, or nil for a plain message.
+receipt_enqueue = function(entry, original, now, recipient, order_ms, expect)
+    local meta = {original = original, recipient = recipient}
+    if order_ms then
+        meta.order = order_ms
+        if expect and expect ~= '' then meta.expect = expect end
+    end
+    local marked = receipt_entry(entry, meta)
     receipt_append(marked, 'queued', now)
+    if order_ms then
+        local message = receipt_message(entry)
+        local okey = order_key(original)
+        redis.call('HSET', okey, 'from', message.from, 'to', message.to,
+            'recipient', recipient, 'ack_ms', order_ms, 'enqueued_at', now,
+            'state', 'queued', 'status', 'open', 'expect', meta.expect or '')
+        redis.call('EXPIRE', okey, 691200)
+        local due = receipt_meta .. ':orders-due'
+        redis.call('ZADD', due, now + order_ms, original)
+        redis.call('HINCRBY', receipt_meta .. ':orders-unacted', message.to, 1)
+        local over = redis.call('ZCARD', due) - 10000
+        if over > 0 then
+            for _, old in ipairs(redis.call('ZRANGE', due, 0, over - 1)) do
+                order_close(old, 'evicted')
+            end
+        end
+    end
     return marked
 end

@@ -72,7 +72,7 @@ fn list_item<'a>(app: &App, e: &'a Escalation) -> ListItem<'a> {
         "{marker}{:<10} {:<8} {:<12} {}",
         e.id,
         e.status.as_str(),
-        e.filing.ticket,
+        e.filing.ticket_text(),
         e.filing.lead
     );
     let style = if app.is_new(&e.id) {
@@ -108,7 +108,7 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
 fn detail_text(e: &Escalation) -> Text<'static> {
     let mut lines = vec![
         Line::from(format!("id:             {}", e.id)),
-        Line::from(format!("ticket:         {}", e.filing.ticket)),
+        Line::from(format!("ticket:         {}", e.filing.ticket_text())),
         Line::from(format!("lead:           {}", e.filing.lead)),
         Line::from(format!(
             "machine:        {}",
@@ -240,7 +240,7 @@ mod tests {
         Escalation {
             id: id.parse().unwrap(),
             filing: EscalationFiling {
-                ticket: "AGE-2015".parse::<TicketId>().unwrap(),
+                ticket: Some("AGE-2015".parse::<TicketId>().unwrap()),
                 lead: "qsl-lead".parse().unwrap(),
                 machine: "node-a".parse().unwrap(),
                 session_id: "sid-1".parse().unwrap(),

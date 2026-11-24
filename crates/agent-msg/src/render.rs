@@ -45,7 +45,7 @@ pub fn escalations_lines(outcome: &EscalationsOutcome) -> Vec<String> {
                 "{}  {}  {}  {}  {}",
                 e.id,
                 e.status,
-                e.filing.ticket,
+                e.filing.ticket_text(),
                 e.filing.lead,
                 relay_ops::clock(e.filing.created_at_ms)
             )
@@ -99,7 +99,7 @@ pub fn resolve_lines(outcome: &ResolveOutcome) -> Vec<String> {
     if matches!(outcome.linear, LinearOutcome::Posted) {
         lines.push(format!(
             "posted a comment on {}",
-            outcome.escalation.filing.ticket
+            outcome.escalation.filing.ticket_text()
         ));
     }
     lines
@@ -115,7 +115,7 @@ pub fn resolve_warning_lines(outcome: &ResolveOutcome) -> Vec<String> {
     vec![
         format!(
             "agent-msg resolve: could not post to {}: {e}",
-            outcome.escalation.filing.ticket
+            outcome.escalation.filing.ticket_text()
         ),
         format!(
             "agent-msg resolve: retry with: agent-msg escalation post-linear {}",
@@ -126,7 +126,7 @@ pub fn resolve_warning_lines(outcome: &ResolveOutcome) -> Vec<String> {
 
 /// `agent-msg escalation post-linear`'s stdout line.
 #[must_use]
-pub fn post_linear_line(ticket: &relay_core::TicketId) -> String {
+pub fn post_linear_line(ticket: &str) -> String {
     format!("posted a comment on {ticket}")
 }
 
@@ -141,7 +141,7 @@ mod tests {
         Escalation {
             id: id.parse().unwrap(),
             filing: EscalationFiling {
-                ticket: "AGE-2015".parse::<TicketId>().unwrap(),
+                ticket: Some("AGE-2015".parse::<TicketId>().unwrap()),
                 lead: "qsl-lead".parse::<AgentName>().unwrap(),
                 machine: "node-a".parse().unwrap(),
                 session_id: "sid-1".parse().unwrap(),
@@ -311,6 +311,9 @@ mod tests {
     #[test]
     fn post_linear_names_the_ticket() {
         let ticket = "AGE-2015".parse::<TicketId>().unwrap();
-        assert_eq!(post_linear_line(&ticket), "posted a comment on AGE-2015");
+        assert_eq!(
+            post_linear_line(ticket.as_str()),
+            "posted a comment on AGE-2015"
+        );
     }
 }

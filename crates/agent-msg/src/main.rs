@@ -99,6 +99,18 @@ enum Cmd {
         /// The message.
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
+        /// Send as an order: it has an ack deadline, and the relay records `AckExpired` and
+        /// raises one escalation when the recipient shows no activity before it passes.
+        #[arg(long)]
+        order: bool,
+        /// How long the recipient has to act, e.g. 90s or 5m (10 seconds to 24 hours).
+        /// Defaults to `[send] ack_deadline` in config.toml, else 5m.
+        #[arg(long, value_name = "AGE", requires = "order")]
+        ack_deadline: Option<Since>,
+        /// The ticket the order expects its recipient to take up (at most 64 bytes),
+        /// returned in the receipt export.
+        #[arg(long, value_name = "ID", requires = "order")]
+        expect_ticket: Option<String>,
     },
     /// Print and remove your pending messages.
     Inbox {
@@ -502,7 +514,16 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
     };
     match cli.cmd {
         Cmd::Work(args) => work::run(args, &mut relay, settings, &mut out)?,
-        Cmd::Send { to, text } => {
+        Cmd::Send {
+            to,
+            text,
+            order,
+            ack_deadline,
+            expect_ticket,
+        } => {
+            let order = order
+                .then(|| order_spec(ack_deadline, expect_ticket))
+                .transpose()?;
             let mut resolved = resolve_send_target(&mut relay, &settings.machine.value, &to)?;
             let broadcast = matches!(resolved.target, relay_core::Target::All);
             let unreadable = resolved.unreadable;
@@ -520,7 +541,15 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 sent_at_ms: now_ms(),
                 forwarded: false,
             };
-            let recipients = enqueue_resolved(&mut relay, &mut resolved, &mut msg)?;
+            if order.is_some() && broadcast {
+                return Err("an order goes to one lane, not to all".into());
+            }
+            // The order's deadline, unacted count and Acted are kept per lane address: a
+            // recipient that is not a verified server:workspace:tab lane cannot take one.
+            if order.is_some() && resolved.directory.is_none() {
+                return Err("an order goes to a lane address server:workspace:tab".into());
+            }
+            let recipients = enqueue_resolved(&mut relay, &mut resolved, &mut msg, order.as_ref())?;
             let recipient = recipient_registration(
                 resolved.recipient,
                 resolved.registry.as_deref(),
@@ -897,7 +926,11 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
             cmd: EscalationCmd::PostLinear { id },
         } => {
             let esc = escalate::run_escalation_post_linear(&mut relay, &RealLinear::new(), &id)?;
-            writeln!(out, "{}", render::post_linear_line(&esc.filing.ticket))?;
+            writeln!(
+                out,
+                "{}",
+                render::post_linear_line(&esc.filing.ticket_text())
+            )?;
         }
         Cmd::Whoami { json } => {
             // AGE-2018 PR review, finding 11: a Redis failure inside
@@ -1017,6 +1050,7 @@ fn enqueue_resolved(
     relay: &mut Relay,
     resolved: &mut SendTarget,
     msg: &mut Message,
+    order: Option<&relay_core::receipts::OrderSpec>,
 ) -> relay_core::Result<Vec<AgentName>> {
     if matches!(msg.to, relay_core::Target::All) {
         return relay.send_directory_broadcast(msg);
@@ -1024,9 +1058,9 @@ fn enqueue_resolved(
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
         let Some(proof) = &resolved.directory else {
-            return relay.send(msg);
+            return relay.send_as(msg, order);
         };
-        match relay.send_directory(msg, proof) {
+        match relay.send_directory_as(msg, proof, order) {
             Err(relay_core::Error::DirectoryChanged) if std::time::Instant::now() < deadline => {
                 let address = proof
                     .registration
@@ -1149,4 +1183,29 @@ fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// The order an `--order` send makes: the deadline from `--ack-deadline`, else
+/// `[send] ack_deadline` of the config file, else five minutes.
+fn order_spec(
+    ack_deadline: Option<Since>,
+    expect_ticket: Option<String>,
+) -> Result<relay_core::receipts::OrderSpec, BoxError> {
+    let age = match ack_deadline {
+        Some(since) => since,
+        None => {
+            let file = relay_core::config::load_file()?
+                .unwrap_or(relay_core::config::FileConfig::default());
+            match file.send.ack_deadline_text()? {
+                Some(text) => text
+                    .parse::<Since>()
+                    .map_err(|e| format!("[send] ack_deadline: {e}"))?,
+                None => Since(Duration::from_millis(
+                    relay_core::receipts::ORDER_ACK_DEFAULT_MS.unsigned_abs(),
+                )),
+            }
+        }
+    };
+    let ms = i64::try_from(age.0.as_millis()).unwrap_or(i64::MAX);
+    Ok(relay_core::receipts::OrderSpec::new(ms, expect_ticket)?)
 }

@@ -52,9 +52,11 @@ pub(crate) fn request_groups(log: &relay_core::test_support::RequestLog) -> Vec<
             let mut names = Vec::new();
             while let Some(command) = read_command(&mut parser, &mut reader) {
                 names.push(
+                    // A script by SHA or by body is one script call.
                     String::from_utf8(command[0].clone())
                         .unwrap()
-                        .to_ascii_uppercase(),
+                        .to_ascii_uppercase()
+                        .replace("EVALSHA", "EVAL"),
                 );
             }
             names

@@ -297,6 +297,7 @@ fn claim_with_queue_counter(
 ) -> relay_core::BatchId {
     let body = [
         include_str!("../src/store/lua/common.lua"),
+        include_str!("../src/store/lua/receipt_core.lua"),
         include_str!("../src/store/lua/receipts.lua"),
         include_str!("../src/store/lua/pop.lua"),
     ]
@@ -1141,10 +1142,24 @@ fn receipts_plain_pop_requeue_preserves_original_without_inventing_delivery() {
             .iter()
             .any(|row| row.event.outcome == ReceiptOutcome::DeadLettered)
     );
-    assert!(!report.events.iter().any(|row| matches!(
-        row.event.outcome,
-        ReceiptOutcome::Delivered | ReceiptOutcome::Acknowledged
-    )));
+    // The plain read is the one delivery (the recipient took it); the requeue and the
+    // dead letter invent none, and nothing is acknowledged.
+    assert!(
+        report
+            .events
+            .iter()
+            .all(|row| row.event.outcome != ReceiptOutcome::Acknowledged)
+    );
+    let delivered: Vec<_> = report
+        .events
+        .iter()
+        .filter(|row| row.event.outcome == ReceiptOutcome::Delivered)
+        .collect();
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(
+        delivered[0].event.evidence,
+        Some(DeliveryEvidence::InboxRead)
+    );
     assert_eq!(bus.relay.log_since(0).unwrap().len(), 1);
 }
 
