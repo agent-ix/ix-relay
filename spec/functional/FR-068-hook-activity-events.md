@@ -126,7 +126,7 @@ agent's turn, and it never changes a tool permission.
 | FR-068-AC-10 | A `cwd` outside a git work tree gives an empty `branch`, and a `cwd` whose branch read hangs gives an empty `branch` within budget. | Test |
 | FR-068-AC-11 | With Redis blackholed, after one failed write the next 5 seconds of tool-call hooks add no write time and are counted as skipped; the backoff doubles to the 5-minute cap on repeated failures; a successful write ends it; `ix.relay.hook.activity_skipped` reports the skips and drops. | Test |
 | FR-068-AC-12 | A `PreToolUse`, `Notification` and `SessionEnd` call writes its event and prints nothing on stdout, including for a tool that the harness would otherwise ask about; no output contains an approve, deny, ask or block decision. | Test |
-| FR-068-AC-13 | The Claude and Codex plugin registrations are parsed by a test that fails unless every supported event of the input list maps to a registered hook with a timeout of at least its budget plus 1 second. | Inspection |
+| FR-068-AC-13 | The Claude and Codex plugin registrations are parsed by a test that fails unless every supported event of the input list maps to a registered hook with a timeout of at least its budget plus 1 second. | Test |
 
 ## Dependencies
 

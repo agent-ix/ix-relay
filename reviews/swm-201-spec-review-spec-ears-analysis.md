@@ -32,3 +32,11 @@ Ticket: SWM-201. New and edited requirement statements checked for EARS shape wi
 ## Verdict
 
 PASS with low findings: wording fixes only, none blocks merge.
+
+## Dispositions
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | The relay-watcher SHALL record the order-level `AckExpired` receipt; quire no longer flags the line. |
+| FND-002 | fixed | The watcher SHALL export `ix_fleet_probe_ok` for every expected source on every push; the agentless passive is gone. |
+| FND-003 | fixed | NFR-001 activity paragraph split into four EARS statements, each with the hook handler as subject. |

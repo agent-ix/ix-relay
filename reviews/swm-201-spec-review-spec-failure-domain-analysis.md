@@ -41,3 +41,24 @@ Done well: FR-070 makes every source a 1/0 series present on every push, failed 
 ## Verdict
 
 CHANGES REQUESTED. FND-001 and FND-002 contradict the purpose of W1 (missing data must never read as unknown, and a working lane must not read idle). FND-003..007 are real gaps against the overnight failure classes and should be closed in this PR; FND-008/009 can be stated as known limits.
+
+## New findings (disposition pass 1)
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-010 | medium | `no_events` and host `hook_events` flag a legitimately idle lane or host: any lane whose newest event is older than `no_events_after` is a defect, and a host whose lanes all stopped overnight reads `hook_events`=0, which turns ProbeFailing into noise and invites silencing. Lead decision: a lane counts as unhealthy only when its last known state is not idle (an open `pre_tool`, herdr reporting working, or a `prompt` with no later `stop`) and it then emits no event for `no_events_after` (default 30 minutes). A lane whose newest event is `stop`, `idle` or `session_end` is quiet, not unhealthy. FR-070-AC-9 currently asserts the opposite and must change. | FR-070 Health series, FR-070-AC-9, FR-045 lane.no_events row |
+| FND-011 | low | FR-072 accepts writes only from a caller with the orchestrator role in the relay configuration, but the relay does not authenticate callers (every participant that can reach Redis is trusted, SR-003 FND-006). State that the role check guards against accidental writes by lanes and is not authentication. | FR-072 Behavior, FR-072-AC-3 |
+
+## Dispositions
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | The lane registry is the union of herdr agent panes and relay registrations (FR-069, AC-11); `unknown` is removed; a lane with no events is `idle` with `no_events`; every registry lane has state and last-activity series. |
+| FND-002 | fixed | A `pre_tool` with no later `post_tool` within `max_tool_runtime`, or an attributed compiler, counts as `working`; past that limit it is `stuck`; FR-045-AC-30 covers both. |
+| FND-003 | fixed | FR-067 says `Acted` is not acceptance; FR-071 adds `--expect-ticket`, exposes focus and gives acceptance to the consumer, which accepts only on a focus match. |
+| FND-004 | fixed | `PreToolUse` budget 300 ms; per-host exponential backoff from 5 s to 5 min; skips counted in `ix.relay.hook.activity_skipped`; FR-068-AC-11 and NFR-001 rows. |
+| FND-005 | fixed | FR-069 states terra lanes, herdr and cargo run inside WSL; `native_windows_agents` makes a native process a defect (FR-069-AC-14). |
+| FND-006 | fixed | `capacity` source (0 when unset) plus the always-exported `capacity_configured` (FR-070-AC-8). |
+| FND-007 | fixed | `hook_events` is now defined (per-lane age against `no_events_after`, plus activity failures), so a host whose hooks are broken reads 0. Its handling of idle lanes is the subject of new finding FND-010. |
+| FND-008 | fixed | Acted ordering and deadlines use relay server (Redis) time; FR-067-AC-12 covers clocks 10 minutes behind and ahead. |
+| FND-009 | fixed | No folding: `ix.fleet.lane.dropped` plus the doctor warning `fleet_lanes_dropped` (FR-045-AC-31). |

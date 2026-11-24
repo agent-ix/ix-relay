@@ -26,6 +26,7 @@ collector is implemented in Rust.
   agent, plus every lead registration of this host in the relay. A lane is identified by
   its address `server:workspace:tab`, which every series and event of this feature carries
   as the join key.
+- Each watcher SHALL publish its host's lane list to Redis under a lease: a record valid for 90 seconds and refreshed about every 30 seconds, as the fenced herdr directory does. The fleet registry SHALL be the union of the unexpired host lists and the relay registrations. When a host's lease has expired, its lanes SHALL stay listed with `stale` set and SHALL NOT be dropped.
 - Every lane in the registry SHALL appear in the lane series of FR-045 on every push,
   whether or not it has produced any hook event. A lane leaves the registry only when
   neither source lists it.
@@ -111,6 +112,7 @@ collector is implemented in Rust.
 | FR-069-AC-9 | Given a source that hangs, the tick completes within its budget plus 500 ms and the other sources still report. | Test |
 | FR-069-AC-10 | The collector crate contains no Python file, no shell script and no spawn of a shell interpreter, and the retired probe scripts are not referenced by any build or service file in this repository. | Inspection |
 | FR-069-AC-11 | Given herdr agent panes and relay registrations that overlap and differ, the registry is their union by lane address, and every registry lane has state and last-activity series on every push, including a lane with no event. | Test |
+| FR-069-AC-16 | Given three hosts publishing lane lists, the fleet registry is the union of their unexpired lists and the relay registrations; given one host whose lease (90 seconds, refreshed about every 30) has expired, its lanes stay listed as `stale` and are not removed; a refresh restores them. | Test |
 | FR-069-AC-12 | Every pane class and hook cause of the behavior list produces an `ix.fleet.lane.blocked` series of its mapped reason, including `wait_loop`, `queued_question`, `permission` and `question`; a test enumerates the classes and fails when one has no reason. | Test |
 | FR-069-AC-13 | Given a compiler process attributed to a lane for 90 seconds of ticks, that lane's `compile_seconds` rises by 90 seconds, and a lane beyond 50 is not exported. | Test |
 | FR-069-AC-14 | Given a WSL interop process list holding a native Windows agent process, `native_windows_agents` is nonzero; given none, it is 0. | Test |

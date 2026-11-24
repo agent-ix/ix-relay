@@ -36,13 +36,14 @@ lane.
 - A list SHALL hold at most 50 tickets in order. Each entry SHALL hold a ticket id (at most
   64 bytes) and a text reference (at most 512 bytes: a link or an identifier that locates
   the ticket text; the relay SHALL NOT fetch it).
+- The role check is a guard against accidental writes by lanes and is not authentication; every participant that can reach the bus is trusted, as in the trust model of the master specification.
 - The relay SHALL accept a write only from an authorized orchestrator command: a caller
   holding the orchestrator role in the relay configuration. The relay SHALL refuse a write
   from a lane or an unauthorized caller, naming the refusal, and SHALL leave the list
   unchanged.
 - A write SHALL be `set` (replace the list), `append`, `remove` of one ticket, or
   `reorder`, and SHALL apply atomically with its transition record. A write naming a lane
-  address that is not in the registry SHALL be refused by the relay.
+  address that is not in the fleet registry SHALL be refused by the relay. A write naming a lane of a host whose registry lease has expired (a `stale` lane, [FR-069](./FR-069-host-collector.md)) SHALL be refused with the error `host_registry_stale`, and the relay SHALL raise the collector probe defect of [FR-070](./FR-070-collector-source-health.md); the relay SHALL NOT accept it silently.
 - Each transition record SHALL hold the operation, the lane address, the writer, the list
   version after the write and the ticket ids, with the relay server's time. The history SHALL
   be retained and read under the bounds of FR-066 (4,096 entries, seven days, bounded
@@ -67,6 +68,7 @@ lane.
 | FR-072-AC-6 | Given a read of one lane and of all lanes, repeated twice, the state and history are byte-identical before and after and no inbox is popped. | Test |
 | FR-072-AC-7 | Given a lane moved to a new address, the list is readable under the new address and the history records a transition naming both addresses. | Test |
 | FR-072-AC-8 | Given a lane holding an assignment and no hook events, no series or read presents the assigned ticket as worked or focused. | Test |
+| FR-072-AC-9 | Given a write naming a lane of a host whose registry lease has expired, the write is refused with `host_registry_stale`, the list is unchanged and the probe defect is raised; after the host refreshes its lease the same write succeeds. | Test |
 
 ## Dependencies
 

@@ -41,3 +41,26 @@ Ticket: SWM-201. Checked identifier uniqueness, cross-FR consistency of names, a
 ## Verdict
 
 CHANGES REQUESTED. FND-001 must be fixed before merge (it corrupts the matrix today). The rest are consistency and coverage gaps that are cheap to close in this PR. Testability is otherwise good: every new AC names fixtures, injected clocks or seeded secret markers and can fail. On the matrix question: running `quire matrix` is required for this spec PR, not to close coverage (every new AC is expected untagged until SWM-202..207 land, and spec.md lists them as not built) but because it is the check that catches id collisions like FND-001; SWM-201 AC3 (test-matrix gaps closed) cannot be met by a spec-only PR and should be read as satisfied by SWM-202..207.
+
+## New findings (disposition pass 1)
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-011 | medium | FR-072 refuses a write naming a lane address not in the registry, but the registry is defined in FR-069 as each host's collector state. The orchestrator writes from one host for lanes on all hosts, so the spec must say where a fleet-wide registry is stored (e.g. each watcher publishes its registry to Redis with an expiry) and what happens when a host's watcher is down (refuse, or accept and flag). | FR-072 Behavior, FR-072-AC-4, FR-069 Lane registry |
+| FND-012 | low | FR-071 states an obligation on ix-board (`fleet assign` SHALL treat an order as accepted only on a focus match) and FR-071-AC-11 verifies it by Demonstration, but this repository cannot build or test that consumer. Keep the relay side here and move the acceptance rule and its AC to the ix-board fleet spec. | FR-071 Order acceptance, FR-071-AC-11 |
+| FND-013 | low | FR-068-AC-13 describes a test that parses the plugin registrations and fails, but its verification method is Inspection; make it Test. | FR-068-AC-13 |
+
+## Dispositions
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | New rows renumbered FR-067-AC-9..AC-12; quire matrix shows one FR-067-AC-8 (the original regression AC) and no duplicate AC ids. |
+| FND-002 | fixed | FR-045 catalogue and FR-071 both use `recipient` (the lane address). |
+| FND-003 | fixed | FR-045 lists seven blocked reasons; FR-069 maps every pane class and hook cause; FR-069-AC-12 enumerates them. |
+| FND-004 | fixed | Host profile with `probe_unavailable`; FR-069-AC-4 and FR-070-AC-7 separate unavailable from failed. |
+| FND-005 | fixed | Orders are explicit (`send --order` or `fleet assign`); FR-071-AC-2 asserts that plain messages never expire. |
+| FND-006 | fixed | FR-068 Plugin registration requirement and FR-068-AC-13. |
+| FND-007 | fixed | FR-069-AC-15 Demonstration on draco, titan, luna and terra (WSL), queried in Prometheus. |
+| FND-008 | fixed | FR-017-AC-5 lists all seven events; FR-017-AC-8 and FR-068-AC-12 assert empty stdout with no permission decision. |
+| FND-009 | fixed | Deterministic rule (trailing ? after stripping, fixed phrase list in last paragraph); FR-068-AC-4 tests each. |
+| FND-010 | fixed | FR-067 Dependencies has a headed Extended-by bullet; NFR-001 paragraph split into four statements. |

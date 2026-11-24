@@ -73,7 +73,6 @@ as an order: explicitly with `agent-msg send --order`, or by the orchestrator's
 | FR-071-AC-8 | A push shows `ix.relay.orders.unacted` equal to the count of orders without `Acted` or `AckExpired`, labelled by `recipient`, falling when one is acted; the act latency histogram records `Delivered` to `Acted` seconds. | Test |
 | FR-071-AC-9 | A tick that scans deadlines makes no key scan and adds at most one pipelined request. | Test |
 | FR-071-AC-10 | Given an order sent with `--expect-ticket`, the receipt export returns the expected ticket, and `focus_info` for the recipient lane shows the ticket parsed from its newest hook-reported branch; the relay records no acceptance of its own. | Test |
-| FR-071-AC-11 | Given a lane whose focus ticket equals, and one whose focus ticket differs from, the assigned ticket, `fleet assign` reports accepted only for the first. | Demonstration |
 
 ## Dependencies
 
@@ -82,6 +81,7 @@ as an order: explicitly with `agent-msg send --order`, or by the orchestrator's
   [FR-068](./FR-068-hook-activity-events.md), [FR-072](./FR-072-ordered-lane-assignment-list.md),
   [FR-024](./FR-024-escalation-status-transitions.md),
   [FR-025](./FR-025-escalation-text-safety.md), [FR-045](./FR-045-watcher-pushes-metrics-over-otlp.md).
+- Acceptance by focus match is owned by ix-board#86 FR-035 (`fleet assign`).
 - The escalation ladder beyond the first escalation (lead, orchestrator, Discord) and the
   `fleet assign` consumer are owned outside this repository (ix-board) and consume this
   escalation and these receipts.
