@@ -86,6 +86,19 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum OrdersCommand {
+    /// List the orders whose ack deadline passed without `Acted`, newest first, in one
+    /// request (at most 500; `truncated` says more exist).
+    Expired {
+        /// Print `{"orders": [...], "truncated": bool, "skipped": N, "indexed_since_ms": ms|null}`
+        /// instead of plain text. `skipped` counts rows that could not be decoded and
+        /// `indexed_since_ms` is when the relay began indexing expiries.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// Write and read the ordered per-lane assignment list: set, append, remove, reorder,
     /// show and history. Writes need `[assign] orchestrator = true` in config.toml.
@@ -115,6 +128,11 @@ enum Cmd {
         /// returned in the receipt export.
         #[arg(long, value_name = "ID", requires = "order")]
         expect_ticket: Option<String>,
+    },
+    /// Read order state. Changes nothing.
+    Orders {
+        #[command(subcommand)]
+        command: OrdersCommand,
     },
     /// Print and remove your pending messages.
     Inbox {
@@ -519,6 +537,32 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
     match cli.cmd {
         Cmd::Work(args) => work::run(args, &mut relay, settings, &mut out)?,
         Cmd::Assign(args) => assign::run(args, &mut relay, settings, &mut out)?,
+        Cmd::Orders {
+            command: OrdersCommand::Expired { json },
+        } => {
+            let report = retry::read(&mut relay, &redial, |r| Ok(r.expired_orders()?))?;
+            if json {
+                json::write_line(&mut out, &report)?;
+            } else {
+                for o in &report.orders {
+                    writeln!(
+                        out,
+                        "{} {} ticket={} last={} escalation={}",
+                        o.original_id,
+                        o.recipient,
+                        o.expect_ticket.as_deref().unwrap_or("-"),
+                        o.last_state,
+                        o.escalation.as_str()
+                    )?;
+                }
+                if report.skipped > 0 {
+                    writeln!(out, "skipped: {} undecodable rows", report.skipped)?;
+                }
+                if report.truncated {
+                    writeln!(out, "truncated: more expired orders exist")?;
+                }
+            }
+        }
         Cmd::Send {
             to,
             text,

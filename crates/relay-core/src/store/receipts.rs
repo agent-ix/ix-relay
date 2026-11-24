@@ -12,9 +12,10 @@ use super::{
 use crate::{
     AgentName, BatchId, Error, Message, Now, Popper, Result, Target,
     receipts::{
-        DeliveryEvidence, ExpiredOrder, OrderLatency, OrderSpec, OrderStats, OrderedReceipt,
-        RECEIPT_EVENT_CAP, RECEIPT_PAGE_CAP, RECEIPT_WINDOW_MS, ReceiptCoverageReason,
-        ReceiptEvent, ReceiptExport, ReceiptRequest,
+        DeliveryEvidence, EXPIRED_ORDERS_CAP, EXPIRED_ORDERS_SCAN_CAP, ExpiredOrder,
+        ExpiredOrderState, ExpiredOrders, OrderEscalationState, OrderLatency, OrderSpec,
+        OrderStats, OrderedReceipt, RECEIPT_EVENT_CAP, RECEIPT_PAGE_CAP, RECEIPT_WINDOW_MS,
+        ReceiptCoverageReason, ReceiptEvent, ReceiptExport, ReceiptRequest,
     },
 };
 
@@ -346,6 +347,12 @@ static ESCALATE_SCRIPT: LazyLock<CachedScript> =
 static ESCALATE_FAILED_SCRIPT: LazyLock<CachedScript> =
     LazyLock::new(|| CachedScript::new(slim_script(include_str!("lua/order_escalate_failed.lua"))));
 
+static LIST_EXPIRED_SCRIPT: LazyLock<CachedScript> = LazyLock::new(|| {
+    // `no-writes` makes Redis refuse any write the body might one day contain.
+    let body = slim_script(include_str!("lua/order_expired_list.lua"));
+    CachedScript::new(format!("#!lua flags=no-writes\n{body}"))
+});
+
 /// Most orders one scan expires.
 const ORDER_SCAN_LIMIT: usize = 100;
 
@@ -381,6 +388,68 @@ impl Relay {
                 })
             })
             .collect())
+    }
+
+    /// Every order whose `AckExpired` the relay recorded and that was not `Acted`,
+    /// newest expiry first, in one request and without a key scan. At most
+    /// [`EXPIRED_ORDERS_CAP`] orders come back; `truncated` says more exist. Changes
+    /// nothing. Orders that expired before the relay indexed them, and orders whose
+    /// record aged out (eight days), are not listed.
+    ///
+    /// # Errors
+    /// Fails when Redis cannot be reached or a receipt key has the wrong type.
+    pub fn expired_orders(&mut self) -> Result<ExpiredOrders> {
+        let lanes_key = self.keys.fleet_lanes_key();
+        let (stream, meta) = (self.keys.receipt_stream_key(), self.keys.receipt_meta_key());
+        let rows: Vec<String> = LIST_EXPIRED_SCRIPT.run(&mut self.conn, |cmd| {
+            cmd.arg(0)
+                .arg(EXPIRED_ORDERS_CAP)
+                .arg(EXPIRED_ORDERS_SCAN_CAP)
+                .arg(&lanes_key)
+                .arg(&stream)
+                .arg(&meta);
+        })?;
+        let mut rows = rows.into_iter();
+        let truncated = rows.next().is_some_and(|flag| flag == "1");
+        let indexed_since_ms = rows.next().and_then(|since| since.parse().ok());
+        rows.next();
+        let list_count = rows.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        let lists: Vec<crate::fleet::HostLaneList> = rows
+            .by_ref()
+            .take(list_count)
+            .filter_map(|raw| serde_json::from_str(&raw).ok())
+            .collect();
+        let fields: Vec<String> = rows.collect();
+        let (chunks, rest) = fields.as_chunks::<9>();
+        let mut skipped = u64::try_from(rest.len()).unwrap_or(u64::MAX);
+        let mut orders = Vec::with_capacity(chunks.len());
+        for row in chunks {
+            match expired_order_of(row) {
+                Some(order) => orders.push(order),
+                None => skipped += 1,
+            }
+        }
+        {
+            let lanes: Vec<(crate::Address, &str)> = lists
+                .iter()
+                .flat_map(|list| list.lanes.iter())
+                .filter_map(|lane| Some((lane.parse().ok()?, lane.as_str())))
+                .collect();
+            for order in &mut orders {
+                if let Ok(stored) = order.recipient.parse::<crate::Address>()
+                    && let Some((_, spelling)) =
+                        lanes.iter().find(|(address, _)| *address == stored)
+                {
+                    order.recipient = (*spelling).to_owned();
+                }
+            }
+        }
+        Ok(ExpiredOrders {
+            orders,
+            truncated,
+            skipped,
+            indexed_since_ms,
+        })
     }
 
     /// Files the escalation of an expired order, once however often it is called.
@@ -526,6 +595,48 @@ impl Relay {
         stats.latency.sum_ms = latency.get("sum_ms").copied().unwrap_or(0);
         Ok((super::hook_health_of(&health), stats))
     }
+}
+
+fn expired_order_of(row: &[String; 9]) -> Option<ExpiredOrderState> {
+    let [
+        id,
+        expired_at,
+        to,
+        expect,
+        enqueued,
+        delivered,
+        ack_ms,
+        last_state,
+        escalation,
+    ] = row;
+    let enqueued_at_ms: i64 = enqueued.parse().ok()?;
+    let from = if delivered.is_empty() {
+        enqueued_at_ms
+    } else {
+        delivered.parse().ok()?
+    };
+    Some(ExpiredOrderState {
+        original_id: id.clone(),
+        recipient: to.clone(),
+        expect_ticket: (!expect.is_empty()).then(|| expect.clone()),
+        enqueued_at_ms,
+        deadline_ms: from.saturating_add(ack_ms.parse().ok()?),
+        expired_at_ms: expired_at.parse().ok()?,
+        delivered_before_expiry: !delivered.is_empty(),
+        last_state: last_state.clone(),
+        escalation: match escalation.as_str() {
+            "" => OrderEscalationState::Pending,
+            "failed" => OrderEscalationState::Failed,
+            filed
+                if filed
+                    .strip_prefix('e')
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) =>
+            {
+                OrderEscalationState::Filed
+            }
+            _ => OrderEscalationState::Unknown,
+        },
+    })
 }
 
 /// The machine and session id a `session/<hex>/<hex>` queue name encodes; the name

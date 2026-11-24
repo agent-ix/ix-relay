@@ -3,8 +3,10 @@
 -- ARGV: limit, clock override, receipt stream, receipt metadata.
 if not receipt_ready() then return redis.error_reply('receipt history has wrong type') end
 local now = now_ms(ARGV[2])
+redis.call('HSETNX', receipt_meta, 'orders_expired_since_ms', now)
 local due = receipt_meta .. ':orders-due'
 local pending = receipt_meta .. ':orders-escalate'
+local expired = receipt_meta .. ':orders-expired'
 for _, original in ipairs(redis.call('ZRANGEBYSCORE', due, '-inf', now, 'LIMIT', 0, tonumber(ARGV[1]))) do
     local okey = order_key(original)
     local h = redis.call('HMGET', okey, 'from', 'recipient', 'state', 'expect', 'status')
@@ -19,7 +21,12 @@ for _, original in ipairs(redis.call('ZRANGEBYSCORE', due, '-inf', now, 'LIMIT',
         redis.call('HSET', okey, 'last_state', h[3])
         order_close(original, 'expired')
         redis.call('ZADD', pending, now, original)
+        redis.call('ZADD', expired, now, original)
     end
+end
+redis.call('ZREMRANGEBYSCORE', expired, '-inf', now - 691200000)
+if redis.call('ZREMRANGEBYRANK', expired, 0, -10001) > 0 then
+    redis.call('HSET', receipt_meta, 'orders_expired_trim_ms', now)
 end
 local out = {}
 for _, original in ipairs(redis.call('ZRANGE', pending, 0, 19)) do

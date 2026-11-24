@@ -50,6 +50,30 @@ as an order: explicitly with `agent-msg send --order`, or by the orchestrator's
   for expired deadlines each tick without a key scan, and a watcher restart SHALL NOT
   create a second `AckExpired` or a second escalation for the same order.
 
+### Expired orders are readable in one request
+
+- The relay SHALL expose, read-only, the orders whose `AckExpired` it recorded and that have
+  not been `Acted`, newest expiry first, without a key scan or a receipt-stream read:
+  `Relay::expired_orders` and `agent-msg orders expired --json`. One reader script reads the
+  index and the leased host lane lists of [FR-069](./FR-069-host-collector.md), which spell
+  each recipient; an unreadable lane list leaves the stored spelling. Each item carries
+  the order identity, the recipient lane address (in the spelling of the host lane lists when the
+  lane is listed, else as stored at send time), the expected ticket, the enqueue time, the
+  deadline, whether `Delivered` was recorded before expiry (a delivery after expiry does not
+  count), the last receipt state before expiry and the escalation state (`pending`, `filed`,
+  `failed`, or `unknown` for a value the reader does not know), and no message text.
+- The relay SHALL record `Acted` on the order itself, so that no later receipt (acknowledged,
+  timed out, requeued, redelivered, dead-lettered) puts an acted order back on the list.
+- The call SHALL return at most 500 orders and examine at most 1,000 index rows, and SHALL set
+  `truncated` when it stopped at either bound or when the index dropped live rows at its size
+  bound. It SHALL return `skipped`, the count of rows it could not decode, and
+  `indexed_since_ms`, the relay time the index began (an expiry recorded earlier, or by a
+  `relay-watcher` that predates the index during a rolling upgrade, is not listed). It SHALL
+  change nothing, and the script SHALL run with the Redis `no-writes` flag.
+- The index holds an expiry for 8 days (the order record's lifetime) and at most 10,000
+  entries, the oldest dropped first. These bounds are the index's own; the 7-day and
+  10,000-event bounds of FR-067 apply to the receipt stream.
+
 ### Order acceptance is confirmed by the consumer
 
 - `Acted` shows that the recipient session acted after delivery; it is not proof that the
@@ -77,6 +101,7 @@ as an order: explicitly with `agent-msg send --order`, or by the orchestrator's
 | FR-071-AC-8 | A push shows `ix.relay.orders.unacted` equal to the count of orders without `Acted` or `AckExpired`, labelled by `recipient`, falling when one is acted; the act latency histogram records `Delivered` to `Acted` seconds. | Test |
 | FR-071-AC-9 | A tick that scans deadlines makes no key scan and adds at most one pipelined request. | Test |
 | FR-071-AC-10 | Given an order sent with `--expect-ticket`, the receipt export returns the expected ticket, and `focus_info` for the recipient lane shows the ticket parsed from its newest hook-reported branch; the relay records no acceptance of its own. | Test |
+| FR-071-AC-11 | Given delivered and never-delivered orders that expired, one acted after expiry, one with a failed escalation and one filed, `expired_orders` and `agent-msg orders expired --json` return every un-acted expired order with its fields and escalation state in one request and exclude the acted one, including after an acknowledgement, lease timeout, requeue, redelivery or dead letter that follows `Acted`; given more than 500, exactly 500 come back with `truncated` set; a row that cannot be decoded is counted in `skipped`, `indexed_since_ms` names the index start, and more than 1,000 index rows or a size-bound trim set `truncated`; a `DUMP` of every relay key before and after the call is identical. | Test |
 
 ## Dependencies
 
