@@ -211,6 +211,7 @@ pub struct Collector {
     status: StatusHandle,
     refresh_redis_ok: bool,
     push_redis_ok: bool,
+    stale_hosts: std::collections::BTreeMap<String, bool>,
 }
 
 impl Collector {
@@ -271,6 +272,7 @@ impl Collector {
             temperature: None,
             pressure: None,
             pressure_unsupported: false,
+            stale_hosts: std::collections::BTreeMap::new(),
             compilers: Vec::new(),
             native_windows: None,
             capacity: CapacityRead::Unread,
@@ -486,6 +488,20 @@ impl Collector {
             }
         };
         self.record(Source::Capacity, outcome, log);
+    }
+
+    /// Name of the `source` attribute of the stale-host assignment defect (FR-072).
+    pub const STALE_HOST_SOURCE: &str = "host_registry_stale";
+
+    /// Records the hosts the relay holds a `host_registry_stale` defect for (FR-072):
+    /// each exports `probe_ok` 0 until it leaves `defective`, then 1.
+    pub fn set_stale_hosts(&mut self, defective: &[String]) {
+        for ok in self.stale_hosts.values_mut() {
+            *ok = true;
+        }
+        for host in defective {
+            self.stale_hosts.insert(host.clone(), false);
+        }
     }
 
     /// Whether the store answered the layout refresh's reads.
@@ -713,6 +729,12 @@ impl Collector {
                 // Not expected, or declared absent: unavailable, never a failure.
                 registry.gauge(&FLEET_PROBE_UNAVAILABLE, attrs(), 1);
             }
+        }
+        for (stale, ok) in &self.stale_hosts {
+            let attrs = Attrs::new()
+                .with("host", stale)
+                .with("source", Self::STALE_HOST_SOURCE);
+            registry.gauge(&FLEET_PROBE_OK, attrs, i64::from(*ok));
         }
         if self.health.ok(Source::Cpu)
             && let Some(ratio) = self.ratio

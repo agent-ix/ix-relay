@@ -430,6 +430,11 @@ fn refresh_fleet(
     };
     let activity_ok = activity.is_ok();
     collector.set_activity(Instant::now(), activity, log);
+    // A failed read keeps the last known defects: the `redis` source reports the failure.
+    if let Ok(defects) = relay.assignment_probe_defects() {
+        let hosts: Vec<String> = defects.into_iter().map(|d| d.host).collect();
+        collector.set_stale_hosts(&hosts);
+    }
     collector.set_refresh_redis(published.is_ok() && read && activity_ok, log);
 }
 
@@ -2228,6 +2233,93 @@ mod tests {
                 .failed_sources()
                 .contains(&fleet::health::Source::HookEvents)
         );
+    }
+
+    /// A refused write to a lane of a host with an expired registry lease is exported as
+    /// `probe_ok` 0 for that host's `host_registry_stale` source, and as 1 once the host
+    /// publishes its lane list again. Redis lane.
+    #[trace("FR-072-AC-9")]
+    #[test]
+    fn tc_072_09_a_stale_host_assignment_refusal_exports_probe_ok_0_until_the_host_refreshes() {
+        use relay_core::{
+            assignment::{AssignWrite, AssignWriter, AssignedTicket},
+            fleet::HostLaneList,
+        };
+        let Some(mut relay) = test_relay("stale-probe-ok") else {
+            eprintln!("skipping: IX_RELAY_TEST_URL unset (run `make test-redis`)");
+            return;
+        };
+        let url = std::env::var("IX_RELAY_TEST_URL").expect("set: test_relay returned Some");
+        let mut raw = redis::Client::open(url)
+            .and_then(|c| c.get_connection())
+            .expect("raw connection to test redis");
+        let old = HostLaneList {
+            machine: "oldhost".parse().unwrap(),
+            refreshed_ms: 1,
+            lanes: vec!["oldhost:SWM:code".into()],
+        };
+        redis::cmd("HSET")
+            .arg(format!("{}fleet-lanes", test_prefix("stale-probe-ok")))
+            .arg("oldhost")
+            .arg(serde_json::to_string(&old).unwrap())
+            .exec(&mut raw)
+            .expect("plant the expired lane list");
+        let writer = AssignWriter {
+            name: "draco:SWM:plan".into(),
+            orchestrator: true,
+            caller_lane: None,
+        };
+        let write = AssignWrite::Set(vec![AssignedTicket {
+            id: "A-1".into(),
+            reference: "https://linear.app/t/A-1".into(),
+        }]);
+        assert!(
+            relay
+                .assign(&writer, "oldhost:SWM:code", &write, None)
+                .is_err()
+        );
+        let here: MachineName = "here".parse().unwrap();
+        let view = relay_ops::find::MachineView {
+            machine: here.clone(),
+            agents: vec![],
+            workspaces: vec![],
+            tabs: vec![],
+            dropped: 0,
+        };
+        let mut collector = fleet::Collector::new(
+            here.clone(),
+            fleet::health::Profile::default(),
+            fleet::fixtures::sources(None),
+            fleet::fixtures::INTERVAL,
+        );
+        let stale_probe = |collector: &fleet::Collector| {
+            let mut registry = otlp::registry::Registry::new(2, 1);
+            collector.fill(&mut registry, Instant::now());
+            registry.points().iter().find_map(|p| {
+                let pairs = p.instrument.name == "ix.fleet.probe_ok" && {
+                    let pairs = p.attrs.pairs();
+                    pairs.iter().any(|(k, v)| *k == "host" && v == "oldhost")
+                        && pairs
+                            .iter()
+                            .any(|(k, v)| *k == "source" && v == "host_registry_stale")
+                };
+                match (&p.value, pairs) {
+                    (otlp::registry::Value::Int(v), true) => Some(*v),
+                    _ => None,
+                }
+            })
+        };
+        assert_eq!(stale_probe(&collector), None, "no defect, no series yet");
+        refresh_fleet(&mut relay, &mut collector, &view, &[], &here, &mut |_| {});
+        assert_eq!(stale_probe(&collector), Some(0));
+        relay
+            .publish_lane_list(
+                &"oldhost".parse().unwrap(),
+                &["oldhost:SWM:code".to_owned()],
+            )
+            .unwrap();
+        refresh_fleet(&mut relay, &mut collector, &view, &[], &here, &mut |_| {});
+        assert_eq!(stale_probe(&collector), Some(1));
     }
 
     fn test_relay(test: &str) -> Option<Relay> {
