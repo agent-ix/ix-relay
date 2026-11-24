@@ -61,13 +61,22 @@ TEST_LOCAL_MACHINE=terra exec "$(dirname "$0")/herdr" "$@"
         let local = serde_json::json!({"agents":agents,"workspaces":[{"workspace_id":"w1","label":"misc"}],"tabs":[{"tab_id":"w1:t1","label":"agent-skills"},{"tab_id":"w1:t2","label":"code"}]});
         let remote = serde_json::json!({"agents":[agent("terra-session","w1:p1","w1:t1")],"workspaces":[{"workspace_id":"w1","label":"laya"}],"tabs":[{"tab_id":"w1:t1","label":"code"}]});
         let profiles = serde_json::json!([{"label":"terra","enabled":true,"target":"fixture-terra","session":"default"}]);
-        for (machine, topology) in [("draco", &local), ("terra", &remote)] {
+        self.write_state(
+            &serde_json::json!({"draco": local, "terra": remote, "profiles": profiles}),
+        );
+    }
+
+    /// Installs `state` as the topology the `herdr` and `ssh` stubs answer from. The stubs
+    /// are shell scripts reading one prepared file per answer: they run inside a hook's
+    /// time budget, which an interpreter start on a loaded host can eat.
+    pub fn write_state(&self, state: &serde_json::Value) {
+        for machine in ["draco", "terra"] {
             for (key, field) in [
                 ("agent", "agents"),
                 ("workspace", "workspaces"),
                 ("tab", "tabs"),
             ] {
-                let body = serde_json::json!({"result": {field: topology[field]}});
+                let body = serde_json::json!({"result": {field: state[machine][field]}});
                 fs::write(
                     self.dir.join(format!("{machine}.{key}.json")),
                     serde_json::to_vec(&body).unwrap(),
@@ -77,15 +86,12 @@ TEST_LOCAL_MACHINE=terra exec "$(dirname "$0")/herdr" "$@"
         }
         fs::write(
             self.dir.join("machines.json"),
-            serde_json::to_vec(&profiles).unwrap(),
+            serde_json::to_vec(&state["profiles"]).unwrap(),
         )
         .unwrap();
         fs::write(
             self.dir.join("state.json"),
-            serde_json::to_vec(
-                &serde_json::json!({"draco": local, "terra": remote, "profiles": profiles}),
-            )
-            .unwrap(),
+            serde_json::to_vec(state).unwrap(),
         )
         .unwrap();
     }
