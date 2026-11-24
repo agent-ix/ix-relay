@@ -66,3 +66,45 @@ jobs:
         run: |
           echo "### Published agent-spend-dashboard ${{ steps.ver.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
           echo "OCI: oci://ghcr.io/agent-ix/ix-relay/agent-spend-dashboard" >> "$GITHUB_STEP_SUMMARY"
+
+  linux-binaries:
+    needs: release
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    env:
+      TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release --locked -p agent-msg -p relay-watcher
+
+      - name: Package agent-msg
+        run: |
+          mkdir -p dist/stage
+          cp target/release/agent-msg LICENSE dist/stage/
+          tar -C dist/stage -czf "dist/agent-msg-${GITHUB_REF_NAME}-${TARGET}.tar.gz" agent-msg LICENSE
+          rm -rf dist/stage
+
+      - name: Package relay-watcher
+        run: |
+          mkdir -p dist/stage
+          cp target/release/relay-watcher LICENSE dist/stage/
+          tar -C dist/stage -czf "dist/relay-watcher-${GITHUB_REF_NAME}-${TARGET}.tar.gz" relay-watcher LICENSE
+          rm -rf dist/stage
+
+      - name: Write checksums
+        working-directory: dist
+        run: |
+          sha256sum "agent-msg-${GITHUB_REF_NAME}-${TARGET}.tar.gz" > "agent-msg-${GITHUB_REF_NAME}-${TARGET}.tar.gz.sha256"
+          sha256sum "relay-watcher-${GITHUB_REF_NAME}-${TARGET}.tar.gz" > "relay-watcher-${GITHUB_REF_NAME}-${TARGET}.tar.gz.sha256"
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
