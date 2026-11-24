@@ -78,3 +78,17 @@ Round 1, fix head `f984fb7031cdb3c153d0ff8aa5d27a3f52fc68ee` (one commit after b
 | FND-011 | low | "In one request" is no longer true: when any order is listed the reader adds `lane_lists()` (HGETALL of the fleet lanes hash plus a TIME), three round trips, and a lane-list read error fails the whole call; method doc, FR-071 heading and AC-11 still say one request | crates/relay-core/src/store/receipts.rs:394 |
 | FND-012 | low | The host lane lists are cited as FR-072; they are FR-069's leased per-host lane lists (FR-072 is the orchestrator assignment list) | crates/relay-core/src/receipts.rs:357 |
 | FND-013 | medium | Branch conflicts with main in CHANGELOG.md: #58 (e9e256c) added its own `## Unreleased` section; GitHub reports CONFLICTING, and #59 will add more entries under the same heading | CHANGELOG.md:3 |
+
+Round 2, head `7b6ff38a07df951981454e1db199709f5e3a122e` (squashed, rebased onto main 0ea3fd1 with #58 and #59). `cargo clippy --workspace --all-targets -- -D warnings` exit 0; `cargo fmt --check` clean; `orders` 21/21, `send_order` 5/5, `assign_cli` 1/1 against redis:7. The `main.rs` conflict resolution keeps both `Cmd::Assign` and `Cmd::Orders` arms and both enum variants; no other change there.
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-011 | fixed | The reader script reads the fleet lane lists with HVALS (guarded by `readable`, so a wrong-typed key yields none) and returns them ahead of the rows; Rust decodes them with `filter_map`, so an unreadable list leaves the stored spelling. One EVALSHA per call; no `lane_lists()` call remains. |
+| FND-012 | fixed | `receipts.rs` and FR-071 now cite FR-069's leased host lane lists. |
+| FND-013 | fixed | Rebased onto 0ea3fd1; CHANGELOG has one `## Unreleased` holding the #58, #59 and #61 bullets; `git merge-tree` against main is clean and GitHub reports MERGEABLE. |
+
+## New findings (disposition pass 2)
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-014 | low | `--json` help still describes the output as `{"orders": [...], "truncated": bool}`; it now also carries `skipped` and `indexed_since_ms` | crates/agent-msg/src/main.rs:93 |

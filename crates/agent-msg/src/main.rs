@@ -90,7 +90,9 @@ enum OrdersCommand {
     /// List the orders whose ack deadline passed without `Acted`, newest first, in one
     /// request (at most 500; `truncated` says more exist).
     Expired {
-        /// Print `{"orders": [...], "truncated": bool}` instead of plain text.
+        /// Print `{"orders": [...], "truncated": bool, "skipped": N, "indexed_since_ms": ms|null}`
+        /// instead of plain text. `skipped` counts rows that could not be decoded and
+        /// `indexed_since_ms` is when the relay began indexing expiries.
         #[arg(long)]
         json: bool,
     },
