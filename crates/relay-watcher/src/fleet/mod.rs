@@ -49,9 +49,6 @@ use crate::otlp::{
     },
 };
 
-/// How much of one source slot the whole pane scan may use: the scan checks the
-/// time left before each read and caps the read at it, so it ends inside
-/// [`SOURCE_BUDGET`] with its completed reads kept.
 /// How long a host that refreshed its lane list keeps exporting `host_registry_stale` as 1.
 pub const STALE_RECOVERED_EXPORT: Duration = Duration::from_secs(60 * 60);
 
@@ -61,6 +58,9 @@ struct StaleHost {
     recovered: Option<Instant>,
 }
 
+/// How much of one source slot the whole pane scan may use: the scan checks the
+/// time left before each read and caps the read at it, so it ends inside
+/// [`SOURCE_BUDGET`] with its completed reads kept.
 const PANE_SCAN_BUDGET: Duration = Duration::from_millis(400);
 
 /// The longest one pane read may take, and the least time left worth starting one.

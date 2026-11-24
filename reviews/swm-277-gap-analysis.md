@@ -40,3 +40,12 @@ FR-072-AC-9 is tagged by three tests: `relay-core/tests/assignment.rs` `a_stale_
 - Semantic review: skipped (not requested).
 
 Plan completion: not assessed
+
+## Dispositions
+
+Round 1, fix head `ac0ea3e1b2cd24e21cfa06c0b254267b8e0c2a09`. FR-072-AC-9 is now tagged by five tests (relay-core refusal/refresh, doctor, `tc_072_09`, `tc_072_10`, `tc_072_11`); every clause of the extended AC is exercised.
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | FR-070 distinguishes the eleven collector sources from the `host_registry_stale` value and owns it in a new bullet |
+| FND-002 | fixed | FR-072 behavior bullet and AC-9 own the failed-read behavior; `tc_072_10` tests it |

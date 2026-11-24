@@ -49,3 +49,21 @@ Checked and clean:
 ## Coverage
 
 Reviewed every hunk of the 4 files. Code paths: `refresh_fleet` defect read, `Collector::set_stale_hosts`, `Collector::fill` stale loop, `tc_072_09`. Spec: FR-072 Behavior bullet and AC-9 edit, FR-070 Sources/Health series, FR-069 lane lease. Out of scope: pre-existing tree state.
+
+## New findings (disposition pass 1)
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-006 | low | `STALE_RECOVERED_EXPORT` and `StaleHost` were inserted between `PANE_SCAN_BUDGET`'s doc comment and its `const`, so the pane-scan doc now prefixes the new constant's doc and `PANE_SCAN_BUDGET` has none | crates/relay-watcher/src/fleet/mod.rs:52 |
+
+## Dispositions
+
+Round 1, fix head `ac0ea3e1b2cd24e21cfa06c0b254267b8e0c2a09` (one commit after 2f01a97). Re-checked against the code: `cargo fmt --check`, `cargo clippy -p relay-watcher --all-targets -D warnings` and `cargo doc -p relay-watcher` clean; `cargo test -p relay-watcher` with redis:7 397/14/1 passed, 0 failed, including `tc_072_09`, `tc_072_10` and `tc_072_11`. A workspace run hit `agent-msg` `activity_state::tests::concurrent_updates_are_exact_and_a_held_lock_never_blocks` once (agent-msg is untouched by this PR); it passed 3/3 alone. `git merge-tree` against origin/main d3027cf is clean.
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | FR-070 now says "The collector sources SHALL be exactly" and adds a bullet exporting `host_registry_stale` per defective host outside the profile, heartbeat and `collector_source_failed`; `Source::ALL` unchanged |
+| FND-002 | fixed | `apply_stale_defects` returns false on a failed read, which is ANDed into `set_refresh_redis`; last-known state kept; pinned by `tc_072_10` |
+| FND-003 | fixed | FR-070, FR-072 and CHANGELOG state every watcher exports it, `host` names the stale host, consumers aggregate with `min by (host, source)` |
+| FND-004 | fixed | `StaleHost.recovered` timestamps recovery; entries are retained for `STALE_RECOVERED_EXPORT` (1 h) and then dropped; pinned by `tc_072_11` |
+| FND-005 | fixed | FR-072 behavior bullet and AC-9 now own the keep-last-known/redis-0 behavior; `tc_072_10` tests it |
