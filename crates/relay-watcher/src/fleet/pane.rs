@@ -87,7 +87,6 @@ impl PaneClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BlockedReason {
     /// A `blocked` hook event with reason `permission`.
-    #[allow(dead_code, reason = "constructed by the hook feed change")]
     Permission,
     /// Pane class `dialog`.
     Dialog,
@@ -96,7 +95,6 @@ pub enum BlockedReason {
     /// Pane class `usage_limit`.
     UsageLimit,
     /// A `Stop` with `last_class=question`.
-    #[allow(dead_code, reason = "constructed by the hook feed change")]
     Question,
     /// Pane class `queued_question`.
     QueuedQuestion,

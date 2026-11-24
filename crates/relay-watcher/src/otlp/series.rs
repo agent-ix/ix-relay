@@ -103,6 +103,22 @@ pub static HEALTH_SNAPSHOT_READ_FAILURES: Instrument = Instrument {
     kind: Kind::Sum,
 };
 
+/// `ix.fleet.lane.compile_seconds`: seconds a compiler ran attributed to the lane.
+pub static FLEET_LANE_COMPILE_SECONDS: Instrument = Instrument {
+    name: "ix.fleet.lane.compile_seconds",
+    unit: "s",
+    description: "Cumulative seconds in which at least one compiler process was attributed to the lane.",
+    kind: Kind::Sum,
+};
+
+/// `ix.relay.hook.activity_skipped`: activity events a hook did not write.
+pub static HOOK_ACTIVITY_SKIPPED: Instrument = Instrument {
+    name: "ix.relay.hook.activity_skipped",
+    unit: "{event}",
+    description: "Activity events a hook did not write, by reason (backoff, failed, unregistered), cumulative on this host.",
+    kind: Kind::Sum,
+};
+
 macro_rules! fleet_gauge {
     ($(#[$doc:meta])* $id:ident, $name:literal, $unit:literal, $desc:literal) => {
         $(#[$doc])*
@@ -118,12 +134,27 @@ macro_rules! fleet_gauge {
 fleet_gauge!(
     /// `ix.fleet.lane.state`: one series per registry lane.
     FLEET_LANE_STATE, "ix.fleet.lane.state", "1",
-    "One series per lane of the lane registry, value 1, by state (working, idle, blocked)."
+    "One series per lane of the lane registry, value 1, by state (working, idle, blocked, stuck, ended)."
 );
 fleet_gauge!(
     /// `ix.fleet.lane.last_activity`: seconds since the lane's newest activity.
     FLEET_LANE_LAST_ACTIVITY, "ix.fleet.lane.last_activity", "s",
     "Seconds since the lane's newest activity event, or since the watcher first saw the lane."
+);
+fleet_gauge!(
+    /// `ix.fleet.lane.no_events`: a non-idle lane whose hooks went silent.
+    FLEET_LANE_NO_EVENTS, "ix.fleet.lane.no_events", "1",
+    "Value 1 for a lane that was non-idle and then emitted no activity event for no_events_after."
+);
+fleet_gauge!(
+    /// `ix.fleet.lane.focus_info`: the ticket and branch a lane reports.
+    FLEET_LANE_FOCUS_INFO, "ix.fleet.lane.focus_info", "1",
+    "Value 1 per lane; ticket parsed from the lane's hook-reported branch or cwd, empty when none."
+);
+fleet_gauge!(
+    /// `ix.fleet.config`: the windows the lane state rules use.
+    FLEET_CONFIG, "ix.fleet.config", "s",
+    "The configured working_window, no_events_after and max_tool_runtime in seconds."
 );
 fleet_gauge!(
     /// `ix.fleet.lane.blocked`: a blocked lane and why.
@@ -211,6 +242,14 @@ pub(crate) const CATALOGUE: &[(&Instrument, &[&str])] = &[
     (&HEALTH_SNAPSHOT_READ_FAILURES, &["snapshot"]),
     (&FLEET_LANE_STATE, &["host", "lane", "state"]),
     (&FLEET_LANE_LAST_ACTIVITY, &["host", "lane"]),
+    (&FLEET_LANE_NO_EVENTS, &["host", "lane"]),
+    (&FLEET_LANE_COMPILE_SECONDS, &["host", "lane"]),
+    (
+        &FLEET_LANE_FOCUS_INFO,
+        &["host", "lane", "ticket", "branch"],
+    ),
+    (&FLEET_CONFIG, &["host", "name"]),
+    (&HOOK_ACTIVITY_SKIPPED, &["host", "reason"]),
     (&FLEET_LANE_BLOCKED, &["host", "lane", "reason"]),
     (&FLEET_LANE_DROPPED, &["host"]),
     (&FLEET_BUSY_RATIO, &["host"]),

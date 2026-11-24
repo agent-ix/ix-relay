@@ -22,6 +22,8 @@ pub enum Source {
     PaneTail,
     /// Hook activity events.
     HookEvents,
+    /// The hook's local skip and drop counts (`spool/activity.json`).
+    ActivityCounters,
     /// herdr's layout.
     Herdr,
     /// The relay's store.
@@ -30,7 +32,7 @@ pub enum Source {
 
 impl Source {
     /// Every source, in the order FR-070 lists them.
-    pub const ALL: [Source; 9] = [
+    pub const ALL: [Source; 10] = [
         Source::Cpu,
         Source::Memory,
         Source::Temperature,
@@ -38,6 +40,7 @@ impl Source {
         Source::Compilers,
         Source::PaneTail,
         Source::HookEvents,
+        Source::ActivityCounters,
         Source::Herdr,
         Source::Redis,
     ];
@@ -53,6 +56,7 @@ impl Source {
             Source::Compilers => "compilers",
             Source::PaneTail => "pane_tail",
             Source::HookEvents => "hook_events",
+            Source::ActivityCounters => "activity_counters",
             Source::Herdr => "herdr",
             Source::Redis => "redis",
         }
@@ -266,7 +270,7 @@ mod tests {
         for s in Source::ALL {
             assert_eq!(p.expects(s), s != Source::Temperature, "{}", s.name());
         }
-        assert_eq!(Source::ALL.map(Source::name).len(), 9);
+        assert_eq!(Source::ALL.map(Source::name).len(), 10);
         assert!(Source::parse("pane_tail").is_some());
         assert!(Source::parse("gpu").is_none());
     }

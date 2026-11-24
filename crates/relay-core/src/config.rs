@@ -123,6 +123,16 @@ pub struct FleetFile {
     pub expected_sources: Option<toml::Value>,
     /// Sources this host declares absent (an array of source names).
     pub unavailable_sources: Option<toml::Value>,
+    /// Seconds a `prompt` or `post_tool` event keeps a lane working (default 600).
+    pub working_window_secs: Option<toml::Value>,
+    /// Seconds without an activity event after which a non-idle lane is reported as
+    /// not reporting (default 1800).
+    pub no_events_after_secs: Option<toml::Value>,
+    /// Seconds an unmatched `pre_tool` may run before the lane is stuck (default 7200).
+    pub max_tool_runtime_secs: Option<toml::Value>,
+    /// Ticket team keys recognised in a lane's branch or cwd (an array of strings;
+    /// default: the known Linear team keys).
+    pub ticket_prefixes: Option<toml::Value>,
 }
 
 /// The shape of `config.toml`. Every field is optional: an absent key falls

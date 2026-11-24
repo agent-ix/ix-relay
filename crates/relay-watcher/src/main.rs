@@ -381,7 +381,7 @@ fn refresh_fleet(
     let lanes = fleet::lanes::lanes_of(machine, view, regs);
     let addresses: Vec<String> = lanes.iter().map(|l| l.address.clone()).collect();
     collector.set_lanes(Instant::now(), lanes);
-    let published = relay.publish_lane_list(machine, &addresses).is_ok();
+    let published = relay.publish_lane_list(machine, &addresses);
     let (capacity, read) = match relay.server_capacities() {
         Ok(all) => (
             all.iter()
@@ -396,7 +396,38 @@ fn refresh_fleet(
         ),
     };
     collector.set_capacity(capacity, log);
-    collector.set_refresh_redis(published && read, log);
+    // The newest event of each lane's hooks (FR-068): one pipelined read under one source
+    // budget, aged against the relay's clock that stamped the lane list in this refresh.
+    let activity = match &published {
+        Ok(list) => {
+            let lanes: Vec<(String, relay_core::Address)> = addresses
+                .iter()
+                .filter_map(|a| Some((a.clone(), a.parse().ok()?)))
+                .collect();
+            let keys: Vec<relay_core::Address> = lanes.iter().map(|(_, k)| k.clone()).collect();
+            relay
+                .activity_last_many(&keys, fleet::bound::SOURCE_BUDGET)
+                .map(|records| {
+                    lanes
+                        .into_iter()
+                        .map(|(address, _)| address)
+                        .zip(records)
+                        .collect::<Vec<_>>()
+                })
+                .map(|records| (list.refreshed_ms, records))
+                .map_err(|e| {
+                    if e.is_timeout() {
+                        fleet::health::ErrorClass::Timeout
+                    } else {
+                        fleet::health::ErrorClass::Unreadable
+                    }
+                })
+        }
+        Err(_) => Err(fleet::health::ErrorClass::Unreadable),
+    };
+    let activity_ok = activity.is_ok();
+    collector.set_activity(Instant::now(), activity, log);
+    collector.set_refresh_redis(published.is_ok() && read && activity_ok, log);
 }
 
 /// The least time between two rename events of one lead. A label that flaps is
@@ -674,12 +705,28 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let fleet_windows = match fleet::feed::Windows::from_file(&settings.fleet) {
+        Ok(windows) => windows,
+        Err(e) => {
+            eprintln!("relay-watcher: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let fleet_tickets = match fleet::feed::Tickets::from_file(&settings.fleet) {
+        Ok(tickets) => tickets,
+        Err(e) => {
+            eprintln!("relay-watcher: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     if !cli.once {
-        state.fleet = Some(fleet::Collector::new(
+        state.fleet = Some(fleet::Collector::with_config(
             machine.clone(),
             fleet_profile,
             fleet::Sources::native(),
             Duration::from_secs(settings.watcher_otlp.interval_secs.value),
+            fleet_windows,
+            fleet_tickets,
         ));
     }
     // `--once` is a manual check: like the state file, it must not publish a
@@ -2061,6 +2108,76 @@ mod tests {
         assert!(
             got.herdr_ids.is_some(),
             "the refreshed place carries Herdr proof"
+        );
+    }
+
+    /// The layout refresh reads each lane's `activity-last` record from the store: a
+    /// lane whose hook wrote a recent prompt is working with its ticket, and the
+    /// `hook_events` source reads ok. Redis lane.
+    #[trace("FR-070-AC-9", "FR-045-AC-29")]
+    #[test]
+    fn tc_070_09_the_layout_refresh_feeds_the_collector_from_the_activity_records() {
+        use relay_core::activity::{ActivityEvent, ActivityKind, Harness};
+        let Some(mut relay) = test_relay("fleet-feed") else {
+            eprintln!("skipping: IX_RELAY_TEST_URL unset (run `make test-redis`)");
+            return;
+        };
+        let here: MachineName = "here".parse().unwrap();
+        let view = relay_ops::find::MachineView {
+            machine: here.clone(),
+            agents: vec![relay_ops::find::HerdrAgent {
+                kind: "claude".into(),
+                pane_id: "wM:p1".parse().unwrap(),
+                tab_id: "wM:t1".parse().unwrap(),
+                workspace_id: "wM".parse().unwrap(),
+                status: "idle".into(),
+                session_name: None,
+                session_id: None,
+            }],
+            workspaces: vec![relay_ops::find::HerdrWorkspace {
+                workspace_id: "wM".parse().unwrap(),
+                label: "EA".into(),
+                tab_count: 1,
+            }],
+            tabs: vec![relay_ops::find::HerdrTab {
+                tab_id: "wM:t1".parse().unwrap(),
+                label: "code".into(),
+            }],
+            dropped: 0,
+        };
+        let mut event = ActivityEvent::new(ActivityKind::Prompt, Harness::Claude, "s-1", 1);
+        event.cwd = "/w/ix-relay-swm-205".into();
+        event.branch = "swm-205-fleet".into();
+        assert!(
+            relay
+                .record_activity(&"here:EA:code".parse().unwrap(), &event)
+                .unwrap()
+        );
+        let mut collector = fleet::Collector::new(
+            here.clone(),
+            fleet::health::Profile::default(),
+            fleet::fixtures::sources(None),
+            fleet::fixtures::INTERVAL,
+        );
+        refresh_fleet(&mut relay, &mut collector, &view, &[], &here, &mut |_| {});
+        let mut registry = otlp::registry::Registry::new(2, 1);
+        collector.fill(&mut registry, Instant::now());
+        let has = |name: &str, attr: (&str, &str)| {
+            registry.points().iter().any(|p| {
+                p.instrument.name == name
+                    && p.attrs
+                        .pairs()
+                        .iter()
+                        .any(|(k, v)| *k == attr.0 && v == attr.1)
+            })
+        };
+        assert!(has("ix.fleet.lane.state", ("state", "working")));
+        assert!(has("ix.fleet.lane.focus_info", ("ticket", "SWM-205")));
+        assert!(has("ix.fleet.probe_ok", ("source", "hook_events")));
+        assert!(
+            !collector
+                .failed_sources()
+                .contains(&fleet::health::Source::HookEvents)
         );
     }
 

@@ -112,6 +112,9 @@ pub struct Health {
     /// `(stage, error_kind)`.
     hook_failures: BTreeMap<(String, String), u64>,
     registrations: u64,
+    /// When the newest `activity`-stage hook failure of this machine since the
+    /// watcher started happened, Unix milliseconds.
+    activity_failure_ms: Option<i64>,
 }
 
 /// Failed reads of each source used to build one health snapshot.
@@ -215,6 +218,9 @@ pub(super) fn read(
                 if at_ms < started_ms {
                     continue;
                 }
+                if stage == "activity" {
+                    health.activity_failure_ms = health.activity_failure_ms.max(Some(at_ms));
+                }
                 let key = if health
                     .hook_failures
                     .contains_key(&(stage.clone(), kind.clone()))
@@ -236,6 +242,13 @@ pub(super) fn read(
 }
 
 impl Health {
+    /// When the newest `activity` hook failure of this machine happened since the
+    /// watcher started, Unix milliseconds.
+    #[must_use]
+    pub fn activity_failure_ms(&self) -> Option<i64> {
+        self.activity_failure_ms
+    }
+
     /// Adds these to `registry`: per-lead gauges (folding leads past
     /// [`MAX_LEADS`] into `lead=other`), the hook failure counts and the
     /// registration gauge for `machine`.
@@ -309,6 +322,7 @@ impl Health {
                 .map(|((s, k), n)| (((*s).to_owned(), (*k).to_owned()), *n))
                 .collect(),
             registrations: rows.len() as u64,
+            activity_failure_ms: None,
         }
     }
 }

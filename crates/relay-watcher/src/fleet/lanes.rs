@@ -65,15 +65,19 @@ pub fn lanes_of(machine: &MachineName, view: &MachineView, regs: &[Registration]
     by_address.into_values().collect()
 }
 
-/// The lane state of the series this collector can derive without hook events.
+/// The `state` of a lane (FR-045); there is no `unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaneState {
-    /// herdr reports the pane working.
+    /// Recent prompt or tool activity, an open tool call, a compiler, or herdr working.
     Working,
-    /// Anything else the watcher can see.
+    /// None of the others, including a lane with no event.
     Idle,
-    /// The pane class maps to a blocked reason.
+    /// A blocked event, a question stop or a pane class that maps to a reason.
     Blocked,
+    /// A `pre_tool` open past `max_tool_runtime`.
+    Stuck,
+    /// The session ended.
+    Ended,
 }
 
 impl LaneState {
@@ -84,19 +88,25 @@ impl LaneState {
             LaneState::Working => "working",
             LaneState::Idle => "idle",
             LaneState::Blocked => "blocked",
+            LaneState::Stuck => "stuck",
+            LaneState::Ended => "ended",
         }
     }
 }
 
-/// A hook event of kind `blocked` or `idle`, as the hook feed (a later change)
-/// reports it to the collector.
+/// What the newest hook event says of a lane at the moment of a push (FR-045).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code, reason = "constructed by the hook feed change")]
 pub enum HookSignal {
-    /// A `blocked` event with this reason.
+    /// Blocked on a person, with this reason.
     Blocked(BlockedReason),
-    /// An `idle` event.
+    /// Idle: an `idle` or `stop` event, or activity older than the working window.
     Idle,
+    /// A recent prompt or post-tool event, or an open tool call within its runtime.
+    Working,
+    /// A tool call open past `max_tool_runtime`.
+    Stuck,
+    /// A `session_end` event.
+    Ended,
 }
 
 /// What the collector knows of a lane beyond the registry.
@@ -104,44 +114,49 @@ pub enum HookSignal {
 pub struct Signals {
     /// The class of the last pane tail and when it was read.
     pub pane: Option<(PaneClass, Instant)>,
-    /// The newest `blocked` or `idle` hook event and when it happened.
+    /// The newest hook event as a verdict and when it happened.
     pub hook: Option<(HookSignal, Instant)>,
 }
 
 impl Signals {
-    /// The blocked reason in force, if any. A hook event newer than the pane
-    /// tail takes precedence over a pane classification: an `idle` event ends a
-    /// stale `dialog`, a `blocked` event names its own reason.
+    /// The state and blocked reason of a lane. The newest evidence wins, and only a
+    /// pane class that maps to a blocked reason can override the hook: a pane class
+    /// read after the newest hook event (or with no hook event) blocks the lane, a
+    /// class of `none` says nothing. Otherwise the hook verdict stands, and a lane
+    /// with no hook event is `working` only through an attributed compiler and else
+    /// `idle`; herdr's status is not evidence of working (FR-045).
     #[must_use]
-    pub fn blocked_reason(&self) -> Option<BlockedReason> {
-        match (self.pane, self.hook) {
-            (_, Some((HookSignal::Blocked(r), at))) if self.pane.is_none_or(|(_, p)| at >= p) => {
-                Some(r)
-            }
-            (_, Some((HookSignal::Idle, at))) if self.pane.is_none_or(|(_, p)| at >= p) => None,
-            (Some((class, _)), _) => class.reason(),
-            (None, Some((HookSignal::Blocked(r), _))) => Some(r),
-            (None, _) => None,
+    pub fn resolve(&self, compiling: bool) -> (LaneState, Option<BlockedReason>) {
+        let pane = self
+            .pane
+            .and_then(|(class, at)| class.reason().map(|reason| (reason, at)));
+        if let Some((reason, at)) = pane
+            && self.hook.is_none_or(|(_, hook_at)| at > hook_at)
+        {
+            return (LaneState::Blocked, Some(reason));
+        }
+        match self.hook {
+            Some((HookSignal::Blocked(reason), _)) => (LaneState::Blocked, Some(reason)),
+            Some((HookSignal::Ended, _)) => (LaneState::Ended, None),
+            Some((HookSignal::Stuck, _)) => (LaneState::Stuck, None),
+            Some((HookSignal::Working, _)) => (LaneState::Working, None),
+            Some((HookSignal::Idle, _)) | None if compiling => (LaneState::Working, None),
+            Some((HookSignal::Idle, _)) | None => (LaneState::Idle, None),
         }
     }
 
-    /// The state of the lane: blocked by [`Signals::blocked_reason`], else
-    /// working when herdr says so, else idle.
+    /// The blocked reason in force, if any.
+    #[cfg(test)]
     #[must_use]
-    pub fn state(&self, herdr_status: Option<&str>) -> LaneState {
-        // A hook event newer than the pane tail names the lane's state itself.
-        if let Some((HookSignal::Idle, at)) = self.hook
-            && self.pane.is_none_or(|(_, p)| at >= p)
-        {
-            return LaneState::Idle;
-        }
-        if self.blocked_reason().is_some() {
-            LaneState::Blocked
-        } else if herdr_status == Some("working") {
-            LaneState::Working
-        } else {
-            LaneState::Idle
-        }
+    pub fn blocked_reason(&self) -> Option<BlockedReason> {
+        self.resolve(false).1
+    }
+
+    /// The state of the lane.
+    #[cfg(test)]
+    #[must_use]
+    pub fn state(&self, compiling: bool) -> LaneState {
+        self.resolve(compiling).0
     }
 }
 
@@ -234,20 +249,20 @@ mod tests {
             hook: Some((HookSignal::Idle, later)),
         };
         assert_eq!(s.blocked_reason(), None);
-        assert_eq!(s.state(Some("working")), LaneState::Idle);
+        assert_eq!(s.state(false), LaneState::Idle);
         // A pane tail newer than the hook event is used.
         let s = Signals {
             pane: Some((PaneClass::Dialog, later)),
             hook: Some((HookSignal::Idle, t0)),
         };
         assert_eq!(s.blocked_reason(), Some(BlockedReason::Dialog));
-        assert_eq!(s.state(None), LaneState::Blocked);
+        assert_eq!(s.state(false), LaneState::Blocked);
         // A newer blocked event names its own reason.
         let s = Signals {
             pane: Some((PaneClass::Login, t0)),
             hook: Some((HookSignal::Blocked(BlockedReason::Permission), later)),
         };
         assert_eq!(s.blocked_reason(), Some(BlockedReason::Permission));
-        assert_eq!(Signals::default().state(Some("idle")), LaneState::Idle);
+        assert_eq!(Signals::default().state(false), LaneState::Idle);
     }
 }
