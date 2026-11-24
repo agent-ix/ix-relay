@@ -397,6 +397,14 @@ fn tc_018_07_post_tool_use_costs_one_read_then_the_pop() {
 #[trace("FR-068-AC-12")]
 #[test]
 fn activity_only_events_cost_the_session_read_and_one_write() {
+    // The write goes by SHA; a server that has never seen the script takes the body once
+    // (three requests), so one call primes the server cache before the measured ones.
+    let _ = measure_with(
+        "activity-prime",
+        ("PreToolUse", r#","tool_name":"Bash""#),
+        false,
+        0,
+    );
     for (event, extra) in [
         ("PreToolUse", r#","tool_name":"Bash""#),
         (

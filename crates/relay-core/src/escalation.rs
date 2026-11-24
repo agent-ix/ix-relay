@@ -210,8 +210,10 @@ pub struct Escalation {
 /// stored [`Escalation`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EscalationFiling {
-    /// The Linear ticket this decision belongs to.
-    pub ticket: TicketId,
+    /// The Linear ticket this decision belongs to. Absent only for an escalation of kind
+    /// `order`, which belongs to an order, not to a ticket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<TicketId>,
     /// The lead filing it.
     pub lead: AgentName,
     /// The lead's machine, from its registration.
@@ -232,6 +234,35 @@ pub struct EscalationFiling {
     /// [`crate::Message::sent_at_ms`] is) rather than read from the system
     /// clock inside the store, so tests can supply a fixed value.
     pub created_at_ms: i64,
+}
+
+impl EscalationFiling {
+    /// The ticket as text, `-` for an escalation that has none.
+    #[must_use]
+    pub fn ticket_text(&self) -> String {
+        self.ticket
+            .as_ref()
+            .map_or_else(|| "-".to_owned(), ToString::to_string)
+    }
+
+    /// Checks what [`crate::Relay::escalate`] checks before it writes anything.
+    ///
+    /// # Errors
+    /// [`Error::InvalidTicket`] for a missing ticket unless the kind is `order`,
+    /// [`Error::InvalidSessionId`] and [`Error::UnsafeEscalationText`] as `escalate`.
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.ticket.is_none() && self.kind != "order" {
+            return Err(Error::InvalidTicket {
+                ticket: String::new(),
+            });
+        }
+        validate_session_id(self.session_id.as_str())?;
+        validate_safe_text("context", &self.context)?;
+        for option in &self.options {
+            validate_safe_text("option", option)?;
+        }
+        validate_safe_text("recommendation", &self.recommendation)
+    }
 }
 
 /// The stored half of an [`Escalation`]: the id and what was filed, but not

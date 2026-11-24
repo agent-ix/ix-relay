@@ -304,7 +304,7 @@ fn run_relay_action(
         }
         RelayAction::PostLinear { id } => {
             match escalate::run_escalation_post_linear(&mut relay, linear, &id) {
-                Ok(esc) => format!("posted a comment on {}", esc.filing.ticket),
+                Ok(esc) => format!("posted a comment on {}", esc.filing.ticket_text()),
                 Err(e) => format!("post-linear {id} failed: {e}"),
             }
         }
@@ -479,7 +479,7 @@ mod tests {
             .unwrap();
         relay
             .escalate(EscalationFiling {
-                ticket: "AGE-2015".parse().unwrap(),
+                ticket: Some("AGE-2015".parse().unwrap()),
                 lead: "qsl-lead".parse().unwrap(),
                 machine: "node-a".parse().unwrap(),
                 session_id: "sid-1".parse().unwrap(),

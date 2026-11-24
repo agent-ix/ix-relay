@@ -35,6 +35,9 @@ pub enum LinearError {
     /// `LINEAR_TIMEOUT`).
     #[error(transparent)]
     Process(#[from] ProcessError),
+    /// The escalation has no ticket to comment on (an order escalation).
+    #[error("the escalation has no ticket to comment on")]
+    NoTicket,
     /// `linear` exited nonzero.
     #[error("linear exited with status {status}: {stderr}")]
     Failed {

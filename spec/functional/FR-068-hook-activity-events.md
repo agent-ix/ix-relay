@@ -80,7 +80,9 @@ agent's turn, and it never changes a tool permission.
   newest event overall, with an expiry of 7 days, so last activity survives stream
   trimming.
 - Event writes SHALL be one pipelined request that adds at most one round trip to the
-  hook's existing request count.
+  hook's existing request count. The write is sent by script SHA; the first write after a
+  Redis restart or script flush takes two round trips (`EVALSHA`, then `EVAL` with the body
+  when Redis answers `NOSCRIPT`), and every later write takes one.
 
 ### Failure behavior and backoff
 

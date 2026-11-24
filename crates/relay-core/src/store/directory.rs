@@ -296,7 +296,7 @@ impl Relay {
             .into_iter()
             .map(|(machine, raw)| (self.keys.directory_key(&machine), raw))
             .collect();
-        let accepted = self.enqueue_receipted(msg, &recipients, &publications)?;
+        let accepted = self.enqueue_receipted(msg, &recipients, &publications, None)?;
         if !accepted {
             return Err(Error::DirectoryChanged);
         }
@@ -309,6 +309,16 @@ impl Relay {
         &mut self,
         msg: &Message,
         recipient: &DirectoryRecipient,
+    ) -> Result<Vec<AgentName>> {
+        self.send_directory_as(msg, recipient, None)
+    }
+
+    /// [`Relay::send_directory`], as an order (FR-071) when `order` is given.
+    pub fn send_directory_as(
+        &mut self,
+        msg: &Message,
+        recipient: &DirectoryRecipient,
+        order: Option<&crate::receipts::OrderSpec>,
     ) -> Result<Vec<AgentName>> {
         if msg.to != Target::Agent(recipient.registration.name.clone()) {
             return Err(Error::UnverifiedEnrollment {
@@ -343,6 +353,7 @@ impl Relay {
                 self.keys.directory_key(&recipient.machine),
                 recipient.publication.clone(),
             )],
+            order,
         )?;
         if !accepted {
             return Err(Error::DirectoryChanged);

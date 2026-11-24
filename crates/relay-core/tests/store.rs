@@ -510,7 +510,7 @@ fn remembering_a_session_again_overwrites_the_previous_name() {
 
 fn new_escalation(ticket: &str, lead: &str) -> EscalationFiling {
     EscalationFiling {
-        ticket: ticket.parse().unwrap(),
+        ticket: Some(ticket.parse().unwrap()),
         lead: name(lead),
         machine: "node-a".parse().unwrap(),
         session_id: "sid-1".parse().unwrap(),
@@ -532,7 +532,7 @@ fn escalate_stores_a_waiting_escalation_get_reads_it_back() {
     assert!(esc.id.as_str().starts_with('e'));
     assert_eq!(esc.status, EscalationStatus::Waiting);
     assert_eq!(esc.decision, None);
-    assert_eq!(esc.filing.ticket.as_str(), "AGE-2014");
+    assert_eq!(esc.filing.ticket_text(), "AGE-2014");
     assert_eq!(esc.filing.lead, name("qsl-lead"));
     assert_eq!(esc.filing.options, vec!["noeviction", "allkeys-lru"]);
 

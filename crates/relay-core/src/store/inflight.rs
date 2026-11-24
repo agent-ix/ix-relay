@@ -105,14 +105,75 @@ pub const BACKLOG_SCAN_BOUND: usize = 1_000;
 /// comments, indentation and blank lines removed (a hook sends the pop's body on
 /// every call, so the bytes are worth saving; Lua does not care).
 pub(super) fn script(common: &str, own: &str) -> String {
-    common
-        .lines()
-        .chain(include_str!("lua/receipts.lua").lines())
-        .chain(own.lines())
+    stripped(
+        common
+            .lines()
+            .chain(include_str!("lua/receipt_core.lua").lines())
+            .chain(include_str!("lua/receipts.lua").lines())
+            .chain(own.lines()),
+    )
+}
+
+/// The body of a script that writes only receipt events: the clock, the type check
+/// and the receipt core, without the entry parsing and the pop helpers. Hook
+/// activity writes and the deadline scan send theirs often, so they stay small.
+pub(super) fn slim_script(own: &str) -> String {
+    stripped(
+        include_str!("lua/slim_prelude.lua")
+            .lines()
+            .chain(include_str!("lua/receipt_core.lua").lines())
+            .chain(own.lines()),
+    )
+}
+
+fn stripped<'a>(lines: impl Iterator<Item = &'a str>) -> String {
+    lines
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with("--"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A script sent by its SHA-1, with its body only when the server does not know it.
+/// Redis caches a body it runs with `EVAL`, so the fallback costs one extra request
+/// once per server start, never one per call.
+pub(super) struct CachedScript {
+    body: String,
+    sha: String,
+}
+
+impl CachedScript {
+    pub(super) fn new(body: String) -> Self {
+        let sha = redis::Script::new(&body).get_hash().to_owned();
+        Self { body, sha }
+    }
+
+    /// The body as sent on a cache miss.
+    #[cfg(test)]
+    pub(super) fn body(&self) -> &str {
+        &self.body
+    }
+
+    /// Runs the script with the arguments `args` adds to the command (the key count
+    /// first): `EVALSHA`, then `EVAL` when the server answers `NOSCRIPT`.
+    pub(super) fn run<T: redis::FromRedisValue>(
+        &self,
+        conn: &mut impl redis::ConnectionLike,
+        args: impl Fn(&mut redis::Cmd),
+    ) -> redis::RedisResult<T> {
+        let mut by_sha = redis::cmd("EVALSHA");
+        by_sha.arg(&self.sha);
+        args(&mut by_sha);
+        match by_sha.query(conn) {
+            Err(e) if e.kind() == redis::ErrorKind::Server(redis::ServerErrorKind::NoScript) => {
+                let mut by_body = redis::cmd("EVAL");
+                by_body.arg(&self.body);
+                args(&mut by_body);
+                by_body.query(conn)
+            }
+            other => other,
+        }
+    }
 }
 
 static POP_SCRIPT: LazyLock<String> =

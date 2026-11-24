@@ -120,7 +120,7 @@ survey and the TLS question are recorded in the README and the pull request, not
   shall skip or fail any of them: the watcher shall log such a failure once per episode
   and leave the affected series out. A tick that pushes shall add at most two pipelined
   requests to the store, one for the local leads' queues and one for the newest hook
-  failures, and no key scan; a tick inside the interval shall add none. The time
+  failures together with the order metrics, and no key scan; a tick inside the interval shall add none. The time
   arithmetic on the interval shall not overflow.
 
 ### Export
@@ -215,15 +215,17 @@ exports.
 | `ix.fleet.probe_unavailable` | gauge | `1` | host, source | Value 1 for a source the host profile declares absent on this host; not a failure. |
 | `ix.fleet.config` | gauge | `s` | host, name | The configured `working_window`, `no_events_after` and `max_tool_runtime` in seconds, so consumers read them instead of holding their own constants. |
 | `ix.relay.hook.activity_skipped` | sum | `{event}` | host, reason | Activity events a hook skipped (`backoff`), dropped (`failed`, which includes a write that ran past its budget) or did not write because its lead had no verified lane (`unregistered`), cumulative since the hook state file began; absent while the file is missing or unreadable, never zero. |
-| `ix.relay.orders.unacted` | gauge | `{order}` | recipient | Orders awaiting `Acted` or `AckExpired` ([FR-071](./FR-071-order-ack-deadline-and-timeout.md)); `recipient` is the lane address, bounded as the other per-lead series. |
-| `ix.relay.order.act_latency` | histogram | `s` | none | Seconds from `Delivered` to `Acted`, buckets 1 s to 1 h. |
+| `ix.relay.orders.unacted` | gauge | `{order}` | recipient | Orders awaiting `Acted` or `AckExpired` ([FR-071](./FR-071-order-ack-deadline-and-timeout.md)); `recipient` is the lane address, bounded as the other per-lead series; a watcher reports only the lanes of its own host, so a sum over hosts counts each order once. |
+| `ix.relay.orders.escalation_failed` | gauge | `{order}` | none | Orders of this watcher's host whose `AckExpired` escalation could not be filed and was given up after three attempts ([FR-071](./FR-071-order-ack-deadline-and-timeout.md)), so a failed escalation is visible in a push as well as in the log; retained for seven days at most. |
+| `ix.relay.order.act_latency` | histogram | `s` | none | Seconds from `Delivered` to `Acted` of orders delivered to lanes of this watcher's host, buckets 1 s to 1 h. |
 
 The health-read failure sum starts at zero for both `snapshot` values and is
 monotonic for the lifetime of this watcher process; it resets when the watcher
 restarts and is not persisted. Each failed `lead_overviews` result for a local
 lead counts once (including a per-lead Redis error such as a wrong-type queue
 key); a top-level failure of the `lead_overviews` read counts once. A failed
-`hook_health_newest` read counts once. These are counts of read results, not
+`hook_health_newest` read counts once; that request also carries the order metrics, so
+its failure leaves the three order series out of the push, never at zero. These are counts of read results, not
 outage episodes, failed fields, skipped entries or ticks: a successful read
 with malformed hook records does not count as a read failure because that
 reader intentionally skips malformed entries. The `snapshot` attribute has
@@ -257,7 +259,8 @@ acknowledgement needs a send time per message that the watcher does not keep), a
 - The relay series come from what the watcher counts as it works (the counters and the
   histogram) and from two pipelined store requests per push (`lead_overviews`, one
   request over the local leads' own keys, and `hook_health_newest`, the newest 1,000 hook
-  failures first), after the tick's deliveries. `lead` is an attribute only where it is bounded: at most 50 leads have
+  failures first, which also carries the order counts and act latency of FR-071 for this
+  machine's lanes), after the tick's deliveries. `lead` is an attribute only where it is bounded: at most 50 leads have
   series of their own and the rest are folded into `lead=other` (depth summed, oldest age
   the largest), and the number folded is reported in the heartbeat (`dropped`) and by
   `doctor`. No series carries message text. An error of any kind reading the store leaves those
@@ -288,7 +291,7 @@ acknowledgement needs a send time per message that the watcher does not keep), a
 | FR-045-AC-19 | A collector that never answers holds the exporter thread only: `submit` never waits, the queue holds two snapshots, the oldest are dropped and counted, and the newest are sent when the collector lets go; a panic in the send path is a counted failed push and leaves a working exporter. | Test |
 | FR-045-AC-20 | Against a real listener a 500, a 429 with `Retry-After`, garbage and a closed connection each back off, in that order and by those waits, on an injected clock, and a configured header value never appears in a log line or in the status. | Test |
 | FR-045-AC-21 | The heartbeat carries the exporter's counters (pushes sent and failed, snapshots dropped, points rejected) when not all zero and they round-trip; a send that has run longer than 30 seconds reads as `failing` with reason `stuck` until it ends, and a send within the limit does not; `doctor` shows the counters. | Test |
-| FR-045-AC-22 | At most one push per interval and the first on the first tick; a tick that pushes makes exactly the two ordinary requests of an idle tick plus two pipelined ones (the local leads' queues, the newest hook failures) and no key scan, the next tick inside the interval makes two; a huge interval never overflows time arithmetic; and a failing push read is logged once and leaves the registry cache updated and the tick Ok. | Test |
+| FR-045-AC-22 | At most one push per interval and the first on the first tick; a tick that pushes makes exactly the three ordinary requests of an idle tick (the order-deadline scan of FR-071 is the third) plus two pipelined ones (the local leads' queues, the newest hook failures with the order metrics) and no key scan, the next tick inside the interval makes three; a huge interval never overflows time arithmetic; and a failing push read is logged once and leaves the registry cache updated and the tick Ok. | Test |
 | FR-045-AC-23 | Given more than 1,000 entries in the hook health stream, the hook gauge counts the newest failures, not the oldest 1,000. | Test |
 | FR-045-AC-24 | On an injected resolver and clock: two pushes within 5 minutes make one lookup, one second short of 5 minutes is still cached, and a push at 5 minutes makes another. | Test |
 | FR-045-AC-25 | On an injected resolver: a push after every address failed to connect makes another lookup with no time passed; a push whose deadline ended before an address was tried, twice, makes one lookup in all and leaves the cache in place. | Test |
@@ -300,6 +303,8 @@ acknowledgement needs a send time per message that the watcher does not keep), a
 | FR-045-AC-31 | Given 51 registry lanes, the 51st is not folded into another lane: `ix.fleet.lane.dropped` is 1 and `agent-msg doctor` warns `fleet_lanes_dropped`. | Test |
 | FR-045-AC-32 | Given `[fleet]` settings, `ix.fleet.config` reports the configured working window (default 10 minutes), `no_events_after` and `max_tool_runtime` (default 2 hours), and the lane state rules use those values and no other. | Test |
 | FR-045-AC-33 | Given a compiler process attributed to a lane across 90 seconds of fixture ticks, `ix.fleet.lane.compile_seconds` for that lane rises by 90 seconds and never decreases. | Test |
+| FR-045-AC-34 | Given orders whose escalation failed three times, a push shows `ix.relay.orders.escalation_failed` equal to the number of such orders whose recipient lane is on the pushing host, `0` when there are none, and none for orders of another host. | Test |
+| FR-045-AC-35 | Given a failed read of the order metrics, a push exports none of `ix.relay.orders.unacted`, `ix.relay.orders.escalation_failed` and `ix.relay.order.act_latency`, and the failure is counted under `health_snapshot.read_failures`. | Test |
 
 ## Dependencies
 

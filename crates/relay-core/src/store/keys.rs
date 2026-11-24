@@ -175,6 +175,11 @@ impl Keys {
         format!("{}esc:{id}:attempts", self.prefix)
     }
 
+    /// What every escalation hash key starts with, for the script that files one.
+    pub(super) fn esc_stem(&self) -> String {
+        format!("{}esc:", self.prefix)
+    }
+
     pub(super) fn esc_seq_key(&self) -> String {
         format!("{}esc:seq", self.prefix)
     }
@@ -324,6 +329,7 @@ mod tests {
             ("esc_key", relay.esc_key(&id)),
             ("esc_attempts_key", relay.esc_attempts_key(&id)),
             ("esc_seq_key", relay.esc_seq_key()),
+            ("esc_stem", relay.esc_stem()),
             ("esc_index_key", relay.esc_index_key()),
             ("session_key", relay.session_key(&sid)),
             ("suppressed_key", relay.suppressed_key(&sid)),
@@ -379,6 +385,7 @@ mod tests {
             ("esc_key", "p:esc:e1"),
             ("esc_attempts_key", "p:esc:e1:attempts"),
             ("esc_seq_key", "p:esc:seq"),
+            ("esc_stem", "p:esc:"),
             ("esc_index_key", "p:esc:index"),
             ("session_key", "p:session:sid-1"),
             ("suppressed_key", "p:suppressed:sid-1"),
@@ -459,6 +466,7 @@ mod tests {
             other.esc_key(&id),
             other.esc_attempts_key(&id),
             other.esc_seq_key(),
+            other.esc_stem(),
             other.esc_index_key(),
             other.session_key(&sid),
             other.suppressed_key(&sid),

@@ -119,6 +119,35 @@ pub static HOOK_ACTIVITY_SKIPPED: Instrument = Instrument {
     kind: Kind::Sum,
 };
 
+/// `ix.relay.orders.unacted`: orders awaiting `Acted` or `AckExpired`, by recipient lane.
+pub static ORDERS_UNACTED: Instrument = Instrument {
+    name: "ix.relay.orders.unacted",
+    unit: "{order}",
+    description: "Orders awaiting Acted or AckExpired, by recipient lane address.",
+    kind: Kind::Gauge,
+};
+
+/// Bucket upper bounds of the order act-latency histogram, in seconds.
+pub const ORDER_LATENCY_BOUNDS: &[f64] = &[1.0, 5.0, 15.0, 60.0, 300.0, 900.0, 3600.0];
+
+/// `ix.relay.orders.escalation_failed`: orders whose escalation was given up.
+pub static ORDERS_ESCALATION_FAILED: Instrument = Instrument {
+    name: "ix.relay.orders.escalation_failed",
+    unit: "{order}",
+    description: "Orders of this host whose AckExpired escalation could not be filed and was given up after three attempts.",
+    kind: Kind::Gauge,
+};
+
+/// `ix.relay.order.act_latency`: seconds from `Delivered` to `Acted` of orders.
+pub static ORDER_ACT_LATENCY: Instrument = Instrument {
+    name: "ix.relay.order.act_latency",
+    unit: "s",
+    description: "Seconds from an order's Delivered receipt to its Acted receipt.",
+    kind: Kind::Histogram {
+        bounds: ORDER_LATENCY_BOUNDS,
+    },
+};
+
 macro_rules! fleet_gauge {
     ($(#[$doc:meta])* $id:ident, $name:literal, $unit:literal, $desc:literal) => {
         $(#[$doc])*
@@ -240,6 +269,9 @@ pub(crate) const CATALOGUE: &[(&Instrument, &[&str])] = &[
     (&TICK_DURATION, &[]),
     (&REGISTRATIONS, &["machine"]),
     (&HEALTH_SNAPSHOT_READ_FAILURES, &["snapshot"]),
+    (&ORDERS_UNACTED, &["recipient"]),
+    (&ORDERS_ESCALATION_FAILED, &[]),
+    (&ORDER_ACT_LATENCY, &[]),
     (&FLEET_LANE_STATE, &["host", "lane", "state"]),
     (&FLEET_LANE_LAST_ACTIVITY, &["host", "lane"]),
     (&FLEET_LANE_NO_EVENTS, &["host", "lane"]),

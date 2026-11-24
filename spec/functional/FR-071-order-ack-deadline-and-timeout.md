@@ -32,6 +32,10 @@ as an order: explicitly with `agent-msg send --order`, or by the orchestrator's
   receipt under the order's original identity and SHALL create one escalation under
   [FR-023](./FR-023-escalation-id-validity.md) naming the order identity, recipient
   address, sender address and the last receipt state, and no message text.
+  The escalation has kind `order` and no ticket; it names the recipient lane address as its lead
+  and the expected ticket when the order carries one. An escalation that cannot be filed
+  is retried at most three times and then given up and counted, so it does not delay the
+  escalation of other orders.
 - `AckExpired` is distinct from an attempt lease timeout in FR-067; a lease timeout SHALL
   NOT start or stop an order deadline.
 - An `Acted` receipt recorded before the deadline SHALL cancel the deadline. One recorded

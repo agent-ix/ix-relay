@@ -5,12 +5,16 @@ use std::{collections::BTreeMap, sync::LazyLock};
 use redis::streams::StreamRangeReply;
 use serde::Deserialize;
 
-use super::{LOG_CAP, Relay, decode, encode, inflight::script};
+use super::{
+    LOG_CAP, Relay, decode, encode,
+    inflight::{CachedScript, script, slim_script},
+};
 use crate::{
     AgentName, BatchId, Error, Message, Now, Popper, Result, Target,
     receipts::{
-        DeliveryEvidence, OrderedReceipt, RECEIPT_EVENT_CAP, RECEIPT_PAGE_CAP, RECEIPT_WINDOW_MS,
-        ReceiptCoverageReason, ReceiptEvent, ReceiptExport, ReceiptRequest,
+        DeliveryEvidence, ExpiredOrder, OrderLatency, OrderSpec, OrderStats, OrderedReceipt,
+        RECEIPT_EVENT_CAP, RECEIPT_PAGE_CAP, RECEIPT_WINDOW_MS, ReceiptCoverageReason,
+        ReceiptEvent, ReceiptExport, ReceiptRequest,
     },
 };
 
@@ -51,13 +55,24 @@ struct StoredMetadata {
     attempt: Option<String>,
     #[serde(default)]
     delivered: Option<DeliveryEvidence>,
+    #[serde(default)]
+    order: Option<i64>,
+    #[serde(default)]
+    expect: Option<String>,
 }
 
 pub(crate) fn decode_message(bytes: &[u8]) -> std::result::Result<Message, serde_json::Error> {
     let stored: StoredMessage = serde_json::from_slice(bytes)?;
     // Metadata belongs to persistence, never to the recipient's public payload.
     if let Some(meta) = stored.metadata {
-        let _ = (meta.original, meta.recipient, meta.attempt, meta.delivered);
+        let _ = (
+            meta.original,
+            meta.recipient,
+            meta.attempt,
+            meta.delivered,
+            meta.order,
+            meta.expect,
+        );
     }
     Ok(Message {
         from: stored.from,
@@ -74,6 +89,7 @@ impl Relay {
         message: &Message,
         recipients: &[AgentName],
         publications: &[(String, String)],
+        order: Option<&OrderSpec>,
     ) -> Result<bool> {
         let mut command = redis::cmd("EVAL");
         command
@@ -92,7 +108,12 @@ impl Relay {
         for (_, publication) in publications {
             command.arg(publication);
         }
-        command.arg(encode(message)).arg(LOG_CAP).arg("");
+        command
+            .arg(encode(message))
+            .arg(LOG_CAP)
+            .arg("")
+            .arg(order.map_or_else(String::new, |o| o.ack_deadline_ms().to_string()))
+            .arg(order.and_then(OrderSpec::expect_ticket).unwrap_or(""));
         for recipient in recipients {
             command.arg(recipient.as_str());
         }
@@ -314,4 +335,238 @@ fn populate_export(
     }
     export.complete = export.reasons.is_empty();
     Ok(())
+}
+
+static EXPIRE_SCRIPT: LazyLock<CachedScript> =
+    LazyLock::new(|| CachedScript::new(slim_script(include_str!("lua/order_expire.lua"))));
+
+static ESCALATE_SCRIPT: LazyLock<CachedScript> =
+    LazyLock::new(|| CachedScript::new(slim_script(include_str!("lua/order_escalate.lua"))));
+
+static ESCALATE_FAILED_SCRIPT: LazyLock<CachedScript> =
+    LazyLock::new(|| CachedScript::new(slim_script(include_str!("lua/order_escalate_failed.lua"))));
+
+/// Most orders one scan expires.
+const ORDER_SCAN_LIMIT: usize = 100;
+
+impl Relay {
+    /// Records `AckExpired` for every order whose ack deadline has passed and
+    /// returns the orders whose escalation is not filed yet (at most 20; an order
+    /// whose escalation kept failing is not among them), in one request and without a
+    /// key scan. Safe to repeat: an order expires once.
+    ///
+    /// # Errors
+    /// Fails when Redis cannot be reached or a receipt key has the wrong type.
+    pub fn expire_orders(&mut self, now: Now) -> Result<Vec<ExpiredOrder>> {
+        let (stream, meta) = (self.keys.receipt_stream_key(), self.keys.receipt_meta_key());
+        let rows: Vec<Vec<String>> = EXPIRE_SCRIPT.run(&mut self.conn, |cmd| {
+            cmd.arg(0)
+                .arg(ORDER_SCAN_LIMIT)
+                .arg(now.arg())
+                .arg(&stream)
+                .arg(&meta);
+        })?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let [original_id, sender, recipient, queue, last_state, expect] =
+                    <[String; 6]>::try_from(row).ok()?;
+                Some(ExpiredOrder {
+                    original_id,
+                    sender,
+                    recipient,
+                    queue,
+                    last_state,
+                    expect_ticket: (!expect.is_empty()).then_some(expect),
+                })
+            })
+            .collect())
+    }
+
+    /// Files the escalation of an expired order, once however often it is called.
+    /// Returns whether this call filed it. The escalation has kind `order` and no
+    /// ticket; it names the order identity, the recipient lane address, the expected
+    /// ticket when the order carried one and the last receipt state, and no message
+    /// text. It is checked like any other filing.
+    ///
+    /// # Errors
+    /// Fails when the filing is invalid or Redis cannot be reached.
+    pub fn escalate_expired_order(
+        &mut self,
+        order: &ExpiredOrder,
+        created_at_ms: i64,
+    ) -> Result<bool> {
+        let (machine, session) = decode_queue(&order.queue);
+        let mut context = format!(
+            "Order {} from {} to {} reached its ack deadline without an Acted receipt \
+             (last receipt: {}).",
+            order.original_id, order.sender, order.recipient, order.last_state
+        );
+        if let Some(ticket) = &order.expect_ticket {
+            context.push_str(&format!(" It expects ticket {ticket}."));
+        }
+        let filing = crate::EscalationFiling {
+            ticket: None,
+            lead: order.recipient.parse().or_else(|_| order.queue.parse())?,
+            machine: machine.parse()?,
+            session_id: session.parse()?,
+            cwd: None,
+            kind: "order".into(),
+            context,
+            options: vec!["re-send the order".into(), "check the lane".into()],
+            recommendation: "check the lane".into(),
+            created_at_ms,
+        };
+        filing.validate()?;
+        let meta = serde_json::to_string(&filing).map_err(|_| Error::InvalidName {
+            name: "order escalation".into(),
+        })?;
+        let (seq, index, stem) = (
+            self.keys.esc_seq_key(),
+            self.keys.esc_index_key(),
+            self.keys.esc_stem(),
+        );
+        let (stream, receipts_meta) =
+            (self.keys.receipt_stream_key(), self.keys.receipt_meta_key());
+        let filed: i64 = ESCALATE_SCRIPT.run(&mut self.conn, |cmd| {
+            cmd.arg(2)
+                .arg(&seq)
+                .arg(&index)
+                .arg(&order.original_id)
+                .arg(&stem)
+                .arg(&meta)
+                .arg(crate::EscalationStatus::Waiting.as_str())
+                .arg(created_at_ms)
+                .arg(&stream)
+                .arg(&receipts_meta);
+        })?;
+        Ok(filed == 1)
+    }
+
+    /// Counts one failed attempt to file `order`'s escalation. After `attempts_allowed`
+    /// failures the order moves to the failed set and no longer comes back from
+    /// [`Relay::expire_orders`]. Returns the failures so far.
+    ///
+    /// # Errors
+    /// Fails when Redis cannot be reached.
+    pub fn order_escalation_failed(
+        &mut self,
+        order: &ExpiredOrder,
+        attempts_allowed: u32,
+    ) -> Result<u32> {
+        let (stream, meta) = (self.keys.receipt_stream_key(), self.keys.receipt_meta_key());
+        let failures: i64 = ESCALATE_FAILED_SCRIPT.run(&mut self.conn, |cmd| {
+            cmd.arg(0)
+                .arg(&order.original_id)
+                .arg(attempts_allowed)
+                .arg(&stream)
+                .arg(&meta);
+        })?;
+        Ok(u32::try_from(failures).unwrap_or(u32::MAX))
+    }
+
+    /// The newest `max` hook health entries (newest first, as
+    /// [`Relay::hook_health_newest`]) and the order metrics of `machine`, in one
+    /// pipelined request: the unacted orders whose recipient lane is on `machine`, the
+    /// delivered-to-acted latency of orders delivered there, and how many orders
+    /// have a failed escalation.
+    ///
+    /// # Errors
+    /// Fails when Redis cannot be reached.
+    pub fn hook_health_and_order_stats(
+        &mut self,
+        max: usize,
+        machine: &crate::MachineName,
+    ) -> Result<(super::HookHealth, OrderStats)> {
+        let meta = self.keys.receipt_meta_key();
+        let machine_hex: String = machine
+            .as_str()
+            .bytes()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let mut pipeline = redis::pipe();
+        pipeline
+            .cmd("XREVRANGE")
+            .arg(self.keys.health_hooks_key())
+            .arg("+")
+            .arg("-")
+            .arg("COUNT")
+            .arg(max)
+            .cmd("HGETALL")
+            .arg(format!("{meta}:orders-unacted"))
+            .cmd("HGETALL")
+            .arg(format!("{meta}:order-latency:{machine_hex}"))
+            .cmd("ZCARD")
+            .arg(format!(
+                "{meta}:orders-escalate-failed:{}",
+                machine.as_str()
+            ));
+        let (health, unacted, latency, failed): (
+            StreamRangeReply,
+            BTreeMap<String, u64>,
+            BTreeMap<String, u64>,
+            u64,
+        ) = pipeline.query(&mut self.conn)?;
+        let mut stats = OrderStats {
+            unacted: unacted
+                .into_iter()
+                .filter(|(lane, _)| {
+                    lane.split(':')
+                        .next()
+                        .is_some_and(|server| server == machine.as_str())
+                })
+                .collect(),
+            latency: OrderLatency::default(),
+            escalation_failed: failed,
+        };
+        for (slot, bucket) in stats.latency.buckets.iter_mut().enumerate() {
+            *bucket = latency.get(&format!("b{slot}")).copied().unwrap_or(0);
+        }
+        stats.latency.count = latency.get("count").copied().unwrap_or(0);
+        stats.latency.sum_ms = latency.get("sum_ms").copied().unwrap_or(0);
+        Ok((super::hook_health_of(&health), stats))
+    }
+}
+
+/// The machine and session id a `session/<hex>/<hex>` queue name encodes; the name
+/// itself, twice, for any other queue.
+fn decode_queue(queue: &str) -> (String, String) {
+    let unhex = |hex: &str| {
+        let bytes: Option<Vec<u8>> = hex
+            .as_bytes()
+            .chunks(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+            .collect();
+        String::from_utf8(bytes?).ok()
+    };
+    queue
+        .strip_prefix("session/")
+        .and_then(|rest| rest.split_once('/'))
+        .and_then(|(machine, session)| Some((unhex(machine)?, unhex(session)?)))
+        .unwrap_or_else(|| (queue.to_owned(), queue.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The activity write is sent on every prompt and tool call of every lane, and the
+    /// scan every tick of every watcher: both stay a fraction of the full receipt script.
+    #[test]
+    fn the_hot_scripts_carry_only_the_receipt_core() {
+        let full = script(
+            include_str!("lua/common.lua"),
+            include_str!("lua/receipt_send.lua"),
+        )
+        .len();
+        let activity = super::super::activity::WRITE.body().len();
+        let scan = EXPIRE_SCRIPT.body().len();
+        eprintln!(
+            "script bytes: activity {activity}, scan {scan}, escalate {}, failed {}, full receipt {full}",
+            ESCALATE_SCRIPT.body().len(),
+            ESCALATE_FAILED_SCRIPT.body().len()
+        );
+        assert!(activity * 2 < full && scan * 2 < full);
+        assert!(activity < 6_000, "{activity}");
+    }
 }

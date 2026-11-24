@@ -398,7 +398,8 @@ impl Publisher {
 }
 
 /// The most store requests one push adds to a tick: one pipelined read of the local
-/// leads' queues and one read of the newest hook failures. FR-045 pins it.
+/// leads' queues and one read of the newest hook failures
+/// together with the order metrics. FR-045 pins it.
 #[cfg(test)]
 pub(crate) const PUSH_REQUESTS: usize = 2;
 
@@ -485,8 +486,8 @@ mod tests {
     ///
     /// Tracing: TC-045-11
     ///
-    /// Caveat: the spec series in `NOT_YET_EXPORTED` below are not exported yet (SWM-207),
-    /// so this holds for the exported catalogue until that list is empty.
+    /// Caveat: the spec series in `NOT_YET_EXPORTED` below are not exported yet; every
+    /// series of the spec is exported when that list is empty.
     #[trace("FR-045-AC-11")]
     #[test]
     fn tc_045_11_the_exported_series_are_the_catalogue_and_the_catalogue_is_the_spec() {
@@ -495,7 +496,8 @@ mod tests {
         let view = view_from(start());
         p.set_panes(now, &view, &[]);
         let health =
-            relay::Health::for_test(&[("qsl-lead", 2, 30, 1, 4)], &[(("connect", "timeout"), 2)]);
+            relay::Health::for_test(&[("qsl-lead", 2, 30, 1, 4)], &[(("connect", "timeout"), 2)])
+                .with_orders(&[("terra:SWM:code", 1)]);
         let mut registry = p.build(now, 2, &health);
         let (collector, fleet_now) = crate::fleet::fixtures::full();
         collector.fill(&mut registry, fleet_now);
@@ -538,12 +540,7 @@ mod tests {
         }
         // Series the spec lists that are not exported yet, each with the ticket that
         // removes it from this list. FR-045-AC-11 and AC-29 are met only when it is empty.
-        const NOT_YET_EXPORTED: &[&str] = &[
-            // SWM-207: order metrics.
-            "ix.relay.orders.unacted",
-            // SWM-207: order metrics.
-            "ix.relay.order.act_latency",
-        ];
+        const NOT_YET_EXPORTED: &[&str] = &[];
         let rows = spec
             .lines()
             .filter(|l| {

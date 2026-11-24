@@ -71,6 +71,9 @@ acknowledgement without reading message content.
   before the `Delivered` receipt, a `session_start`, `stop`, `idle`, `blocked` or
   `session_end` event, or for a message that was never `Delivered`. A retried event SHALL
   NOT create a second `Acted`.
+- An activity event written by the hook call that delivered a message SHALL NOT record `Acted`
+  for it or for any message: only an event of a later hook call of the session counts. A plain
+  inbox read of a message SHALL record `Delivered` (evidence `inbox_read`) beside `Removed`.
 - The relay-watcher SHALL record the order-level `AckExpired` receipt of
   [FR-071](./FR-071-order-ack-deadline-and-timeout.md) under the same identity and
   retention bounds as other receipts, and the export SHALL report `Acted` and `AckExpired`

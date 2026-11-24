@@ -2614,6 +2614,30 @@ fn both_harnesses_write_one_event_of_the_same_schema_without_tool_data() {
     assert_eq!(shapes[0].1, shapes[1].1);
 }
 
+#[trace("FR-067-AC-9", "FR-067-AC-10")]
+#[test]
+fn the_event_of_a_call_that_delivered_mail_is_marked_so_it_never_records_acted() {
+    let delivering = Harness::new().with_inbox(&["queued"]);
+    delivering.run(
+        true,
+        &mut payload("PostToolUse", r#","tool_name":"Bash""#).as_bytes(),
+        false,
+    );
+    assert!(
+        delivering.world.borrow().inbox.is_empty(),
+        "the mail was delivered"
+    );
+    assert!(delivering.world.borrow().activity[0].1.delivered_mail);
+    // The next call of the session has nothing to deliver: its event may record Acted.
+    let later = Harness::new();
+    later.run(
+        true,
+        &mut payload("PreToolUse", r#","tool_name":"Bash""#).as_bytes(),
+        false,
+    );
+    assert!(!later.world.borrow().activity[0].1.delivered_mail);
+}
+
 #[trace("FR-068-AC-12", "FR-017-AC-8")]
 #[test]
 fn pre_tool_notification_and_session_end_print_nothing_and_leave_mail_queued() {

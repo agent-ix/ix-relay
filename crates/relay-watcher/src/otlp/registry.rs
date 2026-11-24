@@ -108,6 +108,20 @@ impl HistogramData {
         }
     }
 
+    /// A histogram holding observations counted elsewhere: one count per bound and a
+    /// last for values above every bound, the number of observations and their sum.
+    /// Counts of the wrong length leave it empty.
+    #[must_use]
+    pub fn from_counts(bounds: &'static [f64], buckets: &[u64], count: u64, sum: f64) -> Self {
+        let mut data = Self::new(bounds);
+        if buckets.len() == data.buckets.len() && sum.is_finite() {
+            data.buckets.copy_from_slice(buckets);
+            data.count = count;
+            data.sum = sum;
+        }
+        data
+    }
+
     /// Records one observation. A value that is not finite is ignored.
     pub fn record(&mut self, value: f64) {
         if !value.is_finite() {
