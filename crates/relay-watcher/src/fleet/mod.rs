@@ -31,7 +31,7 @@ use relay_core::{MachineName, PaneId};
 
 use self::{
     bound::{SOURCE_BUDGET, Slot},
-    feed::{HookCounts, LaneActivity, Windows},
+    feed::{HookCounts, LaneActivity, Tickets, Windows},
     health::{ErrorClass, Health, Outcome, Profile, Source},
     host::{CpuSampler, CpuTicks, Memory},
     lanes::{Lane, MAX_LANES, Signals},
@@ -76,7 +76,7 @@ pub struct Sources {
     /// Native Windows agent processes; `None` off WSL.
     pub native_windows: Option<Read<usize>>,
     /// The hook's local skip and drop counts.
-    pub hook_counts: Read<HookCounts>,
+    pub hook_counts: Read<Option<HookCounts>>,
     /// The tail of one pane's output.
     pub pane_tail: PaneRead,
 }
@@ -99,7 +99,7 @@ impl Sources {
 }
 
 /// `spool/activity.json` beside `config.toml`, where `agent-msg` counts what its hooks skipped.
-fn read_native_hook_counts() -> Result<HookCounts, ErrorClass> {
+fn read_native_hook_counts() -> Result<Option<HookCounts>, ErrorClass> {
     let dir = relay_core::config::config_dir().ok_or(ErrorClass::Unavailable)?;
     feed::read_hook_counts(&dir.join("spool").join("activity.json"))
 }
@@ -157,6 +157,9 @@ impl StatusHandle {
 }
 
 /// The host collector.
+/// The relay clock of a feed read and the records of the lanes read.
+pub type ActivityRead = Result<(i64, Vec<LaneRecord>), ErrorClass>;
+
 /// A lane address and its `activity-last` record, as the store holds it.
 pub type LaneRecord = (String, BTreeMap<String, String>);
 
@@ -186,6 +189,7 @@ pub struct Collector {
     first_seen: HashMap<String, Instant>,
     classes: HashMap<String, (PaneClass, Instant)>,
     windows: Windows,
+    tickets: Tickets,
     activity: HashMap<String, LaneActivity>,
     feed: Feed,
     activity_failure: Option<Instant>,
@@ -211,6 +215,7 @@ impl Collector {
     }
 
     /// A collector whose lane state rules use `windows`.
+    #[cfg(test)]
     #[must_use]
     pub fn with_windows(
         host: MachineName,
@@ -218,6 +223,26 @@ impl Collector {
         sources: Sources,
         interval: Duration,
         windows: Windows,
+    ) -> Self {
+        Self::with_config(
+            host,
+            profile,
+            sources,
+            interval,
+            windows,
+            Tickets::default(),
+        )
+    }
+
+    /// A collector with the lane state windows and the ticket keys of `[fleet]`.
+    #[must_use]
+    pub fn with_config(
+        host: MachineName,
+        profile: Profile,
+        sources: Sources,
+        interval: Duration,
+        windows: Windows,
+        tickets: Tickets,
     ) -> Self {
         let mut health = Health::default();
         // No hook feed is attached yet: the source is expected and not readable,
@@ -244,6 +269,7 @@ impl Collector {
             first_seen: HashMap::new(),
             classes: HashMap::new(),
             windows,
+            tickets,
             activity: HashMap::new(),
             feed: Feed::Detached,
             activity_failure: None,
@@ -302,19 +328,13 @@ impl Collector {
         self.publish_status();
     }
 
-    /// The hook feed of a layout refresh: each lane's `activity-last` record read at
-    /// `now` (wall clock `now_ms`), or the class of the failure that stopped the
-    /// read. A lane with no record has no events. The feed is what makes
-    /// `hook_events` readable (FR-070).
-    pub fn set_activity(
-        &mut self,
-        now: Instant,
-        now_ms: i64,
-        records: Result<Vec<LaneRecord>, ErrorClass>,
-        log: &mut impl FnMut(String),
-    ) {
-        match records {
-            Ok(records) => {
+    /// The hook feed of a layout refresh: each lane's `activity-last` record read at `now`,
+    /// with the relay clock (Unix milliseconds) the ages are measured against, or the
+    /// class of the failure that stopped the read. A lane with no record has no events.
+    /// The feed is what makes `hook_events` readable (FR-070).
+    pub fn set_activity(&mut self, now: Instant, read: ActivityRead, log: &mut impl FnMut(String)) {
+        match read {
+            Ok((now_ms, records)) => {
                 self.activity = records
                     .iter()
                     .filter_map(|(address, record)| {
@@ -329,6 +349,18 @@ impl Collector {
             }
         }
         self.record_hook_events(now, log);
+    }
+
+    /// [`Collector::set_activity`] for a feed read at relay clock `now_ms`.
+    #[cfg(test)]
+    pub fn set_activity_at(
+        &mut self,
+        now: Instant,
+        now_ms: i64,
+        records: Result<Vec<LaneRecord>, ErrorClass>,
+        log: &mut impl FnMut(String),
+    ) {
+        self.set_activity(now, records.map(|r| (now_ms, r)), log);
     }
 
     /// The newest `activity` failure the hooks of this host reported to the relay,
@@ -538,12 +570,19 @@ impl Collector {
         if self.profile.expects(Source::PaneTail) {
             self.scan_panes(now, log);
         }
-        let counts = Arc::clone(&self.sources.hook_counts);
-        self.hook_counts = self
-            .counts_slot
-            .run(SOURCE_BUDGET, move || counts())
-            .ok()
-            .and_then(Result::ok);
+        if self.profile.expects(Source::ActivityCounters) {
+            let counts = Arc::clone(&self.sources.hook_counts);
+            let got = self
+                .counts_slot
+                .run(SOURCE_BUDGET, move || counts())
+                .and_then(|r| r);
+            self.hook_counts = got.ok().flatten();
+            self.record(
+                Source::ActivityCounters,
+                got.map_or_else(Outcome::Failed, |_| Outcome::Ok),
+                log,
+            );
+        }
         if self.profile.expects(Source::HookEvents) {
             self.record_hook_events(now, log);
         }
@@ -681,7 +720,7 @@ impl Collector {
             let signals = self.signals(&lane.address, now);
             let activity = self.activity.get(&lane.address);
             let compiling = self.compiling.contains(&lane.address);
-            let (state, blocked) = signals.resolve(lane.herdr_status.as_deref(), compiling);
+            let (state, blocked) = signals.resolve(compiling);
             let lane_attrs = || Attrs::new().with("host", host).with("lane", &lane.address);
             registry.gauge(
                 &FLEET_LANE_STATE,
@@ -706,11 +745,11 @@ impl Collector {
             if self.feed == Feed::Attached && self.lane_silent(lane, now) {
                 registry.gauge(&FLEET_LANE_NO_EVENTS, lane_attrs(), 1);
             }
-            let (branch, cwd) = activity.map_or(("", ""), |a| (a.branch(), a.cwd()));
+            let (branch, cwd) = activity.map_or(("", ""), |a| a.live_mapping(now));
             registry.gauge(
                 &FLEET_LANE_FOCUS_INFO,
                 lane_attrs()
-                    .with("ticket", &feed::ticket(branch, cwd))
+                    .with("ticket", &self.tickets.find(branch, cwd))
                     .with("branch", branch),
                 1,
             );
@@ -817,12 +856,15 @@ pub(crate) mod fixtures {
                 )
             }),
             native_windows: Some(Arc::new(|| Ok(0))),
-            hook_counts: Arc::new(|| {
-                Ok(HookCounts {
-                    skipped: 3,
-                    dropped: 2,
-                    unregistered: 1,
-                })
+            hook_counts: Arc::new(move || {
+                fail(Source::ActivityCounters).map_or(
+                    Ok(Some(HookCounts {
+                        skipped: 3,
+                        dropped: 2,
+                        unregistered: 1,
+                    })),
+                    Err,
+                )
             }),
             pane_tail: Arc::new(move |_, _| {
                 fail(Source::PaneTail).map_or(Ok("plain output\n".to_owned()), Err)
@@ -848,7 +890,7 @@ pub(crate) mod fixtures {
         let t0 = Instant::now();
         let mut log = |_| {};
         c.set_lanes(t0, vec![lane("hub:QSL:plan", "w1:p1", Harness::Claude)]);
-        c.set_activity(t0, NOW_MS, Ok(Vec::new()), &mut log);
+        c.set_activity_at(t0, NOW_MS, Ok(Vec::new()), &mut log);
         let all = |s: Source| failing.filter(|(f, _)| *f == s).map(|(_, e)| e);
         c.set_herdr(
             all(Source::Herdr).map_or(Outcome::Ok, Outcome::Failed),
@@ -860,7 +902,7 @@ pub(crate) mod fixtures {
         );
         c.set_refresh_redis(all(Source::Redis).is_none(), &mut log);
         if let Some(class) = all(Source::HookEvents) {
-            c.set_activity(t0, NOW_MS, Err(class), &mut log);
+            c.set_activity_at(t0, NOW_MS, Err(class), &mut log);
         }
         c.sample(t0, &mut log);
         let now = t0 + Duration::from_secs(2);
@@ -882,7 +924,7 @@ pub(crate) mod fixtures {
         c.classes
             .insert("hub:QSL:plan".into(), (PaneClass::Dialog, now));
         // A lane that was working and then went silent, in a branch that names a ticket.
-        c.set_activity(
+        c.set_activity_at(
             now,
             NOW_MS,
             Ok(vec![(
@@ -1158,11 +1200,7 @@ mod tests {
         let r = registry_of(&c, t0 + Duration::from_secs(7));
         for a in addrs {
             assert_eq!(
-                int(
-                    &r,
-                    "ix.fleet.lane.state",
-                    &[("lane", a), ("state", "working")]
-                ),
+                int(&r, "ix.fleet.lane.state", &[("lane", a), ("state", "idle")]),
                 Some(1)
             );
             assert_eq!(
@@ -1212,7 +1250,7 @@ mod tests {
             } else {
                 ("stop", Some("question"))
             };
-            c.set_activity(
+            c.set_activity_at(
                 t0,
                 NOW_MS,
                 Ok(vec![(

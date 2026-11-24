@@ -16,11 +16,12 @@ delivery = "herdr"          # or "socket"
 # otlp_interval_secs = 30
 
 # [fleet]
-# expected_sources = ["cpu", "memory", "temperature", "capacity", "compilers", "pane_tail", "hook_events", "herdr", "redis"]
+# expected_sources = ["cpu", "memory", "temperature", "capacity", "compilers", "pane_tail", "hook_events", "activity_counters", "herdr", "redis"]
 # unavailable_sources = ["compilers"]
 # working_window_secs = 600
 # no_events_after_secs = 1800
 # max_tool_runtime_secs = 7200
+# ticket_prefixes = ["SWM", "QSL"]
 ```
 
 ## Keys
@@ -41,6 +42,7 @@ delivery = "herdr"          # or "socket"
 | `[fleet] working_window_secs` | Seconds a `prompt` or `post_tool` hook event keeps a lane `working`. Exported as `ix_fleet_config{name="working_window"}`. | `600` |
 | `[fleet] no_events_after_secs` | Seconds a lane that was working may emit no hook event before it carries `ix_fleet_lane_no_events` and counts against `hook_events`. | `1800` |
 | `[fleet] max_tool_runtime_secs` | Seconds an open `pre_tool` may run before the lane is `stuck`. | `7200` |
+| `[fleet] ticket_prefixes` | Team keys read as a ticket in a lane's branch or working directory for `ix_fleet_lane_focus_info`. | AGE, IR, EA, IXD, JEV, OBS, QSL, PLAT, RES, SAPHO, STD, SWM, TL, VER |
 
 Upgrade `agent-msg`, the hook and `relay-watcher` on a machine before adding `[fleet]` to its `config.toml`: a binary built before this table existed refuses a file that has it.
 

@@ -20,7 +20,7 @@ reported as unavailable, which is not a failure.
 ### Sources and host profile
 
 - The sources SHALL be exactly: `cpu`, `memory`, `temperature`, `capacity`, `compilers`,
-  `pane_tail`, `hook_events`, `herdr`, `redis`.
+  `pane_tail`, `hook_events`, `activity_counters`, `herdr`, `redis`. `activity_counters` is the hook's local skip and drop counts (`spool/activity.json`); it reads 1 when that file is read, or absent because no hook has written one yet, and 0 when it exists and cannot be read or parsed.
 - The host profile (`[fleet] expected_sources` and `unavailable_sources` in the watcher
   configuration, per [FR-026](./FR-026-configuration-precedence.md)) SHALL list the sources
   the host is expected to provide. The default expected set SHALL be every source except
@@ -40,7 +40,7 @@ reported as unavailable, which is not a failure.
 - The `capacity` source SHALL read 0 while no capacity is entered for the host, and
   `ix.fleet.host.capacity_configured` SHALL be 0 then, so that unset capacity is a standing
   failure and not silence.
-- The watcher SHALL count a registry lane toward `hook_events` unhealthy only when both hold: its last known state is non-idle (an open `pre_tool`, a herdr status of working, or a `prompt` with no later `stop`), and it then emits no activity event for `no_events_after` (default 30 minutes). A lane whose newest event is `stop`, `idle` or `session_end` is quiet, not unhealthy.
+- The watcher SHALL count a registry lane toward `hook_events` unhealthy only when both hold: its last known state is non-idle (an open `pre_tool`, a herdr status of working, or a `prompt` with no later `stop`), and it then emits no activity event for `no_events_after` (default 30 minutes). A lane whose newest event is `stop`, `idle`, `session_end` or `blocked` is quiet, not unhealthy: a blocked lane waits for a person and is reported through `ix.fleet.lane.blocked`.
 - The watcher SHALL export `ix.fleet.lane.no_events` for each lane counted unhealthy, and the host's `hook_events` SHALL read 0 only when at least one lane was non-idle and every such lane is counted unhealthy, or when the hook failure stream holds an `activity` failure newer than the newest event of every lane. A host whose working lanes emit nothing is therefore unhealthy, and a host of quiet lanes is not.
 - The watcher SHALL log one line when a source changes between ok and failed, naming the
   source and an error class from a fixed set (`timeout`, `unreadable`, `unsupported`,
@@ -64,6 +64,8 @@ reported as unavailable, which is not a failure.
 | FR-070-AC-8 | Given no entered capacity, `capacity` is 0 and `capacity_configured` is 0; given entered capacity, both are 1 and `capacity_slots` is exported. | Test |
 | FR-070-AC-9 | Given lanes whose last state is an open `pre_tool`, herdr working, and a `prompt` with no later `stop`, each with no event for longer than `no_events_after`, each has `ix.fleet.lane.no_events` 1 and the host's `hook_events` is 0; given lanes whose newest event is `stop`, `idle` or `session_end`, they carry no `no_events` and `hook_events` is 1; given one lane with a recent event among silent working lanes, `hook_events` is 1 and only the silent working lanes carry `no_events`. | Test |
 | FR-070-AC-10 | Given a pane class read from a `pane_tail` source that reads 0, or a class older than one scan interval, `ix.fleet.lane.blocked` carries no value from it. | Test |
+| FR-070-AC-11 | Given lanes whose newest event is `blocked`, with or without an earlier `prompt`, and no event for longer than `no_events_after`, they carry no `ix.fleet.lane.no_events` and the host's `hook_events` is 1. | Test |
+| FR-070-AC-12 | Given a `spool/activity.json` that exists and cannot be parsed, `activity_counters` is 0, one log line names the source and the class, and no `ix.relay.hook.activity_skipped` series is exported; given no such file, `activity_counters` is 1 and no `ix.relay.hook.activity_skipped` series is exported, not zeros. | Test |
 
 ## Dependencies
 

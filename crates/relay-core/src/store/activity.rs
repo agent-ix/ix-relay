@@ -88,3 +88,48 @@ impl Relay {
         Ok(self.conn.hgetall(self.keys.activity_last_key(lane))?)
     }
 }
+
+/// Most lanes one pipelined read of last-activity records carries.
+const ACTIVITY_READ_BATCH: usize = 128;
+
+impl Relay {
+    /// The last-activity records of `lanes`, in order, read in pipelined batches
+    /// of at most 128 lanes (one round trip each) under one total `budget`: the
+    /// connection's timeout is re-armed to what is left before each batch and put
+    /// back afterwards, and a budget that runs out is a timeout error.
+    ///
+    /// # Errors
+    /// Fails when Redis cannot be reached, answers with an error, or the budget
+    /// runs out.
+    pub fn activity_last_many(
+        &mut self,
+        lanes: &[Address],
+        budget: std::time::Duration,
+    ) -> Result<Vec<BTreeMap<String, String>>> {
+        let armed = self.timeout.get();
+        let began = std::time::Instant::now();
+        let read = (|| {
+            let mut records = Vec::with_capacity(lanes.len());
+            for batch in lanes.chunks(ACTIVITY_READ_BATCH) {
+                let left = budget.saturating_sub(began.elapsed());
+                if left.is_zero() {
+                    return Err(crate::Error::Redis(redis::RedisError::from(
+                        std::io::Error::new(std::io::ErrorKind::TimedOut, "activity read budget"),
+                    )));
+                }
+                self.set_timeout(left)?;
+                let mut pipe = redis::pipe();
+                for lane in batch {
+                    pipe.hgetall(self.keys.activity_last_key(lane));
+                }
+                let replies: Vec<BTreeMap<String, String>> = pipe.query(&mut self.conn)?;
+                records.extend(replies);
+            }
+            Ok(records)
+        })();
+        let restored = self.set_timeout(armed);
+        let records = read?;
+        restored?;
+        Ok(records)
+    }
+}

@@ -72,7 +72,7 @@ fn collector_at(
         .iter()
         .map(|(a, e)| ((*a).to_owned(), record(e, "/w/x", "b")))
         .collect();
-    c.set_activity(now, NOW_MS, Ok(records), &mut |_| {});
+    c.set_activity_at(now, NOW_MS, Ok(records), &mut |_| {});
     (c, now)
 }
 
@@ -266,7 +266,7 @@ fn tc_070_09_a_feed_that_cannot_be_read_reads_0_and_flags_no_lane() {
     c.set_lanes(t0, vec![lane_with("hub:S:a", "working")]);
     let r = registry_of(&c, t0 + Duration::from_secs(3600));
     assert_eq!(hook_events(&r), Some(0), "not attached yet");
-    c.set_activity(t0, NOW_MS, Err(ErrorClass::Unreadable), &mut |_| {});
+    c.set_activity_at(t0, NOW_MS, Err(ErrorClass::Unreadable), &mut |_| {});
     let r = registry_of(&c, t0 + Duration::from_secs(3600));
     assert_eq!(hook_events(&r), Some(0));
     assert!(!no_events(&r, "hub:S:a"));
@@ -303,7 +303,7 @@ fn tc_069_13_a_compiler_adds_its_seconds_to_the_lane_with_the_longest_cwd() {
     );
     let feed = |c: &mut Collector, at: Instant, outer_cwd: &str| {
         let events = [("stop", 10, Some("done"))];
-        c.set_activity(
+        c.set_activity_at(
             at,
             NOW_MS,
             Ok(vec![
@@ -362,7 +362,7 @@ fn tc_069_06_a_mapping_older_than_six_hours_attributes_nothing() {
     c.set_lanes(t0, vec![lane_with("hub:S:a", "idle")]);
     let hours = |h: i64| record(&[("stop", h * 3600, Some("done"))], "/w/a", "b");
     for (age, expect) in [(7, 0), (5, 60)] {
-        c.set_activity(
+        c.set_activity_at(
             t0,
             NOW_MS,
             Ok(vec![("hub:S:a".into(), hours(age))]),
@@ -468,7 +468,7 @@ fn tc_045_29_focus_info_carries_the_ticket_of_the_branch_and_is_empty_without_on
         t0,
         vec![lane_with("hub:S:a", "idle"), lane_with("hub:S:b", "idle")],
     );
-    c.set_activity(
+    c.set_activity_at(
         t0,
         NOW_MS,
         Ok(vec![(
@@ -525,4 +525,178 @@ fn tc_068_11_the_hook_counts_are_exported_by_reason_and_left_out_when_unreadable
             .iter()
             .all(|p| p.instrument.name != "ix.relay.hook.activity_skipped")
     );
+}
+
+/// One sample (which reads every pane tail as plain output, class `none`) and then
+/// the push, as production runs them.
+fn after_sample(lane: (&str, &str), events: Vec<Ev>, windows: Windows) -> (Collector, Instant) {
+    let (mut c, now) = collector_at(&[lane], &[(lane.0, events)], windows, Duration::ZERO);
+    c.sample(now, &mut |_| {});
+    (c, now)
+}
+
+#[trace("FR-045-AC-30")]
+#[test]
+fn tc_045_30_a_pane_class_of_none_never_overrides_the_hook_verdict_after_a_sample() {
+    let lane = ("hub:S:a", "idle");
+    let cases: [(&str, Vec<Ev>, &str); 4] = [
+        (
+            "an open pre_tool past max_tool_runtime",
+            vec![("pre_tool", 180 * MIN, None)],
+            "stuck",
+        ),
+        (
+            "a session_end",
+            vec![("prompt", 600, None), ("session_end", 30, None)],
+            "ended",
+        ),
+        (
+            "a recent prompt while herdr is idle",
+            vec![("prompt", 20, None)],
+            "working",
+        ),
+        (
+            "a question Stop",
+            vec![("stop", 20, Some("question"))],
+            "blocked",
+        ),
+    ];
+    for (what, events, want) in cases {
+        let (c, now) = after_sample(lane, events, Windows::default());
+        assert!(
+            c.classes.contains_key("hub:S:a"),
+            "the sample read the pane"
+        );
+        let r = registry_of(&c, now);
+        assert_eq!(state_of(&r, "hub:S:a"), [want], "{what}");
+        if want == "blocked" {
+            assert_eq!(
+                value(&r, "ix.fleet.lane.blocked", &[("reason", "question")]),
+                Some(1)
+            );
+        }
+    }
+}
+
+#[trace("FR-045-AC-30")]
+#[test]
+fn tc_045_30_a_pane_class_with_a_reason_read_after_the_newest_event_blocks_the_lane() {
+    let (mut c, now) = collector_at(
+        &[("hub:S:a", "idle")],
+        &[("hub:S:a", vec![("prompt", 20, None)])],
+        Windows::default(),
+        Duration::ZERO,
+    );
+    c.sources.pane_tail = Arc::new(|_, _| Ok("Do you want to proceed?\n".to_owned()));
+    c.sample(now, &mut |_| {});
+    let r = registry_of(&c, now);
+    assert_eq!(state_of(&r, "hub:S:a"), ["blocked"]);
+    assert_eq!(
+        value(&r, "ix.fleet.lane.blocked", &[("reason", "dialog")]),
+        Some(1)
+    );
+}
+
+#[trace("FR-045-AC-30")]
+#[test]
+fn tc_045_30_a_lane_with_no_hook_event_is_idle_whatever_herdr_says_and_no_events_marks_it() {
+    let silent = Duration::from_secs(31 * 60);
+    let (mut c, now) = collector_at(&[("hub:S:a", "working")], &[], Windows::default(), silent);
+    c.sample(now, &mut |_| {});
+    let r = registry_of(&c, now);
+    assert_eq!(state_of(&r, "hub:S:a"), ["idle"]);
+    assert!(no_events(&r, "hub:S:a"), "FR-070 still flags it");
+}
+
+#[trace("FR-069-AC-6")]
+#[test]
+fn tc_069_06_focus_info_drops_branch_and_ticket_with_the_mapping_after_six_hours() {
+    let mut c = Collector::new(host(), Profile::default(), sources(None), INTERVAL);
+    let t0 = Instant::now();
+    c.set_lanes(t0, vec![lane_with("hub:S:a", "idle")]);
+    let focus = |c: &Collector, ticket: &str, branch: &str| {
+        value(
+            &registry_of(c, t0),
+            "ix.fleet.lane.focus_info",
+            &[("lane", "hub:S:a"), ("ticket", ticket), ("branch", branch)],
+        )
+    };
+    for (hours, live) in [(5, true), (7, false)] {
+        c.set_activity_at(
+            t0,
+            NOW_MS,
+            Ok(vec![(
+                "hub:S:a".into(),
+                record(
+                    &[("stop", hours * 3600, Some("done"))],
+                    "/w/x",
+                    "swm-205-fleet",
+                ),
+            )]),
+            &mut |_| {},
+        );
+        assert_eq!(
+            focus(&c, "SWM-205", "swm-205-fleet"),
+            live.then_some(1),
+            "{hours} h"
+        );
+        assert_eq!(focus(&c, "", ""), (!live).then_some(1), "{hours} h");
+    }
+}
+
+#[trace("FR-070-AC-11")]
+#[test]
+fn tc_070_11_a_lane_waiting_on_a_permission_is_quiet_not_unhealthy() {
+    let (c, now) = collector_at(
+        &[("hub:S:a", "idle"), ("hub:S:b", "idle")],
+        &[
+            (
+                "hub:S:a",
+                vec![("prompt", 300 * MIN, None), ("blocked", 200 * MIN, None)],
+            ),
+            ("hub:S:b", vec![("blocked", 200 * MIN, None)]),
+        ],
+        Windows::default(),
+        Duration::ZERO,
+    );
+    let r = registry_of(&c, now);
+    assert!(!no_events(&r, "hub:S:a") && !no_events(&r, "hub:S:b"));
+    assert_eq!(hook_events(&r), Some(1));
+    assert_eq!(state_of(&r, "hub:S:a"), ["blocked"]);
+}
+
+fn counters_probe(r: &Registry) -> Option<i64> {
+    value(r, "ix.fleet.probe_ok", &[("source", "activity_counters")])
+}
+
+fn has_skipped(r: &Registry) -> bool {
+    r.points()
+        .iter()
+        .any(|p| p.instrument.name == "ix.relay.hook.activity_skipped")
+}
+
+#[trace("FR-070-AC-12")]
+#[test]
+fn tc_070_12_an_unreadable_counts_file_fails_the_source_once_and_a_missing_one_exports_nothing() {
+    let mut c = Collector::new(host(), Profile::default(), sources(None), INTERVAL);
+    let t0 = Instant::now();
+    let mut log = Vec::new();
+    c.sources.hook_counts = Arc::new(|| Err(ErrorClass::Parse));
+    c.sample(t0, &mut |l| log.push(l));
+    c.sample(t0 + Duration::from_secs(30), &mut |l| log.push(l));
+    let r = registry_of(&c, t0);
+    assert_eq!(counters_probe(&r), Some(0));
+    assert!(!has_skipped(&r), "no series, no zeros");
+    let lines: Vec<&String> = log
+        .iter()
+        .filter(|l| l.contains("activity_counters"))
+        .collect();
+    assert_eq!(lines.len(), 1, "one line per transition: {log:?}");
+    assert!(lines[0].contains("parse"));
+    // The hooks never ran: the file is missing, which is healthy and exports nothing.
+    c.sources.hook_counts = Arc::new(|| Ok(None));
+    c.sample(t0 + Duration::from_secs(60), &mut |_| {});
+    let r = registry_of(&c, t0);
+    assert_eq!(counters_probe(&r), Some(1));
+    assert!(!has_skipped(&r));
 }

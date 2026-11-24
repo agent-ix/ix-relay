@@ -381,7 +381,7 @@ fn refresh_fleet(
     let lanes = fleet::lanes::lanes_of(machine, view, regs);
     let addresses: Vec<String> = lanes.iter().map(|l| l.address.clone()).collect();
     collector.set_lanes(Instant::now(), lanes);
-    let published = relay.publish_lane_list(machine, &addresses).is_ok();
+    let published = relay.publish_lane_list(machine, &addresses);
     let (capacity, read) = match relay.server_capacities() {
         Ok(all) => (
             all.iter()
@@ -396,29 +396,38 @@ fn refresh_fleet(
         ),
     };
     collector.set_capacity(capacity, log);
-    // The newest event of each lane's hooks (FR-068): one small read per lane.
-    let at = Instant::now();
-    let read_at_ms = now_ms();
-    let mut activity = Ok(Vec::with_capacity(addresses.len()));
-    for address in &addresses {
-        let Ok(lane) = address.parse::<relay_core::Address>() else {
-            continue;
-        };
-        match relay.activity_last(&lane) {
-            Ok(record) => {
-                if let Ok(all) = &mut activity {
-                    all.push((address.clone(), record));
-                }
-            }
-            Err(_) => {
-                activity = Err(fleet::health::ErrorClass::Unreadable);
-                break;
-            }
+    // The newest event of each lane's hooks (FR-068): one pipelined read under one source
+    // budget, aged against the relay's clock that stamped the lane list in this refresh.
+    let activity = match &published {
+        Ok(list) => {
+            let lanes: Vec<(String, relay_core::Address)> = addresses
+                .iter()
+                .filter_map(|a| Some((a.clone(), a.parse().ok()?)))
+                .collect();
+            let keys: Vec<relay_core::Address> = lanes.iter().map(|(_, k)| k.clone()).collect();
+            relay
+                .activity_last_many(&keys, fleet::bound::SOURCE_BUDGET)
+                .map(|records| {
+                    lanes
+                        .into_iter()
+                        .map(|(address, _)| address)
+                        .zip(records)
+                        .collect::<Vec<_>>()
+                })
+                .map(|records| (list.refreshed_ms, records))
+                .map_err(|e| {
+                    if e.is_timeout() {
+                        fleet::health::ErrorClass::Timeout
+                    } else {
+                        fleet::health::ErrorClass::Unreadable
+                    }
+                })
         }
-    }
+        Err(_) => Err(fleet::health::ErrorClass::Unreadable),
+    };
     let activity_ok = activity.is_ok();
-    collector.set_activity(at, read_at_ms, activity, log);
-    collector.set_refresh_redis(published && read && activity_ok, log);
+    collector.set_activity(Instant::now(), activity, log);
+    collector.set_refresh_redis(published.is_ok() && read && activity_ok, log);
 }
 
 /// The least time between two rename events of one lead. A label that flaps is
@@ -703,13 +712,21 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let fleet_tickets = match fleet::feed::Tickets::from_file(&settings.fleet) {
+        Ok(tickets) => tickets,
+        Err(e) => {
+            eprintln!("relay-watcher: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     if !cli.once {
-        state.fleet = Some(fleet::Collector::with_windows(
+        state.fleet = Some(fleet::Collector::with_config(
             machine.clone(),
             fleet_profile,
             fleet::Sources::native(),
             Duration::from_secs(settings.watcher_otlp.interval_secs.value),
             fleet_windows,
+            fleet_tickets,
         ));
     }
     // `--once` is a manual check: like the state file, it must not publish a

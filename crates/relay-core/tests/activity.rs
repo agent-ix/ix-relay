@@ -180,3 +180,40 @@ fn events_older_than_24_hours_are_dropped_on_the_next_write() {
     // The 25 h and 48 h events are gone; the 1 h one and the new one stay.
     assert_eq!(bus.relay.activity_len().unwrap(), 2);
 }
+
+#[trace("FR-068-AC-2")]
+#[test]
+fn the_records_of_many_lanes_are_read_in_order_in_batches_and_a_spent_budget_is_a_timeout() {
+    let Some(mut bus) = Bus::connect("activity-many") else {
+        return;
+    };
+    // 130 lanes cross the 128-lane batch; every third one has an event.
+    let lanes: Vec<Address> = (0..130)
+        .map(|n| Address::new("terra", "SWM", Some(&format!("t{n}"))))
+        .collect();
+    for lane in lanes.iter().step_by(3) {
+        assert!(
+            bus.relay
+                .record_activity(lane, &event(ActivityKind::Prompt))
+                .unwrap()
+        );
+    }
+    let records = bus
+        .relay
+        .activity_last_many(&lanes, std::time::Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(records.len(), 130);
+    for (n, record) in records.iter().enumerate() {
+        assert_eq!(record.contains_key("any"), n % 3 == 0, "lane {n}");
+    }
+    let spent = bus
+        .relay
+        .activity_last_many(&lanes, std::time::Duration::ZERO);
+    assert!(spent.unwrap_err().is_timeout());
+    // The connection's own timeout is back and the connection is usable.
+    assert!(
+        bus.relay
+            .activity_last_many(&lanes[..1], std::time::Duration::from_secs(5))
+            .is_ok()
+    );
+}

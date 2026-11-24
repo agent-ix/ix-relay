@@ -216,16 +216,14 @@ impl LaneActivity {
         (age <= MAPPING_TTL && !self.cwd.is_empty()).then_some(self.cwd.as_str())
     }
 
-    /// The newest event's branch.
+    /// The newest event's branch and `cwd` while their mapping lives (FR-069: six
+    /// hours without an event), else empty.
     #[must_use]
-    pub fn branch(&self) -> &str {
-        &self.branch
-    }
-
-    /// The newest event's `cwd`.
-    #[must_use]
-    pub fn cwd(&self) -> &str {
-        &self.cwd
+    pub fn live_mapping(&self, now: Instant) -> (&str, &str) {
+        match self.newest(now) {
+            Some((_, age)) if age <= MAPPING_TTL => (self.branch.as_str(), self.cwd.as_str()),
+            _ => ("", ""),
+        }
     }
 }
 
@@ -258,30 +256,81 @@ pub fn attribute<'a>(cwd: &str, lanes: impl Iterator<Item = (usize, &'a str)>) -
         .map(|(index, _)| index)
 }
 
-/// The ticket key in a branch name, else in a working directory (`SWM-205` from
-/// `swm-205-fleet-series` or `/w/ix-relay-swm-205`); empty when neither has one.
-#[must_use]
-pub fn ticket(branch: &str, cwd: &str) -> String {
-    in_text(branch)
-        .or_else(|| cwd.rsplit('/').find_map(in_text))
-        .unwrap_or_default()
+/// The ticket team keys a lane's branch or cwd may name (`[fleet] ticket_prefixes`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tickets(Vec<String>);
+
+/// The Linear team keys known to this fleet.
+const DEFAULT_TICKET_KEYS: &[&str] = &[
+    "AGE", "IR", "EA", "IXD", "JEV", "OBS", "QSL", "PLAT", "RES", "SAPHO", "STD", "SWM", "TL",
+    "VER",
+];
+
+impl Default for Tickets {
+    fn default() -> Self {
+        Self(
+            DEFAULT_TICKET_KEYS
+                .iter()
+                .map(|k| (*k).to_owned())
+                .collect(),
+        )
+    }
 }
 
-fn in_text(text: &str) -> Option<String> {
-    for segment in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-') {
-        let parts: Vec<&str> = segment.split('-').collect();
-        for pair in parts.windows(2) {
-            let (team, number) = (pair[0], pair[1]);
-            if (2..=10).contains(&team.len())
-                && team.bytes().all(|b| b.is_ascii_alphabetic())
-                && (1..=6).contains(&number.len())
-                && number.bytes().all(|b| b.is_ascii_digit())
-            {
-                return Some(format!("{}-{number}", team.to_ascii_uppercase()));
+impl Tickets {
+    /// The keys of the file's raw `[fleet]` values.
+    ///
+    /// # Errors
+    ///
+    /// A message when `ticket_prefixes` is not an array of at most 64 team keys of 2
+    /// to 10 letters.
+    pub fn from_file(file: &FleetFile) -> Result<Self, String> {
+        let Some(raw) = &file.ticket_prefixes else {
+            return Ok(Self::default());
+        };
+        let bad = || {
+            "[fleet] ticket_prefixes must be an array of at most 64 team keys of 2 to 10 letters"
+                .to_owned()
+        };
+        let items = raw.as_array().filter(|a| a.len() <= 64).ok_or_else(bad)?;
+        let mut keys = Vec::new();
+        for item in items {
+            let key = item
+                .as_str()
+                .filter(|k| {
+                    (2..=10).contains(&k.len()) && k.bytes().all(|b| b.is_ascii_alphabetic())
+                })
+                .ok_or_else(bad)?;
+            keys.push(key.to_ascii_uppercase());
+        }
+        Ok(Self(keys))
+    }
+
+    /// The ticket key in a branch name, else in a working directory (`SWM-205` from
+    /// `swm-205-fleet-series` or `/w/ix-relay-swm-205`); empty when neither names one
+    /// of the configured team keys.
+    #[must_use]
+    pub fn find(&self, branch: &str, cwd: &str) -> String {
+        self.in_text(branch)
+            .or_else(|| cwd.rsplit('/').find_map(|part| self.in_text(part)))
+            .unwrap_or_default()
+    }
+
+    fn in_text(&self, text: &str) -> Option<String> {
+        for segment in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-') {
+            let parts: Vec<&str> = segment.split('-').collect();
+            for pair in parts.windows(2) {
+                let (team, number) = (pair[0], pair[1]);
+                if (1..=6).contains(&number.len())
+                    && number.bytes().all(|b| b.is_ascii_digit())
+                    && self.0.iter().any(|k| k.eq_ignore_ascii_case(team))
+                {
+                    return Some(format!("{}-{number}", team.to_ascii_uppercase()));
+                }
             }
         }
+        None
     }
-    None
 }
 
 /// The hook's local counts (`spool/activity.json`, written by `agent-msg`).
@@ -298,16 +347,18 @@ pub struct HookCounts {
     pub unregistered: u64,
 }
 
-/// The counts in the file at `path`. A missing file is no hook activity lost, so
-/// zero; an unreadable or unparsable one is an error, never zero.
+/// The counts in the file at `path`. A missing file means no hook has ever written
+/// one: `None`, never zeros. An unreadable or unparsable one is an error.
 ///
 /// # Errors
 ///
 /// [`ErrorClass::Unreadable`] or [`ErrorClass::Parse`].
-pub fn read_hook_counts(path: &Path) -> Result<HookCounts, ErrorClass> {
+pub fn read_hook_counts(path: &Path) -> Result<Option<HookCounts>, ErrorClass> {
     match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| ErrorClass::Parse),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(HookCounts::default()),
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| ErrorClass::Parse),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err(ErrorClass::Unreadable),
     }
 }
@@ -363,21 +414,45 @@ mod tests {
         assert_eq!(attribute("/w/ix", [(0, "")].into_iter()), None, "no cwd");
     }
 
-    #[trace("FR-045-AC-28")]
+    #[trace("FR-045-AC-29")]
     #[test]
     fn the_ticket_comes_from_the_branch_then_the_cwd_and_is_empty_without_one() {
-        assert_eq!(ticket("swm-205-fleet-series", "/x"), "SWM-205");
-        assert_eq!(ticket("feature/QSL-12/more", ""), "QSL-12");
-        assert_eq!(ticket("main", "/w/worktrees/ix-relay-swm-205"), "SWM-205");
-        assert_eq!(ticket("main", "/w/ix-relay"), "");
-        assert_eq!(ticket("", ""), "");
+        let t = Tickets::default();
+        assert_eq!(t.find("swm-205-fleet-series", "/x"), "SWM-205");
+        assert_eq!(t.find("feature/QSL-12/more", ""), "QSL-12");
+        assert_eq!(t.find("main", "/w/worktrees/ix-relay-swm-205"), "SWM-205");
+        assert_eq!(t.find("main", "/w/ix-relay"), "");
+        assert_eq!(t.find("", ""), "");
+    }
+
+    #[trace("FR-045-AC-29")]
+    #[test]
+    fn a_word_and_number_that_is_not_a_configured_team_key_is_no_ticket() {
+        let t = Tickets::default();
+        for (branch, cwd) in [
+            ("release-2026", "/w"),
+            ("fix-12-x", "/w"),
+            ("main", "/x/utf-8/y"),
+        ] {
+            assert_eq!(t.find(branch, cwd), "", "{branch} {cwd}");
+        }
+        let file: relay_core::config::FileConfig =
+            toml::from_str("[fleet]\nticket_prefixes = [\"fix\"]\n").unwrap();
+        let custom = Tickets::from_file(&file.fleet).unwrap();
+        assert_eq!(custom.find("fix-12-x", ""), "FIX-12");
+        assert_eq!(custom.find("swm-205", ""), "", "only the configured keys");
+        for bad in ["\"fix\"", "[\"a\"]", "[3]", "[\"has-dash\"]"] {
+            let file: relay_core::config::FileConfig =
+                toml::from_str(&format!("[fleet]\nticket_prefixes = {bad}\n")).unwrap();
+            assert!(Tickets::from_file(&file.fleet).is_err(), "{bad}");
+        }
     }
 
     #[test]
-    fn hook_counts_read_zero_for_a_missing_file_and_fail_for_a_broken_one() {
+    fn hook_counts_are_none_for_a_missing_file_and_fail_for_a_broken_one() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("activity.json");
-        assert_eq!(read_hook_counts(&path), Ok(HookCounts::default()));
+        assert_eq!(read_hook_counts(&path), Ok(None));
         fs::write(
             &path,
             r#"{"skipped":3,"dropped":2,"unregistered":1,"backoff_ms":5}"#,
@@ -385,11 +460,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             read_hook_counts(&path),
-            Ok(HookCounts {
+            Ok(Some(HookCounts {
                 skipped: 3,
                 dropped: 2,
                 unregistered: 1
-            })
+            }))
         );
         fs::write(&path, "{").unwrap();
         assert_eq!(read_hook_counts(&path), Err(ErrorClass::Parse));
