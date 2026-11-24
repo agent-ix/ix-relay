@@ -73,3 +73,5 @@ What is sound:
 | FND-006 | fixed | Counter updates take a sidecar flock with a 50 ms bound. The concurrency test (4 threads x 10 updates = 40) and the held-lock test both pass. |
 | FND-007 | fixed | `flush_health` now runs before `emit_activity`. |
 | FND-008 | fixed | `_cx` is renamed to `cx`. |
+| FND-009 | fixed | Fix head defe2bc narrows `is_bus_fault` to `Connect`, `Derive`, `Register` and `Pop`. A herdr failure or a spent budget now calls `dropped()` and starts no backoff. Test: `a_herdr_failure_or_spent_budget_counts_a_drop_and_starts_no_backoff` (passes). |
+| FND-010 | fixed | FR-068 and AC-5 now describe `skill_versions` as a JSON object of name-to-version entries that is always present, with an empty set written as `{}`. The relay-core test pins the object shape, the `unknown` version and `{}`. The spec file passes `quire validate`. |
