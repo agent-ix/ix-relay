@@ -63,6 +63,7 @@ reported as unavailable, which is not a failure.
 | FR-070-AC-7 | Given a macOS or WSL host whose profile omits `temperature`, the push shows `probe_unavailable` for `temperature`, no `probe_ok` 0 for it and no failed-source warning; given a profile that expects it and an unreadable sensor, `probe_ok` for `temperature` is 0. | Test |
 | FR-070-AC-8 | Given no entered capacity, `capacity` is 0 and `capacity_configured` is 0; given entered capacity, both are 1 and `capacity_slots` is exported. | Test |
 | FR-070-AC-9 | Given lanes whose last state is an open `pre_tool`, herdr working, and a `prompt` with no later `stop`, each with no event for longer than `no_events_after`, each has `ix.fleet.lane.no_events` 1 and the host's `hook_events` is 0; given lanes whose newest event is `stop`, `idle` or `session_end`, they carry no `no_events` and `hook_events` is 1; given one lane with a recent event among silent working lanes, `hook_events` is 1 and only the silent working lanes carry `no_events`. | Test |
+| FR-070-AC-10 | Given a pane class read from a `pane_tail` source that reads 0, or a class older than one scan interval, `ix.fleet.lane.blocked` carries no value from it. | Test |
 
 ## Dependencies
 

@@ -54,3 +54,27 @@ Checked and clean:
 **FND-006.** The hook seam is not wired yet, so no shipped behaviour changes. The tagged test still fixes the wrong expectation for SWM-202/205 to inherit. FR-045's state rules never list "herdr working" as a reason for `working`.
 
 **FND-007.** Point 5. The allowlist is self-expiring and checks in both directions: each entry must be in the spec and must not be exported, and the row count is pinned. It therefore does not silently hide a new unexported series, which is acceptable as a known-gap mechanism. It does mean the AC-11 test passes while AC-11 is false, and the new `FR-045-AC-29` tag claims coverage of series that do not exist yet. Remove the AC-29 tag, or narrow it to a test that only asserts the exported fleet subset, and give each NOT_YET_EXPORTED entry the follow-up ticket that removes it.
+
+## Dispositions
+
+Round 1, fix head `d0f29dd11bac99e10da4f87414e9b48b3c01a472` (`da01f43..d0f29dd`). On macOS, `cargo clippy --workspace --all-targets -D warnings` is green, fmt is clean, and `cargo test -p relay-watcher -p relay-core -p agent-msg` is all green. The coder reports Linux clippy and tests green on terra. That is consistent with the fix: `ErrorClass::Unsupported` is now built by `read_native_windows`, which compiles on every target. Linux was not re-run.
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | `Bus::offline()` runs after every failed connect or poll and calls `Publisher::publish_offline`, which pushes on the configured interval with `redis` = 0 and the collector's other sources. The watcher-level test `tc_070_06_a_watcher_with_redis_down_still_pushes_redis_0_and_the_other_sources` drives `Supervisor::step` against `redis://127.0.0.1:1`. The offline cadence is max(interval, the backoff step), capped near 30 s plus the connect timeout, which is acceptable for FR-070-AC-6. |
+| FND-002 | fixed | clippy is green on macOS (`ticks_from_macos` is now called by `mac::cpu_ticks`); `Unsupported` is now constructed (procs.rs `ProcessError::Spawn`). |
+| FND-003 | fixed | `signals()` counts a pane class only while `health.ok(PaneTail)` holds and the class is younger than one push interval; tc_070_10 tests both. |
+| FND-004 | fixed | Each read is capped at `left.min(PANE_READ_MAX)` and no read starts with less than 20 ms left, so the scan ends inside 400 ms and keeps its completed reads; `tc_069_09_a_slow_herdr_...` tests it. |
+| FND-005 | fixed | `mac::cpu_ticks` returns `ticks_from_macos(user, system, idle, nice)`. |
+| FND-006 | fixed | `Signals::state` returns `Idle` for a hook `Idle` newer than the pane tail; the test now asserts `LaneState::Idle`. |
+| FND-007 | fixed | The AC-29 tag is removed, and each NOT_YET_EXPORTED entry names SWM-205 or SWM-207. |
+| FND-008 | fixed | docs/configuration.md and CHANGELOG state the upgrade order before `[fleet]` is added. |
+| FND-009 | fixed | The comment is rejoined below the inserted block. |
+
+## New findings (disposition pass 1)
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-010 | medium | The offline push exports `ix.relay.registrations{machine}` = 0 during a Redis outage: `publish_offline` builds from `relay::Health::default()`, whose `fill` always emits the registrations gauge. That is a store-backed reading shown as a real zero, contrary to `publish_offline`'s own doc and the test's "no store-backed series", which only checks `inbox.depth`. | crates/relay-watcher/src/otlp/mod.rs:338-352; crates/relay-watcher/src/otlp/relay.rs:267-271; crates/relay-watcher/src/main.rs:3907-3911 |
+| FND-011 | low | `heartbeat_check` returns at the first warning. `collector_source_failed` therefore hides `fleet_lanes_dropped`, and the default profile fails `hook_events` until SWM-202/205, so dropped lanes are never shown by doctor on a host without `unavailable_sources`. | crates/agent-msg/src/doctor/checks.rs:860-890 |
+| FND-012 | low | tc_070_10 (stale or unhealthy pane class) is tagged FR-070-AC-4, which is specifically the `cpu` busy ratio; no AC states the pane-class omission, so the binding overclaims AC-4 instead of a gap noted for FR-070's omission rule. | crates/relay-watcher/src/fleet/mod.rs:962-966 |

@@ -270,7 +270,19 @@ impl Publisher {
     /// Builds the registry of a push from what was recorded and `health`,
     /// stamped `unix_nanos`. The panes are left out once older than
     /// [`PANES_MAX_AGE`] at `now`.
+    #[cfg(test)]
     pub(crate) fn build(&self, now: Instant, unix_nanos: u64, health: &relay::Health) -> Registry {
+        self.build_from(now, unix_nanos, Some(health))
+    }
+
+    /// [`Publisher::build`], with `health` `None` when the store was not read at all: the
+    /// store-backed series are then left out, not shown as zeros.
+    fn build_from(
+        &self,
+        now: Instant,
+        unix_nanos: u64,
+        health: Option<&relay::Health>,
+    ) -> Registry {
         let Some(a) = &self.active else {
             return Registry::new(unix_nanos, unix_nanos);
         };
@@ -280,7 +292,9 @@ impl Publisher {
         {
             panes::fill(&mut registry, panes);
         }
-        health.fill(&mut registry, &a.machine);
+        if let Some(health) = health {
+            health.fill(&mut registry, &a.machine);
+        }
         a.read_failures.fill(&mut registry);
         a.stats.fill(&mut registry);
         registry
@@ -329,7 +343,7 @@ impl Publisher {
             Some(_) => {}
             None => a.read_failed_reported = false,
         }
-        self.push(now, &health, failed_ok, fleet, log);
+        self.push(now, Some(&health), failed_ok, fleet, log);
     }
 
     /// The push of a watcher with no store connection (FR-070-AC-6): on the same
@@ -348,14 +362,14 @@ impl Publisher {
             return;
         }
         a.next_due = Some(next_due_after(now, a.interval));
-        self.push(now, &relay::Health::default(), false, fleet, log);
+        self.push(now, None, false, fleet, log);
     }
 
     /// Samples the collector, builds the registry and hands it to the exporter.
     fn push(
         &self,
         now: Instant,
-        health: &relay::Health,
+        health: Option<&relay::Health>,
         store_ok: bool,
         mut fleet: Option<&mut crate::fleet::Collector>,
         log: &mut impl FnMut(String),
@@ -364,7 +378,7 @@ impl Publisher {
             f.set_push_redis(store_ok, log);
             f.sample(now, log);
         }
-        let mut registry = self.build(now, unix_nanos(), health);
+        let mut registry = self.build_from(now, unix_nanos(), health);
         if let Some(f) = fleet {
             f.fill(&mut registry, now);
         }
@@ -391,6 +405,7 @@ pub fn next_due_after(now: Instant, interval: Duration) -> Instant {
 
 #[cfg(test)]
 mod tests {
+    use ix_trace_rs::trace;
     use std::collections::BTreeMap;
 
     use relay_core::config::{
@@ -460,7 +475,10 @@ mod tests {
     /// code, the catalogue and the spec agree.
     ///
     /// Tracing: TC-045-11
-    /// ACs: FR-045-AC-11
+    ///
+    /// Caveat: the spec series in `NOT_YET_EXPORTED` below are not exported yet (SWM-205,
+    /// SWM-207), so this holds for the exported catalogue until that list is empty.
+    #[trace("FR-045-AC-11")]
     #[test]
     fn tc_045_11_the_exported_series_are_the_catalogue_and_the_catalogue_is_the_spec() {
         let (mut p, _rx) = publisher();

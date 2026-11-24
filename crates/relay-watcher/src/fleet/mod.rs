@@ -961,7 +961,7 @@ mod tests {
 
     /// A class that is a scan interval old, or any class while `pane_tail` reads 0,
     /// is not exported as current.
-    #[trace("FR-070-AC-4")]
+    #[trace("FR-070-AC-10")]
     #[test]
     fn tc_070_10_a_stale_pane_class_or_an_unhealthy_pane_tail_exports_no_blocked_value() {
         let (mut c, now) = healthy(Profile::default(), None);

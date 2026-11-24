@@ -31,3 +31,19 @@ Stubs: the deliberate `#[allow(dead_code)]` seams (`hook_feed_attached`, `set_ho
 | FND-001 | high | FR-070-AC-6 ("with the watcher running and Redis down, redis is 0 and the other sources still report") is tagged on TC-070-06, which only exercises the collector in isolation; the watcher pushes nothing when Redis is down (see SR-1868 FND-001). | crates/relay-watcher/src/fleet/mod.rs:735-746 |
 | FND-002 | medium | FR-070-AC-5 is tagged on TC-070-05, which covers only the log line; the heartbeat and doctor halves (naming the failed source, `collector_source_failed`) are not implemented. FR-045-AC-31's doctor `fleet_lanes_dropped` half is likewise absent. Both read as covered in a tag scan. | crates/relay-watcher/src/fleet/health.rs:238-260; crates/relay-watcher/src/fleet/mod.rs:917-937 |
 | FND-003 | medium | The deferred criteria (FR-069-AC-5, AC-6, AC-13, FR-070-AC-9, the heartbeat/doctor halves of FR-070-AC-5 and FR-045-AC-31, and the NOT_YET_EXPORTED series) are listed as "seams" in the ticket comment with no follow-up ticket ids, so nothing tracks them to closure. | crates/relay-watcher/src/fleet/mod.rs:10-13; crates/relay-watcher/src/otlp/mod.rs:482-492 |
+
+## Dispositions
+
+Round 1, fix head `d0f29dd11bac99e10da4f87414e9b48b3c01a472`. The tests now use `#[trace(...)]`, and `quoin matrix` now binds them (89 tagged repo-wide, up from 69). FR-069-AC-1/2/3/4/7/8/9/11/12/14/16 and FR-070-AC-1..8 are `tagged`, and FR-045-AC-31 too.
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | FR-070-AC-6 is now bound to the watcher-level test `main.rs` `tc_070_06_a_watcher_with_redis_down_still_pushes_redis_0_and_the_other_sources`, which steps the supervisor against an unreachable Redis and decodes the pushed body. |
+| FND-002 | fixed | The heartbeat carries `fleet_failed_sources` and `fleet_lanes_dropped` (liveness.rs tc_070_05), and doctor warns `collector_source_failed` and `fleet_lanes_dropped` (checks.rs tc_070_05, bound to FR-070-AC-5 and FR-045-AC-31). The FR-029 table lists both codes. The new heartbeat fields are `serde(default)` and skipped when empty, and `WatcherHeartbeat` has no `deny_unknown_fields`, so old and new watchers and doctors read each other. |
+| FND-003 | fixed | Each NOT_YET_EXPORTED entry names its ticket (SWM-205 for no_events, compile_seconds and the attribution behind FR-069-AC-5/6/13, focus_info, config and activity_skipped; SWM-207 for the order series). |
+
+## New findings (disposition pass 1)
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-004 | low | `tc_045_11` still uses the `/// ACs: FR-045-AC-11` doc tag, so `quoin matrix` reports FR-045-AC-11 `untagged` although this PR changed the test and converted every other tag it touched. | crates/relay-watcher/src/otlp/mod.rs:460-465 |
