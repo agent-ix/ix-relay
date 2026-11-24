@@ -394,7 +394,7 @@ fn refresh_fleet(
             true,
         ),
         Err(_) => (
-            fleet::CapacityRead::Failed(fleet::health::ErrorClass::Unreadable),
+            fleet::CapacityRead::Failed(host_probe::ErrorClass::Unreadable),
             false,
         ),
     };
@@ -409,7 +409,7 @@ fn refresh_fleet(
                 .collect();
             let keys: Vec<relay_core::Address> = lanes.iter().map(|(_, k)| k.clone()).collect();
             relay
-                .activity_last_many(&keys, fleet::bound::SOURCE_BUDGET)
+                .activity_last_many(&keys, host_probe::bound::SOURCE_BUDGET)
                 .map(|records| {
                     lanes
                         .into_iter()
@@ -420,13 +420,13 @@ fn refresh_fleet(
                 .map(|records| (list.refreshed_ms, records))
                 .map_err(|e| {
                     if e.is_timeout() {
-                        fleet::health::ErrorClass::Timeout
+                        host_probe::ErrorClass::Timeout
                     } else {
-                        fleet::health::ErrorClass::Unreadable
+                        host_probe::ErrorClass::Unreadable
                     }
                 })
         }
-        Err(_) => Err(fleet::health::ErrorClass::Unreadable),
+        Err(_) => Err(host_probe::ErrorClass::Unreadable),
     };
     let activity_ok = activity.is_ok();
     collector.set_activity(Instant::now(), activity, log);
@@ -480,7 +480,7 @@ fn refresh_places(
         Err(e) => {
             if let Some(collector) = &mut state.fleet {
                 collector.set_herdr(
-                    fleet::health::Outcome::Failed(fleet::health::ErrorClass::Unreadable),
+                    fleet::health::Outcome::Failed(host_probe::ErrorClass::Unreadable),
                     log,
                 );
             }

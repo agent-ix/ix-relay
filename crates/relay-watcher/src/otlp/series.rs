@@ -216,6 +216,11 @@ fleet_gauge!(
     "Highest CPU package or Tctl temperature; absent unless the host profile expects it and it reads."
 );
 fleet_gauge!(
+    /// `ix.fleet.host.pressure`: Linux PSI stall percentage.
+    FLEET_PRESSURE, "ix.fleet.host.pressure", "%",
+    "Share of the last 10 or 60 seconds tasks stalled on cpu, io or memory (Linux PSI), by resource and kind; absent unless the pressure source reads."
+);
+fleet_gauge!(
     /// `ix.fleet.host.capacity_slots`.
     FLEET_CAPACITY_SLOTS, "ix.fleet.host.capacity_slots", "{slot}",
     "Operator-entered capacity slots; absent when none is entered."
@@ -288,6 +293,7 @@ pub(crate) const CATALOGUE: &[(&Instrument, &[&str])] = &[
     (&FLEET_MEMORY_USED, &["host"]),
     (&FLEET_MEMORY_TOTAL, &["host"]),
     (&FLEET_TEMPERATURE, &["host"]),
+    (&FLEET_PRESSURE, &["host", "resource", "kind"]),
     (&FLEET_CAPACITY_SLOTS, &["host"]),
     (&FLEET_CAPACITY_CONFIGURED, &["host"]),
     (&FLEET_NATIVE_WINDOWS, &["host"]),

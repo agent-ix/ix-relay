@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 #[cfg(any(target_os = "linux", test))]
 use std::{fs, path::Path};
 
-use super::health::ErrorClass;
+use crate::ErrorClass;
 
 /// The shortest interval between two CPU samples that yields a ratio.
 pub const MIN_CPU_INTERVAL: Duration = Duration::from_secs(1);
@@ -185,7 +185,7 @@ pub fn read_cpu_ticks() -> Result<CpuTicks, ErrorClass> {
     }
     #[cfg(target_os = "macos")]
     {
-        super::mac::cpu_ticks()
+        crate::mac::cpu_ticks()
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -206,7 +206,7 @@ pub fn read_memory() -> Result<Memory, ErrorClass> {
     }
     #[cfg(target_os = "macos")]
     {
-        super::mac::memory()
+        crate::mac::memory()
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -278,7 +278,7 @@ mod tests {
         assert!(ticks.busy + ticks.idle > 0);
         let m = read_memory().unwrap();
         assert!(m.total > 0 && m.used <= m.total);
-        assert!(!crate::fleet::mac::processes(&|_| true).unwrap().is_empty());
+        assert!(!crate::mac::processes(&|_| true).unwrap().is_empty());
     }
 
     #[test]

@@ -208,6 +208,7 @@ exports.
 | `ix.fleet.host.memory_used_bytes` | gauge | `By` | host | Memory in use on the host (total minus available); absent when its source fails. |
 | `ix.fleet.host.memory_total_bytes` | gauge | `By` | host | Total memory of the host; absent when its source fails. |
 | `ix.fleet.host.temperature` | gauge | `Cel` | host | Highest CPU package or `Tctl` temperature in degrees Celsius; present only where the host profile expects `temperature` and it reads. |
+| `ix.fleet.host.pressure` | gauge | `%` | host, resource, kind | Linux pressure stall percentage over the last 10 or 60 seconds: `resource` is `cpu`, `io` or `memory`, `kind` is `some_avg10`, `some_avg60`, `full_avg10` or `full_avg60` (the `full` kinds are absent where the kernel gives no `full` line). Present only where the `pressure` source reads; off Linux the source is unavailable. |
 | `ix.fleet.host.capacity_slots` | gauge | `{slot}` | host | Operator-entered capacity slots ([FR-058](./FR-058-explicit-server-capacity.md)); absent when none is entered. |
 | `ix.fleet.host.capacity_configured` | gauge | `1` | host | 1 when capacity is entered, 0 otherwise; always exported. |
 | `ix.fleet.host.native_windows_agents` | gauge | `{process}` | host | On a WSL host, native Windows agent, herdr or build processes seen; nonzero is a defect. |

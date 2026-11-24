@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use ix_trace_rs::trace;
 
-use super::{feed::Windows, fixtures::*, procs::Compiler, *};
+use super::{feed::Windows, fixtures::*, *};
 use crate::otlp::registry::Value;
 
 const MIN: i64 = 60;

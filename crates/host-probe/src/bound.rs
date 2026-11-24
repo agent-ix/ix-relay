@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use super::health::ErrorClass;
+use crate::ErrorClass;
 
 /// How long one source may delay a tick.
 pub const SOURCE_BUDGET: Duration = Duration::from_millis(500);
@@ -50,7 +50,7 @@ impl Slot {
         let release = Release(Arc::clone(&self.busy));
         let (tx, rx) = mpsc::channel();
         thread::Builder::new()
-            .name("fleet-source".into())
+            .name("host-probe-source".into())
             .spawn(move || {
                 // The slot frees before the result is sent, so a caller that sees the
                 // result can start the next read at once.
