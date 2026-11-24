@@ -46,3 +46,4 @@ PASS with low findings: wording fixes only, none blocks merge.
 | FND-001 | fixed | The relay-watcher SHALL record the order-level `AckExpired` receipt; quire no longer flags the line. |
 | FND-002 | fixed | The watcher SHALL export `ix_fleet_probe_ok` for every expected source on every push; the agentless passive is gone. |
 | FND-003 | fixed | NFR-001 activity paragraph split into four EARS statements, each with the hook handler as subject. |
+| FND-004 | fixed | FR-072 stale-host rule split into three single-SHALL statements; quire no longer flags ears:non-singular. |

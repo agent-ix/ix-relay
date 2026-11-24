@@ -70,3 +70,4 @@ CHANGES REQUESTED. FND-001 and FND-002 contradict the purpose of W1 (missing dat
 | FND-009 | fixed | No folding: `ix.fleet.lane.dropped` plus the doctor warning `fleet_lanes_dropped` (FR-045-AC-31). |
 | FND-010 | fixed | FR-070 and the FR-045 no_events row count a lane only when its last known state is non-idle (open pre_tool, herdr working, prompt with no later stop) and it is silent past no_events_after; stop/idle/session_end lanes are quiet; FR-070-AC-9 tests all three cases. |
 | FND-011 | fixed | FR-072 states the role check guards against accidental lane writes and is not authentication. |
+| FND-012 | fixed | FR-070 now reads hook_events 0 only when at least one lane was non-idle and every such lane is unhealthy; a host of quiet lanes is not flagged, matching FR-070-AC-9. |
