@@ -45,3 +45,9 @@ Round 1, fix head `0e986124f43fb7125e9689b30e00100bd30dc2db`. `quoin matrix --js
 | FND-001 | fixed | Taken the second way the finding offered: the FR-071-AC-10 tag stays on the receipt-export half, and orders.rs now states above the test that AC-10 is met only with its `focus_info` half (SWM-205). |
 | FND-002 | fixed | `an_idle_tick_is_three_requests_and_no_herdr_call` carries `#[trace("FR-038-AC-5", "FR-071-AC-9")]`; the matrix reports FR-071-AC-9 tagged. |
 | FND-003 | fixed | `an_event_of_the_same_session_id_on_another_machine_does_not_act` (tagged FR-067-AC-10) sends the same session id from another machine and asserts no Acted. |
+
+## New findings (disposition pass 2)
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-004 | low | `tc_045_35_a_failed_order_read_leaves_every_order_series_out_not_at_zero` is traced to FR-045-AC-11 (the catalogue equals the series table), which it does not test. No FR-045 AC states that a failed order read leaves the order series out, so the rule exists only in prose. The test is also a doc-comment tag, which the matrix does not read. | crates/relay-watcher/src/otlp/relay.rs:425-444 |

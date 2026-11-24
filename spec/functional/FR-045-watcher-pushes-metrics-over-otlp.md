@@ -304,6 +304,7 @@ acknowledgement needs a send time per message that the watcher does not keep), a
 | FR-045-AC-32 | Given `[fleet]` settings, `ix.fleet.config` reports the configured working window (default 10 minutes), `no_events_after` and `max_tool_runtime` (default 2 hours), and the lane state rules use those values and no other. | Test |
 | FR-045-AC-33 | Given a compiler process attributed to a lane across 90 seconds of fixture ticks, `ix.fleet.lane.compile_seconds` for that lane rises by 90 seconds and never decreases. | Test |
 | FR-045-AC-34 | Given orders whose escalation failed three times, a push shows `ix.relay.orders.escalation_failed` equal to the number of such orders whose recipient lane is on the pushing host, `0` when there are none, and none for orders of another host. | Test |
+| FR-045-AC-35 | Given a failed read of the order metrics, a push exports none of `ix.relay.orders.unacted`, `ix.relay.orders.escalation_failed` and `ix.relay.order.act_latency`, and the failure is counted under `health_snapshot.read_failures`. | Test |
 
 ## Dependencies
 

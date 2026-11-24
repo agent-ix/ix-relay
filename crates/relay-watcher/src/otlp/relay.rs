@@ -423,7 +423,8 @@ mod tests {
     }
 
     /// Tracing: TC-045-35
-    /// ACs: FR-045-AC-11
+    /// ACs: FR-045-AC-35
+    #[ix_trace_rs::trace("FR-045-AC-35")]
     #[test]
     fn tc_045_35_a_failed_order_read_leaves_every_order_series_out_not_at_zero() {
         // No successful read of the order metrics: nothing is claimed about orders.
