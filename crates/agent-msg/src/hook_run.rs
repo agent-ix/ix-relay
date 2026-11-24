@@ -78,11 +78,13 @@ use std::{
 use serde::Deserialize;
 
 use relay_core::{
-    AddressBook, AgentName, BatchId, BudgetPopResult, Claim, CommitOutcome, HookHealthEntry,
-    IdentityCommit, MachineName, Message, Popper, Relay, SessionId, SessionProbe,
+    ActivityEvent, AddressBook, AgentName, BatchId, BudgetPopResult, Claim, CommitOutcome,
+    HookHealthEntry, IdentityCommit, MachineName, Message, Popper, Relay, SessionId, SessionProbe,
 };
 
 use crate::{
+    activity::{self, BRANCH_READ_LIMIT},
+    activity_state::ActivityState,
     budget::{Budget, Clock},
     hook::{self, Event, HOOK_BATCH, HookInput},
     identity::{self, Derived, HookIdentity, HookRequest, IdentityError},
@@ -179,8 +181,10 @@ const FLUSH_CHUNK: usize = 200;
 pub(crate) fn hook_deadline_budget(event: Event) -> Duration {
     match event {
         Event::SessionStart => identity::SESSION_START_HERDR_BUDGET + HOOK_TIMEOUT,
-        Event::UserPromptSubmit => HOOK_TIMEOUT,
-        Event::PostToolUse | Event::Stop => identity::LAZY_HERDR_BUDGET + HOOK_TIMEOUT,
+        Event::UserPromptSubmit | Event::PreToolUse => HOOK_TIMEOUT,
+        Event::PostToolUse | Event::Stop | Event::Notification | Event::SessionEnd => {
+            identity::LAZY_HERDR_BUDGET + HOOK_TIMEOUT
+        }
     }
 }
 
@@ -220,6 +224,13 @@ pub(crate) trait Bus {
     fn address_book(&mut self) -> AddressBook;
     /// Appends spool records to the `health:hooks` stream.
     fn push_hook_health(&mut self, entries: &[HookHealthEntry]) -> relay_core::Result<()>;
+    /// Writes one activity event for `lead` in one request. `false` when the
+    /// lead has no lane address and nothing was written.
+    fn record_activity(
+        &mut self,
+        lead: &AgentName,
+        event: &ActivityEvent,
+    ) -> relay_core::Result<bool>;
 }
 
 /// The real [`Bus`]: a [`Relay`] connection and this machine's name.
@@ -300,12 +311,24 @@ impl Bus for RelayBus {
     fn push_hook_health(&mut self, entries: &[HookHealthEntry]) -> relay_core::Result<()> {
         self.relay.push_hook_health(entries).map(drop)
     }
+
+    fn record_activity(
+        &mut self,
+        lead: &AgentName,
+        event: &ActivityEvent,
+    ) -> relay_core::Result<bool> {
+        self.relay.record_activity(lead, event)
+    }
 }
 
 /// What a hook call was invoked with, apart from stdin.
 pub(crate) struct HookCtx<'a> {
     /// This machine's bus name.
     pub(crate) machine: &'a MachineName,
+    /// The harness this hook was registered by (`agent-msg hook <kind>`).
+    pub(crate) harness: relay_core::Harness,
+    /// The local activity backoff and counts; `None` when there is no config directory.
+    pub(crate) activity: Option<&'a ActivityState>,
 }
 
 /// Everything that can fail in a hook call. One value is one failure, and one
@@ -405,6 +428,12 @@ pub(crate) enum HookError {
         /// How many rows.
         stuck: usize,
     },
+    /// Writing the activity event failed. The event was dropped.
+    #[error("could not write the activity event: {0}")]
+    Activity(#[source] relay_core::Error),
+    /// The budget was spent before the activity event could be written.
+    #[error("hook time budget exhausted before writing the activity event")]
+    ActivityBudget,
     /// The hook panicked.
     #[error("the hook panicked")]
     Panicked,
@@ -426,6 +455,7 @@ impl HookError {
             Self::RequeueFailed { .. } => Stage::RequeueFailed,
             Self::AckFailed { .. } | Self::AckStale => Stage::Ack,
             Self::InflightFull { .. } | Self::DeadLetterUnusable { .. } => Stage::Pop,
+            Self::Activity(_) | Self::ActivityBudget => Stage::Activity,
             Self::Panicked => Stage::Panic,
         }
     }
@@ -438,6 +468,8 @@ impl HookError {
             Self::InputTooLarge => ErrorKind::TooLarge,
             Self::InputTimeout => ErrorKind::StdinTimeout,
             Self::BudgetExhausted { .. } => ErrorKind::BudgetExhausted,
+            Self::Activity(e) => ErrorKind::of(e),
+            Self::ActivityBudget => ErrorKind::BudgetExhausted,
             Self::Connect(e) | Self::Derive(e) | Self::Register(e) | Self::Pop(e) => {
                 ErrorKind::of(e)
             }
@@ -471,6 +503,8 @@ impl HookError {
             | Self::AckStale
             | Self::InflightFull { .. }
             | Self::DeadLetterUnusable { .. }
+            | Self::Activity(_)
+            | Self::ActivityBudget
             | Self::Panicked => None,
         }
     }
@@ -494,6 +528,8 @@ impl HookError {
             | Self::AckStale
             | Self::InflightFull { .. }
             | Self::DeadLetterUnusable { .. }
+            | Self::Activity(_)
+            | Self::ActivityBudget
             | Self::Panicked => &[],
         }
     }
@@ -671,6 +707,13 @@ fn try_run<B: Bus>(
     if input.agent_id.is_some() {
         return Ok(());
     }
+    // The activity event this payload yields, if any. An activity-only call
+    // that yields none (a notification of another type) ends here, before any
+    // connection is made.
+    let pending_activity = activity::from_input(event, &input, _cx.harness, clock.now_ms());
+    if pending_activity.is_none() && !event.delivers_mail() {
+        return Ok(());
+    }
 
     // One budget for this *entire* hook call — connect, an optional identity
     // derivation, an optional register, and the pop each get whatever is left
@@ -748,6 +791,39 @@ fn try_run<B: Bus>(
         apply(&mut bus, &budget, &commit, rec)?;
     }
 
+    let mail = if event.delivers_mail() {
+        deliver_mail(&mut bus, &budget, event, (rtt, sampled), &name, rec, out)
+    } else {
+        Ok(())
+    };
+    // Telemetry goes last, with only the time mail left over (NFR-001), and its
+    // failure never reaches the turn.
+    if let Some(mut activity) = pending_activity {
+        emit_activity(
+            &mut bus,
+            (clock, &budget),
+            _cx.activity,
+            &name,
+            &mut activity,
+            rec,
+        );
+    }
+    mail?;
+    flush_health(&mut bus, &budget, rec);
+    Ok(())
+}
+
+/// Pops the lead's inbox and prints what the agent should see: the mail half of
+/// a hook call, for the events that deliver mail.
+fn deliver_mail<B: Bus>(
+    bus: &mut B,
+    budget: &Budget<'_>,
+    event: Event,
+    (rtt, sampled): (Duration, bool),
+    name: &AgentName,
+    rec: &mut Recorder<'_>,
+    out: &mut dyn Write,
+) -> Result<(), HookError> {
     let window = if sampled {
         pop_window(rtt)
     } else {
@@ -759,7 +835,10 @@ fn try_run<B: Bus>(
         // flood the health stream and cost every later hook a flush. Anywhere
         // else delivery really is delayed, so it is recorded.
         return match event {
-            Event::UserPromptSubmit => Ok(()),
+            Event::UserPromptSubmit
+            | Event::PreToolUse
+            | Event::Notification
+            | Event::SessionEnd => Ok(()),
             Event::SessionStart | Event::PostToolUse | Event::Stop => {
                 Err(HookError::BudgetExhausted {
                     step: "popping the inbox",
@@ -768,7 +847,7 @@ fn try_run<B: Bus>(
         };
     };
     bus.set_timeout(left).map_err(HookError::Pop)?;
-    let popped = bus.pop_inbox(&name).map_err(HookError::Pop)?;
+    let popped = bus.pop_inbox(name).map_err(HookError::Pop)?;
     for e in &popped.rejected {
         rec.note(
             Stage::Decode,
@@ -820,9 +899,9 @@ fn try_run<B: Bus>(
             Ok(bytes) => bytes,
             Err(e) => {
                 return Err(recover(
-                    &mut bus,
-                    &budget,
-                    &name,
+                    bus,
+                    budget,
+                    name,
                     batch,
                     popped.messages,
                     HookError::Encode(e),
@@ -831,9 +910,9 @@ fn try_run<B: Bus>(
         };
         if let Err(e) = out.write_all(&bytes).and_then(|()| out.flush()) {
             return Err(recover(
-                &mut bus,
-                &budget,
-                &name,
+                bus,
+                budget,
+                name,
                 batch,
                 popped.messages,
                 HookError::Output(e),
@@ -841,11 +920,57 @@ fn try_run<B: Bus>(
         }
     }
     if let Some(batch) = batch {
-        acknowledge(&mut bus, &budget, &name, batch, rec);
+        acknowledge(bus, budget, name, batch, rec);
     }
 
-    flush_health(&mut bus, &budget, rec);
     Ok(())
+}
+
+/// Writes the activity event of this call after the mail work, with whatever
+/// budget is left, and never fails the hook: a write that cannot happen is one
+/// dropped event, recorded once under stage `activity` (FR-068). Dropped events
+/// are not spooled for replay, because a replay would report stale activity as
+/// fresh. After a failure the state file holds a backoff that skips later
+/// writes (and counts them) so an outage does not cost every tool call the
+/// write's time.
+fn emit_activity<B: Bus>(
+    bus: &mut B,
+    (clock, budget): (&dyn Clock, &Budget<'_>),
+    state: Option<&ActivityState>,
+    name: &AgentName,
+    event: &mut ActivityEvent,
+    rec: &mut Recorder<'_>,
+) {
+    if state.is_some_and(|s| s.skip(clock.now_ms())) {
+        return;
+    }
+    let failed = |rec: &mut Recorder<'_>, error: HookError| {
+        rec.record(&error);
+        if let Some(state) = state {
+            state.failed(clock.now_ms());
+        }
+    };
+    let Some(left) = budget.remaining() else {
+        failed(rec, HookError::ActivityBudget);
+        return;
+    };
+    // The branch read is part of the write's time and ends when the budget does.
+    event.branch = activity::branch_within(&event.cwd, BRANCH_READ_LIMIT.min(left));
+    let Some(left) = budget.remaining() else {
+        failed(rec, HookError::ActivityBudget);
+        return;
+    };
+    match bus
+        .set_timeout(left)
+        .and_then(|()| bus.record_activity(name, event))
+    {
+        Ok(_) => {
+            if let Some(state) = state {
+                state.succeeded();
+            }
+        }
+        Err(e) => failed(rec, HookError::Activity(e)),
+    }
 }
 
 /// herdr could not name the session. The first failure of a session in a window

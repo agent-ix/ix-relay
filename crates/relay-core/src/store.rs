@@ -58,6 +58,7 @@ const SESSION_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 /// This never stops session verification or enrollment.
 pub const HERDR_FAILED_TTL_SECS: u64 = 300;
 
+mod activity;
 mod commit;
 mod directory;
 mod fleet;

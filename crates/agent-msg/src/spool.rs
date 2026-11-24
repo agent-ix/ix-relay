@@ -113,6 +113,8 @@ pub(crate) enum Stage {
     /// the batch stays in flight and is delivered again, marked, when its lease
     /// expires.
     Ack,
+    /// Writing the activity event (FR-068). The event was dropped, never replayed.
+    Activity,
     /// The hook panicked. It still exited 0.
     Panic,
     /// A stage a newer binary wrote that this one does not know (see

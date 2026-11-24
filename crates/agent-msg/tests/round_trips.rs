@@ -330,8 +330,8 @@ fn tc_018_06_a_derived_name_user_prompt_submit_reaches_the_pop_in_three_requests
     assert!(stdout.contains("message 0"), "stdout: {stdout}");
     assert_eq!(before, 1, "cached genuine session lookup before the pop");
     assert_eq!(
-        total, 4,
-        "requests in all: the pop, the address book and (AGE-2032) the acknowledgement follow"
+        total, 5,
+        "requests in all: the pop, the address book, (AGE-2032) the acknowledgement and (FR-068) the one activity write follow"
     );
 }
 
@@ -348,8 +348,8 @@ fn tc_018_06_an_explicit_name_user_prompt_submit_reaches_the_pop_in_two_requests
     assert!(stdout.contains("message 0"), "stdout: {stdout}");
     assert_eq!(before, 1, "cached genuine session lookup before the pop");
     assert_eq!(
-        total, 4,
-        "requests in all: the pop, the address book and (AGE-2032) the acknowledgement follow"
+        total, 5,
+        "requests in all: the pop, the address book, (AGE-2032) the acknowledgement and (FR-068) the one activity write follow"
     );
 }
 
@@ -370,7 +370,7 @@ fn tc_018_07_post_tool_use_costs_one_read_then_the_pop() {
     };
     assert_eq!(
         (before, total),
-        (1, 2),
-        "environment metadata does not bypass session lookup"
+        (1, 3),
+        "environment metadata does not bypass session lookup; the pop and the one activity write follow"
     );
 }
