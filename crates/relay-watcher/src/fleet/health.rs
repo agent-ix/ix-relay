@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use host_probe::ErrorClass;
 use relay_core::config::FleetFile;
 
 /// A collector source. The set is fixed by FR-070.
@@ -12,6 +13,8 @@ pub enum Source {
     Cpu,
     /// Memory used and total.
     Memory,
+    /// Linux pressure stall information (CPU, IO, memory).
+    Pressure,
     /// Hardware temperature.
     Temperature,
     /// Operator-entered server capacity.
@@ -32,9 +35,10 @@ pub enum Source {
 
 impl Source {
     /// Every source, in the order FR-070 lists them.
-    pub const ALL: [Source; 10] = [
+    pub const ALL: [Source; 11] = [
         Source::Cpu,
         Source::Memory,
+        Source::Pressure,
         Source::Temperature,
         Source::Capacity,
         Source::Compilers,
@@ -51,6 +55,7 @@ impl Source {
         match self {
             Source::Cpu => "cpu",
             Source::Memory => "memory",
+            Source::Pressure => "pressure",
             Source::Temperature => "temperature",
             Source::Capacity => "capacity",
             Source::Compilers => "compilers",
@@ -66,39 +71,6 @@ impl Source {
     #[must_use]
     pub fn parse(name: &str) -> Option<Source> {
         Source::ALL.into_iter().find(|s| s.name() == name)
-    }
-}
-
-/// Why a read failed: the fixed set the log line may name, never content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorClass {
-    /// The read ran past its budget.
-    Timeout,
-    /// A file or call could not be read.
-    Unreadable,
-    /// This platform has no way to read it.
-    Unsupported,
-    /// What was read did not parse.
-    #[cfg_attr(
-        not(any(target_os = "linux", test)),
-        allow(dead_code, reason = "only the Linux readers parse text")
-    )]
-    Parse,
-    /// The thing to read is not there.
-    Unavailable,
-}
-
-impl ErrorClass {
-    /// The class as logged.
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            ErrorClass::Timeout => "timeout",
-            ErrorClass::Unreadable => "unreadable",
-            ErrorClass::Unsupported => "unsupported",
-            ErrorClass::Parse => "parse",
-            ErrorClass::Unavailable => "unavailable",
-        }
     }
 }
 
@@ -121,12 +93,16 @@ pub struct Profile {
 }
 
 impl Default for Profile {
-    /// Every source except `temperature` expected, none unavailable.
+    /// Every source except `temperature` expected, none unavailable; `pressure`
+    /// is expected only where the build target is Linux (the only PSI platform).
     fn default() -> Self {
         Self {
             expected: Source::ALL
                 .into_iter()
-                .filter(|s| *s != Source::Temperature)
+                .filter(|s| {
+                    *s != Source::Temperature
+                        && (*s != Source::Pressure || cfg!(target_os = "linux"))
+                })
                 .collect(),
             unavailable: BTreeSet::new(),
         }
@@ -216,6 +192,12 @@ impl Health {
         }
     }
 
+    /// Forgets the last outcome of `source`: the host cannot provide it, so it is
+    /// neither ok nor failed.
+    pub fn clear(&mut self, source: Source) {
+        self.last.remove(&source);
+    }
+
     /// Whether the last read of `source` succeeded; false for one never read.
     #[must_use]
     pub fn ok(&self, source: Source) -> bool {
@@ -268,9 +250,14 @@ mod tests {
     fn tc_070_01_the_default_profile_expects_every_source_but_temperature() {
         let p = Profile::default();
         for s in Source::ALL {
-            assert_eq!(p.expects(s), s != Source::Temperature, "{}", s.name());
+            assert_eq!(
+                p.expects(s),
+                s != Source::Temperature && (s != Source::Pressure || cfg!(target_os = "linux")),
+                "{}",
+                s.name()
+            );
         }
-        assert_eq!(Source::ALL.map(Source::name).len(), 10);
+        assert_eq!(Source::ALL.map(Source::name).len(), 11);
         assert!(Source::parse("pane_tail").is_some());
         assert!(Source::parse("gpu").is_none());
     }

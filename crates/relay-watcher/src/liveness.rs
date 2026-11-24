@@ -506,7 +506,7 @@ mod tests {
             crate::fleet::health::Profile::default(),
             crate::fleet::fixtures::sources(Some((
                 crate::fleet::health::Source::Cpu,
-                crate::fleet::health::ErrorClass::Unreadable,
+                host_probe::ErrorClass::Unreadable,
             ))),
             crate::fleet::fixtures::INTERVAL,
         );

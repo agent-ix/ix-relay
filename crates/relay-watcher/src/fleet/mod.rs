@@ -3,7 +3,7 @@
 //! The collector measures this host natively (no shell, no ssh), keeps the
 //! lane registry of the host, classifies each lane's pane tail, and fills the
 //! `ix.fleet.*` series of FR-045 for the push. Every source runs under its own
-//! time budget ([`bound`]) and reports its own health ([`health`]): a failing
+//! time budget ([`host_probe::bound`]) and reports its own health ([`health`]): a failing
 //! source exports `probe_ok` 0 and leaves its measured series out, never an old
 //! value, never an absent `probe_ok`.
 //!
@@ -11,13 +11,9 @@
 //! its state, the `hook_events` health, the compiler attribution and the focus
 //! info, all by the rules of [`feed`] and [`lanes`].
 
-pub mod bound;
 pub mod feed;
 pub mod health;
-pub mod host;
 pub mod lanes;
-#[cfg(target_os = "macos")]
-mod mac;
 pub mod pane;
 pub mod procs;
 
@@ -27,16 +23,20 @@ use std::{
     time::{Duration, Instant},
 };
 
+use host_probe::{
+    ErrorClass,
+    bound::{SOURCE_BUDGET, Slot},
+    host::{self, CpuSampler, CpuTicks, Memory},
+    pressure::{self, PressureSet, Resource},
+    procs::Compiler,
+};
 use relay_core::{MachineName, PaneId};
 
 use self::{
-    bound::{SOURCE_BUDGET, Slot},
     feed::{HookCounts, LaneActivity, Tickets, Windows},
-    health::{ErrorClass, Health, Outcome, Profile, Source},
-    host::{CpuSampler, CpuTicks, Memory},
+    health::{Health, Outcome, Profile, Source},
     lanes::{Lane, MAX_LANES, Signals},
     pane::{Harness, PaneClass},
-    procs::Compiler,
 };
 use crate::otlp::{
     registry::{Attrs, Registry},
@@ -44,8 +44,8 @@ use crate::otlp::{
         FLEET_BUSY_RATIO, FLEET_CAPACITY_CONFIGURED, FLEET_CAPACITY_SLOTS, FLEET_CONFIG,
         FLEET_LANE_BLOCKED, FLEET_LANE_COMPILE_SECONDS, FLEET_LANE_DROPPED, FLEET_LANE_FOCUS_INFO,
         FLEET_LANE_LAST_ACTIVITY, FLEET_LANE_NO_EVENTS, FLEET_LANE_STATE, FLEET_MEMORY_TOTAL,
-        FLEET_MEMORY_USED, FLEET_NATIVE_WINDOWS, FLEET_PROBE_OK, FLEET_PROBE_UNAVAILABLE,
-        FLEET_TEMPERATURE, HOOK_ACTIVITY_SKIPPED,
+        FLEET_MEMORY_USED, FLEET_NATIVE_WINDOWS, FLEET_PRESSURE, FLEET_PROBE_OK,
+        FLEET_PROBE_UNAVAILABLE, FLEET_TEMPERATURE, HOOK_ACTIVITY_SKIPPED,
     },
 };
 
@@ -71,6 +71,8 @@ pub struct Sources {
     pub memory: Read<Memory>,
     /// Temperature in degrees Celsius.
     pub temperature: Read<f64>,
+    /// Linux pressure stall information; unsupported elsewhere.
+    pub pressure: Read<PressureSet>,
     /// Compiler processes.
     pub compilers: Read<Vec<Compiler>>,
     /// Native Windows agent processes; `None` off WSL.
@@ -89,7 +91,10 @@ impl Sources {
             cpu: Arc::new(host::read_cpu_ticks),
             memory: Arc::new(host::read_memory),
             temperature: Arc::new(host::read_temperature),
-            compilers: Arc::new(|| procs::read_compilers(procs::DEFAULT_COMPILERS)),
+            pressure: Arc::new(pressure::read_pressure),
+            compilers: Arc::new(|| {
+                host_probe::procs::read_compilers(host_probe::procs::DEFAULT_COMPILERS)
+            }),
             native_windows: (cfg!(target_os = "linux") && procs::is_wsl())
                 .then(|| Arc::new(procs::read_native_windows) as Read<usize>),
             hook_counts: Arc::new(read_native_hook_counts),
@@ -182,6 +187,8 @@ pub struct Collector {
     ratio: Option<f64>,
     memory: Option<Memory>,
     temperature: Option<f64>,
+    pressure: Option<PressureSet>,
+    pressure_unsupported: bool,
     compilers: Vec<Compiler>,
     native_windows: Option<usize>,
     capacity: CapacityRead,
@@ -262,6 +269,8 @@ impl Collector {
             ratio: None,
             memory: None,
             temperature: None,
+            pressure: None,
+            pressure_unsupported: false,
             compilers: Vec::new(),
             native_windows: None,
             capacity: CapacityRead::Unread,
@@ -549,6 +558,22 @@ impl Collector {
                 log,
             );
         }
+        if self.profile.expects(Source::Pressure) {
+            let got = self.bounded(Source::Pressure, &self.sources.pressure.clone());
+            self.pressure = got.ok();
+            // A platform or kernel without PSI is unavailable, not a failed read.
+            self.pressure_unsupported = got == Err(ErrorClass::Unsupported);
+            if self.pressure_unsupported {
+                self.health.clear(Source::Pressure);
+                self.publish_status();
+            } else {
+                self.record(
+                    Source::Pressure,
+                    got.map_or_else(Outcome::Failed, |_| Outcome::Ok),
+                    log,
+                );
+            }
+        }
         if self.profile.expects(Source::Compilers) {
             let got = self.bounded(Source::Compilers, &self.sources.compilers.clone());
             let outcome = got
@@ -680,7 +705,9 @@ impl Collector {
                     .with("host", host)
                     .with("source", source.name())
             };
-            if self.profile.expects(source) {
+            if self.profile.expects(source)
+                && !(source == Source::Pressure && self.pressure_unsupported)
+            {
                 registry.gauge(&FLEET_PROBE_OK, attrs(), i64::from(self.health.ok(source)));
             } else {
                 // Not expected, or declared absent: unavailable, never a failure.
@@ -703,6 +730,27 @@ impl Collector {
             && let Some(t) = self.temperature
         {
             registry.gauge_f64(&FLEET_TEMPERATURE, host_attr(), t);
+        }
+        if self.profile.expects(Source::Pressure)
+            && self.health.ok(Source::Pressure)
+            && let Some(set) = self.pressure
+        {
+            for resource in Resource::ALL {
+                let p = set.get(resource);
+                let mut put = |kind: &str, value: f64| {
+                    let attrs = Attrs::new()
+                        .with("host", host)
+                        .with("resource", resource.name())
+                        .with("kind", kind);
+                    registry.gauge_f64(&FLEET_PRESSURE, attrs, value);
+                };
+                put("some_avg10", p.some.avg10);
+                put("some_avg60", p.some.avg60);
+                if let Some(full) = p.full {
+                    put("full_avg10", full.avg10);
+                    put("full_avg60", full.avg60);
+                }
+            }
         }
         match self.capacity {
             CapacityRead::Slots(n) => {
@@ -846,6 +894,7 @@ pub(crate) mod fixtures {
                 fail(Source::Memory).map_or(Ok(Memory { used: 3, total: 8 }), Err)
             }),
             temperature: Arc::new(move || fail(Source::Temperature).map_or(Ok(61.5), Err)),
+            pressure: Arc::new(move || fail(Source::Pressure).map_or(Ok(sample_pressure()), Err)),
             compilers: Arc::new(move || {
                 fail(Source::Compilers).map_or(
                     Ok(vec![Compiler {
@@ -878,6 +927,23 @@ pub(crate) mod fixtures {
             pane: Some(pane.parse().unwrap()),
             harness: kind,
             herdr_status: Some("working".into()),
+        }
+    }
+
+    /// The pressure reading the fixture sources give: CPU without a `full` line.
+    pub(crate) fn sample_pressure() -> PressureSet {
+        let avg = |avg10, avg60| pressure::Averages { avg10, avg60 };
+        let both = |a, b| pressure::Pressure {
+            some: avg(a, b),
+            full: Some(avg(a / 2.0, b / 2.0)),
+        };
+        PressureSet {
+            cpu: pressure::Pressure {
+                some: avg(1.5, 0.75),
+                full: None,
+            },
+            io: both(28.5, 20.25),
+            memory: both(0.0, 0.0),
         }
     }
 
@@ -995,9 +1061,10 @@ mod tests {
     }
 
     fn expected() -> Vec<Source> {
+        let profile = Profile::default();
         Source::ALL
             .into_iter()
-            .filter(|s| *s != Source::Temperature)
+            .filter(|s| profile.expects(*s))
             .collect()
     }
 
@@ -1115,6 +1182,69 @@ mod tests {
         assert!(has(&registry_of(&c, now), "ix.fleet.host.temperature"));
     }
 
+    fn pressure_value(r: &Registry, resource: &str, kind: &str) -> Option<f64> {
+        let want = [("resource", resource), ("kind", kind)];
+        r.points()
+            .iter()
+            .filter(|p| p.instrument.name == "ix.fleet.host.pressure")
+            .find(|p| {
+                want.iter()
+                    .all(|(k, v)| p.attrs.pairs().iter().any(|(pk, pv)| pk == k && pv == v))
+            })
+            .and_then(|p| match p.value {
+                Value::Double(v) => Some(v),
+                _ => None,
+            })
+    }
+
+    #[trace("FR-069-AC-19")]
+    #[test]
+    fn tc_069_19_pressure_is_exported_per_resource_and_kind_and_omits_a_missing_full_line() {
+        let (c, now) = healthy(Profile::new(&[Source::Pressure], &[]), None);
+        let r = registry_of(&c, now);
+        assert_eq!(probe(&r, Source::Pressure), Some(1));
+        assert_eq!(pressure_value(&r, "io", "some_avg10"), Some(28.5));
+        assert_eq!(pressure_value(&r, "io", "some_avg60"), Some(20.25));
+        assert_eq!(pressure_value(&r, "io", "full_avg10"), Some(14.25));
+        assert_eq!(pressure_value(&r, "cpu", "some_avg10"), Some(1.5));
+        assert_eq!(pressure_value(&r, "cpu", "full_avg10"), None);
+        assert_eq!(pressure_value(&r, "memory", "full_avg60"), Some(0.0));
+    }
+
+    #[trace("FR-069-AC-20")]
+    #[test]
+    fn tc_069_20_a_host_without_psi_reports_pressure_unavailable_and_an_unreadable_one_failed() {
+        let profile = Profile::new(&[Source::Pressure], &[]);
+        let unsupported = Some((Source::Pressure, ErrorClass::Unsupported));
+        let (c, now) = healthy(profile.clone(), unsupported);
+        let r = registry_of(&c, now);
+        assert!(unavailable(&r, Source::Pressure));
+        assert_eq!(probe(&r, Source::Pressure), None);
+        assert!(!has(&r, "ix.fleet.host.pressure"));
+        assert!(!c.failed_sources().contains(&Source::Pressure));
+        let unreadable = Some((Source::Pressure, ErrorClass::Unreadable));
+        let (c, now) = healthy(profile, unreadable);
+        let r = registry_of(&c, now);
+        assert_eq!(probe(&r, Source::Pressure), Some(0));
+        assert!(!has(&r, "ix.fleet.host.pressure"));
+        assert!(c.failed_sources().contains(&Source::Pressure));
+    }
+
+    #[trace("FR-069-AC-22")]
+    #[test]
+    fn tc_069_22_an_unsupported_read_clears_an_earlier_failure_so_status_and_metrics_agree() {
+        let profile = Profile::new(&[Source::Pressure], &[]);
+        let failing = Some((Source::Pressure, ErrorClass::Unreadable));
+        let (mut c, now) = healthy(profile, failing);
+        assert_eq!(c.failed_sources(), [Source::Pressure]);
+        c.sources.pressure = Arc::new(|| Err(ErrorClass::Unsupported));
+        c.sample(now + Duration::from_secs(5), &mut |_| {});
+        let r = registry_of(&c, now);
+        assert!(c.failed_sources().is_empty());
+        assert!(unavailable(&r, Source::Pressure));
+        assert_eq!(probe(&r, Source::Pressure), None);
+    }
+
     #[trace("FR-070-AC-8")]
     #[test]
     fn tc_070_08_unset_capacity_is_a_standing_failure_and_entered_capacity_is_exported() {
@@ -1145,7 +1275,7 @@ mod tests {
         let mut lines = Vec::new();
         c.sample(now + Duration::from_secs(3), &mut |l| lines.push(l));
         assert!(
-            started.elapsed() < bound::SOURCE_BUDGET + Duration::from_millis(500),
+            started.elapsed() < SOURCE_BUDGET + Duration::from_millis(500),
             "{:?}",
             started.elapsed()
         );
@@ -1314,11 +1444,7 @@ mod tests {
         c.set_lanes(t0, lanes);
         let started = Instant::now();
         c.sample(t0, &mut |_| {});
-        assert!(
-            started.elapsed() < bound::SOURCE_BUDGET,
-            "{:?}",
-            started.elapsed()
-        );
+        assert!(started.elapsed() < SOURCE_BUDGET, "{:?}", started.elapsed());
         assert!(
             c.health.ok(Source::PaneTail),
             "not a timeout of the whole scan"

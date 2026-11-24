@@ -21,6 +21,7 @@ claude-wire.workspace = true
 relay-core.workspace = true
 relay-ops.workspace = true
 herdr-cli.workspace = true
+host-probe.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

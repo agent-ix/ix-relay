@@ -1,5 +1,9 @@
 # Release notes
 
+## Unreleased
+
+- Move the host readers (CPU busy ratio, memory, temperature, compiler processes, per-source read budgets and error classes) into the `host-probe` crate and add Linux pressure stall information: `ix.fleet.host.pressure{resource,kind}` from `/proc/pressure/{cpu,io,memory}` and a `pressure` collector source, reported as `probe_unavailable` on macOS and on kernels without PSI. Add `pressure` to `expected_sources` on a host that should report it off the default.
+
 ## 0.4.0
 
 - Add the host collector to `relay-watcher`: measured CPU busy ratio, memory and temperature, a per-lane state, last-activity and blocked reason from pane-tail classification, the leased per-host lane list in Redis, `ix.fleet.probe_ok` per collector source, and the `[fleet]` host profile. `agent-msg doctor` warns `collector_source_failed` and `fleet_lanes_dropped` from the heartbeat. Upgrade `agent-msg` and the hook before adding `[fleet]` to a machine's `config.toml`.

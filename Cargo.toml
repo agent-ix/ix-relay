@@ -18,6 +18,7 @@ relay-work-wire = { path = "crates/relay-work-wire" }
 relay-core = { path = "crates/relay-core" }
 herdr-cli = { path = "crates/herdr-cli" }
 relay-ops = { path = "crates/relay-ops" }
+host-probe = { path = "crates/host-probe" }
 relay-test-support = { path = "crates/relay-test-support" }
 claude-wire = { path = "crates/claude-wire" }
 clap = { version = "4.6", features = ["derive", "env"] }

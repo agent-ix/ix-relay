@@ -19,12 +19,12 @@ reported as unavailable, which is not a failure.
 
 ### Sources and host profile
 
-- The sources SHALL be exactly: `cpu`, `memory`, `temperature`, `capacity`, `compilers`,
+- The sources SHALL be exactly: `cpu`, `memory`, `temperature`, `pressure`, `capacity`, `compilers`,
   `pane_tail`, `hook_events`, `activity_counters`, `herdr`, `redis`. `activity_counters` is the hook's local skip and drop counts (`spool/activity.json`); it reads 1 when that file is read, or absent because no hook has written one yet, and 0 when it exists and cannot be read or parsed.
 - The host profile (`[fleet] expected_sources` and `unavailable_sources` in the watcher
   configuration, per [FR-026](./FR-026-configuration-precedence.md)) SHALL list the sources
   the host is expected to provide. The default expected set SHALL be every source except
-  `temperature`; a host with a readable hwmon sensor declares `temperature`. A source
+  `temperature` and, on a host that is not Linux, `pressure`; a host with a readable hwmon sensor declares `temperature`. A source
   listed as unavailable SHALL be exported through `ix.fleet.probe_unavailable` and SHALL NOT
   be exported as failed.
 

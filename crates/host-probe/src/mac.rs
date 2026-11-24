@@ -7,8 +7,8 @@
     reason = "the Mach host interface is a C API; libc marks mach_host_self deprecated in favour of a crate this workspace does not use"
 )]
 
-use super::{
-    health::ErrorClass,
+use crate::{
+    ErrorClass,
     host::{CpuTicks, Memory, ticks_from_macos},
 };
 

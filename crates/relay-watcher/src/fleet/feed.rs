@@ -8,7 +8,9 @@ use std::{collections::BTreeMap, fs, io, path::Path, time::Duration, time::Insta
 use relay_core::config::FleetFile;
 use serde::Deserialize;
 
-use super::{health::ErrorClass, lanes::HookSignal, pane::BlockedReason};
+use host_probe::ErrorClass;
+
+use super::{lanes::HookSignal, pane::BlockedReason};
 
 /// How long a lane's `cwd` and `branch` mapping lives without an event (FR-069).
 pub const MAPPING_TTL: Duration = Duration::from_secs(6 * 60 * 60);

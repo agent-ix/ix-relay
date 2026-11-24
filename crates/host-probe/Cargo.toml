@@ -1,0 +1,27 @@
+[package]
+name = "host-probe"
+description = "Native host measurements: CPU busy ratio, memory, temperature, Linux pressure (PSI), compiler processes and per-source read budgets."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+# Exposes the text and directory parsers on every platform so a consumer can
+# drive them from fixtures (for example the scheduler's tests on macOS).
+fixtures = []
+
+[dependencies]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+ix-trace-rs = { git = "https://github.com/agent-ix/ix-trace-rs", tag = "v0.1.1" }
+tempfile.workspace = true

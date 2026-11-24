@@ -16,7 +16,7 @@ delivery = "herdr"          # or "socket"
 # otlp_interval_secs = 30
 
 # [fleet]
-# expected_sources = ["cpu", "memory", "temperature", "capacity", "compilers", "pane_tail", "hook_events", "activity_counters", "herdr", "redis"]
+# expected_sources = ["cpu", "memory", "temperature", "pressure", "capacity", "compilers", "pane_tail", "hook_events", "activity_counters", "herdr", "redis"]
 # unavailable_sources = ["compilers"]
 # working_window_secs = 600
 # no_events_after_secs = 1800
@@ -37,7 +37,7 @@ delivery = "herdr"          # or "socket"
 | `[watcher] otlp_endpoint` | OTLP/HTTP collector base URL, `http://` only. Unset sends nothing. | unset |
 | `[watcher] otlp_headers` | Request headers, `name=value,name=value` | none |
 | `[watcher] otlp_interval_secs` | Seconds between pushes, 5 to 3600 | `30` |
-| `[fleet] expected_sources` | Collector sources this host provides, each exported as `ix_fleet_probe_ok`. A source not listed, or listed in `unavailable_sources`, is exported as `ix_fleet_probe_unavailable`. A host with a readable hwmon sensor adds `temperature`. | every source except `temperature` |
+| `[fleet] expected_sources` | Collector sources this host provides, each exported as `ix_fleet_probe_ok`. A source not listed, or listed in `unavailable_sources`, is exported as `ix_fleet_probe_unavailable`. A host with a readable hwmon sensor adds `temperature`. | every source except `temperature` (and `pressure` off Linux) |
 | `[fleet] unavailable_sources` | Sources this host cannot provide, for example `compilers` on a host with no process list. | none |
 | `[fleet] working_window_secs` | Seconds a `prompt` or `post_tool` hook event keeps a lane `working`. Exported as `ix_fleet_config{name="working_window"}`. | `600` |
 | `[fleet] no_events_after_secs` | Seconds a lane that was working may emit no hook event before it carries `ix_fleet_lane_no_events` and counts against `hook_events`. | `1800` |
