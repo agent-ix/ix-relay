@@ -1,6 +1,6 @@
 # CLI reference
 
-This page is generated from the `--help` output of the built binaries (version 0.4.0). Run `<command> --help` for the same text. Every `agent-msg` subcommand also accepts `--url`, `--prefix` and `--human`; [Configuration](configuration.md) describes them.
+This page is generated from the `--help` output of the built binaries (version 0.4.1). Run `<command> --help` for the same text. Every `agent-msg` subcommand also accepts `--url`, `--prefix` and `--human`; [Configuration](configuration.md) describes them.
 
 ## agent-msg
 
