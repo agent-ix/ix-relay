@@ -9,6 +9,8 @@
 //! `AGENT_MSG_NAME` stays env-only: one machine can run several leads, so it
 //! can't live in the machine-level config file.
 
+mod activity;
+mod activity_state;
 mod budget;
 mod doctor;
 mod find;
@@ -369,7 +371,7 @@ fn main() -> ExitCode {
         }
     };
 
-    if let Cmd::Hook { kind: _ } = cli.cmd {
+    if let Cmd::Hook { kind } = cli.cmd {
         // Hooks outside Herdr are not lead hooks. Identity is established from
         // the genuine session association after the machine config is loaded.
         if std::env::var("HERDR_ENV").as_deref() != Ok("1") {
@@ -388,8 +390,14 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
         };
+        let activity_state = activity_state::ActivityState::in_config_dir();
         let cx = HookCtx {
             machine: &settings.machine.value,
+            harness: match kind {
+                HookKind::Claude => relay_core::Harness::Claude,
+                HookKind::Codex => relay_core::Harness::Codex,
+            },
+            activity: activity_state.as_ref(),
         };
         // A panic anywhere in the hook is caught inside `run` and recorded;
         // this second net keeps even a panic in that recording from becoming a

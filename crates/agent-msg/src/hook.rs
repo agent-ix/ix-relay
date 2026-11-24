@@ -44,6 +44,34 @@ pub struct HookInput {
     /// join the bus under its own name, same as an `esc-*` tab — see
     /// `identity::derive_for_hook`.
     pub source: Option<String>,
+    /// The working directory, when the harness reports one.
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub cwd: Option<String>,
+    /// The tool a `PreToolUse` or `PostToolUse` call is about. Only the name is
+    /// read; the tool input and response are never decoded.
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub tool_name: Option<String>,
+    /// A `Notification`'s type, e.g. `permission_prompt` or `idle_prompt`.
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub notification_type: Option<String>,
+    /// A `Stop`'s final assistant message, read only to classify it.
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub last_assistant_message: Option<String>,
+}
+
+/// A field that is text reads as text; anything else reads as absent. Optional
+/// activity fields never make the payload malformed: the hook never fails a turn
+/// over them (FR-017).
+fn lenient_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::String(s)) => Some(s),
+            _ => None,
+        },
+    )
 }
 
 /// A harness `session_id` that is text but not a [`SessionId`] (empty, longer
@@ -71,6 +99,12 @@ pub enum Event {
     UserPromptSubmit,
     /// The turn is ending; block it to keep the agent working on new messages.
     Stop,
+    /// A tool call is about to run. Activity only: no mail, no output.
+    PreToolUse,
+    /// The harness raised a notification. Activity only: no mail, no output.
+    Notification,
+    /// The session ended. Activity only: no mail, no output.
+    SessionEnd,
 }
 
 impl Event {
@@ -81,6 +115,9 @@ impl Event {
             "PostToolUse" => Some(Self::PostToolUse),
             "UserPromptSubmit" => Some(Self::UserPromptSubmit),
             "Stop" => Some(Self::Stop),
+            "PreToolUse" => Some(Self::PreToolUse),
+            "Notification" => Some(Self::Notification),
+            "SessionEnd" => Some(Self::SessionEnd),
             _ => None,
         }
     }
@@ -91,7 +128,19 @@ impl Event {
             Self::PostToolUse => "PostToolUse",
             Self::UserPromptSubmit => "UserPromptSubmit",
             Self::Stop => "Stop",
+            Self::PreToolUse => "PreToolUse",
+            Self::Notification => "Notification",
+            Self::SessionEnd => "SessionEnd",
         }
+    }
+
+    /// Whether this event pops the inbox and may print. The others only report
+    /// activity and print nothing (FR-017, FR-068).
+    pub fn delivers_mail(self) -> bool {
+        !matches!(
+            self,
+            Self::PreToolUse | Self::Notification | Self::SessionEnd
+        )
     }
 }
 
@@ -163,6 +212,7 @@ pub fn respond(
                 additional_context: text,
             },
         },
+        Event::PreToolUse | Event::Notification | Event::SessionEnd => return None,
     })
 }
 

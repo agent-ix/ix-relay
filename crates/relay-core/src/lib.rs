@@ -6,6 +6,7 @@
 //! in-flight record that an acknowledgement deletes and a lease expiry returns to
 //! the inbox, so delivery is at-least-once (AGE-2032).
 
+pub mod activity;
 mod address;
 pub mod config;
 pub mod directory;
@@ -33,6 +34,12 @@ pub mod text;
 pub mod work;
 pub mod work_history;
 
+pub use activity::{
+    ACTIVITY_LAST_TTL_SECS, ACTIVITY_MAX_AGE_MS, ACTIVITY_MAX_CWD_BYTES, ACTIVITY_MAX_EVENT_BYTES,
+    ACTIVITY_MAX_EVENTS, ACTIVITY_MAX_FIELD_BYTES, ACTIVITY_MAX_SKILL_NAME_BYTES,
+    ACTIVITY_MAX_SKILL_PAIRS, ACTIVITY_MAX_SKILL_VERSION_BYTES, ActivityEvent, ActivityKind,
+    BlockedReason, Harness, LastClass,
+};
 pub use address::{Address, AddressBook, HerdrPlaceIds, MAX_LABEL_BYTES, Place, duplicated};
 pub use env::machine_name;
 pub use error::{Candidate, Error, LinkFault, Result, UnknownCause};

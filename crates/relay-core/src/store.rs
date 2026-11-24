@@ -58,6 +58,7 @@ const SESSION_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 /// This never stops session verification or enrollment.
 pub const HERDR_FAILED_TTL_SECS: u64 = 300;
 
+mod activity;
 mod commit;
 mod directory;
 mod fleet;
@@ -455,18 +456,26 @@ if type(cached) == 'table' and cached.err then cached = false end
 local suppressed = redis.call('EXISTS', KEYS[1])
 redis.call('EXPIRE', KEYS[1], ARGV[1])
 redis.call('EXPIRE', KEYS[2], ARGV[1])
-return {suppressed, cached}
+local registration = false
+if cached then
+  registration = redis.pcall('HGET', KEYS[3], cached)
+  if type(registration) == 'table' then registration = false end
+end
+return {suppressed, cached, registration}
 "#;
-        let (suppressed, name): (bool, Option<String>) = redis::cmd("EVAL")
-            .arg(SCRIPT)
-            .arg(2)
-            .arg(self.keys.suppressed_key(session_id))
-            .arg(self.keys.session_key(session_id))
-            .arg(SESSION_TTL_SECS)
-            .query(&mut self.conn)?;
+        let (suppressed, name, registration): (bool, Option<String>, Option<String>) =
+            redis::cmd("EVAL")
+                .arg(SCRIPT)
+                .arg(3)
+                .arg(self.keys.suppressed_key(session_id))
+                .arg(self.keys.session_key(session_id))
+                .arg(self.keys.agents_key())
+                .arg(SESSION_TTL_SECS)
+                .query(&mut self.conn)?;
         Ok(SessionProbe {
             suppressed,
             name: name.and_then(|s| s.parse().ok()),
+            registration: registration.and_then(|json| serde_json::from_str(&json).ok()),
         })
     }
 
@@ -1297,6 +1306,10 @@ pub struct SessionProbe {
     pub suppressed: bool,
     /// The bus name remembered for the session, if any.
     pub name: Option<AgentName>,
+    /// The remembered name's registration, read in the same request, when it
+    /// is there and decodes. The hook takes the lane address of its activity
+    /// event from it.
+    pub registration: Option<Registration>,
 }
 
 /// The usable entries of a hook health stream reply, in reply order, and how many

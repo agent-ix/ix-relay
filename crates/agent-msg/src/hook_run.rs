@@ -78,11 +78,13 @@ use std::{
 use serde::Deserialize;
 
 use relay_core::{
-    AddressBook, AgentName, BatchId, BudgetPopResult, Claim, CommitOutcome, HookHealthEntry,
-    IdentityCommit, MachineName, Message, Popper, Relay, SessionId, SessionProbe,
+    ActivityEvent, AddressBook, AgentName, BatchId, BudgetPopResult, Claim, CommitOutcome,
+    HookHealthEntry, IdentityCommit, MachineName, Message, Popper, Relay, SessionId, SessionProbe,
 };
 
 use crate::{
+    activity::{self, BRANCH_READ_LIMIT},
+    activity_state::ActivityState,
     budget::{Budget, Clock},
     hook::{self, Event, HOOK_BATCH, HookInput},
     identity::{self, Derived, HookIdentity, HookRequest, IdentityError},
@@ -179,8 +181,10 @@ const FLUSH_CHUNK: usize = 200;
 pub(crate) fn hook_deadline_budget(event: Event) -> Duration {
     match event {
         Event::SessionStart => identity::SESSION_START_HERDR_BUDGET + HOOK_TIMEOUT,
-        Event::UserPromptSubmit => HOOK_TIMEOUT,
-        Event::PostToolUse | Event::Stop => identity::LAZY_HERDR_BUDGET + HOOK_TIMEOUT,
+        Event::UserPromptSubmit | Event::PreToolUse => HOOK_TIMEOUT,
+        Event::PostToolUse | Event::Stop | Event::Notification | Event::SessionEnd => {
+            identity::LAZY_HERDR_BUDGET + HOOK_TIMEOUT
+        }
     }
 }
 
@@ -220,6 +224,13 @@ pub(crate) trait Bus {
     fn address_book(&mut self) -> AddressBook;
     /// Appends spool records to the `health:hooks` stream.
     fn push_hook_health(&mut self, entries: &[HookHealthEntry]) -> relay_core::Result<()>;
+    /// Writes one activity event for the lane at `lane` in one request. `false`
+    /// when the bus refused the address and nothing was written.
+    fn record_activity(
+        &mut self,
+        lane: &relay_core::Address,
+        event: &ActivityEvent,
+    ) -> relay_core::Result<bool>;
 }
 
 /// The real [`Bus`]: a [`Relay`] connection and this machine's name.
@@ -300,12 +311,24 @@ impl Bus for RelayBus {
     fn push_hook_health(&mut self, entries: &[HookHealthEntry]) -> relay_core::Result<()> {
         self.relay.push_hook_health(entries).map(drop)
     }
+
+    fn record_activity(
+        &mut self,
+        lane: &relay_core::Address,
+        event: &ActivityEvent,
+    ) -> relay_core::Result<bool> {
+        self.relay.record_activity(lane, event)
+    }
 }
 
 /// What a hook call was invoked with, apart from stdin.
 pub(crate) struct HookCtx<'a> {
     /// This machine's bus name.
     pub(crate) machine: &'a MachineName,
+    /// The harness this hook was registered by (`agent-msg hook <kind>`).
+    pub(crate) harness: relay_core::Harness,
+    /// The local activity backoff and counts; `None` when there is no config directory.
+    pub(crate) activity: Option<&'a ActivityState>,
 }
 
 /// Everything that can fail in a hook call. One value is one failure, and one
@@ -405,6 +428,12 @@ pub(crate) enum HookError {
         /// How many rows.
         stuck: usize,
     },
+    /// Writing the activity event failed. The event was dropped.
+    #[error("could not write the activity event: {0}")]
+    Activity(#[source] relay_core::Error),
+    /// The budget was spent before the activity event could be written.
+    #[error("hook time budget exhausted before writing the activity event")]
+    ActivityBudget,
     /// The hook panicked.
     #[error("the hook panicked")]
     Panicked,
@@ -426,6 +455,7 @@ impl HookError {
             Self::RequeueFailed { .. } => Stage::RequeueFailed,
             Self::AckFailed { .. } | Self::AckStale => Stage::Ack,
             Self::InflightFull { .. } | Self::DeadLetterUnusable { .. } => Stage::Pop,
+            Self::Activity(_) | Self::ActivityBudget => Stage::Activity,
             Self::Panicked => Stage::Panic,
         }
     }
@@ -438,6 +468,8 @@ impl HookError {
             Self::InputTooLarge => ErrorKind::TooLarge,
             Self::InputTimeout => ErrorKind::StdinTimeout,
             Self::BudgetExhausted { .. } => ErrorKind::BudgetExhausted,
+            Self::Activity(e) => ErrorKind::of(e),
+            Self::ActivityBudget => ErrorKind::BudgetExhausted,
             Self::Connect(e) | Self::Derive(e) | Self::Register(e) | Self::Pop(e) => {
                 ErrorKind::of(e)
             }
@@ -471,6 +503,8 @@ impl HookError {
             | Self::AckStale
             | Self::InflightFull { .. }
             | Self::DeadLetterUnusable { .. }
+            | Self::Activity(_)
+            | Self::ActivityBudget
             | Self::Panicked => None,
         }
     }
@@ -494,8 +528,19 @@ impl HookError {
             | Self::AckStale
             | Self::InflightFull { .. }
             | Self::DeadLetterUnusable { .. }
+            | Self::Activity(_)
+            | Self::ActivityBudget
             | Self::Panicked => &[],
         }
+    }
+
+    /// Whether this failure says the bus is unreachable or too slow: the
+    /// activity write that was dropped with it starts the backoff.
+    fn is_bus_fault(&self) -> bool {
+        matches!(
+            self,
+            Self::Connect(_) | Self::Derive(_) | Self::Register(_) | Self::Pop(_)
+        )
     }
 
     /// Whether this fault repeats on every call and happens before the hook
@@ -515,6 +560,8 @@ struct Recorder<'a> {
     clock: &'a dyn Clock,
     subject: Subject,
     err: &'a mut dyn Write,
+    /// How many failures this call has recorded.
+    recorded: u32,
 }
 
 impl Recorder<'_> {
@@ -551,6 +598,7 @@ impl Recorder<'_> {
         candidate: Option<&AgentName>,
         messages: &[Message],
     ) {
+        self.recorded += 1;
         let Some(spool) = self.spool else { return };
         let mut record = SpoolRecord::new(self.clock.now_ms(), &self.subject, stage, kind);
         record.candidate = candidate.map(|name| name.as_str().to_owned());
@@ -592,7 +640,7 @@ pub(crate) fn record_early(
 /// `connect` opens the bus with the timeout it is given (what is left of the
 /// budget).
 pub(crate) fn run<B: Bus>(
-    _cx: &HookCtx<'_>,
+    cx: &HookCtx<'_>,
     clock: &dyn Clock,
     spool: Option<&Spool>,
     (stdin, out, err): (&mut dyn InputSource, &mut dyn Write, &mut dyn Write),
@@ -601,14 +649,15 @@ pub(crate) fn run<B: Bus>(
     let mut recorder = Recorder {
         spool,
         clock,
-        subject: Subject::on(_cx.machine.clone()),
+        subject: Subject::on(cx.machine.clone()),
         err,
+        recorded: 0,
     };
     // The deadline of the whole call starts here, before stdin is read.
     let started = clock.elapsed();
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         try_run(
-            _cx,
+            cx,
             (clock, started),
             &mut recorder,
             stdin,
@@ -640,12 +689,38 @@ pub(crate) fn decode_input(raw: &[u8]) -> Result<HookInput, serde_json::Error> {
 }
 
 fn try_run<B: Bus>(
-    _cx: &HookCtx<'_>,
+    cx: &HookCtx<'_>,
     (clock, started): (&dyn Clock, Duration),
     rec: &mut Recorder<'_>,
     stdin: &mut dyn InputSource,
     out: &mut dyn Write,
     connect: &mut dyn FnMut(Duration) -> relay_core::Result<B>,
+) -> Result<(), HookError> {
+    let mut pending = None;
+    let result = try_call(cx, (clock, started), rec, stdin, out, connect, &mut pending);
+    // An event the call never wrote or counted is a dropped one. A call that
+    // fails on the bus (connect, derive, register, pop, budget) also starts the
+    // backoff, so the next call spends no time on the network (FR-068).
+    if let (Err(error), Some(state), true) = (&result, cx.activity, pending.is_some()) {
+        if error.is_bus_fault() {
+            state.failed(clock.now_ms());
+        } else {
+            state.dropped();
+        }
+    }
+    result
+}
+
+/// One hook call. `pending` holds the call's activity event from the moment it
+/// is known until it is written or counted.
+fn try_call<B: Bus>(
+    cx: &HookCtx<'_>,
+    (clock, started): (&dyn Clock, Duration),
+    rec: &mut Recorder<'_>,
+    stdin: &mut dyn InputSource,
+    out: &mut dyn Write,
+    connect: &mut dyn FnMut(Duration) -> relay_core::Result<B>,
+    pending: &mut Option<ActivityEvent>,
 ) -> Result<(), HookError> {
     // The deadline started before stdin was read (NFR-001-M-5). The event is not
     // known until the payload is, so the read is bounded by 300 ms without
@@ -671,6 +746,15 @@ fn try_run<B: Bus>(
     if input.agent_id.is_some() {
         return Ok(());
     }
+    *pending = activity::from_input(event, &input, cx.harness, clock.now_ms());
+    // During a backoff the event is skipped and counted before anything touches
+    // the network; an activity-only call then has nothing left to do.
+    if pending.is_some() && cx.activity.is_some_and(|state| state.skip(clock.now_ms())) {
+        *pending = None;
+    }
+    if pending.is_none() && !event.delivers_mail() {
+        return Ok(());
+    }
 
     // One budget for this *entire* hook call — connect, an optional identity
     // derivation, an optional register, and the pop each get whatever is left
@@ -689,7 +773,7 @@ fn try_run<B: Bus>(
     // only the connect, which through a tunnel measures nothing.
     let mut sampled = false;
 
-    let identity = {
+    let (identity, probe_registration) = {
         arm(&mut bus, &budget, "reading the session", HookError::Derive)?;
         // One request for every independent read about the session (suppressed,
         // cached queue). It is also the round trip the pop window
@@ -715,7 +799,7 @@ fn try_run<B: Bus>(
             event,
         };
         match bus.derive(&request, &probe, &budget) {
-            Ok(identity) => identity,
+            Ok(identity) => (identity, probe.registration),
             Err(IdentityError::Relay(e)) => return Err(HookError::Derive(e)),
         }
     };
@@ -740,6 +824,13 @@ fn try_run<B: Bus>(
         }
     };
     rec.subject.lead = Some(name.as_str().to_owned());
+    // The lane address the event is filed under: the lead's own verified place,
+    // from the registration this call just derived or the one the session probe
+    // read in its single request.
+    let lane = [commit.registration.as_ref(), probe_registration.as_ref()]
+        .into_iter()
+        .flatten()
+        .find_map(|r| r.verified_place().map(|place| place.address(&r.machine)));
 
     // Every identity write — registration, alias demotions, session cache — is
     // this one step, made only after everything that reads and waits is done,
@@ -748,6 +839,40 @@ fn try_run<B: Bus>(
         apply(&mut bus, &budget, &commit, rec)?;
     }
 
+    let mail = if event.delivers_mail() {
+        deliver_mail(&mut bus, &budget, event, (rtt, sampled), &name, rec, out)
+    } else {
+        Ok(())
+    };
+    mail?;
+    // Shipping the spool comes before telemetry, so an activity write that
+    // stalls never takes the window FR-030 needs. Telemetry then gets only the
+    // time left (NFR-001), and its failure never reaches the turn.
+    flush_health(&mut bus, &budget, rec);
+    if let Some(mut event) = pending.take() {
+        emit_activity(
+            &mut bus,
+            (clock, &budget),
+            cx.activity,
+            lane.as_ref(),
+            &mut event,
+            rec,
+        );
+    }
+    Ok(())
+}
+
+/// Pops the lead's inbox and prints what the agent should see: the mail half of
+/// a hook call, for the events that deliver mail.
+fn deliver_mail<B: Bus>(
+    bus: &mut B,
+    budget: &Budget<'_>,
+    event: Event,
+    (rtt, sampled): (Duration, bool),
+    name: &AgentName,
+    rec: &mut Recorder<'_>,
+    out: &mut dyn Write,
+) -> Result<(), HookError> {
     let window = if sampled {
         pop_window(rtt)
     } else {
@@ -759,7 +884,10 @@ fn try_run<B: Bus>(
         // flood the health stream and cost every later hook a flush. Anywhere
         // else delivery really is delayed, so it is recorded.
         return match event {
-            Event::UserPromptSubmit => Ok(()),
+            Event::UserPromptSubmit
+            | Event::PreToolUse
+            | Event::Notification
+            | Event::SessionEnd => Ok(()),
             Event::SessionStart | Event::PostToolUse | Event::Stop => {
                 Err(HookError::BudgetExhausted {
                     step: "popping the inbox",
@@ -768,7 +896,7 @@ fn try_run<B: Bus>(
         };
     };
     bus.set_timeout(left).map_err(HookError::Pop)?;
-    let popped = bus.pop_inbox(&name).map_err(HookError::Pop)?;
+    let popped = bus.pop_inbox(name).map_err(HookError::Pop)?;
     for e in &popped.rejected {
         rec.note(
             Stage::Decode,
@@ -820,9 +948,9 @@ fn try_run<B: Bus>(
             Ok(bytes) => bytes,
             Err(e) => {
                 return Err(recover(
-                    &mut bus,
-                    &budget,
-                    &name,
+                    bus,
+                    budget,
+                    name,
                     batch,
                     popped.messages,
                     HookError::Encode(e),
@@ -831,9 +959,9 @@ fn try_run<B: Bus>(
         };
         if let Err(e) = out.write_all(&bytes).and_then(|()| out.flush()) {
             return Err(recover(
-                &mut bus,
-                &budget,
-                &name,
+                bus,
+                budget,
+                name,
                 batch,
                 popped.messages,
                 HookError::Output(e),
@@ -841,11 +969,70 @@ fn try_run<B: Bus>(
         }
     }
     if let Some(batch) = batch {
-        acknowledge(&mut bus, &budget, &name, batch, rec);
+        acknowledge(bus, budget, name, batch, rec);
     }
 
-    flush_health(&mut bus, &budget, rec);
     Ok(())
+}
+
+/// Writes the activity event of this call after the mail work and the spool
+/// flush, with whatever budget is left, and never fails the hook: a write that
+/// cannot happen is one dropped event (FR-068). Dropped events are not spooled
+/// for replay, because a replay would report stale activity as fresh. A failure
+/// is recorded under stage `activity` only when the call has recorded nothing
+/// else, so a failing call still leaves exactly one record (FR-030); either way
+/// the state file counts the drop and starts the backoff that skips later
+/// writes, so an outage does not cost every tool call the write's time.
+fn emit_activity<B: Bus>(
+    bus: &mut B,
+    (clock, budget): (&dyn Clock, &Budget<'_>),
+    state: Option<&ActivityState>,
+    lane: Option<&relay_core::Address>,
+    event: &mut ActivityEvent,
+    rec: &mut Recorder<'_>,
+) {
+    let Some(lane) = lane else {
+        if let Some(state) = state {
+            state.unregistered();
+        }
+        return;
+    };
+    let failed = |rec: &mut Recorder<'_>, error: HookError| {
+        if rec.recorded == 0 {
+            rec.record(&error);
+        }
+        if let Some(state) = state {
+            state.failed(clock.now_ms());
+        }
+    };
+    let Some(left) = budget.remaining() else {
+        failed(rec, HookError::ActivityBudget);
+        return;
+    };
+    // The branch read is part of the write's time and ends when the budget does.
+    event.branch = activity::branch_within(&event.cwd, BRANCH_READ_LIMIT.min(left));
+    let Some(left) = budget.remaining() else {
+        failed(rec, HookError::ActivityBudget);
+        return;
+    };
+    match bus
+        .set_timeout(left)
+        .and_then(|()| bus.record_activity(lane, event))
+    {
+        Ok(true) => {
+            if let Some(state) = state {
+                state.succeeded();
+            }
+        }
+        // The bus refused the address (longer than it prints): nothing was
+        // attempted against it, so the backoff is untouched.
+        Ok(false) => {
+            if let Some(state) = state {
+                state.unregistered();
+            }
+        }
+        Err(e) => failed(rec, HookError::Activity(e)),
+    }
 }
 
 /// herdr could not name the session. The first failure of a session in a window

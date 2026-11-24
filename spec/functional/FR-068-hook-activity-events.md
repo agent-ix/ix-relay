@@ -53,9 +53,11 @@ agent's turn, and it never changes a tool permission.
   message is unavailable. The classification SHALL read the final message only, SHALL NOT
   store any of its text, and SHALL NOT use the network.
 - For `session_start`, the event SHALL carry `role` and `skill_versions`: the role-spec
-  and skill versions the session loaded, as `name=version` pairs, at most 16 pairs, each
-  name at most 64 bytes and each version at most 32 bytes; an unknown version SHALL be
-  recorded as `unknown`, not omitted.
+  and skill versions the session loaded. `skill_versions` SHALL be a JSON object mapping
+  each name to its version string (for example `{"dev-team":"0.4.1"}`), with at most 16
+  entries, each name at most 64 bytes and each version at most 32 bytes; it SHALL always be
+  present on `session_start` (an empty object when no skill is known), and an unknown
+  version SHALL be recorded as `unknown`, not omitted.
 - `branch` SHALL be the checked-out branch of `cwd` at event time, or empty when `cwd` is
   not a git work tree or the branch cannot be read within the time budget.
 - Subagent hook calls (payloads carrying an agent id) SHALL NOT produce events, following
@@ -118,7 +120,7 @@ agent's turn, and it never changes a tool permission.
 | FR-068-AC-2 | Given the same payloads for `claude` and `codex`, both harnesses produce events of the same schema, differing only in `harness`, and every event's `addr` is the lane address. | Test |
 | FR-068-AC-3 | Given `Notification` payloads of type permission prompt, idle prompt and another type, the events are `blocked/permission`, `idle`, and none. | Test |
 | FR-068-AC-4 | Given final messages ending in `?`, ending in `?"` or `?**`, ending in a statement whose last paragraph contains `want me to`, ending in a statement with none of the phrases, and unavailable, `last_class` is `question`, `question`, `question`, `done` and `unknown`; no event contains any message text, seeded with a secret marker. | Test |
-| FR-068-AC-5 | Given a `SessionStart` with 20 skill versions and an overlong name, the event holds at most 16 pairs within the length bounds; a skill without a version is recorded `unknown`. | Test |
+| FR-068-AC-5 | Given a `SessionStart` with 20 skill versions and an overlong name, the event's `skill_versions` is an object of at most 16 name-to-version entries within the length bounds; a skill without a version is recorded `unknown`, and an empty set is `{}`, not omitted. | Test |
 | FR-068-AC-6 | Given a field of 10 KiB, a control character and a multi-byte character at the cut, the stored event is at most 4 KiB, holds no control character and is valid UTF-8. | Test |
 | FR-068-AC-7 | Given 20,001 appended events, and separately events aged 25 hours, the stream holds at most 20,000 and none older than 24 hours, while the lead's last-activity record still shows its newest event of each kind. | Test |
 | FR-068-AC-8 | With Redis accepting connections and never answering, every event kind exits 0 within its [NFR-001](../non-functional/NFR-001-hook-time-budget.md) budget, records one `activity` hook failure when Redis later answers, and replays no event. | Test |
