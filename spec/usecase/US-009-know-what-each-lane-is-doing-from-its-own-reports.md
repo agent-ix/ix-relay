@@ -36,5 +36,6 @@ as absence or as a healthy reading.
 - [FR-069](../functional/FR-069-host-collector.md)
 - [FR-070](../functional/FR-070-collector-source-health.md)
 - [FR-071](../functional/FR-071-order-ack-deadline-and-timeout.md)
+- [FR-072](../functional/FR-072-ordered-lane-assignment-list.md)
 - [FR-067](../functional/FR-067-persistent-delivery-receipts.md) (Acted receipt state)
 - [FR-045](../functional/FR-045-watcher-pushes-metrics-over-otlp.md) (fleet series)

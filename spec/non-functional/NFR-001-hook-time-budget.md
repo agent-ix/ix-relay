@@ -63,7 +63,12 @@ takes as long as the payload does, at most 900 ms, not its event's 300 ms.
 - After a decode failure that repeats on every call the hook makes one attempt to
   ship the spool, within what is left of 300 ms counted from the start of the call.
 
-The new activity events of [FR-068](../functional/FR-068-hook-activity-events.md) are telemetry: `PreToolUse`, `Notification` and `SessionEnd` calls, and the event write of every other event, SHALL finish within the 900 ms budget of `PostToolUse` (`SessionEnd` and `Notification` 900 ms as well), the event write SHALL be attempted only after the mail work and only with the time left in the budget, and a spent budget SHALL drop the event with one recorded failure rather than extend the call.
+The activity events of [FR-068](../functional/FR-068-hook-activity-events.md) are telemetry and sit inside these budgets:
+
+- The hook handler SHALL finish a `PreToolUse` call within 300 ms.
+- The hook handler SHALL finish a `Notification` or `SessionEnd` call, and the event write of every other event, within the 900 ms budget of `PostToolUse`.
+- The hook handler SHALL attempt the event write only after the mail work and only with the time left in the budget.
+- If the budget is spent, then the hook handler SHALL drop the event with one recorded failure and not extend the call.
 
 ## Rationale
 
@@ -103,7 +108,9 @@ about 90 ms and beyond that skips and records the pop.
 | `UserPromptSubmit` wall time with a 200 MB transcript and no `/rename` line | 300 ms | 400 ms | performance-benchmarking |
 | Wall time with stdin held open and no complete payload (silent), ending in one `stdin_timeout` record | 300 ms | 400 ms | performance-benchmarking |
 | `PostToolUse` and `Stop` wall time on a session-cache miss, Redis answering and herdr hanging | 900 ms | 1000 ms | performance-benchmarking |
-| `PreToolUse`, `Notification` and `SessionEnd` wall time, Redis blackholed | 900 ms | 1000 ms | performance-benchmarking |
+| `PreToolUse` wall time, Redis blackholed | 300 ms | 400 ms | performance-benchmarking |
+| `Notification` and `SessionEnd` wall time, Redis blackholed | 900 ms | 1000 ms | performance-benchmarking |
+| `PreToolUse` wall time during a failure backoff (FR-068) | 300 ms | 400 ms | performance-benchmarking |
 | Wall time with a byte arriving every 200 ms and no complete payload (drip), ending in one `stdin_timeout` record | 900 ms | 1000 ms | performance-benchmarking |
 
 The threshold allows 100 ms for process start-up and exit on top of the budget.

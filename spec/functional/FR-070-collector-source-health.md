@@ -10,40 +10,63 @@ relationships:
 
 ## Description
 
-The watcher SHALL export, for each collector source on each host, whether the last read
-succeeded, so a source that fails is visible as a failure and never as an absent or
-healthy-looking reading.
+The watcher SHALL export, for each collector source that its host profile expects, whether
+the last read succeeded, so a source that fails is visible as a failure and never as an
+absent or healthy-looking reading. A source that the host cannot provide and declares so is
+reported as unavailable, which is not a failure.
 
 ## Behavior
 
-- The watcher SHALL export `ix_fleet_probe_ok{host,source}` with value 1 when the source's last
-  read succeeded within its budget and 0 otherwise.
-- The sources SHALL be exactly: `cpu`, `memory`, `temperature`, `compilers`, `pane_tail`,
-  `hook_events`, `herdr`, `redis`.
-- A series SHALL be exported for every source on every push, including a source that has
-  never succeeded, one the platform cannot provide (`temperature` without a sensor: 0) and
-  one that timed out. A source failure SHALL NOT remove the series nor any other source's
-  series.
-- The watcher SHALL omit a source's measured series (for example `ix_fleet_host_busy_ratio`) when
-  its source reads 0, so that an old value is never exported as current.
+### Sources and host profile
+
+- The sources SHALL be exactly: `cpu`, `memory`, `temperature`, `capacity`, `compilers`,
+  `pane_tail`, `hook_events`, `herdr`, `redis`.
+- The host profile (`[fleet] expected_sources` and `unavailable_sources` in the watcher
+  configuration, per [FR-026](./FR-026-configuration-precedence.md)) SHALL list the sources
+  the host is expected to provide. The default expected set SHALL be every source except
+  `temperature`; a host with a readable hwmon sensor declares `temperature`. A source
+  listed as unavailable SHALL be exported through `ix.fleet.probe_unavailable` and SHALL NOT
+  be exported as failed.
+
+### Health series
+
+- The watcher SHALL export `ix_fleet_probe_ok{host,source}` with value 1 when the source's
+  last read succeeded within its budget and 0 otherwise, for every expected source on every
+  push, including a source that has never succeeded and one that timed out. A source
+  failure SHALL NOT remove its own series nor any other source's series.
+- The watcher SHALL omit a source's measured series (for example
+  `ix_fleet_host_busy_ratio`) while that source reads 0, so that an old value is never
+  exported as current.
+- The `capacity` source SHALL read 0 while no capacity is entered for the host, and
+  `ix.fleet.host.capacity_configured` SHALL be 0 then, so that unset capacity is a standing
+  failure and not silence.
+- The `hook_events` source SHALL be evaluated per lane by the age of the lane's newest
+  activity event against `no_events_after` (default 30 minutes), exporting
+  `ix.fleet.lane.no_events` for each lane past it. The host's `hook_events` SHALL read 0
+  when the registry has at least one lane and every registry lane is past `no_events_after`,
+  or when the hook failure stream holds an `activity` failure newer than the newest event
+  of every lane. A host whose registered lanes emit nothing is therefore unhealthy.
 - The watcher SHALL log one line when a source changes between ok and failed, naming the
   source and an error class from a fixed set (`timeout`, `unreadable`, `unsupported`,
   `parse`, `unavailable`), never a path content or pane text.
 - The heartbeat of [FR-028](./FR-028-watcher-heartbeat.md) SHALL list the failed sources,
   and `agent-msg doctor` SHALL report a warning `collector_source_failed` naming each.
-- Redirecting a source's error output to nowhere, treating a timeout as success, and
-  treating a missing file as zero SHALL NOT occur in the collector.
+- The collector SHALL NOT discard a source's error output, treat a timeout as success or
+  treat a missing file as zero.
 
 ## Acceptance Criteria
 
 | ID | Criteria | Verification |
 |----|----------|--------------|
-| FR-070-AC-1 | A push built from healthy fixtures carries `ix_fleet_probe_ok` equal to 1 for each of the eight sources with the host attribute. | Test |
-| FR-070-AC-2 | Given each source failing in turn (unreadable file, timeout, parse error, unsupported platform), that source's series is exported as 0 and every other source is unchanged. | Test |
+| FR-070-AC-1 | A push built from healthy fixtures carries `ix_fleet_probe_ok` equal to 1 for each expected source with the host attribute, and none for a source the profile declares unavailable. | Test |
+| FR-070-AC-2 | Given each expected source failing in turn (unreadable file, timeout, parse error, unsupported platform), that source's series is exported as 0 and every other source is unchanged. | Test |
 | FR-070-AC-3 | Given a source that has never succeeded since start, its series is present with 0 on the first push. | Test |
 | FR-070-AC-4 | Given the `cpu` source failing after a successful read, `ix_fleet_host_busy_ratio` is absent from the push, not the old value. | Test |
 | FR-070-AC-5 | A transition between ok and failed logs exactly one line with the error class and no path content or pane text, and the heartbeat and doctor name the failed source. | Test |
-| FR-070-AC-6 | With the watcher killed, no series is exported; the absence is the signal for an alert on the stale series, and with the watcher running and Redis down, `redis` is 0 and the other sources still report. | Test |
+| FR-070-AC-6 | With the watcher killed, no series is exported, so a consumer's alert on stale series fires; with the watcher running and Redis down, `redis` is 0 and the other sources still report. | Test |
+| FR-070-AC-7 | Given a macOS or WSL host whose profile omits `temperature`, the push shows `probe_unavailable` for `temperature`, no `probe_ok` 0 for it and no failed-source warning; given a profile that expects it and an unreadable sensor, `probe_ok` for `temperature` is 0. | Test |
+| FR-070-AC-8 | Given no entered capacity, `capacity` is 0 and `capacity_configured` is 0; given entered capacity, both are 1 and `capacity_slots` is exported. | Test |
+| FR-070-AC-9 | Given a host whose registered lanes have no event for longer than `no_events_after`, each lane has `ix.fleet.lane.no_events` 1 and the host's `hook_events` is 0; given one lane with a recent event, `hook_events` is 1 and only the silent lanes carry `no_events`. | Test |
 
 ## Dependencies
 

@@ -44,9 +44,10 @@ output JSON object.
 | FR-017-AC-2 | Given an unknown flag on the command line after `hook`, the process exits 0. | Test |
 | FR-017-AC-3 | Given `AGENT_MSG_NAME=Bad Name`, a `Stop` hook exits 0 and prints nothing on stdout. | Test |
 | FR-017-AC-4 | Given a config file containing `url = ` (a TOML syntax error), a hook in a herdr pane exits 0 and stderr names the file, line and column. | Test |
-| FR-017-AC-5 | Given the Redis URL points at a closed port, each of the four hook events exits 0 with empty stdout. | Test |
+| FR-017-AC-5 | Given the Redis URL points at a closed port, each hook event (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, `SessionEnd`) exits 0 with empty stdout. | Test |
 | FR-017-AC-6 | Given no bus name and no herdr pane environment, a hook exits 0 without opening the configuration file, even when that file is unreadable. | Test |
 | FR-017-AC-7 | Given a `Stop` event and an empty inbox, stdout is empty. | Test |
+| FR-017-AC-8 | Given a `PreToolUse`, `Notification` or `SessionEnd` event, with and without queued mail, stdout is empty and holds no permission decision. | Test |
 
 ## Dependencies
 
