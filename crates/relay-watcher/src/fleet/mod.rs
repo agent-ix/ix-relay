@@ -52,6 +52,15 @@ use crate::otlp::{
 /// How much of one source slot the whole pane scan may use: the scan checks the
 /// time left before each read and caps the read at it, so it ends inside
 /// [`SOURCE_BUDGET`] with its completed reads kept.
+/// How long a host that refreshed its lane list keeps exporting `host_registry_stale` as 1.
+pub const STALE_RECOVERED_EXPORT: Duration = Duration::from_secs(60 * 60);
+
+/// A host with a stored stale-host defect; `recovered` is when it was first seen without one.
+#[derive(Debug, Clone, Copy)]
+struct StaleHost {
+    recovered: Option<Instant>,
+}
+
 const PANE_SCAN_BUDGET: Duration = Duration::from_millis(400);
 
 /// The longest one pane read may take, and the least time left worth starting one.
@@ -211,7 +220,7 @@ pub struct Collector {
     status: StatusHandle,
     refresh_redis_ok: bool,
     push_redis_ok: bool,
-    stale_hosts: std::collections::BTreeMap<String, bool>,
+    stale_hosts: std::collections::BTreeMap<String, StaleHost>,
 }
 
 impl Collector {
@@ -493,15 +502,23 @@ impl Collector {
     /// Name of the `source` attribute of the stale-host assignment defect (FR-072).
     pub const STALE_HOST_SOURCE: &str = "host_registry_stale";
 
-    /// Records the hosts the relay holds a `host_registry_stale` defect for (FR-072):
-    /// each exports `probe_ok` 0 until it leaves `defective`, then 1.
-    pub fn set_stale_hosts(&mut self, defective: &[String]) {
-        for ok in self.stale_hosts.values_mut() {
-            *ok = true;
+    /// Records the hosts the relay holds a `host_registry_stale` defect for (FR-072) at `now`:
+    /// each exports `probe_ok` 0 while it is in `defective`, then 1 for [`STALE_RECOVERED_EXPORT`],
+    /// then nothing.
+    pub fn set_stale_hosts(&mut self, now: Instant, defective: &[String]) {
+        for stale in self.stale_hosts.values_mut() {
+            if stale.recovered.is_none() {
+                stale.recovered = Some(now);
+            }
         }
         for host in defective {
-            self.stale_hosts.insert(host.clone(), false);
+            self.stale_hosts
+                .insert(host.clone(), StaleHost { recovered: None });
         }
+        self.stale_hosts.retain(|_, s| {
+            s.recovered
+                .is_none_or(|at| now.saturating_duration_since(at) < STALE_RECOVERED_EXPORT)
+        });
     }
 
     /// Whether the store answered the layout refresh's reads.
@@ -730,11 +747,11 @@ impl Collector {
                 registry.gauge(&FLEET_PROBE_UNAVAILABLE, attrs(), 1);
             }
         }
-        for (stale, ok) in &self.stale_hosts {
+        for (stale, state) in &self.stale_hosts {
             let attrs = Attrs::new()
                 .with("host", stale)
                 .with("source", Self::STALE_HOST_SOURCE);
-            registry.gauge(&FLEET_PROBE_OK, attrs, i64::from(*ok));
+            registry.gauge(&FLEET_PROBE_OK, attrs, i64::from(state.recovered.is_some()));
         }
         if self.health.ok(Source::Cpu)
             && let Some(ratio) = self.ratio

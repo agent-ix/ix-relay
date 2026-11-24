@@ -19,7 +19,7 @@ reported as unavailable, which is not a failure.
 
 ### Sources and host profile
 
-- The sources SHALL be exactly: `cpu`, `memory`, `temperature`, `pressure`, `capacity`, `compilers`,
+- The collector sources SHALL be exactly: `cpu`, `memory`, `temperature`, `pressure`, `capacity`, `compilers`,
   `pane_tail`, `hook_events`, `activity_counters`, `herdr`, `redis`. `activity_counters` is the hook's local skip and drop counts (`spool/activity.json`); it reads 1 when that file is read, or absent because no hook has written one yet, and 0 when it exists and cannot be read or parsed.
 - The host profile (`[fleet] expected_sources` and `unavailable_sources` in the watcher
   configuration, per [FR-026](./FR-026-configuration-precedence.md)) SHALL list the sources
@@ -27,6 +27,7 @@ reported as unavailable, which is not a failure.
   `temperature` and, on a host that is not Linux, `pressure`; a host with a readable hwmon sensor declares `temperature`. A source
   listed as unavailable SHALL be exported through `ix.fleet.probe_unavailable` and SHALL NOT
   be exported as failed.
+- The watcher SHALL also export `ix_fleet_probe_ok{host,source="host_registry_stale"}` ([FR-072](./FR-072-ordered-lane-assignment-list.md)) once per host that has a stored assignment defect. It is not a collector source: it is outside `expected_sources`, `unavailable_sources`, the heartbeat failed list and `collector_source_failed`, and `agent-msg doctor` reports it as `assignment_host_registry_stale`. For it `host` names the stale host, not the reporting watcher, and consumers aggregate it with `min by (host, source)`.
 
 ### Health series
 
