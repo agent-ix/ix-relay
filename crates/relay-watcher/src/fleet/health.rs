@@ -233,9 +233,9 @@ impl Health {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ix_trace_rs::trace;
 
-    /// Tracing: TC-070-05
-    /// ACs: FR-070-AC-5
+    #[trace("FR-070-AC-5")]
     #[test]
     fn tc_070_05_a_transition_logs_one_line_with_the_class_and_nothing_else() {
         let mut h = Health::default();
@@ -259,8 +259,7 @@ mod tests {
         assert!(h.failed().is_empty());
     }
 
-    /// Tracing: TC-070-01
-    /// ACs: FR-070-AC-1
+    #[trace("FR-070-AC-1")]
     #[test]
     fn tc_070_01_the_default_profile_expects_every_source_but_temperature() {
         let p = Profile::default();

@@ -1336,9 +1336,9 @@ mod tests {
 #[cfg(test)]
 mod fleet_file_tests {
     use super::*;
+    use ix_trace_rs::trace;
 
-    /// Tracing: TC-070-01
-    /// ACs: FR-070-AC-1
+    #[trace("FR-070-AC-1")]
     #[test]
     fn the_fleet_table_loads_raw_and_an_unknown_key_is_refused_like_the_other_tables() {
         let file: FileConfig =

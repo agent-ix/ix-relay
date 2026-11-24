@@ -131,6 +131,8 @@ fn heartbeat_full() -> WatcherHeartbeat {
             reason: "timeout".into(),
             counters: Default::default(),
         }),
+        fleet_failed_sources: Vec::new(),
+        fleet_lanes_dropped: 0,
         last_error: Some(HeartbeatError {
             kind: HeartbeatErrorKind::RedisUnreachable,
             at_ms: 9,
@@ -157,6 +159,8 @@ fn a_heartbeat_and_the_watcher_file_are_byte_identical_to_main() {
         redis_ok: false,
         leads_watched: 0,
         otlp: Some(OtlpStatus::Disabled),
+        fleet_failed_sources: Vec::new(),
+        fleet_lanes_dropped: 0,
         last_error: None,
     };
     assert_wire(&min, HEARTBEAT_MIN);

@@ -36,6 +36,8 @@ delivery = "herdr"          # or "socket"
 | `[fleet] expected_sources` | Collector sources this host provides, each exported as `ix_fleet_probe_ok`. A source not listed, or listed in `unavailable_sources`, is exported as `ix_fleet_probe_unavailable`. A host with a readable hwmon sensor adds `temperature`. | every source except `temperature` |
 | `[fleet] unavailable_sources` | Sources this host cannot provide, for example `compilers` on a host with no process list. | none |
 
+Upgrade `agent-msg`, the hook and `relay-watcher` on a machine before adding `[fleet]` to its `config.toml`: a binary built before this table existed refuses a file that has it.
+
 ## Environment variables and flags
 
 Each setting resolves in this order: flag, environment variable, file, default. A `--url` flag beats `IX_RELAY_URL`, which beats `url` in the file, which beats the compiled-in default.

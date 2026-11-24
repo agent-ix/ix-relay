@@ -273,6 +273,7 @@ pub fn classify(tail: &str, harness: Harness) -> PaneClass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ix_trace_rs::trace;
 
     /// The fixture tail of each class for each harness.
     fn fixture(harness: Harness, class: PaneClass) -> String {
@@ -296,8 +297,7 @@ mod tests {
         format!("earlier output\n{body}\n")
     }
 
-    /// Tracing: TC-069-07
-    /// ACs: FR-069-AC-7
+    #[trace("FR-069-AC-7")]
     #[test]
     fn tc_069_07_each_fixture_classifies_to_its_class_for_both_harnesses() {
         for harness in Harness::ALL {
@@ -311,8 +311,7 @@ mod tests {
         }
     }
 
-    /// Tracing: TC-069-07
-    /// ACs: FR-069-AC-7
+    #[trace("FR-069-AC-7")]
     #[test]
     fn tc_069_07_a_tail_over_the_bound_is_read_only_to_the_bound() {
         // A dialog marker beyond 80 lines, then plain output: not seen.
@@ -334,8 +333,7 @@ mod tests {
         assert!(bound_tail(&wide).len() <= TAIL_BYTES);
     }
 
-    /// Tracing: TC-069-12
-    /// ACs: FR-069-AC-12
+    #[trace("FR-069-AC-12")]
     #[test]
     fn tc_069_12_every_class_has_a_reason_and_every_reason_is_reachable() {
         for class in PaneClass::ALL {

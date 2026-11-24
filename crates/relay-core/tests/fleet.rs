@@ -1,10 +1,10 @@
 //! The per-host lane lists of the fleet registry against real Redis.
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test fixtures")]
+use ix_trace_rs::trace;
 use relay_core::fleet::fleet_registry;
 use relay_test_support::Bus;
 
-/// Tracing: TC-069-16
-/// ACs: FR-069-AC-16
+#[trace("FR-069-AC-16")]
 #[test]
 fn tc_069_16_three_hosts_publish_lane_lists_and_the_registry_is_their_union() {
     let Some(mut bus) = Bus::connect("fleet-lane-lists") else {

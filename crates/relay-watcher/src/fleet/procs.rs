@@ -130,6 +130,8 @@ pub fn read_native_windows() -> Result<usize, ErrorClass> {
         )
         .map_err(|e| match e {
             ProcessError::Timeout { .. } => ErrorClass::Timeout,
+            // No `tasklist.exe`: WSL interop is off or this is no WSL guest.
+            ProcessError::Spawn { .. } => ErrorClass::Unsupported,
             _ => ErrorClass::Unavailable,
         })?;
     if !out.success {
@@ -141,9 +143,9 @@ pub fn read_native_windows() -> Result<usize, ErrorClass> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ix_trace_rs::trace;
 
-    /// Tracing: TC-069-14
-    /// ACs: FR-069-AC-14
+    #[trace("FR-069-AC-14")]
     #[test]
     fn tc_069_14_a_native_windows_agent_in_the_interop_list_is_counted() {
         let with = "\"System\",\"4\",\"Services\",\"0\",\"8 K\"\r\n\

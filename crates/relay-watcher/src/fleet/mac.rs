@@ -9,7 +9,7 @@
 
 use super::{
     health::ErrorClass,
-    host::{CpuTicks, Memory},
+    host::{CpuTicks, Memory, ticks_from_macos},
 };
 
 /// Cumulative host CPU ticks.
@@ -30,13 +30,13 @@ pub fn cpu_ticks() -> Result<CpuTicks, ErrorClass> {
         }
         info
     };
-    let tick = |state: libc::c_int| u64::from(info.cpu_ticks[usize::try_from(state).unwrap_or(0)]);
-    Ok(CpuTicks {
-        busy: tick(libc::CPU_STATE_USER)
-            + tick(libc::CPU_STATE_SYSTEM)
-            + tick(libc::CPU_STATE_NICE),
-        idle: tick(libc::CPU_STATE_IDLE),
-    })
+    let tick = |state: libc::c_int| info.cpu_ticks[usize::try_from(state).unwrap_or(0)];
+    Ok(ticks_from_macos(
+        tick(libc::CPU_STATE_USER),
+        tick(libc::CPU_STATE_SYSTEM),
+        tick(libc::CPU_STATE_IDLE),
+        tick(libc::CPU_STATE_NICE),
+    ))
 }
 
 /// Used and total memory: total from `hw.memsize`, available as the free and

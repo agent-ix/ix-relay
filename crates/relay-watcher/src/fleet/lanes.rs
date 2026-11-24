@@ -129,6 +129,12 @@ impl Signals {
     /// working when herdr says so, else idle.
     #[must_use]
     pub fn state(&self, herdr_status: Option<&str>) -> LaneState {
+        // A hook event newer than the pane tail names the lane's state itself.
+        if let Some((HookSignal::Idle, at)) = self.hook
+            && self.pane.is_none_or(|(_, p)| at >= p)
+        {
+            return LaneState::Idle;
+        }
         if self.blocked_reason().is_some() {
             LaneState::Blocked
         } else if herdr_status == Some("working") {
@@ -141,6 +147,7 @@ impl Signals {
 
 #[cfg(test)]
 mod tests {
+    use ix_trace_rs::trace;
     use relay_ops::find::{HerdrAgent, HerdrTab, HerdrWorkspace};
 
     use super::*;
@@ -197,8 +204,7 @@ mod tests {
         }
     }
 
-    /// Tracing: TC-069-11
-    /// ACs: FR-069-AC-11
+    #[trace("FR-069-AC-11")]
     #[test]
     fn tc_069_11_the_registry_is_the_union_of_panes_and_registrations_by_address() {
         let hub: MachineName = "hub".parse().unwrap();
@@ -217,8 +223,7 @@ mod tests {
         assert!(review.pane.is_none() && review.herdr_status.is_none());
     }
 
-    /// Tracing: TC-069-08
-    /// ACs: FR-069-AC-8
+    #[trace("FR-069-AC-8")]
     #[test]
     fn tc_069_08_a_hook_event_newer_than_the_pane_tail_takes_precedence() {
         let t0 = Instant::now();
@@ -229,7 +234,7 @@ mod tests {
             hook: Some((HookSignal::Idle, later)),
         };
         assert_eq!(s.blocked_reason(), None);
-        assert_eq!(s.state(Some("working")), LaneState::Working);
+        assert_eq!(s.state(Some("working")), LaneState::Idle);
         // A pane tail newer than the hook event is used.
         let s = Signals {
             pane: Some((PaneClass::Dialog, later)),

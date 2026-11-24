@@ -233,6 +233,7 @@ pub fn read_temperature() -> Result<f64, ErrorClass> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ix_trace_rs::trace;
 
     const STAT_A: &str = "cpu  1000 0 500 8000 500 0 0 0 0 0\ncpu0 1000 0 500 8000 500 0 0 0 0 0\n";
     // +300 user, +100 system, +500 idle, +100 iowait over the interval.
@@ -243,8 +244,7 @@ mod tests {
         *BASE.get_or_init(Instant::now) + Duration::from_secs(secs)
     }
 
-    /// Tracing: TC-069-01
-    /// ACs: FR-069-AC-1
+    #[trace("FR-069-AC-1")]
     #[test]
     fn tc_069_01_two_proc_stat_samples_give_the_non_idle_share_and_one_gives_none() {
         let mut s = CpuSampler::default();
@@ -259,8 +259,7 @@ mod tests {
         assert!(s.sample(at(11), parse_proc_stat(STAT_B).unwrap()).is_some());
     }
 
-    /// Tracing: TC-069-02
-    /// ACs: FR-069-AC-2
+    #[trace("FR-069-AC-2")]
     #[test]
     fn tc_069_02_macos_host_tick_fixtures_give_the_expected_ratio_on_the_build_target_path() {
         let mut s = CpuSampler::default();
@@ -305,8 +304,7 @@ mod tests {
         );
     }
 
-    /// Tracing: TC-069-03
-    /// ACs: FR-069-AC-3
+    #[trace("FR-069-AC-3")]
     #[test]
     fn tc_069_03_a_wsl_proc_fixture_gives_cpu_and_memory_from_text_alone() {
         // The WSL VM exposes the Linux /proc files; the parsers take text, so no
@@ -320,8 +318,7 @@ mod tests {
         assert_eq!(parse_meminfo("MemTotal: 1 kB\n"), Err(ErrorClass::Parse));
     }
 
-    /// Tracing: TC-069-04
-    /// ACs: FR-069-AC-4
+    #[trace("FR-069-AC-4")]
     #[test]
     fn tc_069_04_the_highest_tctl_or_package_sensor_is_read_and_a_missing_one_fails() {
         let dir = tempfile::tempdir().unwrap();

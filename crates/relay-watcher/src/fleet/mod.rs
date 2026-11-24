@@ -47,12 +47,17 @@ use crate::otlp::{
     },
 };
 
-/// How much of one tick the pane scan may use, leaving the rest of the source
-/// budget for the hand-off.
+/// How much of one source slot the whole pane scan may use: the scan checks the
+/// time left before each read and caps the read at it, so it ends inside
+/// [`SOURCE_BUDGET`] with its completed reads kept.
 const PANE_SCAN_BUDGET: Duration = Duration::from_millis(400);
 
+/// The longest one pane read may take, and the least time left worth starting one.
+const PANE_READ_MAX: Duration = Duration::from_millis(300);
+const PANE_READ_MIN: Duration = Duration::from_millis(20);
+
 type Read<T> = Arc<dyn Fn() -> Result<T, ErrorClass> + Send + Sync>;
-type PaneRead = Arc<dyn Fn(&PaneId) -> Result<String, ErrorClass> + Send + Sync>;
+type PaneRead = Arc<dyn Fn(&PaneId, Duration) -> Result<String, ErrorClass> + Send + Sync>;
 
 /// What the collector reads. [`Sources::native`] is this host; tests give
 /// fixtures.
@@ -89,14 +94,14 @@ impl Sources {
 }
 
 /// `herdr pane read <pane> --lines 80`: plain text, bounded by the runner.
-fn read_pane_tail(pane: &PaneId) -> Result<String, ErrorClass> {
+fn read_pane_tail(pane: &PaneId, timeout: Duration) -> Result<String, ErrorClass> {
     use herdr_cli::{ProcessError, ProcessRunner, RealProcessRunner};
     let lines = pane::TAIL_LINES.to_string();
     let out = RealProcessRunner
         .run(
             "herdr",
             &["pane", "read", pane.as_str(), "--lines", &lines],
-            Duration::from_millis(300),
+            timeout,
         )
         .map_err(|e| match e {
             ProcessError::Timeout { .. } => ErrorClass::Timeout,
@@ -122,6 +127,24 @@ pub enum CapacityRead {
     Failed(ErrorClass),
 }
 
+/// What the heartbeat reports of the collector, shared with the thread that writes it.
+#[derive(Debug, Clone, Default)]
+pub struct StatusHandle(Arc<std::sync::Mutex<(Vec<String>, u32)>>);
+
+impl StatusHandle {
+    /// The failed source names and the registry lanes left out past the cap.
+    #[must_use]
+    pub fn get(&self) -> (Vec<String>, u32) {
+        self.0.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+
+    fn set(&self, failed: Vec<String>, dropped: u32) {
+        if let Ok(mut g) = self.0.lock() {
+            *g = (failed, dropped);
+        }
+    }
+}
+
 /// The host collector.
 pub struct Collector {
     host: MachineName,
@@ -142,14 +165,16 @@ pub struct Collector {
     classes: HashMap<String, (PaneClass, Instant)>,
     hooks: HashMap<String, (HookSignal, Instant)>,
     scan_from: usize,
+    interval: Duration,
+    status: StatusHandle,
     refresh_redis_ok: bool,
     push_redis_ok: bool,
 }
 
 impl Collector {
-    /// A collector for `host` with `profile`, reading `sources`.
+    /// A collector for `host` with `profile`, reading `sources` once per push `interval`.
     #[must_use]
-    pub fn new(host: MachineName, profile: Profile, sources: Sources) -> Self {
+    pub fn new(host: MachineName, profile: Profile, sources: Sources, interval: Duration) -> Self {
         let mut health = Health::default();
         // No hook feed is attached yet: the source is expected and not readable,
         // which is a standing failure and not silence (FR-070).
@@ -176,6 +201,8 @@ impl Collector {
             classes: HashMap::new(),
             hooks: HashMap::new(),
             scan_from: 0,
+            interval,
+            status: StatusHandle::default(),
             refresh_redis_ok: true,
             push_redis_ok: true,
         }
@@ -191,14 +218,28 @@ impl Collector {
         &self.compilers
     }
 
-    #[allow(
-        dead_code,
-        reason = "seam: the heartbeat and doctor of FR-028 list failed sources"
-    )]
-    /// The sources that failed their last read, for the heartbeat.
+    /// The sources that failed their last read.
+    #[cfg(test)]
     #[must_use]
     pub fn failed_sources(&self) -> Vec<Source> {
         self.health.failed()
+    }
+
+    /// The handle the heartbeat reads: failed sources and dropped lanes.
+    #[must_use]
+    pub fn status(&self) -> StatusHandle {
+        self.status.clone()
+    }
+
+    fn publish_status(&self) {
+        let failed = self
+            .health
+            .failed()
+            .into_iter()
+            .map(|s| s.name().to_owned())
+            .collect();
+        let dropped = u32::try_from(self.lanes.len().saturating_sub(MAX_LANES)).unwrap_or(u32::MAX);
+        self.status.set(failed, dropped);
     }
 
     #[allow(dead_code, reason = "seam: the hook feed change attaches itself here")]
@@ -225,6 +266,7 @@ impl Collector {
         self.classes.retain(|a, _| keep.contains(a.as_str()));
         self.hooks.retain(|a, _| keep.contains(a.as_str()));
         self.lanes = lanes;
+        self.publish_status();
     }
 
     /// The outcome of the last layout read from herdr.
@@ -271,6 +313,7 @@ impl Collector {
         if let Some(line) = self.health.record(source, outcome) {
             log(line);
         }
+        self.publish_status();
     }
 
     fn bounded<T: Send + 'static>(&self, source: Source, read: &Read<T>) -> Result<T, ErrorClass> {
@@ -360,12 +403,14 @@ impl Collector {
                 let began = Instant::now();
                 let mut done = Vec::new();
                 for offset in 0..job_targets.len() {
-                    if began.elapsed() >= PANE_SCAN_BUDGET {
+                    let left = PANE_SCAN_BUDGET.saturating_sub(began.elapsed());
+                    if left < PANE_READ_MIN {
                         break;
                     }
                     let (address, pane, harness) =
                         &job_targets[(start + offset) % job_targets.len()];
-                    let class = read(pane).map(|tail| pane::classify(&tail, *harness));
+                    let class = read(pane, left.min(PANE_READ_MAX))
+                        .map(|tail| pane::classify(&tail, *harness));
                     done.push((address.clone(), class));
                 }
                 done
@@ -398,9 +443,15 @@ impl Collector {
         }
     }
 
-    fn signals(&self, address: &str) -> Signals {
+    /// The signals of a lane at `now`. A pane class counts only while `pane_tail`
+    /// reads ok and the class is younger than one scan interval: an old class is
+    /// never exported as current (FR-070).
+    fn signals(&self, address: &str, now: Instant) -> Signals {
+        let pane = self.classes.get(address).copied().filter(|(_, at)| {
+            self.health.ok(Source::PaneTail) && now.saturating_duration_since(*at) < self.interval
+        });
         Signals {
-            pane: self.classes.get(address).copied(),
+            pane,
             hook: self.hooks.get(address).copied(),
         }
     }
@@ -454,7 +505,7 @@ impl Collector {
             registry.gauge(&FLEET_NATIVE_WINDOWS, host_attr(), clamp(n as u64));
         }
         for lane in self.lanes.iter().take(MAX_LANES) {
-            let signals = self.signals(&lane.address);
+            let signals = self.signals(&lane.address, now);
             let state = signals.state(lane.herdr_status.as_deref());
             let lane_attrs = || Attrs::new().with("host", host).with("lane", &lane.address);
             registry.gauge(
@@ -491,6 +542,8 @@ pub(crate) mod fixtures {
 
     use super::*;
 
+    pub(crate) const INTERVAL: Duration = Duration::from_secs(30);
+
     pub(crate) fn host() -> MachineName {
         "hub".parse().unwrap()
     }
@@ -524,7 +577,7 @@ pub(crate) mod fixtures {
                 )
             }),
             native_windows: Some(Arc::new(|| Ok(0))),
-            pane_tail: Arc::new(move |_| {
+            pane_tail: Arc::new(move |_, _| {
                 fail(Source::PaneTail).map_or(Ok("plain output\n".to_owned()), Err)
             }),
         }
@@ -544,7 +597,7 @@ pub(crate) mod fixtures {
         profile: Profile,
         failing: Option<(Source, ErrorClass)>,
     ) -> (Collector, Instant) {
-        let mut c = Collector::new(host(), profile, sources(failing));
+        let mut c = Collector::new(host(), profile, sources(failing), INTERVAL);
         let t0 = Instant::now();
         let mut log = |_| {};
         c.set_lanes(t0, vec![lane("hub:QSL:plan", "w1:p1", Harness::Claude)]);
@@ -592,6 +645,7 @@ pub(crate) mod fixtures {
 
 #[cfg(test)]
 mod tests {
+    use ix_trace_rs::trace;
     use std::time::Instant;
 
     use super::{fixtures::*, *};
@@ -648,8 +702,7 @@ mod tests {
             .collect()
     }
 
-    /// Tracing: TC-070-01
-    /// ACs: FR-070-AC-1
+    #[trace("FR-070-AC-1")]
     #[test]
     fn tc_070_01_healthy_fixtures_give_probe_ok_1_for_each_expected_source_only() {
         let (c, now) = healthy(Profile::new(&expected(), &[Source::Compilers]), None);
@@ -673,8 +726,7 @@ mod tests {
         assert!((ratio.unwrap() - 0.4).abs() < 1e-9);
     }
 
-    /// Tracing: TC-070-02
-    /// ACs: FR-070-AC-2
+    #[trace("FR-070-AC-2")]
     #[test]
     fn tc_070_02_each_source_failing_in_turn_exports_0_and_leaves_the_others_alone() {
         let classes = [
@@ -704,11 +756,10 @@ mod tests {
         }
     }
 
-    /// Tracing: TC-070-03
-    /// ACs: FR-070-AC-3
+    #[trace("FR-070-AC-3")]
     #[test]
     fn tc_070_03_a_source_that_never_succeeded_is_present_with_0_on_the_first_push() {
-        let c = Collector::new(host(), Profile::default(), sources(None));
+        let c = Collector::new(host(), Profile::default(), sources(None), INTERVAL);
         let r = registry_of(&c, Instant::now());
         for s in expected() {
             assert_eq!(probe(&r, s), Some(0), "{}", s.name());
@@ -716,8 +767,7 @@ mod tests {
         assert!(!has(&r, "ix.fleet.host.busy_ratio"));
     }
 
-    /// Tracing: TC-070-04
-    /// ACs: FR-070-AC-4
+    #[trace("FR-070-AC-4")]
     #[test]
     fn tc_070_04_the_busy_ratio_is_absent_when_cpu_fails_after_a_good_read() {
         let (mut c, now) = healthy(Profile::default(), None);
@@ -732,8 +782,7 @@ mod tests {
         assert_eq!(c.failed_sources(), [Source::Cpu]);
     }
 
-    /// Tracing: TC-070-06
-    /// ACs: FR-070-AC-6
+    #[trace("FR-070-AC-6")]
     #[test]
     fn tc_070_06_with_redis_down_redis_reads_0_and_the_other_sources_still_report() {
         let (mut c, now) = healthy(Profile::default(), None);
@@ -745,8 +794,7 @@ mod tests {
         assert!(has(&r, "ix.fleet.host.busy_ratio"));
     }
 
-    /// Tracing: TC-070-07
-    /// ACs: FR-070-AC-7, FR-069-AC-4
+    #[trace("FR-070-AC-7", "FR-069-AC-4")]
     #[test]
     fn tc_070_07_temperature_is_unavailable_unless_expected_and_failed_when_unreadable() {
         // The profile omits temperature: unavailable, no probe_ok, no value, no failed source.
@@ -768,8 +816,7 @@ mod tests {
         assert!(has(&registry_of(&c, now), "ix.fleet.host.temperature"));
     }
 
-    /// Tracing: TC-070-08
-    /// ACs: FR-070-AC-8
+    #[trace("FR-070-AC-8")]
     #[test]
     fn tc_070_08_unset_capacity_is_a_standing_failure_and_entered_capacity_is_exported() {
         let (mut c, now) = healthy(Profile::default(), None);
@@ -785,8 +832,7 @@ mod tests {
         assert_eq!(int(&r, "ix.fleet.host.capacity_slots", &[]), Some(8));
     }
 
-    /// Tracing: TC-069-09
-    /// ACs: FR-069-AC-9
+    #[trace("FR-069-AC-9")]
     #[test]
     fn tc_069_09_a_hung_source_costs_its_budget_and_the_others_still_report() {
         let (mut c, now) = healthy(Profile::default(), None);
@@ -812,13 +858,13 @@ mod tests {
         drop(release);
     }
 
-    /// Tracing: TC-069-08
-    /// ACs: FR-069-AC-8
+    #[trace("FR-069-AC-8")]
     #[test]
     fn tc_069_08_matched_pane_text_reaches_no_series_and_no_log_line() {
         let marker = "SECRET-MARKER-9f3a";
-        let mut c = Collector::new(host(), Profile::default(), sources(None));
-        c.sources.pane_tail = Arc::new(move |_| Ok(format!("{marker} Do you want to proceed?\n")));
+        let mut c = Collector::new(host(), Profile::default(), sources(None), INTERVAL);
+        c.sources.pane_tail =
+            Arc::new(move |_, _| Ok(format!("{marker} Do you want to proceed?\n")));
         let t0 = Instant::now();
         let mut lines = Vec::new();
         c.set_lanes(t0, vec![lane("hub:QSL:plan", "w1:p1", Harness::Claude)]);
@@ -838,11 +884,10 @@ mod tests {
         assert!(lines.iter().all(|l| !l.contains(marker)), "{lines:?}");
     }
 
-    /// Tracing: TC-069-11
-    /// ACs: FR-069-AC-11
+    #[trace("FR-069-AC-11")]
     #[test]
     fn tc_069_11_every_registry_lane_has_state_and_last_activity_on_every_push() {
-        let mut c = Collector::new(host(), Profile::default(), sources(None));
+        let mut c = Collector::new(host(), Profile::default(), sources(None), INTERVAL);
         let t0 = Instant::now();
         let addrs = ["hub:A:one", "hub:A:two", "hub:B:three"];
         c.set_lanes(
@@ -874,15 +919,15 @@ mod tests {
         assert!(int(&r, "ix.fleet.lane.state", &[("lane", "hub:A:two")]).is_none());
     }
 
-    /// Tracing: TC-069-12
-    /// ACs: FR-069-AC-12
+    #[trace("FR-069-AC-12")]
     #[test]
     fn tc_069_12_every_pane_class_exports_its_mapped_blocked_reason() {
         for harness in Harness::ALL {
             for class in PaneClass::ALL {
-                let mut c = Collector::new(host(), Profile::default(), sources(None));
+                let mut c = Collector::new(host(), Profile::default(), sources(None), INTERVAL);
                 let t0 = Instant::now();
                 c.set_lanes(t0, vec![lane("hub:A:one", "w1:p1", harness)]);
+                c.record(Source::PaneTail, Outcome::Ok, &mut |_| {});
                 c.classes.insert("hub:A:one".into(), (class, t0));
                 let r = registry_of(&c, t0);
                 for reason in pane::BlockedReason::ALL {
@@ -898,7 +943,7 @@ mod tests {
             }
         }
         // Hook causes map to their reasons too.
-        let mut c = Collector::new(host(), Profile::default(), sources(None));
+        let mut c = Collector::new(host(), Profile::default(), sources(None), INTERVAL);
         let t0 = Instant::now();
         c.set_lanes(t0, vec![lane("hub:A:one", "w1:p1", Harness::Claude)]);
         for reason in [
@@ -914,13 +959,71 @@ mod tests {
         }
     }
 
+    /// A class that is a scan interval old, or any class while `pane_tail` reads 0,
+    /// is not exported as current.
+    #[trace("FR-070-AC-4")]
+    #[test]
+    fn tc_070_10_a_stale_pane_class_or_an_unhealthy_pane_tail_exports_no_blocked_value() {
+        let (mut c, now) = healthy(Profile::default(), None);
+        c.classes
+            .insert("hub:QSL:plan".into(), (PaneClass::Dialog, now));
+        let blocked = |c: &Collector, at: Instant| {
+            int(
+                &registry_of(c, at),
+                "ix.fleet.lane.blocked",
+                &[("reason", "dialog")],
+            )
+        };
+        assert_eq!(blocked(&c, now), Some(1));
+        assert_eq!(blocked(&c, now + INTERVAL), None, "one scan interval old");
+        c.record(
+            Source::PaneTail,
+            Outcome::Failed(ErrorClass::Timeout),
+            &mut |_| {},
+        );
+        assert_eq!(blocked(&c, now), None, "pane_tail reads 0");
+    }
+
+    /// A slow herdr cannot push the scan past its slot: each read is capped at the time
+    /// left, the completed reads are kept and the next scan resumes after them.
+    #[trace("FR-069-AC-9")]
+    #[test]
+    fn tc_069_09_a_slow_herdr_ends_the_scan_inside_its_budget_and_keeps_completed_reads() {
+        let mut c = Collector::new(host(), Profile::default(), sources(None), INTERVAL);
+        c.sources.pane_tail = Arc::new(|_, timeout| {
+            let took = Duration::from_millis(200);
+            std::thread::sleep(took.min(timeout));
+            if timeout < took {
+                Err(ErrorClass::Timeout)
+            } else {
+                Ok("Do you want to proceed?\n".to_owned())
+            }
+        });
+        let t0 = Instant::now();
+        let lanes: Vec<Lane> = (0..6)
+            .map(|n| lane(&format!("hub:W:t{n}"), &format!("w1:p{n}"), Harness::Claude))
+            .collect();
+        c.set_lanes(t0, lanes);
+        let started = Instant::now();
+        c.sample(t0, &mut |_| {});
+        assert!(
+            started.elapsed() < bound::SOURCE_BUDGET,
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            c.health.ok(Source::PaneTail),
+            "not a timeout of the whole scan"
+        );
+        assert!(!c.classes.is_empty(), "completed reads are kept");
+        assert!(c.scan_from > 0 && c.scan_from < 6, "{}", c.scan_from);
+    }
+
     /// The exporter half: the 51st lane is not folded into another, and the drop is counted.
-    ///
-    /// Tracing: TC-045-31
-    /// ACs: FR-045-AC-31
+    #[trace("FR-045-AC-31")]
     #[test]
     fn tc_045_31_the_51st_lane_is_dropped_and_counted_not_folded() {
-        let mut c = Collector::new(host(), Profile::default(), sources(None));
+        let mut c = Collector::new(host(), Profile::default(), sources(None), INTERVAL);
         let t0 = Instant::now();
         let lanes: Vec<Lane> = (0..51)
             .map(|n| lane(&format!("hub:W:t{n:02}"), "w1:p1", Harness::Claude))

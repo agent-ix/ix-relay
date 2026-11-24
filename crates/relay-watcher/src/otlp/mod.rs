@@ -329,12 +329,42 @@ impl Publisher {
             Some(_) => {}
             None => a.read_failed_reported = false,
         }
-        let mut fleet = fleet;
+        self.push(now, &health, failed_ok, fleet, log);
+    }
+
+    /// The push of a watcher with no store connection (FR-070-AC-6): on the same
+    /// interval, with every store-backed series left out and the `redis` source
+    /// reading 0, so the collector sees the outage and the host's other sources.
+    pub fn publish_offline(
+        &mut self,
+        now: Instant,
+        fleet: Option<&mut crate::fleet::Collector>,
+        log: &mut impl FnMut(String),
+    ) {
+        let Some(a) = &mut self.active else {
+            return;
+        };
+        if a.next_due.is_some_and(|due| now < due) {
+            return;
+        }
+        a.next_due = Some(next_due_after(now, a.interval));
+        self.push(now, &relay::Health::default(), false, fleet, log);
+    }
+
+    /// Samples the collector, builds the registry and hands it to the exporter.
+    fn push(
+        &self,
+        now: Instant,
+        health: &relay::Health,
+        store_ok: bool,
+        mut fleet: Option<&mut crate::fleet::Collector>,
+        log: &mut impl FnMut(String),
+    ) {
         if let Some(f) = fleet.as_deref_mut() {
-            f.set_push_redis(failed_ok, log);
+            f.set_push_redis(store_ok, log);
             f.sample(now, log);
         }
-        let mut registry = self.build(now, unix_nanos(), &health);
+        let mut registry = self.build(now, unix_nanos(), health);
         if let Some(f) = fleet {
             f.fill(&mut registry, now);
         }
@@ -430,7 +460,7 @@ mod tests {
     /// code, the catalogue and the spec agree.
     ///
     /// Tracing: TC-045-11
-    /// ACs: FR-045-AC-11, FR-045-AC-29
+    /// ACs: FR-045-AC-11
     #[test]
     fn tc_045_11_the_exported_series_are_the_catalogue_and_the_catalogue_is_the_spec() {
         let (mut p, _rx) = publisher();
@@ -479,15 +509,22 @@ mod tests {
             );
             assert!(spec.contains(&row), "FR-045 has no series row {row:?}");
         }
-        // Series the spec lists that belong to the hook feed and the order
-        // lanes (later changes) and are not exported yet.
+        // Series the spec lists that are not exported yet, each with the ticket that
+        // removes it from this list. FR-045-AC-11 and AC-29 are met only when it is empty.
         const NOT_YET_EXPORTED: &[&str] = &[
+            // SWM-205: the hook feed.
             "ix.fleet.lane.no_events",
+            // SWM-205: needs hook `cwd` for compiler attribution.
             "ix.fleet.lane.compile_seconds",
+            // SWM-205: from the hook-reported branch or cwd.
             "ix.fleet.lane.focus_info",
+            // SWM-205: the hook-state windows it reports.
             "ix.fleet.config",
+            // SWM-205: the hook feed.
             "ix.relay.hook.activity_skipped",
+            // SWM-207: order metrics.
             "ix.relay.orders.unacted",
+            // SWM-207: order metrics.
             "ix.relay.order.act_latency",
         ];
         let rows = spec

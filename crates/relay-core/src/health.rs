@@ -216,8 +216,20 @@ pub struct WatcherHeartbeat {
     /// heartbeat unreadable.
     #[serde(default, deserialize_with = "lenient_otlp")]
     pub otlp: Option<OtlpStatus>,
+    /// The collector sources (FR-070) whose last read failed, by name. Absent from a
+    /// record an older watcher wrote, and empty when none failed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fleet_failed_sources: Vec<String>,
+    /// Registry lanes left out of the per-lane series past the cap of 50 (FR-045);
+    /// absent or 0 when none.
+    #[serde(default, skip_serializing_if = "is_zero_lanes")]
+    pub fleet_lanes_dropped: u32,
     /// The most recent failed tick, kept after recovery.
     pub last_error: Option<HeartbeatError>,
+}
+
+fn is_zero_lanes(n: &u32) -> bool {
+    *n == 0
 }
 
 /// What reading one machine's heartbeat key found.
@@ -289,6 +301,8 @@ mod tests {
                 reason: "timeout".into(),
                 counters: OtlpCounters::default(),
             }),
+            fleet_failed_sources: Vec::new(),
+            fleet_lanes_dropped: 0,
             last_error: Some(HeartbeatError {
                 kind: HeartbeatErrorKind::RedisUnreachable,
                 at_ms: 4,

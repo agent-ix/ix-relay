@@ -80,6 +80,7 @@ pub fn fleet_registry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ix_trace_rs::trace;
 
     fn list(machine: &str, refreshed_ms: i64, lanes: &[&str]) -> HostLaneList {
         HostLaneList {
@@ -89,8 +90,7 @@ mod tests {
         }
     }
 
-    /// Tracing: TC-069-16
-    /// ACs: FR-069-AC-16
+    #[trace("FR-069-AC-16")]
     #[test]
     fn tc_069_16_registry_is_the_union_and_an_expired_host_stays_listed_as_stale() {
         let lists = [
@@ -124,8 +124,7 @@ mod tests {
         assert_eq!(reg.len(), 5);
     }
 
-    /// Tracing: TC-069-16
-    /// ACs: FR-069-AC-16
+    #[trace("FR-069-AC-16")]
     #[test]
     fn tc_069_16_the_lease_is_ninety_seconds_and_refreshed_about_every_thirty() {
         let l = list("a", 0, &[]);

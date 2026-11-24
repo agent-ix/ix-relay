@@ -45,6 +45,8 @@ pub struct HeartbeatConfig {
     pub ttl: Duration,
     /// What the OTLP push is doing, read on each heartbeat (FR-045).
     pub otlp: crate::otlp::export::StatusHandle,
+    /// The collector's failed sources and dropped lanes (FR-070, FR-045).
+    pub fleet: crate::fleet::StatusHandle,
 }
 
 /// The heartbeat's running state.
@@ -277,6 +279,8 @@ impl Beat {
             redis_ok: !self.redis_flapped,
             leads_watched: leads,
             otlp: Some(self.config.otlp.get()),
+            fleet_failed_sources: self.config.fleet.get().0,
+            fleet_lanes_dropped: self.config.fleet.get().1,
             last_error: self.last_error.clone(),
         }
     }
@@ -284,6 +288,7 @@ impl Beat {
 
 #[cfg(test)]
 mod tests {
+    use ix_trace_rs::trace;
     use std::cell::RefCell;
 
     use relay_core::health::HeartbeatRead;
@@ -302,6 +307,7 @@ mod tests {
             sweep: Duration::from_secs(15),
             ttl,
             otlp: crate::otlp::export::StatusHandle::disabled(),
+            fleet: crate::fleet::StatusHandle::default(),
         }
     }
 
@@ -475,6 +481,40 @@ mod tests {
             last_write_ms: None,
         }
         .snapshot(1, 0, &HerdrCheck::NotChecked)
+    }
+
+    /// The heartbeat lists the collector's failed sources and dropped lanes, and an
+    /// older reader's JSON is unchanged when there are none.
+    #[trace("FR-070-AC-5")]
+    #[test]
+    fn tc_070_05_the_heartbeat_lists_failed_collector_sources() {
+        let mut config = config(Duration::from_secs(60));
+        let beat = |config: HeartbeatConfig| Beat {
+            config,
+            last_sweep_ms: None,
+            redis_flapped: false,
+            last_error: None,
+            write_failing: false,
+            last_write_ms: None,
+        };
+        let quiet = beat(config.clone()).snapshot(1, 0, &HerdrCheck::NotChecked);
+        let json = serde_json::to_value(&quiet).unwrap();
+        assert!(json.get("fleet_failed_sources").is_none());
+        assert!(json.get("fleet_lanes_dropped").is_none());
+        let mut collector = crate::fleet::Collector::new(
+            "hub".parse().unwrap(),
+            crate::fleet::health::Profile::default(),
+            crate::fleet::fixtures::sources(Some((
+                crate::fleet::health::Source::Cpu,
+                crate::fleet::health::ErrorClass::Unreadable,
+            ))),
+            crate::fleet::fixtures::INTERVAL,
+        );
+        config.fleet = collector.status();
+        collector.sample(std::time::Instant::now(), &mut |_| {});
+        let hb = beat(config).snapshot(1, 0, &HerdrCheck::NotChecked);
+        assert_eq!(hb.fleet_failed_sources, ["cpu", "hook_events"]);
+        assert_eq!(hb.fleet_lanes_dropped, 0);
     }
 
     #[test]

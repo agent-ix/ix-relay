@@ -857,6 +857,37 @@ fn heartbeat_check(
         )
         .with_details(counters_line(counters));
     }
+    if !hb.fleet_failed_sources.is_empty() {
+        let named: Vec<String> = hb
+            .fleet_failed_sources
+            .iter()
+            .map(|s| relay_core::text::neutralise(s))
+            .collect();
+        return Check::warn(
+            Family::Watcher,
+            Code::CollectorSourceFailed,
+            Some(machine.as_str()),
+            format!(
+                "the watcher on {machine} reports collector sources failing: {}",
+                named.join(", ")
+            ),
+            "a host measurement or lane source did not read; its series are left out and ix_fleet_probe_ok reads 0",
+            "check that host (its /proc, herdr, Redis or capacity entry), or list the source under [fleet] unavailable_sources if the host cannot provide it",
+        );
+    }
+    if hb.fleet_lanes_dropped > 0 {
+        return Check::warn(
+            Family::Watcher,
+            Code::FleetLanesDropped,
+            Some(machine.as_str()),
+            format!(
+                "the watcher on {machine} left {} lane(s) out of its metrics: more than 50 lanes",
+                hb.fleet_lanes_dropped
+            ),
+            "the per-lane series are capped at 50 lanes per host",
+            "retire idle lanes on that host; the cap is fixed",
+        );
+    }
     Check::ok(
         Family::Watcher,
         Some(machine.as_str()),
@@ -1944,6 +1975,7 @@ fn service(f: &Facts, up: Option<&RedisUp>, checks: &mut Vec<Check>) {
 #[cfg(test)]
 mod tests {
     use crate::doctor::facts::MovesRead;
+    use ix_trace_rs::trace;
     use std::{collections::HashSet, time::Duration};
 
     use relay_core::{
@@ -1978,6 +2010,8 @@ mod tests {
                 redis_ok: true,
                 leads_watched: 1,
                 otlp: Some(OtlpStatus::Disabled),
+                fleet_failed_sources: Vec::new(),
+                fleet_lanes_dropped: 0,
                 last_error: Some(HeartbeatError {
                     kind: HeartbeatErrorKind::PollFailed,
                     at_ms: NOW - HOUR_MS,
@@ -2169,6 +2203,40 @@ mod tests {
             .find(|c| c.code == code)
             .unwrap_or_else(|| panic!("{code:?} never fired"))
             .status
+    }
+
+    /// A heartbeat that lists failed collector sources is a warning naming each, and one
+    /// that reports dropped lanes is a warning with the count; neither is a failure.
+    #[trace("FR-070-AC-5", "FR-045-AC-31")]
+    #[test]
+    fn tc_070_05_doctor_warns_naming_each_failed_collector_source_and_dropped_lanes() {
+        let with = |sources: &[&str], dropped: u32| {
+            let mut f = healthy();
+            let mut b = beat("hub", 42, 1_000);
+            if let HeartbeatRead::Live(hb) = &mut b.read {
+                hb.fleet_failed_sources = sources.iter().map(|s| (*s).to_owned()).collect();
+                hb.fleet_lanes_dropped = dropped;
+            }
+            up(&mut f).heartbeats = beats(vec![b, beat("node-a", 7, 1_000)]);
+            f
+        };
+        let failed = with(&["cpu", "pane_tail"], 0);
+        assert_eq!(
+            status_of(&failed, Code::CollectorSourceFailed),
+            Status::Warn
+        );
+        let message = evaluate(&failed)
+            .into_iter()
+            .find(|c| c.code == Code::CollectorSourceFailed)
+            .unwrap()
+            .message;
+        assert!(
+            message.contains("cpu") && message.contains("pane_tail"),
+            "{message}"
+        );
+        let dropped = with(&[], 1);
+        assert_eq!(status_of(&dropped, Code::FleetLanesDropped), Status::Warn);
+        assert!(statuses(&with(&[], 0)).is_empty());
     }
 
     /// Tracing: TC-045-08

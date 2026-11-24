@@ -96,6 +96,10 @@ pub(crate) enum Code {
     WatcherHerdrProblem,
     /// A watcher cannot push metrics to its OTLP collector and is backing off.
     WatcherOtlpFailing,
+    /// A watcher reports collector sources whose last read failed (FR-070).
+    CollectorSourceFailed,
+    /// A watcher left registry lanes out of its per-lane series past the cap (FR-045).
+    FleetLanesDropped,
     /// `watcher.json` is absent.
     WatcherFileMissing,
     /// There is no config location, so no `watcher.json` is looked for.
@@ -423,6 +427,8 @@ mod tests {
             Code::WatcherOtlpConfigInvalid => "watcher_otlp_config_invalid",
             Code::WatcherHerdrProblem => "watcher_herdr_problem",
             Code::WatcherOtlpFailing => "watcher_otlp_failing",
+            Code::CollectorSourceFailed => "collector_source_failed",
+            Code::FleetLanesDropped => "fleet_lanes_dropped",
             Code::WatcherFileMissing => "watcher_file_missing",
             Code::WatcherFileUnlocated => "watcher_file_unlocated",
             Code::WatcherFileUnreadable => "watcher_file_unreadable",
@@ -477,6 +483,8 @@ mod tests {
             Code::WatcherOtlpConfigInvalid,
             Code::WatcherHerdrProblem,
             Code::WatcherOtlpFailing,
+            Code::CollectorSourceFailed,
+            Code::FleetLanesDropped,
             Code::WatcherFileMissing,
             Code::WatcherFileUnlocated,
             Code::WatcherFileUnreadable,

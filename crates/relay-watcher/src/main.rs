@@ -444,13 +444,13 @@ fn refresh_places(
             layout
         }
         Err(e) => {
-            // Nothing is relinked or renamed on an answer that did not come: one
             if let Some(collector) = &mut state.fleet {
                 collector.set_herdr(
                     fleet::health::Outcome::Failed(fleet::health::ErrorClass::Unreadable),
                     log,
                 );
             }
+            // Nothing is relinked or renamed on an answer that did not come: one
             // line per episode, the addresses stay as registered.
             if !std::mem::replace(&mut state.layout_failed_reported, true) {
                 log(format!(
@@ -679,6 +679,7 @@ fn main() -> ExitCode {
             machine.clone(),
             fleet_profile,
             fleet::Sources::native(),
+            Duration::from_secs(settings.watcher_otlp.interval_secs.value),
         ));
     }
     // `--once` is a manual check: like the state file, it must not publish a
@@ -692,6 +693,11 @@ fn main() -> ExitCode {
             sweep,
             ttl: relay_core::health::heartbeat_ttl(sweep),
             otlp: state.otlp.status(),
+            fleet: state
+                .fleet
+                .as_ref()
+                .map(fleet::Collector::status)
+                .unwrap_or_default(),
         });
     }
     let herdr = delivery(settings.delivery);
@@ -835,6 +841,16 @@ impl<H: Herdr + Deliverer> Bus for RedisBus<H> {
             },
         );
         self.state.live.finish_tick(conn, wake, ticked)
+    }
+
+    /// The metrics push without the store: the collector's sources and `redis` = 0
+    /// (FR-070-AC-6).
+    fn offline(&mut self) {
+        self.state
+            .otlp
+            .publish_offline(Instant::now(), self.state.fleet.as_mut(), &mut |line| {
+                eprintln!("relay-watcher: {line}");
+            });
     }
 
     /// Blocks on the message log until a send, a due retry or the sweep, in
@@ -1599,6 +1615,7 @@ impl RelayInbox<'_> {
 
 #[cfg(test)]
 mod tests {
+    use ix_trace_rs::trace;
     use std::collections::BTreeMap;
 
     use relay_core::{MachineName, Message, PaneId, Target};
@@ -3818,6 +3835,80 @@ mod tests {
                 .push((pane.to_string(), text.to_owned()));
             Ok(())
         }
+    }
+
+    struct NoSink;
+
+    impl crate::supervise::StateSink for NoSink {
+        fn write(&mut self, _file: &crate::supervise::WatcherFile) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// With Redis unreachable the supervisor's failed step still pushes: `redis` is 0, the
+    /// host's other sources report, and no store-backed series is sent. Deleting the
+    /// `offline` hook of the failed step fails this.
+    #[trace("FR-070-AC-6")]
+    #[test]
+    fn tc_070_06_a_watcher_with_redis_down_still_pushes_redis_0_and_the_other_sources() {
+        let here: MachineName = "node-a".parse().unwrap();
+        let (publisher, rx) = recording_publisher(&here, Duration::ZERO);
+        let mut state = WatcherState::new(Duration::from_secs(1), Duration::from_secs(5));
+        state.otlp = publisher;
+        state.fleet = Some(fleet::Collector::new(
+            here.clone(),
+            fleet::health::Profile::default(),
+            fleet::fixtures::sources(None),
+            fleet::fixtures::INTERVAL,
+        ));
+        let bus = RedisBus {
+            url: "redis://127.0.0.1:1".to_owned(),
+            prefix: "ixr:test:".to_owned(),
+            machine: here,
+            herdr: StubHerdr {
+                session_id: None,
+                prompts: std::cell::RefCell::default(),
+            },
+            state,
+        };
+        let stub = StubHerdr {
+            session_id: None,
+            prompts: std::cell::RefCell::default(),
+        };
+        let mut sup = crate::supervise::Supervisor::new(
+            bus,
+            crate::supervise::SystemClock::new(),
+            stub,
+            NoSink,
+            1,
+        );
+        assert!(!sup.step().ok, "redis is unreachable");
+        let body = String::from_utf8(rx.recv_timeout(Duration::from_secs(5)).unwrap()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let probe = json["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == "ix.fleet.probe_ok")
+            .unwrap()["gauge"]["dataPoints"]
+            .clone();
+        let value = |source: &str| {
+            probe.as_array().unwrap().iter().find_map(|p| {
+                p["attributes"]
+                    .as_array()?
+                    .iter()
+                    .any(|a| a["key"] == "source" && a["value"]["stringValue"] == source)
+                    .then(|| p["asInt"].as_str().map(str::to_owned))
+                    .flatten()
+            })
+        };
+        assert_eq!(value("redis").as_deref(), Some("0"));
+        assert_eq!(value("memory").as_deref(), Some("1"));
+        assert_eq!(value("compilers").as_deref(), Some("1"));
+        assert!(
+            !body.contains("ix.relay.inbox.depth"),
+            "no store-backed series"
+        );
     }
 
     /// A bus for `test`'s keyspace with `herdr`, on machine `node-a`, whose
