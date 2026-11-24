@@ -7,12 +7,12 @@
 //! source exports `probe_ok` 0 and leaves its measured series out, never an old
 //! value, never an absent `probe_ok`.
 //!
-//! Seams left for the hook feed (FR-068, a later change): [`Collector::hook_feed_attached`]
-//! makes the `hook_events` source readable, [`Collector::set_hook_signal`]
-//! feeds `blocked`/`idle` events into the lane state, and
-//! [`Collector::compilers`] is the compiler list a lane attribution will read.
+//! The hook feed (FR-068) arrives through [`Collector::set_activity`]: it gives each lane
+//! its state, the `hook_events` health, the compiler attribution and the focus
+//! info, all by the rules of [`feed`] and [`lanes`].
 
 pub mod bound;
+pub mod feed;
 pub mod health;
 pub mod host;
 pub mod lanes;
@@ -22,7 +22,7 @@ pub mod pane;
 pub mod procs;
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -31,19 +31,21 @@ use relay_core::{MachineName, PaneId};
 
 use self::{
     bound::{SOURCE_BUDGET, Slot},
+    feed::{HookCounts, LaneActivity, Windows},
     health::{ErrorClass, Health, Outcome, Profile, Source},
     host::{CpuSampler, CpuTicks, Memory},
-    lanes::{HookSignal, Lane, MAX_LANES, Signals},
+    lanes::{Lane, MAX_LANES, Signals},
     pane::{Harness, PaneClass},
     procs::Compiler,
 };
 use crate::otlp::{
     registry::{Attrs, Registry},
     series::{
-        FLEET_BUSY_RATIO, FLEET_CAPACITY_CONFIGURED, FLEET_CAPACITY_SLOTS, FLEET_LANE_BLOCKED,
-        FLEET_LANE_DROPPED, FLEET_LANE_LAST_ACTIVITY, FLEET_LANE_STATE, FLEET_MEMORY_TOTAL,
+        FLEET_BUSY_RATIO, FLEET_CAPACITY_CONFIGURED, FLEET_CAPACITY_SLOTS, FLEET_CONFIG,
+        FLEET_LANE_BLOCKED, FLEET_LANE_COMPILE_SECONDS, FLEET_LANE_DROPPED, FLEET_LANE_FOCUS_INFO,
+        FLEET_LANE_LAST_ACTIVITY, FLEET_LANE_NO_EVENTS, FLEET_LANE_STATE, FLEET_MEMORY_TOTAL,
         FLEET_MEMORY_USED, FLEET_NATIVE_WINDOWS, FLEET_PROBE_OK, FLEET_PROBE_UNAVAILABLE,
-        FLEET_TEMPERATURE,
+        FLEET_TEMPERATURE, HOOK_ACTIVITY_SKIPPED,
     },
 };
 
@@ -73,6 +75,8 @@ pub struct Sources {
     pub compilers: Read<Vec<Compiler>>,
     /// Native Windows agent processes; `None` off WSL.
     pub native_windows: Option<Read<usize>>,
+    /// The hook's local skip and drop counts.
+    pub hook_counts: Read<HookCounts>,
     /// The tail of one pane's output.
     pub pane_tail: PaneRead,
 }
@@ -88,9 +92,16 @@ impl Sources {
             compilers: Arc::new(|| procs::read_compilers(procs::DEFAULT_COMPILERS)),
             native_windows: (cfg!(target_os = "linux") && procs::is_wsl())
                 .then(|| Arc::new(procs::read_native_windows) as Read<usize>),
+            hook_counts: Arc::new(read_native_hook_counts),
             pane_tail: Arc::new(read_pane_tail),
         }
     }
+}
+
+/// `spool/activity.json` beside `config.toml`, where `agent-msg` counts what its hooks skipped.
+fn read_native_hook_counts() -> Result<HookCounts, ErrorClass> {
+    let dir = relay_core::config::config_dir().ok_or(ErrorClass::Unavailable)?;
+    feed::read_hook_counts(&dir.join("spool").join("activity.json"))
 }
 
 /// `herdr pane read <pane> --lines 80`: plain text, bounded by the runner.
@@ -146,6 +157,17 @@ impl StatusHandle {
 }
 
 /// The host collector.
+/// A lane address and its `activity-last` record, as the store holds it.
+pub type LaneRecord = (String, BTreeMap<String, String>);
+
+/// Whether the hook feed has been read, and whether the last read worked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Feed {
+    Detached,
+    Attached,
+    Failed(ErrorClass),
+}
+
 pub struct Collector {
     host: MachineName,
     profile: Profile,
@@ -163,7 +185,16 @@ pub struct Collector {
     lanes: Vec<Lane>,
     first_seen: HashMap<String, Instant>,
     classes: HashMap<String, (PaneClass, Instant)>,
-    hooks: HashMap<String, (HookSignal, Instant)>,
+    windows: Windows,
+    activity: HashMap<String, LaneActivity>,
+    feed: Feed,
+    activity_failure: Option<Instant>,
+    epoch: Instant,
+    last_sample: Option<Instant>,
+    compiling: std::collections::HashSet<String>,
+    compile_ms: HashMap<String, u64>,
+    hook_counts: Option<HookCounts>,
+    counts_slot: Slot,
     scan_from: usize,
     interval: Duration,
     status: StatusHandle,
@@ -173,8 +204,21 @@ pub struct Collector {
 
 impl Collector {
     /// A collector for `host` with `profile`, reading `sources` once per push `interval`.
+    #[cfg(test)]
     #[must_use]
     pub fn new(host: MachineName, profile: Profile, sources: Sources, interval: Duration) -> Self {
+        Self::with_windows(host, profile, sources, interval, Windows::default())
+    }
+
+    /// A collector whose lane state rules use `windows`.
+    #[must_use]
+    pub fn with_windows(
+        host: MachineName,
+        profile: Profile,
+        sources: Sources,
+        interval: Duration,
+        windows: Windows,
+    ) -> Self {
         let mut health = Health::default();
         // No hook feed is attached yet: the source is expected and not readable,
         // which is a standing failure and not silence (FR-070).
@@ -199,23 +243,22 @@ impl Collector {
             lanes: Vec::new(),
             first_seen: HashMap::new(),
             classes: HashMap::new(),
-            hooks: HashMap::new(),
+            windows,
+            activity: HashMap::new(),
+            feed: Feed::Detached,
+            activity_failure: None,
+            epoch: Instant::now(),
+            last_sample: None,
+            compiling: std::collections::HashSet::new(),
+            compile_ms: HashMap::new(),
+            hook_counts: None,
+            counts_slot: Slot::default(),
             scan_from: 0,
             interval,
             status: StatusHandle::default(),
             refresh_redis_ok: true,
             push_redis_ok: true,
         }
-    }
-
-    #[allow(
-        dead_code,
-        reason = "seam: the lane attribution of the hook feed change reads it"
-    )]
-    /// The compiler processes of the last sample: what a lane attribution reads.
-    #[must_use]
-    pub fn compilers(&self) -> &[Compiler] {
-        &self.compilers
     }
 
     /// The sources that failed their last read.
@@ -242,18 +285,6 @@ impl Collector {
         self.status.set(failed, dropped);
     }
 
-    #[allow(dead_code, reason = "seam: the hook feed change attaches itself here")]
-    /// Marks the hook feed as running: `hook_events` reads ok.
-    pub fn hook_feed_attached(&mut self, log: &mut impl FnMut(String)) {
-        self.record(Source::HookEvents, Outcome::Ok, log);
-    }
-
-    #[allow(dead_code, reason = "seam: the hook feed change reports events here")]
-    /// Feeds the newest `blocked` or `idle` hook event of lane `address`.
-    pub fn set_hook_signal(&mut self, address: &str, signal: HookSignal, at: Instant) {
-        self.hooks.insert(address.to_owned(), (signal, at));
-    }
-
     /// The lanes of a layout refresh at `now`. A lane new to the registry is
     /// timed from now; one that left is forgotten.
     pub fn set_lanes(&mut self, now: Instant, lanes: Vec<Lane>) {
@@ -263,10 +294,138 @@ impl Collector {
         let keep: std::collections::HashSet<&str> =
             lanes.iter().map(|l| l.address.as_str()).collect();
         self.first_seen.retain(|a, _| keep.contains(a.as_str()));
+        self.activity.retain(|a, _| keep.contains(a.as_str()));
+        self.compiling.retain(|a| keep.contains(a.as_str()));
+        self.compile_ms.retain(|a, _| keep.contains(a.as_str()));
         self.classes.retain(|a, _| keep.contains(a.as_str()));
-        self.hooks.retain(|a, _| keep.contains(a.as_str()));
         self.lanes = lanes;
         self.publish_status();
+    }
+
+    /// The hook feed of a layout refresh: each lane's `activity-last` record read at
+    /// `now` (wall clock `now_ms`), or the class of the failure that stopped the
+    /// read. A lane with no record has no events. The feed is what makes
+    /// `hook_events` readable (FR-070).
+    pub fn set_activity(
+        &mut self,
+        now: Instant,
+        now_ms: i64,
+        records: Result<Vec<LaneRecord>, ErrorClass>,
+        log: &mut impl FnMut(String),
+    ) {
+        match records {
+            Ok(records) => {
+                self.activity = records
+                    .iter()
+                    .filter_map(|(address, record)| {
+                        Some((address.clone(), LaneActivity::parse(record, now_ms, now)?))
+                    })
+                    .collect();
+                self.feed = Feed::Attached;
+            }
+            Err(class) => {
+                self.activity.clear();
+                self.feed = Feed::Failed(class);
+            }
+        }
+        self.record_hook_events(now, log);
+    }
+
+    /// The newest `activity` failure the hooks of this host reported to the relay,
+    /// as how long ago it happened at `now`.
+    pub fn set_activity_failure(&mut self, now: Instant, age: Option<Duration>) {
+        self.activity_failure = age.map(|age| now.checked_sub(age).unwrap_or(self.epoch));
+    }
+
+    /// The `hook_events` outcome (FR-070): the feed's own failure, else unhealthy
+    /// when at least one lane was non-idle and every such lane has gone silent past
+    /// `no_events_after`, or when an `activity` failure is newer than the newest
+    /// event of every lane. Quiet lanes are not unhealthy.
+    fn hook_outcome(&self, now: Instant) -> Outcome {
+        match self.feed {
+            Feed::Detached => return Outcome::Failed(ErrorClass::Unavailable),
+            Feed::Failed(class) => return Outcome::Failed(class),
+            Feed::Attached => {}
+        }
+        let mut non_idle = self.lanes.iter().filter(|l| self.lane_non_idle(l, now));
+        let all_silent = non_idle.clone().next().is_some()
+            && non_idle.all(|l| self.silence(l, now) >= self.windows.no_events_after);
+        let failure_newer = self.activity_failure.is_some_and(|failed| {
+            self.lanes.iter().all(|lane| {
+                self.activity
+                    .get(&lane.address)
+                    .and_then(|a| a.newest(now))
+                    .is_none_or(|(_, age)| now.checked_sub(age).unwrap_or(self.epoch) < failed)
+            })
+        });
+        if all_silent || failure_newer {
+            Outcome::Failed(ErrorClass::Unavailable)
+        } else {
+            Outcome::Ok
+        }
+    }
+
+    fn lane_non_idle(&self, lane: &Lane, now: Instant) -> bool {
+        feed::last_state_non_idle(
+            self.activity.get(&lane.address),
+            lane.herdr_status.as_deref() == Some("working"),
+            now,
+        )
+    }
+
+    /// How long the lane has emitted nothing: since its newest event, or since the
+    /// watcher first saw it.
+    fn silence(&self, lane: &Lane, now: Instant) -> Duration {
+        self.activity
+            .get(&lane.address)
+            .and_then(|a| a.newest(now))
+            .map(|(_, age)| age)
+            .unwrap_or_else(|| {
+                self.first_seen
+                    .get(&lane.address)
+                    .map_or(Duration::ZERO, |at| now.saturating_duration_since(*at))
+            })
+    }
+
+    /// A non-idle lane that has been silent past `no_events_after`.
+    fn lane_silent(&self, lane: &Lane, now: Instant) -> bool {
+        self.lane_non_idle(lane, now) && self.silence(lane, now) >= self.windows.no_events_after
+    }
+
+    fn record_hook_events(&mut self, now: Instant, log: &mut impl FnMut(String)) {
+        let outcome = self.hook_outcome(now);
+        self.record(Source::HookEvents, outcome, log);
+    }
+
+    /// Attributes each compiler of the last sample to the lane with the longest
+    /// hook-reported `cwd` containing its working directory, and adds the time
+    /// since the previous sample to every lane that has one (FR-069).
+    fn attribute_compilers(&mut self, now: Instant, ok: bool) {
+        let elapsed = self.last_sample.map_or(Duration::ZERO, |t| {
+            now.saturating_duration_since(t).min(self.interval * 2)
+        });
+        self.last_sample = Some(now);
+        self.compiling.clear();
+        if !ok {
+            return;
+        }
+        let cwds: Vec<(usize, &str)> = self
+            .lanes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| Some((i, self.activity.get(&l.address)?.live_cwd(now)?)))
+            .collect();
+        let hit: std::collections::HashSet<usize> = self
+            .compilers
+            .iter()
+            .filter_map(|c| feed::attribute(&c.cwd, cwds.iter().copied()))
+            .collect();
+        let ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+        for index in hit {
+            let address = self.lanes[index].address.clone();
+            *self.compile_ms.entry(address.clone()).or_default() += ms;
+            self.compiling.insert(address);
+        }
     }
 
     /// The outcome of the last layout read from herdr.
@@ -363,7 +522,9 @@ impl Collector {
             let outcome = got
                 .as_ref()
                 .map_or_else(|c| Outcome::Failed(*c), |_| Outcome::Ok);
+            let compilers_ok = got.is_ok();
             self.compilers = got.unwrap_or_default();
+            self.attribute_compilers(now, compilers_ok);
             self.record(Source::Compilers, outcome, log);
         }
         if let Some(read) = self.sources.native_windows.clone() {
@@ -376,6 +537,15 @@ impl Collector {
         }
         if self.profile.expects(Source::PaneTail) {
             self.scan_panes(now, log);
+        }
+        let counts = Arc::clone(&self.sources.hook_counts);
+        self.hook_counts = self
+            .counts_slot
+            .run(SOURCE_BUDGET, move || counts())
+            .ok()
+            .and_then(Result::ok);
+        if self.profile.expects(Source::HookEvents) {
+            self.record_hook_events(now, log);
         }
     }
 
@@ -452,7 +622,10 @@ impl Collector {
         });
         Signals {
             pane,
-            hook: self.hooks.get(address).copied(),
+            hook: self
+                .activity
+                .get(address)
+                .and_then(|a| a.signal(now, &self.windows, self.epoch)),
         }
     }
 
@@ -506,28 +679,70 @@ impl Collector {
         }
         for lane in self.lanes.iter().take(MAX_LANES) {
             let signals = self.signals(&lane.address, now);
-            let state = signals.state(lane.herdr_status.as_deref());
+            let activity = self.activity.get(&lane.address);
+            let compiling = self.compiling.contains(&lane.address);
+            let (state, blocked) = signals.resolve(lane.herdr_status.as_deref(), compiling);
             let lane_attrs = || Attrs::new().with("host", host).with("lane", &lane.address);
             registry.gauge(
                 &FLEET_LANE_STATE,
                 lane_attrs().with("state", state.name()),
                 1,
             );
-            let since = self
-                .first_seen
-                .get(&lane.address)
-                .map_or(0, |at| now.saturating_duration_since(*at).as_secs());
-            registry.gauge(&FLEET_LANE_LAST_ACTIVITY, lane_attrs(), clamp(since));
-            if let Some(reason) = signals.blocked_reason() {
+            let since = activity
+                .and_then(|a| a.newest(now))
+                .map_or_else(|| self.silence(lane, now), |(_, age)| age);
+            registry.gauge(
+                &FLEET_LANE_LAST_ACTIVITY,
+                lane_attrs(),
+                clamp(since.as_secs()),
+            );
+            if let Some(reason) = blocked {
                 registry.gauge(
                     &FLEET_LANE_BLOCKED,
                     lane_attrs().with("reason", reason.name()),
                     1,
                 );
             }
+            if self.feed == Feed::Attached && self.lane_silent(lane, now) {
+                registry.gauge(&FLEET_LANE_NO_EVENTS, lane_attrs(), 1);
+            }
+            let (branch, cwd) = activity.map_or(("", ""), |a| (a.branch(), a.cwd()));
+            registry.gauge(
+                &FLEET_LANE_FOCUS_INFO,
+                lane_attrs()
+                    .with("ticket", &feed::ticket(branch, cwd))
+                    .with("branch", branch),
+                1,
+            );
+            let seconds = self.compile_ms.get(&lane.address).copied().unwrap_or(0) / 1000;
+            registry.sum(&FLEET_LANE_COMPILE_SECONDS, lane_attrs(), seconds);
         }
         let dropped = self.lanes.len().saturating_sub(MAX_LANES);
         registry.gauge(&FLEET_LANE_DROPPED, host_attr(), clamp(dropped as u64));
+        for (name, window) in [
+            ("working_window", self.windows.working_window),
+            ("no_events_after", self.windows.no_events_after),
+            ("max_tool_runtime", self.windows.max_tool_runtime),
+        ] {
+            registry.gauge(
+                &FLEET_CONFIG,
+                host_attr().with("name", name),
+                clamp(window.as_secs()),
+            );
+        }
+        if let Some(counts) = self.hook_counts {
+            for (reason, n) in [
+                ("backoff", counts.skipped),
+                ("failed", counts.dropped),
+                ("unregistered", counts.unregistered),
+            ] {
+                registry.sum(
+                    &HOOK_ACTIVITY_SKIPPED,
+                    host_attr().with("reason", reason),
+                    n,
+                );
+            }
+        }
     }
 }
 
@@ -543,6 +758,31 @@ pub(crate) mod fixtures {
     use super::*;
 
     pub(crate) const INTERVAL: Duration = Duration::from_secs(30);
+
+    /// The wall clock of the fixture feed, in Unix milliseconds.
+    pub(crate) const NOW_MS: i64 = 1_800_000_000_000;
+
+    /// An `activity-last` record: each `(kind, seconds ago, last_class)` as the
+    /// relay stores it, with `cwd` and `branch` on every event.
+    pub(crate) fn record(
+        events: &[(&str, i64, Option<&str>)],
+        cwd: &str,
+        branch: &str,
+    ) -> BTreeMap<String, String> {
+        events
+            .iter()
+            .map(|(kind, ago, class)| {
+                let mut event = serde_json::json!({
+                    "addr": "x", "server_ms": NOW_MS - ago * 1000, "kind": kind,
+                    "cwd": cwd, "branch": branch,
+                });
+                if let Some(class) = class {
+                    event["last_class"] = (*class).into();
+                }
+                (format!("kind:{kind}"), event.to_string())
+            })
+            .collect()
+    }
 
     pub(crate) fn host() -> MachineName {
         "hub".parse().unwrap()
@@ -577,6 +817,13 @@ pub(crate) mod fixtures {
                 )
             }),
             native_windows: Some(Arc::new(|| Ok(0))),
+            hook_counts: Arc::new(|| {
+                Ok(HookCounts {
+                    skipped: 3,
+                    dropped: 2,
+                    unregistered: 1,
+                })
+            }),
             pane_tail: Arc::new(move |_, _| {
                 fail(Source::PaneTail).map_or(Ok("plain output\n".to_owned()), Err)
             }),
@@ -601,7 +848,7 @@ pub(crate) mod fixtures {
         let t0 = Instant::now();
         let mut log = |_| {};
         c.set_lanes(t0, vec![lane("hub:QSL:plan", "w1:p1", Harness::Claude)]);
-        c.hook_feed_attached(&mut log);
+        c.set_activity(t0, NOW_MS, Ok(Vec::new()), &mut log);
         let all = |s: Source| failing.filter(|(f, _)| *f == s).map(|(_, e)| e);
         c.set_herdr(
             all(Source::Herdr).map_or(Outcome::Ok, Outcome::Failed),
@@ -612,12 +859,8 @@ pub(crate) mod fixtures {
             &mut log,
         );
         c.set_refresh_redis(all(Source::Redis).is_none(), &mut log);
-        if all(Source::HookEvents).is_some() {
-            c.record(
-                Source::HookEvents,
-                Outcome::Failed(ErrorClass::Unavailable),
-                &mut log,
-            );
+        if let Some(class) = all(Source::HookEvents) {
+            c.set_activity(t0, NOW_MS, Err(class), &mut log);
         }
         c.sample(t0, &mut log);
         let now = t0 + Duration::from_secs(2);
@@ -638,6 +881,20 @@ pub(crate) mod fixtures {
         c.set_lanes(now, vec![lane("hub:QSL:plan", "w1:p1", Harness::Claude)]);
         c.classes
             .insert("hub:QSL:plan".into(), (PaneClass::Dialog, now));
+        // A lane that was working and then went silent, in a branch that names a ticket.
+        c.set_activity(
+            now,
+            NOW_MS,
+            Ok(vec![(
+                "hub:QSL:plan".to_owned(),
+                record(
+                    &[("prompt", 7200, None)],
+                    "/w/ix-relay-swm-205",
+                    "swm-205-fleet",
+                ),
+            )]),
+            &mut |_| {},
+        );
         c.native_windows = Some(1);
         (c, now)
     }
@@ -950,7 +1207,20 @@ mod tests {
             pane::BlockedReason::Permission,
             pane::BlockedReason::Question,
         ] {
-            c.set_hook_signal("hub:A:one", HookSignal::Blocked(reason), t0);
+            let (kind, class) = if reason == pane::BlockedReason::Permission {
+                ("blocked", None)
+            } else {
+                ("stop", Some("question"))
+            };
+            c.set_activity(
+                t0,
+                NOW_MS,
+                Ok(vec![(
+                    "hub:A:one".to_owned(),
+                    record(&[(kind, 5, class)], "/w", "b"),
+                )]),
+                &mut |_| {},
+            );
             let r = registry_of(&c, t0);
             assert_eq!(
                 int(&r, "ix.fleet.lane.blocked", &[("reason", reason.name())]),
@@ -1039,3 +1309,6 @@ mod tests {
         assert_eq!(int(&r, "ix.fleet.lane.dropped", &[]), Some(1));
     }
 }
+
+#[cfg(test)]
+mod feed_tests;

@@ -376,6 +376,15 @@ impl Publisher {
     ) {
         if let Some(f) = fleet.as_deref_mut() {
             f.set_push_redis(store_ok, log);
+            if let Some(failed_ms) = health.map(relay::Health::activity_failure_ms) {
+                let now_ms = i64::try_from(unix_nanos() / 1_000_000).unwrap_or(i64::MAX);
+                f.set_activity_failure(
+                    now,
+                    failed_ms.map(|ms| {
+                        Duration::from_millis(u64::try_from(now_ms.saturating_sub(ms)).unwrap_or(0))
+                    }),
+                );
+            }
             f.sample(now, log);
         }
         let mut registry = self.build_from(now, unix_nanos(), health);
@@ -476,8 +485,8 @@ mod tests {
     ///
     /// Tracing: TC-045-11
     ///
-    /// Caveat: the spec series in `NOT_YET_EXPORTED` below are not exported yet (SWM-205,
-    /// SWM-207), so this holds for the exported catalogue until that list is empty.
+    /// Caveat: the spec series in `NOT_YET_EXPORTED` below are not exported yet (SWM-207),
+    /// so this holds for the exported catalogue until that list is empty.
     #[trace("FR-045-AC-11")]
     #[test]
     fn tc_045_11_the_exported_series_are_the_catalogue_and_the_catalogue_is_the_spec() {
@@ -530,16 +539,6 @@ mod tests {
         // Series the spec lists that are not exported yet, each with the ticket that
         // removes it from this list. FR-045-AC-11 and AC-29 are met only when it is empty.
         const NOT_YET_EXPORTED: &[&str] = &[
-            // SWM-205: the hook feed.
-            "ix.fleet.lane.no_events",
-            // SWM-205: needs hook `cwd` for compiler attribution.
-            "ix.fleet.lane.compile_seconds",
-            // SWM-205: from the hook-reported branch or cwd.
-            "ix.fleet.lane.focus_info",
-            // SWM-205: the hook-state windows it reports.
-            "ix.fleet.config",
-            // SWM-205: the hook feed.
-            "ix.relay.hook.activity_skipped",
             // SWM-207: order metrics.
             "ix.relay.orders.unacted",
             // SWM-207: order metrics.

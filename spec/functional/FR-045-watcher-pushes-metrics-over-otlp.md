@@ -214,7 +214,7 @@ exports.
 | `ix.fleet.probe_ok` | gauge | `1` | host, source | Source health ([FR-070](./FR-070-collector-source-health.md)), 1 or 0, for each source the host profile expects. Prometheus `ix_fleet_probe_ok`. |
 | `ix.fleet.probe_unavailable` | gauge | `1` | host, source | Value 1 for a source the host profile declares absent on this host; not a failure. |
 | `ix.fleet.config` | gauge | `s` | host, name | The configured `working_window`, `no_events_after` and `max_tool_runtime` in seconds, so consumers read them instead of holding their own constants. |
-| `ix.relay.hook.activity_skipped` | sum | `{event}` | host, reason | Activity events a hook skipped (`backoff`) or dropped (`failed`, `budget`), cumulative. |
+| `ix.relay.hook.activity_skipped` | sum | `{event}` | host, reason | Activity events a hook skipped (`backoff`), dropped (`failed`, which includes a write that ran past its budget) or did not write because its lead had no verified lane (`unregistered`), cumulative since the hook state file began. |
 | `ix.relay.orders.unacted` | gauge | `{order}` | recipient | Orders awaiting `Acted` or `AckExpired` ([FR-071](./FR-071-order-ack-deadline-and-timeout.md)); `recipient` is the lane address, bounded as the other per-lead series. |
 | `ix.relay.order.act_latency` | histogram | `s` | none | Seconds from `Delivered` to `Acted`, buckets 1 s to 1 h. |
 
