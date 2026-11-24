@@ -6,6 +6,8 @@
 //! names, classes and bounded strings. [`ActivityEvent::encode`] applies every
 //! bound, so a caller cannot write an oversized or control-character event.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
 /// Most events the activity stream keeps.
@@ -20,7 +22,7 @@ pub const ACTIVITY_MAX_FIELD_BYTES: usize = 256;
 pub const ACTIVITY_MAX_CWD_BYTES: usize = 1024;
 /// Longest stored event, in bytes.
 pub const ACTIVITY_MAX_EVENT_BYTES: usize = 4096;
-/// Most `name=version` pairs in a `session_start` event.
+/// Most skill entries in a `session_start` event.
 pub const ACTIVITY_MAX_SKILL_PAIRS: usize = 16;
 /// Longest skill or role-spec name, in bytes.
 pub const ACTIVITY_MAX_SKILL_NAME_BYTES: usize = 64;
@@ -127,9 +129,10 @@ pub struct ActivityEvent {
     /// The role spec, for `session_start`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    /// `name=version` pairs, for `session_start`. Omitted when empty.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub skill_versions: Vec<String>,
+    /// Skill name to version, for `session_start`, where it is always present
+    /// (an empty map when no version is known).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_versions: Option<BTreeMap<String, String>>,
 }
 
 impl ActivityEvent {
@@ -147,7 +150,7 @@ impl ActivityEvent {
             reason: None,
             last_class: None,
             role: None,
-            skill_versions: Vec::new(),
+            skill_versions: None,
         }
     }
 
@@ -177,17 +180,22 @@ impl ActivityEvent {
                 .role
                 .as_ref()
                 .map(|v| bound(v, ACTIVITY_MAX_FIELD_BYTES)),
-            skill_versions: self
-                .skill_versions
-                .iter()
-                .take(ACTIVITY_MAX_SKILL_PAIRS)
-                .map(|pair| bound_pair(pair))
-                .collect(),
+            skill_versions: self.skill_versions.as_ref().map(|versions| {
+                versions
+                    .iter()
+                    .take(ACTIVITY_MAX_SKILL_PAIRS)
+                    .map(|(name, version)| bound_pair(name, version))
+                    .collect()
+            }),
         };
         loop {
             let json = serde_json::to_string(&bounded).unwrap_or_default();
             if json.len() + WRITE_OVERHEAD_BYTES <= ACTIVITY_MAX_EVENT_BYTES
-                || bounded.skill_versions.pop().is_none()
+                || bounded
+                    .skill_versions
+                    .as_mut()
+                    .and_then(BTreeMap::pop_last)
+                    .is_none()
             {
                 return json;
             }
@@ -195,19 +203,17 @@ impl ActivityEvent {
     }
 }
 
-/// `name=version` with each side cut to its bound; a missing or empty version
-/// is `unknown`.
-fn bound_pair(pair: &str) -> String {
-    let (name, version) = pair.split_once('=').unwrap_or((pair, ""));
+/// A skill name and version, each cut to its bound; an empty version is
+/// `unknown`.
+fn bound_pair(name: &str, version: &str) -> (String, String) {
     let version = if version.trim().is_empty() {
         "unknown"
     } else {
         version
     };
-    format!(
-        "{}={}",
+    (
         bound(name, ACTIVITY_MAX_SKILL_NAME_BYTES),
-        bound(version, ACTIVITY_MAX_SKILL_VERSION_BYTES)
+        bound(version, ACTIVITY_MAX_SKILL_VERSION_BYTES),
     )
 }
 
@@ -226,13 +232,15 @@ fn bound(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use ix_trace_rs::trace;
+
     use super::*;
 
     fn event() -> ActivityEvent {
         ActivityEvent::new(ActivityKind::PostTool, Harness::Claude, "s-1", 5)
     }
 
-    /// Trace: FR-068-AC-6
+    #[trace("FR-068-AC-6")]
     #[test]
     fn an_oversized_field_is_cut_clean_and_the_event_stays_under_four_kib() {
         let mut e = event();
@@ -260,26 +268,33 @@ mod tests {
         );
     }
 
-    /// Trace: FR-068-AC-5
+    #[trace("FR-068-AC-5")]
     #[test]
     fn skill_pairs_are_capped_bounded_and_never_without_a_version() {
         let mut e = ActivityEvent::new(ActivityKind::SessionStart, Harness::Codex, "s-1", 5);
-        e.skill_versions = (0..20).map(|i| format!("skill-{i}=1.{i}")).collect();
-        e.skill_versions[0] = format!("{}=9.9", "n".repeat(200));
-        e.skill_versions[1] = "bare".to_owned();
-        e.skill_versions[2] = format!("v=1.{}", "9".repeat(100));
+        let mut versions: BTreeMap<String, String> = (0..20)
+            .map(|i| (format!("skill-{i:02}"), format!("1.{i}")))
+            .collect();
+        versions.insert("n".repeat(200), "9.9".into());
+        versions.insert("bare".into(), String::new());
+        versions.insert("v".into(), format!("1.{}", "9".repeat(100)));
+        e.skill_versions = Some(versions);
         let v: serde_json::Value = serde_json::from_str(&e.encode()).unwrap();
-        let pairs = v["skill_versions"].as_array().unwrap();
-        assert_eq!(pairs.len(), ACTIVITY_MAX_SKILL_PAIRS);
-        assert_eq!(
-            pairs[0].as_str().unwrap(),
-            format!("{}=9.9", "n".repeat(64))
-        );
-        assert_eq!(pairs[1], "bare=unknown");
-        assert_eq!(pairs[2].as_str().unwrap().len(), "v=".len() + 32);
+        let map = v["skill_versions"].as_object().unwrap();
+        assert_eq!(map.len(), ACTIVITY_MAX_SKILL_PAIRS);
+        for (name, version) in map {
+            assert!(name.len() <= 64 && version.as_str().unwrap().len() <= 32);
+        }
+        let mut one = ActivityEvent::new(ActivityKind::SessionStart, Harness::Codex, "s-1", 5);
+        one.skill_versions = Some(BTreeMap::from([("bare".to_owned(), String::new())]));
+        let v: serde_json::Value = serde_json::from_str(&one.encode()).unwrap();
+        assert_eq!(v["skill_versions"]["bare"], "unknown");
+        one.skill_versions = Some(BTreeMap::new());
+        let v: serde_json::Value = serde_json::from_str(&one.encode()).unwrap();
+        assert_eq!(v["skill_versions"], serde_json::json!({}));
     }
 
-    /// Trace: FR-068-AC-1
+    #[trace("FR-068-AC-1")]
     #[test]
     fn an_event_without_a_tool_input_field_encodes_only_its_schema() {
         let mut e = event();

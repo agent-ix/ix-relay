@@ -1,16 +1,18 @@
 //! The hook's local activity-emit state: the backoff after a failed write and
-//! the counts of skipped and dropped events (FR-068).
+//! the counts of skipped, dropped and unregistered events (FR-068).
 //!
 //! One small JSON file beside the failure spool, per host. `relay-watcher`
-//! reads the counts for `ix.relay.hook.activity_skipped`. Hooks race on the
-//! file without a lock, so a count can lose an increment under concurrent
-//! hooks; the backoff still converges because every failure rewrites it.
+//! reads the counts for `ix.relay.hook.activity_skipped`. Updates are a
+//! read-modify-write under an advisory lock on a sidecar file, taken without
+//! ever waiting longer than [`LOCK_WAIT`]: a hook that cannot get the lock
+//! skips the update (an uncounted event) rather than delay the agent.
 
 use std::{
-    fs::{self, DirBuilder},
+    fs::{self, DirBuilder, File, OpenOptions, TryLockError},
     io::{self, Write},
     os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::PathBuf,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,8 @@ use serde::{Deserialize, Serialize};
 const BACKOFF_START_MS: u64 = 5_000;
 /// The longest backoff.
 const BACKOFF_CAP_MS: u64 = 5 * 60 * 1_000;
+/// The longest an update waits for the lock.
+const LOCK_WAIT: Duration = Duration::from_millis(50);
 
 /// What the file holds.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,9 +36,12 @@ pub(crate) struct ActivityCounts {
     /// Events skipped because of the backoff.
     #[serde(default)]
     pub(crate) skipped: u64,
-    /// Events dropped because the write failed or had no time.
+    /// Events dropped because the write, or the call carrying it, failed.
     #[serde(default)]
     pub(crate) dropped: u64,
+    /// Events not written because the lead has no verified lane address.
+    #[serde(default)]
+    pub(crate) unregistered: u64,
 }
 
 /// The state file.
@@ -69,40 +76,57 @@ impl ActivityState {
 
     /// Whether a write at `now_ms` must be skipped; counts the skip when so.
     pub(crate) fn skip(&self, now_ms: i64) -> bool {
-        let mut counts = self.counts();
-        if now_ms >= counts.not_before_ms {
+        if now_ms >= self.counts().not_before_ms {
             return false;
         }
-        counts.skipped = counts.skipped.saturating_add(1);
-        let _ = self.store(&counts);
+        self.update(|c| c.skipped = c.skipped.saturating_add(1));
         true
     }
 
     /// Records a dropped event and starts or doubles the backoff.
     pub(crate) fn failed(&self, now_ms: i64) {
-        let mut counts = self.counts();
-        counts.dropped = counts.dropped.saturating_add(1);
-        counts.backoff_ms = if counts.backoff_ms == 0 {
-            BACKOFF_START_MS
-        } else {
-            counts.backoff_ms.saturating_mul(2).min(BACKOFF_CAP_MS)
-        };
-        counts.not_before_ms = now_ms.saturating_add(i64::try_from(counts.backoff_ms).unwrap_or(0));
-        let _ = self.store(&counts);
+        self.update(|c| {
+            c.dropped = c.dropped.saturating_add(1);
+            c.backoff_ms = if c.backoff_ms == 0 {
+                BACKOFF_START_MS
+            } else {
+                c.backoff_ms.saturating_mul(2).min(BACKOFF_CAP_MS)
+            };
+            c.not_before_ms = now_ms.saturating_add(i64::try_from(c.backoff_ms).unwrap_or(0));
+        });
+    }
+
+    /// Records a dropped event without touching the backoff: the call failed for
+    /// a reason that says nothing about the activity write.
+    pub(crate) fn dropped(&self) {
+        self.update(|c| c.dropped = c.dropped.saturating_add(1));
+    }
+
+    /// Records an event not written for want of a verified lane address. The
+    /// backoff is untouched: nothing was attempted.
+    pub(crate) fn unregistered(&self) {
+        self.update(|c| c.unregistered = c.unregistered.saturating_add(1));
     }
 
     /// Ends the backoff after a successful write.
     pub(crate) fn succeeded(&self) {
-        let mut counts = self.counts();
+        let counts = self.counts();
         if counts.backoff_ms == 0 && counts.not_before_ms == 0 {
             return;
         }
-        counts.backoff_ms = 0;
-        counts.not_before_ms = 0;
-        let _ = self.store(&counts);
+        self.update(|c| {
+            c.backoff_ms = 0;
+            c.not_before_ms = 0;
+        });
     }
 
-    fn store(&self, counts: &ActivityCounts) -> io::Result<()> {
+    /// Applies `change` to the file under the lock; skipped when the lock is
+    /// not free within [`LOCK_WAIT`] or the file cannot be written.
+    fn update(&self, change: impl FnOnce(&mut ActivityCounts)) {
+        let _ = self.try_update(change);
+    }
+
+    fn try_update(&self, change: impl FnOnce(&mut ActivityCounts)) -> io::Result<()> {
         if fs::symlink_metadata(&self.path).is_ok_and(|m| m.file_type().is_symlink()) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -112,25 +136,53 @@ impl ActivityState {
         if let Some(dir) = self.path.parent() {
             DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
         }
+        let lock = self.lock()?;
+        let mut counts = self.counts();
+        change(&mut counts);
         let tmp = self
             .path
             .with_extension(format!("tmp{}", std::process::id()));
-        let mut file = fs::OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
             .truncate(true)
             .write(true)
             .mode(0o600)
             .open(&tmp)?;
-        file.write_all(&serde_json::to_vec(counts).map_err(io::Error::other)?)?;
-        fs::rename(&tmp, &self.path)
+        file.write_all(&serde_json::to_vec(&counts).map_err(io::Error::other)?)?;
+        fs::rename(&tmp, &self.path)?;
+        drop(lock);
+        Ok(())
+    }
+
+    /// The advisory lock on the sidecar file, polled for at most [`LOCK_WAIT`].
+    fn lock(&self) -> io::Result<File> {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .open(self.path.with_extension("lock"))?;
+        let started = Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(TryLockError::Error(e)) => return Err(e),
+                Err(TryLockError::WouldBlock) if started.elapsed() >= LOCK_WAIT => {
+                    return Err(io::Error::from(io::ErrorKind::WouldBlock));
+                }
+                Err(TryLockError::WouldBlock) => std::thread::sleep(Duration::from_micros(200)),
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use ix_trace_rs::trace;
+
     use super::*;
 
-    /// Trace: FR-068-AC-11
+    #[trace("FR-068-AC-11")]
     #[test]
     fn the_backoff_starts_at_five_seconds_doubles_to_the_cap_and_ends_on_success() {
         let dir = tempfile::tempdir().unwrap();
@@ -159,5 +211,48 @@ mod tests {
         assert_eq!((c.dropped, c.skipped), (9, 9));
         state.failed(now);
         assert_eq!(state.counts().backoff_ms, 5_000, "starts over");
+    }
+
+    /// An unregistered lead is counted and neither starts nor ends a backoff.
+    #[trace("FR-068-AC-11")]
+    #[test]
+    fn an_unregistered_event_is_counted_and_leaves_the_backoff_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = ActivityState::at(dir.path().join("activity.json"));
+        state.failed(1_000);
+        state.unregistered();
+        state.unregistered();
+        state.dropped();
+        let c = state.counts();
+        assert_eq!((c.unregistered, c.dropped, c.backoff_ms), (2, 2, 5_000));
+        state.unregistered();
+        assert_eq!(state.counts().backoff_ms, 5_000);
+    }
+
+    /// Concurrent hooks lose no increment, and a held lock skips the update
+    /// without waiting past the bound.
+    #[trace("FR-068-AC-11")]
+    #[test]
+    fn concurrent_updates_are_exact_and_a_held_lock_never_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = ActivityState::at(dir.path().join("activity.json"));
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..10 {
+                        state.unregistered();
+                    }
+                });
+            }
+        });
+        assert_eq!(state.counts().unregistered, 40);
+        let held = state.lock().unwrap();
+        let started = Instant::now();
+        state.unregistered();
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(state.counts().unregistered, 40, "skipped, not counted");
+        drop(held);
+        state.unregistered();
+        assert_eq!(state.counts().unregistered, 41);
     }
 }

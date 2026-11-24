@@ -1,58 +1,58 @@
 //! Hook activity stream and last-activity record against real Redis (FR-068).
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test fixtures")]
+use ix_trace_rs::trace;
 use relay_core::{
     ACTIVITY_MAX_EVENTS, ActivityEvent, ActivityKind, Address, AgentName, Harness, HerdrPlaceIds,
     Place, Registration,
 };
 use relay_test_support::Bus;
 
-fn lead(bus: &mut Bus, place: bool) -> AgentName {
+fn lead(bus: &mut Bus, place: bool) -> Registration {
     let machine = "terra".parse().unwrap();
     let session = "s-1".parse().unwrap();
     let name = AgentName::for_session(&machine, &session);
-    bus.relay
-        .register(&Registration {
-            name: name.clone(),
-            machine,
-            kind: "claude".into(),
-            session_id: Some(session.clone()),
-            cwd: None,
-            herdr_pane: Some("w1:p1".parse().unwrap()),
-            place: place.then(|| Place {
-                workspace: "SWM".into(),
-                tab: "code".into(),
-                herdr_ids: Some(HerdrPlaceIds {
-                    workspace: "w1".parse().unwrap(),
-                    tab: "w1:t1".parse().unwrap(),
-                    pane: "w1:p1".parse().unwrap(),
-                    session_id: session,
-                    verified_at_ms: 1,
-                }),
+    let reg = Registration {
+        name,
+        machine,
+        kind: "claude".into(),
+        session_id: Some(session.clone()),
+        cwd: None,
+        herdr_pane: Some("w1:p1".parse().unwrap()),
+        place: place.then(|| Place {
+            workspace: "SWM".into(),
+            tab: "code".into(),
+            herdr_ids: Some(HerdrPlaceIds {
+                workspace: "w1".parse().unwrap(),
+                tab: "w1:t1".parse().unwrap(),
+                pane: "w1:p1".parse().unwrap(),
+                session_id: session,
+                verified_at_ms: 1,
             }),
-            last_seen_ms: 1,
-        })
-        .unwrap();
-    name
+        }),
+        last_seen_ms: 1,
+    };
+    bus.relay.register(&reg).unwrap();
+    reg
+}
+
+fn lane_of(reg: &Registration) -> Address {
+    reg.verified_place().unwrap().address(&reg.machine)
 }
 
 fn event(kind: ActivityKind) -> ActivityEvent {
     ActivityEvent::new(kind, Harness::Claude, "s-1", 1_000)
 }
 
-fn lane() -> Address {
-    "terra:SWM:code".parse().unwrap()
-}
-
-/// Trace: FR-068-AC-1, FR-068-AC-2
+#[trace("FR-068-AC-1", "FR-068-AC-2")]
 #[test]
 fn an_event_is_stored_with_the_lane_address_and_server_time() {
     let Some(mut bus) = Bus::connect("activity-shape") else {
         return;
     };
-    let name = lead(&mut bus, true);
+    let lane = lane_of(&lead(&mut bus, true));
     let mut e = event(ActivityKind::PostTool);
     e.tool = Some("Edit".into());
-    assert!(bus.relay.record_activity(&name, &e).unwrap());
+    assert!(bus.relay.record_activity(&lane, &e).unwrap());
     let stored = bus.relay.activity_events(10).unwrap();
     assert_eq!(stored.len(), 1);
     let v: serde_json::Value = serde_json::from_str(&stored[0]).unwrap();
@@ -65,48 +65,71 @@ fn an_event_is_stored_with_the_lane_address_and_server_time() {
     assert!(stored[0].len() <= relay_core::ACTIVITY_MAX_EVENT_BYTES);
 }
 
-/// Trace: FR-068-AC-9
+#[trace("FR-068-AC-9")]
 #[test]
-fn a_lead_with_no_lane_address_writes_nothing() {
+fn an_unverified_lead_has_no_address_and_an_overlong_address_writes_nothing() {
     let Some(mut bus) = Bus::connect("activity-no-address") else {
         return;
     };
     let unplaced = lead(&mut bus, false);
+    assert!(unplaced.verified_place().is_none());
+    let long = Address::new("terra", &"w".repeat(100), Some("code"));
     assert!(
         !bus.relay
-            .record_activity(&unplaced, &event(ActivityKind::Prompt))
-            .unwrap()
-    );
-    let unknown: AgentName = "nobody".parse().unwrap();
-    assert!(
-        !bus.relay
-            .record_activity(&unknown, &event(ActivityKind::Prompt))
+            .record_activity(&long, &event(ActivityKind::Prompt))
             .unwrap()
     );
     assert_eq!(bus.relay.activity_len().unwrap(), 0);
 }
 
-/// Trace: FR-068-AC-7
+/// The session probe returns the remembered name's registration in its one
+/// request, so the hook can take the lane address without another.
+#[trace("FR-068-AC-1")]
+#[test]
+fn the_session_probe_carries_the_registration_of_the_cached_name() {
+    let Some(mut bus) = Bus::connect("activity-probe") else {
+        return;
+    };
+    let reg = lead(&mut bus, true);
+    let session = reg.session_id.clone().unwrap();
+    assert_eq!(
+        bus.relay.probe_session(&session).unwrap().registration,
+        None
+    );
+    bus.relay
+        .commit_identity(&relay_core::IdentityCommit {
+            registration: Some(reg.clone()),
+            session_name: Some((session.clone(), reg.name.clone())),
+            ..relay_core::IdentityCommit::default()
+        })
+        .unwrap();
+    let probe = bus.relay.probe_session(&session).unwrap();
+    assert_eq!(probe.name.as_ref(), Some(&reg.name));
+    assert_eq!(probe.registration.as_ref(), Some(&reg));
+    assert_eq!(lane_of(&probe.registration.unwrap()), lane_of(&reg));
+}
+
+#[trace("FR-068-AC-7")]
 #[test]
 fn the_stream_holds_at_most_20000_events_and_the_last_record_survives() {
     let Some(mut bus) = Bus::connect("activity-cap") else {
         return;
     };
-    let name = lead(&mut bus, true);
+    let lane = lane_of(&lead(&mut bus, true));
     bus.relay
-        .record_activity(&name, &event(ActivityKind::Stop))
+        .record_activity(&lane, &event(ActivityKind::Stop))
         .unwrap();
     bus.relay
-        .record_activity(&name, &event(ActivityKind::Idle))
+        .record_activity(&lane, &event(ActivityKind::Idle))
         .unwrap();
     for _ in 0..ACTIVITY_MAX_EVENTS {
         bus.relay
-            .record_activity(&name, &event(ActivityKind::PreTool))
+            .record_activity(&lane, &event(ActivityKind::PreTool))
             .unwrap();
     }
     assert_eq!(bus.relay.activity_len().unwrap(), ACTIVITY_MAX_EVENTS);
     // The stop and idle events were trimmed from the stream; the record keeps them.
-    let last = bus.relay.activity_last(&lane()).unwrap();
+    let last = bus.relay.activity_last(&lane).unwrap();
     for kind in ["stop", "idle", "pre_tool"] {
         assert!(
             last.contains_key(&format!("kind:{kind}")),
@@ -121,13 +144,13 @@ fn the_stream_holds_at_most_20000_events_and_the_last_record_survives() {
     assert!((1..=7 * 24 * 3600).contains(&ttl), "ttl {ttl}");
 }
 
-/// Trace: FR-068-AC-7
+#[trace("FR-068-AC-7")]
 #[test]
 fn events_older_than_24_hours_are_dropped_on_the_next_write() {
     let Some(mut bus) = Bus::connect("activity-age") else {
         return;
     };
-    let name = lead(&mut bus, true);
+    let lane = lane_of(&lead(&mut bus, true));
     let now_ms: i64 = {
         let (s, us): (i64, i64) = redis::cmd("TIME").query(&mut bus.raw).unwrap();
         s * 1000 + us / 1000
@@ -152,7 +175,7 @@ fn events_older_than_24_hours_are_dropped_on_the_next_write() {
         .unwrap();
     assert_eq!(bus.relay.activity_len().unwrap(), 3);
     bus.relay
-        .record_activity(&name, &event(ActivityKind::Prompt))
+        .record_activity(&lane, &event(ActivityKind::Prompt))
         .unwrap();
     // The 25 h and 48 h events are gone; the 1 h one and the new one stay.
     assert_eq!(bus.relay.activity_len().unwrap(), 2);

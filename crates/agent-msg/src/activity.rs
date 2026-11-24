@@ -5,6 +5,7 @@
 //! only message-derived value is the [`LastClass`].
 
 use std::{
+    collections::BTreeMap,
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -17,11 +18,10 @@ use relay_core::{ActivityEvent, ActivityKind, BlockedReason, Harness, LastClass}
 
 use crate::hook::{Event, HookInput};
 
-/// The role spec the session loaded, set by whatever starts the session.
+/// The role spec the session loaded, set by whatever launches the session.
 pub(crate) const ROLE_ENV: &str = "AGENT_MSG_ROLE";
-/// Space- or comma-separated `name=version` pairs of the skills the session
-/// loaded; a name with no version is recorded as `unknown`.
-pub(crate) const SKILLS_ENV: &str = "AGENT_MSG_SKILLS";
+/// The plugin whose installed version is the session's skill version.
+const SKILL_PLUGIN: &str = "dev-team";
 
 /// The longest a branch read may take before the branch is reported empty.
 pub(crate) const BRANCH_READ_LIMIT: Duration = Duration::from_millis(100);
@@ -82,12 +82,8 @@ pub(crate) fn from_input(
         }
         Event::SessionStart => {
             let mut e = make(ActivityKind::SessionStart);
-            let (role, skills) = session_versions(
-                std::env::var(ROLE_ENV).ok().as_deref(),
-                std::env::var(SKILLS_ENV).ok().as_deref(),
-            );
-            e.role = Some(role);
-            e.skill_versions = skills;
+            e.role = Some(role_from(std::env::var(ROLE_ENV).ok().as_deref()));
+            e.skill_versions = Some(plugin_versions(harness, &PluginHomes::from_env()));
             e
         }
         Event::SessionEnd => make(ActivityKind::SessionEnd),
@@ -96,24 +92,79 @@ pub(crate) fn from_input(
     Some(e)
 }
 
-/// The role and `name=version` pairs from the session's environment values.
-/// An unset role is `unknown`; a skill without a version gets `unknown`.
-pub(crate) fn session_versions(role: Option<&str>, skills: Option<&str>) -> (String, Vec<String>) {
-    let role = role
-        .map(str::trim)
+/// The role spec: `AGENT_MSG_ROLE` as the launcher set it, `unknown` only when
+/// it is unset or empty.
+pub(crate) fn role_from(role: Option<&str>) -> String {
+    role.map(str::trim)
         .filter(|r| !r.is_empty())
-        .unwrap_or("unknown");
-    let pairs = skills
-        .unwrap_or_default()
-        .split([' ', ',', '\n'])
-        .filter(|s| !s.is_empty())
-        .map(|s| match s.split_once('=') {
-            Some((name, version)) if !version.is_empty() => format!("{name}={version}"),
-            Some((name, _)) => format!("{name}=unknown"),
-            None => format!("{s}=unknown"),
-        })
-        .collect();
-    (role.to_owned(), pairs)
+        .unwrap_or("unknown")
+        .to_owned()
+}
+
+/// Where the harnesses keep their installed plugins.
+pub(crate) struct PluginHomes {
+    /// The user's home directory.
+    pub(crate) home: Option<PathBuf>,
+    /// `CODEX_HOME`, when set.
+    pub(crate) codex_home: Option<PathBuf>,
+}
+
+impl PluginHomes {
+    fn from_env() -> Self {
+        Self {
+            home: std::env::var_os("HOME").map(PathBuf::from),
+            codex_home: std::env::var_os("CODEX_HOME").map(PathBuf::from),
+        }
+    }
+}
+
+/// The skill version of the session: the installed `dev-team` plugin version,
+/// from Claude's install manifest (`plugins/installed_plugins.json`, key
+/// `dev-team@agent-ix`) or Codex's plugin cache
+/// (`plugins/cache/agent-ix/dev-team/<version>`). A version that cannot be read
+/// is `unknown`, never omitted.
+pub(crate) fn plugin_versions(harness: Harness, homes: &PluginHomes) -> BTreeMap<String, String> {
+    let version = match harness {
+        Harness::Claude => homes.home.as_ref().and_then(|home| {
+            claude_plugin_version(&home.join(".claude/plugins/installed_plugins.json"))
+        }),
+        Harness::Codex => homes
+            .codex_home
+            .clone()
+            .or_else(|| homes.home.as_ref().map(|home| home.join(".codex")))
+            .and_then(|dir| {
+                codex_plugin_version(&dir.join("plugins/cache/agent-ix").join(SKILL_PLUGIN))
+            }),
+    };
+    BTreeMap::from([(
+        SKILL_PLUGIN.to_owned(),
+        version.unwrap_or_else(|| "unknown".to_owned()),
+    )])
+}
+
+fn claude_plugin_version(manifest: &Path) -> Option<String> {
+    let mut text = String::new();
+    fs::File::open(manifest)
+        .ok()?
+        .take(1 << 20)
+        .read_to_string(&mut text)
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let installs = value.get("plugins")?.get("dev-team@agent-ix")?.as_array()?;
+    installs
+        .iter()
+        .rev()
+        .find_map(|install| install.get("version")?.as_str().map(str::to_owned))
+}
+
+/// The highest version directory under the plugin's Codex cache folder.
+fn codex_plugin_version(plugin_dir: &Path) -> Option<String> {
+    let key = |v: &str| -> Vec<u64> { v.split('.').map(|p| p.parse().unwrap_or(0)).collect() };
+    fs::read_dir(plugin_dir)
+        .ok()?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.starts_with(|c: char| c.is_ascii_digit()))
+        .max_by_key(|name| key(name))
 }
 
 /// Whether the final assistant message asks the user something. Reads the
@@ -199,13 +250,15 @@ fn git_dir_of(dir: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use ix_trace_rs::trace;
+
     use super::*;
 
     fn input(json: &str) -> HookInput {
         serde_json::from_str(json).unwrap()
     }
 
-    /// Trace: FR-068-AC-4
+    #[trace("FR-068-AC-4")]
     #[test]
     fn the_final_message_is_classified_by_its_ending_and_last_paragraph() {
         let cases = [
@@ -225,7 +278,7 @@ mod tests {
         }
     }
 
-    /// Trace: FR-068-AC-4
+    #[trace("FR-068-AC-4")]
     #[test]
     fn a_stop_event_carries_the_class_and_never_the_message() {
         let secret = "SECRET-MARKER-9f3a";
@@ -249,7 +302,7 @@ mod tests {
         }
     }
 
-    /// Trace: FR-068-AC-3
+    #[trace("FR-068-AC-3")]
     #[test]
     fn notifications_become_blocked_idle_or_nothing() {
         let notify = |t: &str| {
@@ -277,18 +330,60 @@ mod tests {
         );
     }
 
-    /// Trace: FR-068-AC-5
+    #[trace("FR-068-AC-5")]
     #[test]
-    fn session_versions_pair_every_skill_and_default_a_missing_version() {
-        let (role, skills) = session_versions(Some("coder=1.2"), Some("a=1 b, c=  d="));
-        assert_eq!(role, "coder=1.2");
-        assert_eq!(skills, ["a=1", "b=unknown", "c=unknown", "d=unknown"]);
-        let (role, skills) = session_versions(None, None);
-        assert_eq!(role, "unknown");
-        assert!(skills.is_empty());
+    fn the_role_and_skill_version_come_from_the_launcher_and_the_installed_plugin() {
+        assert_eq!(role_from(Some(" coder ")), "coder");
+        assert_eq!(role_from(Some("")), "unknown");
+        assert_eq!(role_from(None), "unknown");
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        let homes = PluginHomes {
+            home: Some(home.clone()),
+            codex_home: None,
+        };
+        // Nothing installed: the version is present and `unknown`.
+        assert_eq!(
+            plugin_versions(Harness::Claude, &homes),
+            BTreeMap::from([("dev-team".to_owned(), "unknown".to_owned())])
+        );
+        fs::create_dir_all(home.join(".claude/plugins")).unwrap();
+        fs::write(
+            home.join(".claude/plugins/installed_plugins.json"),
+            r#"{"version":2,"plugins":{
+                "other@x":[{"version":"9.9.9"}],
+                "dev-team@agent-ix":[{"version":"0.3.0"},{"version":"0.4.1"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            plugin_versions(Harness::Claude, &homes)["dev-team"],
+            "0.4.1"
+        );
+
+        // Codex keeps one directory per installed version.
+        for v in ["0.4.1", "0.10.0", "0.9.2"] {
+            fs::create_dir_all(home.join(format!(".codex/plugins/cache/agent-ix/dev-team/{v}")))
+                .unwrap();
+        }
+        assert_eq!(
+            plugin_versions(Harness::Codex, &homes)["dev-team"],
+            "0.10.0"
+        );
     }
 
-    /// Trace: FR-068-AC-1
+    /// A `SessionStart` always carries both fields.
+    #[trace("FR-068-AC-5")]
+    #[test]
+    fn a_session_start_event_always_carries_a_role_and_skill_versions() {
+        let i = input(r#"{"session_id":"s-1","hook_event_name":"SessionStart","cwd":"/w"}"#);
+        let e = from_input(Event::SessionStart, &i, Harness::Claude, 7).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&e.encode()).unwrap();
+        assert!(v["role"].is_string());
+        assert!(v["skill_versions"]["dev-team"].is_string(), "{v}");
+    }
+
+    #[trace("FR-068-AC-1")]
     #[test]
     fn a_tool_event_keeps_the_tool_name_and_no_input_or_output() {
         let i = input(
@@ -302,7 +397,7 @@ mod tests {
         assert!(json.contains(r#""tool":"Bash""#));
     }
 
-    /// Trace: FR-068-AC-10
+    #[trace("FR-068-AC-10")]
     #[test]
     fn the_branch_is_read_from_head_and_empty_outside_a_work_tree() {
         let dir = tempfile::tempdir().unwrap();
@@ -345,7 +440,7 @@ mod tests {
         assert_eq!(branch_within("", Duration::from_secs(2)), "");
     }
 
-    /// Trace: FR-068-AC-10
+    #[trace("FR-068-AC-10")]
     #[test]
     fn a_branch_read_that_hangs_gives_an_empty_branch_within_the_limit() {
         let dir = tempfile::tempdir().unwrap();
