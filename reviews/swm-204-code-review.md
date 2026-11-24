@@ -70,6 +70,9 @@ Round 1, fix head `d0f29dd11bac99e10da4f87414e9b48b3c01a472` (`da01f43..d0f29dd`
 | FND-007 | fixed | The AC-29 tag is removed, and each NOT_YET_EXPORTED entry names SWM-205 or SWM-207. |
 | FND-008 | fixed | docs/configuration.md and CHANGELOG state the upgrade order before `[fleet]` is added. |
 | FND-009 | fixed | The comment is rejoined below the inserted block. |
+| FND-010 | fixed | Round 2 (`0f0b65f`): `publish_offline` calls `push(now, None, ..)`, and `build_from` fills relay health only for `Some`, so an outage push carries no `ix.relay.registrations`. The guarding assertion is missing (FND-013). |
+| FND-011 | fixed | Round 2: `fleet_checks` runs once per live heartbeat, separate from `heartbeat_check`, and emits both warnings; the doctor test asserts both together. The `watcher_otlp_failing` early return inside `heartbeat_check` is pre-existing and now hides neither fleet warning, so it is out of scope. |
+| FND-012 | fixed | Round 2: FR-070-AC-10 is added (a class from an unhealthy `pane_tail` or older than one scan interval carries no `lane.blocked` value), and tc_070_10 is retagged to it; the matrix binds it. |
 
 ## New findings (disposition pass 1)
 
@@ -78,3 +81,9 @@ Round 1, fix head `d0f29dd11bac99e10da4f87414e9b48b3c01a472` (`da01f43..d0f29dd`
 | FND-010 | medium | The offline push exports `ix.relay.registrations{machine}` = 0 during a Redis outage: `publish_offline` builds from `relay::Health::default()`, whose `fill` always emits the registrations gauge. That is a store-backed reading shown as a real zero, contrary to `publish_offline`'s own doc and the test's "no store-backed series", which only checks `inbox.depth`. | crates/relay-watcher/src/otlp/mod.rs:338-352; crates/relay-watcher/src/otlp/relay.rs:267-271; crates/relay-watcher/src/main.rs:3907-3911 |
 | FND-011 | low | `heartbeat_check` returns at the first warning. `collector_source_failed` therefore hides `fleet_lanes_dropped`, and the default profile fails `hook_events` until SWM-202/205, so dropped lanes are never shown by doctor on a host without `unavailable_sources`. | crates/agent-msg/src/doctor/checks.rs:860-890 |
 | FND-012 | low | tc_070_10 (stale or unhealthy pane class) is tagged FR-070-AC-4, which is specifically the `cpu` busy ratio; no AC states the pane-class omission, so the binding overclaims AC-4 instead of a gap noted for FR-070's omission rule. | crates/relay-watcher/src/fleet/mod.rs:962-966 |
+
+## New findings (disposition pass 2)
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-013 | low | The FND-010 fix has no regression guard: tc_070_06 (watcher level) still asserts only that `ix.relay.inbox.depth` is absent, not `ix.relay.registrations`, although the fix round reports that it does. Reverting `push(now, None, ..)` to `Health::default()` would pass. | crates/relay-watcher/src/main.rs:3907-3911 |

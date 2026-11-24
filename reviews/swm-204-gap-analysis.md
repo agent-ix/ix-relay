@@ -41,6 +41,7 @@ Round 1, fix head `d0f29dd11bac99e10da4f87414e9b48b3c01a472`. The tests now use 
 | FND-001 | fixed | FR-070-AC-6 is now bound to the watcher-level test `main.rs` `tc_070_06_a_watcher_with_redis_down_still_pushes_redis_0_and_the_other_sources`, which steps the supervisor against an unreachable Redis and decodes the pushed body. |
 | FND-002 | fixed | The heartbeat carries `fleet_failed_sources` and `fleet_lanes_dropped` (liveness.rs tc_070_05), and doctor warns `collector_source_failed` and `fleet_lanes_dropped` (checks.rs tc_070_05, bound to FR-070-AC-5 and FR-045-AC-31). The FR-029 table lists both codes. The new heartbeat fields are `serde(default)` and skipped when empty, and `WatcherHeartbeat` has no `deny_unknown_fields`, so old and new watchers and doctors read each other. |
 | FND-003 | fixed | Each NOT_YET_EXPORTED entry names its ticket (SWM-205 for no_events, compile_seconds and the attribution behind FR-069-AC-5/6/13, focus_info, config and activity_skipped; SWM-207 for the order series). |
+| FND-004 | fixed | Round 2 (`0f0b65f`): tc_045_11 carries `#[trace("FR-045-AC-11")]`, and `quoin matrix` reports FR-045-AC-11 as tagged. |
 
 ## New findings (disposition pass 1)
 

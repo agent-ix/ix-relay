@@ -3909,6 +3909,10 @@ mod tests {
             !body.contains("ix.relay.inbox.depth"),
             "no store-backed series"
         );
+        assert!(
+            !body.contains("ix.relay.registrations"),
+            "no store-backed series, not even a zero"
+        );
     }
 
     /// A bus for `test`'s keyspace with `herdr`, on machine `node-a`, whose
