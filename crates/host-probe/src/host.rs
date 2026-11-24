@@ -4,7 +4,7 @@
 //! here spawns a process.
 
 use std::time::{Duration, Instant};
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", test, feature = "fixtures"))]
 use std::{fs, path::Path};
 
 use crate::ErrorClass;
@@ -21,7 +21,7 @@ pub struct CpuTicks {
     pub idle: u64,
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", test, feature = "fixtures"))]
 /// Parses the aggregate `cpu` line of `/proc/stat`.
 ///
 /// # Errors
@@ -53,7 +53,7 @@ pub fn parse_proc_stat(text: &str) -> Result<CpuTicks, ErrorClass> {
 }
 
 /// The ticks of the macOS host CPU counters: user, system and nice are busy.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", test, feature = "fixtures"))]
 #[must_use]
 pub fn ticks_from_macos(user: u32, system: u32, idle: u32, nice: u32) -> CpuTicks {
     CpuTicks {
@@ -100,7 +100,7 @@ pub struct Memory {
     pub total: u64,
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", test, feature = "fixtures"))]
 /// Parses `/proc/meminfo`: used is `MemTotal` minus `MemAvailable`.
 ///
 /// # Errors
@@ -127,7 +127,7 @@ pub fn parse_meminfo(text: &str) -> Result<Memory, ErrorClass> {
     })
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", test, feature = "fixtures"))]
 /// The highest `Tctl` or CPU package temperature under a hwmon root
 /// (`/sys/class/hwmon`), in degrees Celsius.
 ///

@@ -192,6 +192,12 @@ impl Health {
         }
     }
 
+    /// Forgets the last outcome of `source`: the host cannot provide it, so it is
+    /// neither ok nor failed.
+    pub fn clear(&mut self, source: Source) {
+        self.last.remove(&source);
+    }
+
     /// Whether the last read of `source` succeeded; false for one never read.
     #[must_use]
     pub fn ok(&self, source: Source) -> bool {

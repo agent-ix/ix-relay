@@ -5,7 +5,7 @@
 //! (and on a kernel built without it) the reading is
 //! [`ErrorClass::Unsupported`], which callers report as unavailable, not failed.
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", test, feature = "fixtures"))]
 use std::{fs, io::ErrorKind, path::Path};
 
 use crate::ErrorClass;
@@ -78,7 +78,7 @@ impl PressureSet {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", test, feature = "fixtures"))]
 /// Parses one `/proc/pressure/<resource>` file.
 ///
 /// # Errors
@@ -122,23 +122,18 @@ pub fn parse_pressure(text: &str) -> Result<Pressure, ErrorClass> {
     })
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", test, feature = "fixtures"))]
 /// Reads the pressure of every resource under a `/proc/pressure`-shaped `root`.
 ///
 /// # Errors
 ///
-/// [`ErrorClass::Unsupported`] when a file is absent (a kernel without PSI),
-/// [`ErrorClass::Unreadable`] for any other read failure (PSI can be disabled
-/// at boot, which fails the read), [`ErrorClass::Parse`] for malformed text.
+/// [`ErrorClass::Unsupported`] when a file is absent (a kernel built without PSI)
+/// or the read is refused as unsupported (PSI disabled at boot),
+/// [`ErrorClass::Unreadable`] for any other read failure,
+/// [`ErrorClass::Parse`] for malformed text.
 pub fn read_pressure_at(root: &Path) -> Result<PressureSet, ErrorClass> {
     let one = |resource: Resource| -> Result<Pressure, ErrorClass> {
-        let text = fs::read_to_string(root.join(resource.name())).map_err(|e| {
-            if e.kind() == ErrorKind::NotFound {
-                ErrorClass::Unsupported
-            } else {
-                ErrorClass::Unreadable
-            }
-        })?;
+        let text = fs::read_to_string(root.join(resource.name())).map_err(|e| read_failure(&e))?;
         parse_pressure(&text)
     };
     Ok(PressureSet {
@@ -146,6 +141,17 @@ pub fn read_pressure_at(root: &Path) -> Result<PressureSet, ErrorClass> {
         io: one(Resource::Io)?,
         memory: one(Resource::Memory)?,
     })
+}
+
+#[cfg(any(target_os = "linux", test, feature = "fixtures"))]
+/// A missing file (no PSI in the kernel) and `EOPNOTSUPP` (PSI disabled at boot
+/// with `psi=0`) mean the host has no pressure readings; any other failure is a
+/// failed read.
+fn read_failure(e: &std::io::Error) -> ErrorClass {
+    match e.kind() {
+        ErrorKind::NotFound | ErrorKind::Unsupported => ErrorClass::Unsupported,
+        _ => ErrorClass::Unreadable,
+    }
 }
 
 /// The pressure of this host.
@@ -199,6 +205,18 @@ mod tests {
         assert_eq!(set.get(Resource::Memory).some.avg60, 0.0);
     }
 
+    #[trace("FR-069-AC-21")]
+    #[test]
+    fn tc_069_21_eopnotsupp_from_a_psi_disabled_boot_is_unsupported_and_other_errors_unreadable() {
+        let refused = std::io::Error::from(ErrorKind::Unsupported);
+        assert_eq!(read_failure(&refused), ErrorClass::Unsupported);
+        let denied = std::io::Error::from(ErrorKind::PermissionDenied);
+        assert_eq!(read_failure(&denied), ErrorClass::Unreadable);
+        // A directory in place of the file is a failed read, not an absent one.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("cpu")).unwrap();
+        assert_eq!(read_pressure_at(dir.path()), Err(ErrorClass::Unreadable));
+    }
     #[trace("FR-069-AC-18")]
     #[test]
     fn tc_069_18_a_host_without_proc_pressure_is_unsupported_and_garbage_is_a_parse_failure() {

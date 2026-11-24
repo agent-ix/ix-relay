@@ -1,6 +1,6 @@
 //! Compiler and build driver processes with their working directories (FR-069).
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", test, feature = "fixtures"))]
 use std::{fs, path::Path};
 
 use crate::ErrorClass;
@@ -17,7 +17,7 @@ pub struct Compiler {
     pub cwd: String,
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", test, feature = "fixtures"))]
 /// The compiler processes under a `/proc`-shaped `root`: each numeric
 /// directory's `comm` is matched against `names`, and `cwd` read as a link. A
 /// process that exits mid-read is skipped, as it is no longer a process.

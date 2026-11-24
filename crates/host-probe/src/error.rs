@@ -9,7 +9,7 @@ pub enum ErrorClass {
     Unsupported,
     /// What was read did not parse.
     #[cfg_attr(
-        not(any(target_os = "linux", test)),
+        not(any(target_os = "linux", test, feature = "fixtures")),
         allow(dead_code, reason = "only the Linux readers parse text")
     )]
     Parse,

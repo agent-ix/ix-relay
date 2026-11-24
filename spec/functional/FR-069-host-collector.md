@@ -44,7 +44,7 @@ holds no Redis or OTLP code so the build scheduler can read the same probes.
   temperature, the collector SHALL read the highest hwmon `Tctl` or CPU package sensor in
   degrees Celsius; a host whose profile does not expect one reports the source as
   unavailable and never as zero.
-- The collector SHALL read Linux pressure stall information from `/proc/pressure/cpu`, `/proc/pressure/io` and `/proc/pressure/memory` (`some` and, where the kernel gives it, `full`, each as the 10 and 60 second averages in percent) and export it as `ix.fleet.host.pressure` by `resource` and `kind`. A host without PSI (macOS, or a kernel built without it) SHALL report the `pressure` source as unavailable and never as failed; a PSI file that exists and cannot be read or parsed SHALL fail the source.
+- The collector SHALL read Linux pressure stall information from `/proc/pressure/cpu`, `/proc/pressure/io` and `/proc/pressure/memory` (`some` and, where the kernel gives it, `full`, each as the 10 and 60 second averages in percent) and export it as `ix.fleet.host.pressure` by `resource` and `kind`. A host without PSI (macOS, or a kernel built without it or booted with it disabled) SHALL report the `pressure` source as unavailable and never as failed; a PSI file that exists and cannot be read or parsed SHALL fail the source.
 - The collector SHALL report `host_capacity_slots` from the operator-entered server
   capacity of [FR-058](./FR-058-explicit-server-capacity.md), SHALL always report
   `host_capacity_configured` as 1 or 0, and SHALL NOT estimate capacity.
@@ -122,6 +122,8 @@ holds no Redis or OTLP code so the build scheduler can read the same probes.
 | FR-069-AC-18 | Given a `/proc/pressure` directory with a file absent the read is `unsupported`; given malformed text the read is a parse failure. | Test |
 | FR-069-AC-19 | Given a pressure reading, `ix.fleet.host.pressure` carries one point per resource and kind, and no `full_*` point for a resource without a `full` reading. | Test |
 | FR-069-AC-20 | Given an unsupported pressure read, `ix_fleet_probe_unavailable` is exported for `pressure`, no `probe_ok` 0 and no failed source; given an unreadable one, `probe_ok` is 0 and no value is exported. | Test |
+| FR-069-AC-21 | Given a pressure read refused as unsupported (`EOPNOTSUPP`, PSI disabled at boot) the read is `unsupported`; any other read failure is `unreadable`. | Test |
+| FR-069-AC-22 | Given a `pressure` source that failed and then reads `unsupported`, the failed state is cleared: no failed source is listed and `probe_unavailable` is exported. | Test |
 | FR-069-AC-15 | On each of the hosts draco, titan, luna and terra (terra inside WSL), `relay-watcher` run on that host alone, without an ssh session from another machine, exports the host series, per-lane series for the host's lanes and `ix_fleet_probe_ok`, and they are queried in Prometheus by their `ix_fleet_*` names with that host's label. | Demonstration |
 
 ## Dependencies

@@ -563,7 +563,10 @@ impl Collector {
             self.pressure = got.ok();
             // A platform or kernel without PSI is unavailable, not a failed read.
             self.pressure_unsupported = got == Err(ErrorClass::Unsupported);
-            if !self.pressure_unsupported {
+            if self.pressure_unsupported {
+                self.health.clear(Source::Pressure);
+                self.publish_status();
+            } else {
                 self.record(
                     Source::Pressure,
                     got.map_or_else(Outcome::Failed, |_| Outcome::Ok),
@@ -1208,7 +1211,7 @@ mod tests {
         assert_eq!(pressure_value(&r, "memory", "full_avg60"), Some(0.0));
     }
 
-    #[trace("FR-069-AC-20", "FR-070-AC-7")]
+    #[trace("FR-069-AC-20")]
     #[test]
     fn tc_069_20_a_host_without_psi_reports_pressure_unavailable_and_an_unreadable_one_failed() {
         let profile = Profile::new(&[Source::Pressure], &[]);
@@ -1225,6 +1228,21 @@ mod tests {
         assert_eq!(probe(&r, Source::Pressure), Some(0));
         assert!(!has(&r, "ix.fleet.host.pressure"));
         assert!(c.failed_sources().contains(&Source::Pressure));
+    }
+
+    #[trace("FR-069-AC-22")]
+    #[test]
+    fn tc_069_22_an_unsupported_read_clears_an_earlier_failure_so_status_and_metrics_agree() {
+        let profile = Profile::new(&[Source::Pressure], &[]);
+        let failing = Some((Source::Pressure, ErrorClass::Unreadable));
+        let (mut c, now) = healthy(profile, failing);
+        assert_eq!(c.failed_sources(), [Source::Pressure]);
+        c.sources.pressure = Arc::new(|| Err(ErrorClass::Unsupported));
+        c.sample(now + Duration::from_secs(5), &mut |_| {});
+        let r = registry_of(&c, now);
+        assert!(c.failed_sources().is_empty());
+        assert!(unavailable(&r, Source::Pressure));
+        assert_eq!(probe(&r, Source::Pressure), None);
     }
 
     #[trace("FR-070-AC-8")]
