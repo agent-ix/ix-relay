@@ -74,6 +74,7 @@ Round 1, fix head `d0f29dd11bac99e10da4f87414e9b48b3c01a472` (`da01f43..d0f29dd`
 | FND-011 | fixed | Round 2: `fleet_checks` runs once per live heartbeat, separate from `heartbeat_check`, and emits both warnings; the doctor test asserts both together. The `watcher_otlp_failing` early return inside `heartbeat_check` is pre-existing and now hides neither fleet warning, so it is out of scope. |
 | FND-012 | fixed | Round 2: FR-070-AC-10 is added (a class from an unhealthy `pane_tail` or older than one scan interval carries no `lane.blocked` value), and tc_070_10 is retagged to it; the matrix binds it. |
 | FND-013 | fixed | Round 3 (`eadc437`): tc_070_06_a_watcher_with_redis_down_... asserts `!body.contains("ix.relay.registrations")`; with `publish_offline` reverted to `Health::default()` the gauge is emitted and this fails. |
+| FND-014 | fixed | Round 4 (`360ffe1`): the `build_from` doc comment no longer links to the test-only `Publisher::build`; `make fmt-check docs check-matrix` exit 0, 0, 0 at this head. The rest of the gate passed at eadc437, and the change since then is one doc comment. |
 
 ## New findings (disposition pass 1)
 
