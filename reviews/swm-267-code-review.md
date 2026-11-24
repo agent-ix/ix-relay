@@ -32,3 +32,10 @@ Checked and clean:
 | --- | --- | --- | --- |
 | FND-001 | medium | The gnu binaries are built on `ubuntu-latest` (24.04, glibc 2.39). terra's WSL, a rollout host in this ticket, has glibc 2.35. Bundled C code (libsqlite3-sys, ring) compiled against 2.39 headers can require symbols newer than 2.35 (for example `__isoc23_strtol@GLIBC_2.38`), and the binary then fails to start on terra. `ubuntu-latest` also moves the floor up without notice. Build on `ubuntu-22.04`, or check `objdump -T` of the artifact for symbols above GLIBC_2.35. | .github/workflows/release.yml:73 |
 | FND-002 | low | `linux-binaries` inherits the workflow-level `packages: write`, which it does not need. It only uploads release assets. A job-level `permissions: contents: write` would make it least-privilege. | .github/workflows/release.yml:13-15,70-73 |
+
+## Dispositions
+
+| FND | Outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | 2867fcc: `linux-binaries` now `runs-on: ubuntu-22.04` (glibc 2.35, terra WSL floor). actionlint exit 0. |
+| FND-002 | fixed | 2867fcc: job-level `permissions: contents: write` overrides the workflow-level `packages: write`. |
