@@ -17,8 +17,8 @@ machine=${TEST_LOCAL_MACHINE:-draco}
 key=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --session) shift 2 ;;
-    --machine) machine=$2; shift 2 ;;
+    --session) [ $# -ge 2 ] || exit 1; shift 2 ;;
+    --machine) [ $# -ge 2 ] || exit 1; machine=$2; shift 2 ;;
     *) [ -z "$key" ] && key=$1; shift ;;
   esac
 done
@@ -34,7 +34,8 @@ exec cat "$dir/$machine.$key.json"
             r#"#!/bin/sh
 for last; do :; done
 eval "set -- $last"
-while [ "$1" != herdr ]; do shift; done
+while [ $# -gt 0 ] && [ "$1" != herdr ]; do shift; done
+[ $# -gt 0 ] || exit 1
 shift
 TEST_LOCAL_MACHINE=terra exec "$(dirname "$0")/herdr" "$@"
 "#,

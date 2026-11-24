@@ -114,22 +114,35 @@ impl CountingRedis {
 struct Hook {
     child: Child,
     stdin: Option<std::process::ChildStdin>,
+    /// The writer of a pre-filled pipe, held so the hook sees an open pipe.
+    held: Option<std::io::PipeWriter>,
     config: std::path::PathBuf,
     started: Instant,
 }
 
 impl Hook {
     fn spawn(redis: &CountingRedis) -> Self {
-        Self::spawn_with(redis, Stdio::piped())
+        Self::spawn_with(redis, Stdio::piped(), None)
     }
 
     /// A hook whose stdin is at end of file from its first read: a pipe the test
     /// closes after the spawn races the hook's own stdin deadline on a loaded host.
     fn spawn_closed(redis: &CountingRedis) -> Self {
-        Self::spawn_with(redis, Stdio::null())
+        Self::spawn_with(redis, Stdio::null(), None)
     }
 
-    fn spawn_with(redis: &CountingRedis, stdin: Stdio) -> Self {
+    /// A hook whose stdin already holds `pieces` (written in order, before the spawn, so
+    /// no test-side timing reaches the hook's stdin deadline). With `keep_open` the
+    /// pipe stays open until `finish`; otherwise it is at end of file after them.
+    fn spawn_with_input(redis: &CountingRedis, pieces: &[&[u8]], keep_open: bool) -> Self {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        for piece in pieces {
+            writer.write_all(piece).unwrap();
+        }
+        Self::spawn_with(redis, Stdio::from(reader), keep_open.then_some(writer))
+    }
+
+    fn spawn_with(redis: &CountingRedis, stdin: Stdio, held: Option<std::io::PipeWriter>) -> Self {
         let config = nonexistent_config_path();
         let mut cmd = base_cmd(&["hook", "claude"], Some("hub:EA:code"));
         cmd.env("IX_RELAY_CONFIG", &config);
@@ -143,6 +156,7 @@ impl Hook {
         Self {
             child,
             stdin,
+            held,
             config,
             started: Instant::now(),
         }
@@ -177,6 +191,7 @@ impl Hook {
             thread::sleep(Duration::from_millis(10));
         };
         let elapsed = self.started.elapsed();
+        drop(self.held.take());
         assert_eq!(status.code(), Some(0), "a hook never fails the turn");
         let mut stdout = String::new();
         self.child
@@ -235,8 +250,8 @@ fn a_stdin_closed_empty_leaves_one_malformed_record() {
 #[test]
 fn a_whole_payload_is_served_without_the_pipe_being_closed() {
     let redis = CountingRedis::start();
-    let mut hook = Hook::spawn(&redis);
-    hook.write(payload("Stop").as_bytes());
+    let payload = payload("Stop");
+    let hook = Hook::spawn_with_input(&redis, &[payload.as_bytes()], true);
     // Not closed: the hook must go on to the bus, and fail there (the blackhole
     // never answers) rather than wait for end of file.
     let (_, records) = hook.finish();
@@ -252,12 +267,9 @@ fn a_whole_payload_is_served_without_the_pipe_being_closed() {
 #[test]
 fn a_payload_written_in_two_pieces_is_served() {
     let redis = CountingRedis::start();
-    let mut hook = Hook::spawn(&redis);
     let whole = payload("SessionStart");
     let (head, tail) = whole.split_at(20);
-    hook.write(head.as_bytes());
-    hook.write(tail.as_bytes());
-    hook.close_stdin();
+    let hook = Hook::spawn_with_input(&redis, &[head.as_bytes(), tail.as_bytes()], false);
     let (_, records) = hook.finish();
     redis.assert_connections(1);
     assert_eq!(records.len(), 1, "{records:?}");
@@ -316,8 +328,7 @@ fn an_oversized_payload_is_a_recorded_too_large_not_an_allocation() {
 #[test]
 fn a_complete_non_hook_object_on_an_open_pipe_is_malformed_not_a_timeout() {
     let redis = CountingRedis::start();
-    let mut hook = Hook::spawn(&redis);
-    hook.write(b"{}");
+    let hook = Hook::spawn_with_input(&redis, &[b"{}"], true);
     let (_, records) = hook.finish();
     assert_eq!(records, rec("decode", "malformed"));
     redis.assert_connections(1);
@@ -327,8 +338,8 @@ fn a_complete_non_hook_object_on_an_open_pipe_is_malformed_not_a_timeout() {
 #[test]
 fn bytes_after_the_first_object_are_ignored() {
     let redis = CountingRedis::start();
-    let mut hook = Hook::spawn(&redis);
-    hook.write(format!("{}\n{}\0junk", payload("Stop"), payload("Stop")).as_bytes());
+    let input = format!("{}\n{}\0junk", payload("Stop"), payload("Stop"));
+    let hook = Hook::spawn_with_input(&redis, &[input.as_bytes()], true);
     let (_, records) = hook.finish();
     redis.assert_connections(1);
     assert_ne!(records[0].0, "decode", "{records:?}");

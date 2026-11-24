@@ -213,23 +213,24 @@ fn subagent_call_leaves_the_inbox_untouched() {
 fn session_start_hook_records_the_herdr_pane_from_env() {
     let Some(url) = test_url() else { return };
     let prefix = format!("test:{}:pane_hook:", std::process::id());
-    // The hook's time budget cannot be widened, so a hook that ran out of time before
-    // registering (the lead is then not listed at all) is run again.
+    // The hook's time budget cannot be widened, so a hook whose spool record proves it
+    // ran out of time is run again; any other outcome is asserted.
     let mut listed = String::new();
     support::until_in_time(|_| {
-        let r = agent_msg_with_pane(
-            &["hook", "claude"],
-            Some("hub:EA:code"),
-            Some(&url),
-            Some(&prefix),
-            Some("w1:p1"),
-            SESSION_START,
-        );
+        let (r, records) =
+            support::run_hook_recording("hub:EA:code", &url, &prefix, Some("w1:p1"), SESSION_START);
         assert_eq!(r.status, 0, "stderr: {}", r.stderr);
+        if support::ran_out_of_time(&records) {
+            return false;
+        }
+        assert!(
+            records.is_empty(),
+            "the hook recorded a failure: {records:?}"
+        );
         let r = agent_msg(&["who"], Some("hub:EA:code"), Some(&url), Some(&prefix), "");
         assert_eq!(r.status, 0, "stderr: {}", r.stderr);
         listed = r.stdout;
-        listed.contains("hub:EA:code")
+        true
     });
     assert!(listed.contains("pane w1:p1"), "stdout: {listed}");
 }

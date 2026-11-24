@@ -64,27 +64,6 @@ const REDIS_PER_CALL: Duration = Duration::from_secs(1);
 /// timeout is reported in seconds).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Names an integer that multiplies [`PROBE_TIMEOUT`] and [`PROBE_BUDGET`] (default 1).
-/// A test whose subject is not the deadline sets it so that a slow child spawn on a
-/// loaded host is not read as a hung one; the deadline tests leave it unset.
-const PROBE_SCALE_ENV: &str = "IX_RELAY_DOCTOR_PROBE_SCALE";
-
-fn probe_scale() -> u32 {
-    std::env::var(PROBE_SCALE_ENV)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|n| *n >= 1)
-        .unwrap_or(1)
-}
-
-fn probe_timeout() -> Duration {
-    PROBE_TIMEOUT.saturating_mul(probe_scale())
-}
-
-fn probe_budget() -> Duration {
-    PROBE_BUDGET.saturating_mul(probe_scale())
-}
-
 /// How long herdr's whole version and shape check may take.
 pub(crate) const PROBE_BUDGET: Duration = Duration::from_secs(2);
 
@@ -672,13 +651,13 @@ pub(crate) struct RealProbes;
 
 impl Probes for RealProbes {
     fn herdr_check(&self) -> HerdrCheck {
-        herdr_check::check_within(&RealProcessRunner, probe_timeout(), probe_budget())
+        herdr_check::check_within(&RealProcessRunner, PROBE_TIMEOUT, PROBE_BUDGET)
     }
 
     fn herdr_panes(&self) -> Result<HashSet<PaneId>, String> {
         use relay_ops::find::{FindHerdr, RealFindHerdr};
         let listed = RealFindHerdr::new()
-            .agent_list(None, probe_timeout())
+            .agent_list(None, PROBE_TIMEOUT)
             .map_err(|e| e.to_string())?;
         // A dropped entry may be a registered pane: with any dropped, the set is
         // not the panes herdr has, and no registration is judged against it.
@@ -702,7 +681,7 @@ pub(crate) fn service_state(runner: &impl ProcessRunner) -> ServiceState {
     match runner.run(
         "systemctl",
         &["--user", "is-active", SYSTEMD_UNIT],
-        probe_timeout(),
+        PROBE_TIMEOUT,
     ) {
         Ok(out) if out.success => ServiceState::Active,
         Ok(out) => {
@@ -714,11 +693,7 @@ pub(crate) fn service_state(runner: &impl ProcessRunner) -> ServiceState {
                     stderr.trim()
                 ));
             }
-            match runner.run(
-                "systemctl",
-                &["--user", "cat", SYSTEMD_UNIT],
-                probe_timeout(),
-            ) {
+            match runner.run("systemctl", &["--user", "cat", SYSTEMD_UNIT], PROBE_TIMEOUT) {
                 Ok(cat) if cat.success => ServiceState::Inactive(word),
                 Ok(_) => ServiceState::NotInstalled,
                 Err(e) => ServiceState::Unknown(e.to_string()),
@@ -731,7 +706,7 @@ pub(crate) fn service_state(runner: &impl ProcessRunner) -> ServiceState {
 
 /// launchd's view of [`LAUNCHD_LABEL`].
 fn launchd_state(runner: &impl ProcessRunner) -> ServiceState {
-    match runner.run("launchctl", &["list", LAUNCHD_LABEL], probe_timeout()) {
+    match runner.run("launchctl", &["list", LAUNCHD_LABEL], PROBE_TIMEOUT) {
         Ok(out) if out.success => {
             if String::from_utf8_lossy(&out.stdout).contains("\"PID\"") {
                 ServiceState::Active

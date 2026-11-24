@@ -471,7 +471,7 @@ fn write_transport_herdr(directory: &Path) {
 key=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --session|--machine) shift 2 ;;
+    --session|--machine) [ $# -ge 2 ] || exit 1; shift 2 ;;
     *) [ -z "$key" ] && key=$1; shift ;;
   esac
 done
@@ -480,6 +480,7 @@ case "$key" in
   agent) echo '{"result":{"agents":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle","agent_session":{"kind":"id","value":"s1"}},{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1","agent_status":"idle","agent_session":{"kind":"id","value":"sender-session"}}]}}' ;;
   workspace) echo '{"result":{"workspaces":[{"workspace_id":"w1","label":"EA"}]}}' ;;
   tab) echo '{"result":{"tabs":[{"tab_id":"w1:t1","label":"code"},{"tab_id":"w1:t2","label":"sender"}]}}' ;;
+  *) echo "herdr stub: unknown subcommand $key" >&2; exit 1 ;;
 esac
 "#;
     std::fs::write(directory.join("ssh"), SSH_TO_HERDR).unwrap();
@@ -502,7 +503,42 @@ esac
 const SSH_TO_HERDR: &str = r#"#!/bin/sh
 for last; do :; done
 eval "set -- $last"
-while [ "$1" != herdr ]; do shift; done
+while [ $# -gt 0 ] && [ "$1" != herdr ]; do shift; done
+[ $# -gt 0 ] || exit 1
 shift
 exec "$(dirname "$0")/herdr" "$@"
 "#;
+
+/// Runs a hook as `name` with its own config directory, so the spool it leaves is read
+/// back (`run` deletes the directories it makes itself), and returns the run with the
+/// spool's records. Pair it with [`until_in_time`] and [`ran_out_of_time`]: only a
+/// spool record that proves the hook ran out of time may justify running it again.
+#[allow(
+    dead_code,
+    reason = "shared by every agent-msg test binary, each using a different subset, so #[expect] is unfulfilled where the item is used"
+)]
+pub fn run_hook_recording(
+    name: &str,
+    url: &str,
+    prefix: &str,
+    pane: Option<&str>,
+    stdin: &str,
+) -> (Run, Vec<serde_json::Value>) {
+    let dir = Scratch::new("ix-relay-hookrun-");
+    let config = dir.path().join("config.toml");
+    let mut cmd = base_cmd(&["hook", "claude"], Some(name));
+    cmd.env("IX_RELAY_URL", url)
+        .env("IX_RELAY_PREFIX", prefix)
+        .env("IX_RELAY_CONFIG", &config);
+    match pane {
+        Some(pane) => cmd.env("HERDR_PANE_ID", pane),
+        None => cmd.env_remove("HERDR_PANE_ID"),
+    };
+    let ran = run(cmd, stdin);
+    let records = std::fs::read_to_string(spool_path(&config))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    (ran, records)
+}

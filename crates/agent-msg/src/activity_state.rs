@@ -229,11 +229,12 @@ mod tests {
         assert_eq!(state.counts().backoff_ms, 5_000);
     }
 
-    /// Concurrent hooks lose no counted increment (each is counted or skipped), and a held lock skips the update
-    /// without waiting past the bound.
-    #[trace("FR-068-AC-11")]
+    /// Concurrent hooks lose no update silently: each attempt is applied to the file or
+    /// returned as skipped, and a held lock skips the update without waiting past the
+    /// bound.
+    #[trace("FR-068-AC-14")]
     #[test]
-    fn concurrent_updates_are_exact_and_a_held_lock_never_blocks() {
+    fn concurrent_updates_are_each_applied_or_returned_skipped_and_a_held_lock_never_blocks() {
         let dir = tempfile::tempdir().unwrap();
         let state = ActivityState::at(dir.path().join("activity.json"));
         let counted = std::sync::atomic::AtomicU64::new(0);
@@ -253,6 +254,7 @@ mod tests {
         // design; what must hold is that every update that got the lock is in the file.
         let (counted, skipped) = (counted.into_inner(), skipped.into_inner());
         assert_eq!(counted + skipped, 40);
+        assert!(counted > 0, "every update skipping would pass the sum");
         assert_eq!(state.counts().unregistered, counted);
         let base = counted;
         let held = state.lock().unwrap();

@@ -588,6 +588,22 @@ mod tests {
         assert!(!HerdrCheck::NotChecked.is_problem());
     }
 
+    /// With doctor's own deadlines (one second a call, two for the check) and a herdr
+    /// that lists no agents, the check is `Ok`: the answer `tc_029_03` accepts beside
+    /// `unknown`, pinned here without a clock or a child process.
+    ///
+    /// Tracing: TC-029-03
+    /// ACs: FR-029-AC-3
+    #[test]
+    fn a_herdr_listing_no_agents_is_ok_within_doctors_deadlines() {
+        let stub = Stub::new(vec![
+            (&["--version"], ok("herdr 0.9.1\n")),
+            (&["agent", "list"], ok(r#"{"result":{"agents":[]}}"#)),
+        ]);
+        let found = check_within(&stub, Duration::from_secs(1), Duration::from_secs(2));
+        assert_eq!(found.code(), "ok");
+    }
+
     /// A zero budget makes no call at all.
     #[test]
     fn a_check_with_no_budget_asks_nothing() {
