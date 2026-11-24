@@ -54,7 +54,21 @@ acknowledgement without reading message content.
   store SHALL NOT create an acknowledged receipt for the current attempt.
 - The relay SHALL interpret delivered as the transport observation and acknowledged
   as the relay's committed settlement, without asserting that a human or agent has
-  read, understood or acted on the message.
+  read or understood the message. Only `Acted` (below) asserts activity after delivery,
+  and it asserts that the session acted, not that it acted on this message.
+- When the recipient lead's session writes its first `prompt`, `pre_tool` or `post_tool`
+  activity event under [FR-068](./FR-068-hook-activity-events.md) after a message's
+  `Delivered` receipt, the relay SHALL record one `Acted` receipt for that message under
+  its original identity, atomically with that event write, naming the event's session.
+  One event SHALL mark `Acted` every Delivered, not-yet-Acted message of that lead whose
+  `Delivered` precedes the event, at most 50 per event.
+- The relay SHALL NOT record `Acted` from an event of another session, an event older than
+  the `Delivered` receipt, a `session_start`, `stop`, `idle`, `blocked` or `session_end`
+  event, or for a message that was never `Delivered`. A retried event SHALL NOT create a
+  second `Acted`.
+- The order-level `TimedOut` receipt of [FR-071](./FR-071-order-ack-deadline-and-timeout.md)
+  SHALL be recorded under the same identity and retention bounds as other receipts, and the
+  export SHALL report `Acted` and `TimedOut` in the same ordered, paginated form.
 - If delivery is failed, ambiguous, held or timed out, then the relay SHALL NOT
   record delivered or acknowledged solely because the send was queued or a lease
   elapsed.
@@ -106,9 +120,14 @@ acknowledgement without reading message content.
 | FR-067-AC-5 | Advance the fixture clock beyond seven days and separately append 10,001 events. Retained history obeys both bounds; evicted history and an evicted continuation cursor report incomplete coverage with a reason. A message still waiting across receipt expiry retains its original identity on later delivery. | Test |
 | FR-067-AC-6 | Request an interval before instrumentation, an interval with a known recording gap, a source that cannot be read, and a covered interval with no events. Only the last is complete empty history. A request with more than 1,000 matching events returns bounded pages and continuation metadata without silently dropping the remainder. | Test |
 | FR-067-AC-7 | Snapshot inbox, in-flight and receipt state, export all pages twice and compare state byte for byte. Reads leave all three unchanged, including events past their retention age that have not yet been trimmed by a writer. Exported data contains none of a seeded secret message body, transcript or credential value and no prose-derived semantic classification. | Test |
+| FR-067-AC-8 | Given a Delivered message and then, in the recipient's session, a `prompt`, `pre_tool` or `post_tool` event, the export shows one `Acted` receipt after `Delivered` under the same original identity, the event's session, and no message content; the acknowledgement state is unchanged. | Test |
+| FR-067-AC-9 | Given events of another session, an event older than `Delivered`, `stop`, `idle`, `blocked`, `session_start` and `session_end` events, and a message never Delivered, no `Acted` is recorded; a retried event adds no second `Acted`; one event marks at most 50 Delivered messages. | Test |
+| FR-067-AC-10 | Given an ack deadline passing without `Acted`, the export shows a `TimedOut` receipt under the original identity, distinct in outcome from an attempt lease timeout, in recorded order with the other receipts. | Test |
 | FR-067-AC-8 | Exercise successful delivery, definite failure, ambiguous failure, lease recovery, exhausted redelivery, stale acknowledgement and a plain-inbox pop with receipt collection enabled. Existing ordering, markings and recovery outcomes remain unchanged; ordinary message-history JSON still contains each original send once and no requeue entry. | Test |
 
 ## Dependencies
+
+- Extended by [US-009](../usecase/US-009-know-what-each-lane-is-doing-from-its-own-reports.md) with `Acted` and `TimedOut` ([FR-068](./FR-068-hook-activity-events.md), [FR-071](./FR-071-order-ack-deadline-and-timeout.md)).
 
 - **Upstream**: [US-006](../usecase/US-006-see-when-the-relay-is-failing.md).
 - Existing outcome semantics: [FR-010](./FR-010-send-queues-one-copy-to-the-addressed-lead.md),

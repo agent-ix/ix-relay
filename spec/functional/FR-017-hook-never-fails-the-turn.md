@@ -27,11 +27,14 @@ output JSON object.
   fails or times out, if herdr fails, or if the time budget is exhausted, then the
   hook handler shall report the failure on stderr and exit 0.
 - If the hook event is not one of `SessionStart`, `UserPromptSubmit`,
-  `PostToolUse` or `Stop`, then the hook handler shall print nothing and exit 0.
+  `PreToolUse`, `PostToolUse`, `Notification`, `Stop` or `SessionEnd`, then the hook handler shall print nothing and exit 0.
 - If no bus name is set and the process is not running in a herdr pane, then the
   hook handler shall print nothing, read no configuration file and exit 0.
 - When the popped messages are empty, the hook handler shall print nothing, so a
   `Stop` hook never blocks the turn without a message to deliver.
+- When the event is `PreToolUse`, `Notification` or `SessionEnd`, the hook handler shall
+  print nothing, because those events carry activity reports under
+  [FR-068](./FR-068-hook-activity-events.md) and no mail.
 
 ## Acceptance Criteria
 

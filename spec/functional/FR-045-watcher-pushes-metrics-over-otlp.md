@@ -197,6 +197,15 @@ exports.
 | `ix.relay.watcher.tick.duration` | histogram | `s` | none | How long each watcher tick took, buckets 5 ms to 10 s, since the watcher started. |
 | `ix.relay.registrations` | gauge | `{registration}` | machine | Leads registered on this machine. |
 | `ix.relay.watcher.health_snapshot.read_failures` | sum | `{failure}` | snapshot | Failed reads used to build the relay-health snapshot, cumulative since this watcher started; `snapshot` is `lead_overviews` or `hook_health_newest`. |
+| `ix.fleet.lane.state` | gauge | `1` | host, lane, state | One series per local lane, value 1, `state` one of `working`, `idle`, `blocked`, `ended`, `unknown`, derived from the newest activity event ([FR-068](./FR-068-hook-activity-events.md)): `pre_tool`/`post_tool`/`prompt` within 5 minutes is `working`, `blocked` is `blocked`, `idle` or `stop` or older activity is `idle`, `session_end` is `ended`, a lane with no event is `unknown`. Prometheus name `ix_fleet_lane_state`. |
+| `ix.fleet.lane.last_activity` | gauge | `s` | host, lane | Seconds since the lane's newest activity event; absent for a lane with none. Prometheus `ix_fleet_lane_last_activity_seconds`. |
+| `ix.fleet.lane.blocked` | gauge | `1` | host, lane, reason | Value 1 for a lane currently blocked, `reason` one of `dialog`, `login`, `usage_limit`, `question`, from a `blocked` event, a `Stop` with `last_class=question`, or a pane-tail class ([FR-069](./FR-069-host-collector.md)). |
+| `ix.fleet.host.busy_ratio` | gauge | `1` | host | Measured CPU busy ratio, 0 to 1. Absent when the source fails. |
+| `ix.fleet.host.capacity_slots` | gauge | `{slot}` | host | Operator-entered capacity slots of the host ([FR-058](./FR-058-explicit-server-capacity.md)); absent when none is entered. |
+| `ix.fleet.lane.focus_info` | gauge | `1` | host, lane, ticket, branch | Value 1 per lane, `ticket` parsed from the lane's reported branch or cwd, empty when none. |
+| `ix.fleet.probe_ok` | gauge | `1` | host, source | Collector source health of [FR-070](./FR-070-collector-source-health.md), 1 or 0. Prometheus `ix_fleet_probe_ok`. |
+| `ix.relay.orders.unacted` | gauge | `{order}` | lead | Orders awaiting `Acted` ([FR-071](./FR-071-order-ack-deadline-and-timeout.md)). |
+| `ix.relay.order.act_latency` | histogram | `s` | none | Seconds from `Delivered` to `Acted`, buckets 1 s to 1 h. |
 
 The health-read failure sum starts at zero for both `snapshot` values and is
 monotonic for the lifetime of this watcher process; it resets when the watcher
@@ -275,6 +284,8 @@ acknowledgement needs a send time per message that the watcher does not keep), a
 | FR-045-AC-26 | On an injected resolver: a lookup that failed or returned no address is not cached and is repeated on the next push; at the end of the 5 minutes a failed or empty lookup leaves the expired addresses in use, the push succeeds, and the next push looks up again. | Test |
 | FR-045-AC-27 | A lookup that takes longer than the whole request budget still lets the push succeed; a resolver that returns 6 addresses leaves 4 in use, in the order returned. | Test |
 | FR-045-AC-28 | Given a local lead whose queue overview read returns a Redis error, including one lead with a wrong-type key among otherwise readable leads, the next OTLP push increments only `snapshot=lead_overviews` once per failed lead and preserves the other leads' gauges; a failed `hook_health_newest` read increments only `snapshot=hook_health_newest` once; one whole-read connection error counts once for that read source; malformed entries in a successful hook read do not increment either counter; repeated failed pushes accumulate, a recovered read adds nothing, and both zero-valued points are present before any failure and on every later push. The sum is monotonic from zero for one watcher process and resets on process restart, uses `{failure}`, and carries only the bounded `snapshot` attribute with values `lead_overviews` and `hook_health_newest`; no host, machine, lead, key, error, credential or other high-cardinality value is an attribute. | Test |
+| FR-045-AC-29 | Given lane events and collector fixtures, a push exports `ix.fleet.lane.state`, `lane.last_activity`, `lane.blocked`, `host.busy_ratio`, `host.capacity_slots`, `lane.focus_info`, `probe_ok`, `ix.relay.orders.unacted` and `order.act_latency` with exactly the attributes of the catalogue; the catalogue test of AC-11 covers them, and the series appear under their `ix_fleet_*` and `ix_relay_*` Prometheus names. | Test |
+| FR-045-AC-30 | Given lanes with no event, with a `blocked` event, a `question` Stop, a pane-tail `usage_limit`, and activity 6 minutes old, the lane state and blocked reason are the ones the catalogue defines; lanes beyond the 50-lead bound fold under the bound of the existing series and the push stays within the 6,000-point limit. | Test |
 
 ## Dependencies
 
