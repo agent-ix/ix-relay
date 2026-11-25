@@ -18,8 +18,8 @@ use relay_core::{BatchId, PaneId, SessionId};
 /// How a lead's mail may reach it now (FR-044).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
-    /// The session has no inbox socket at all (another harness, a Claude Code session
-    /// whose own record names none, or `delivery = "herdr"`): typed into its pane,
+    /// The session has no inbox socket at all (its own record names none, another harness
+    /// whose session no record names, or `delivery = "herdr"`): typed into its pane,
     /// after the session and readiness checks.
     Terminal,
     /// The session has an inbox socket: posted to it, whatever the pane is doing.
@@ -90,8 +90,7 @@ impl From<ProcessError> for DeliverError {
 pub struct BatchTarget<'a> {
     /// The lead's bus name.
     pub lead: &'a str,
-    /// The harness kind the lead registered (`claude`, `codex`, ...): the socket is tried
-    /// only for a Claude Code lead (FR-054).
+    /// The harness kind the lead registered (`claude`, `codex`, ...).
     pub kind: &'a str,
     /// The in-flight batch being delivered.
     pub batch: BatchId,
@@ -108,8 +107,6 @@ pub struct BatchTarget<'a> {
 pub struct RegisteredLead<'a> {
     /// The lead's bus name.
     pub name: &'a str,
-    /// The harness kind it registered.
-    pub kind: &'a str,
     /// Whether the registration is on this watcher's machine.
     pub here: bool,
 }
@@ -214,6 +211,12 @@ pub trait Deliverer {
     /// decision only once the write is confirmed, and returns it again until then.
     /// The default ignores it.
     fn applied(&self, _settlement: &Settlement, _result: &Result<usize, String>) {}
+
+    /// Whether the transport still has a send to the lead that it has not settled. The
+    /// default has none.
+    fn open(&self, _lead: &str) -> bool {
+        false
+    }
 
     /// Whether the transport's time per tick is limited, so the watcher looks at the
     /// leads in a rotating order. The default is no.

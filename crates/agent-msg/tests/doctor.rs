@@ -121,6 +121,7 @@ impl World {
             herdr_ok: true,
             herdr_problem: None,
             herdr_blocks_delivery: false,
+            herdr_waiting_leads: Vec::new(),
             redis_ok: true,
             leads_watched: 1,
             otlp: Some(relay_core::health::OtlpStatus::Disabled),

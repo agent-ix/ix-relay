@@ -80,8 +80,6 @@ pub enum DeadLetterReason {
     ReceiverDenied,
     /// The receiver's approval hold expired unanswered.
     HoldExpired,
-    /// A socket post whose consumption was not confirmed before its deadline.
-    ConsumptionExpired,
     /// Persisted settlement evidence did not retain a more specific cause.
     Unknown,
 }
@@ -91,7 +89,6 @@ impl DeadLetterReason {
         match self {
             Self::ReceiverDenied => "receiver_denied",
             Self::HoldExpired => "hold_expired",
-            Self::ConsumptionExpired => "consumption_expired",
             Self::Unknown => "unknown",
         }
     }

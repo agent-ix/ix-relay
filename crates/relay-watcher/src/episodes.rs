@@ -52,6 +52,9 @@ pub enum EpisodeKind {
     /// The lead's mail waits for its inbox socket (FR-044): no usable socket, or the
     /// socket did not take it. Nothing is typed.
     SocketWaiting,
+    /// The lead is typed into through herdr, whose output is in a shape ix-relay cannot
+    /// read (FR-036): its mail waits.
+    HerdrShape,
 }
 
 impl EpisodeKind {
@@ -67,6 +70,7 @@ impl EpisodeKind {
             Self::InflightFull => "in-flight cap reached",
             Self::SocketHeld => "mail held by Claude Code for approval",
             Self::SocketWaiting => "mail waiting for the inbox socket",
+            Self::HerdrShape => "mail waiting for a readable herdr",
         }
     }
 }
@@ -136,7 +140,8 @@ impl Episodes {
                 EpisodeKind::Stale
                 | EpisodeKind::NoAgent
                 | EpisodeKind::InflightFull
-                | EpisodeKind::SocketWaiting,
+                | EpisodeKind::SocketWaiting
+                | EpisodeKind::HerdrShape,
             )
             | None => {
                 self.notified.remove(name);

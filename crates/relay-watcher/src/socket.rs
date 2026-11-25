@@ -4,9 +4,10 @@
 //! socket receives its mail only through that socket, whatever its pane is doing.
 //! Mail the socket did not certainly take stays queued or in flight and is retried
 //! or dead-lettered with a reason; it is never typed into the terminal. herdr types
-//! only into a lead that has no socket at all: another harness, or a Claude Code
-//! session whose own registry record names no socket. `delivery = "herdr"` is the
-//! operator's explicit way to switch sockets off.
+//! only into a lead that has no socket at all: another harness whose session no record
+//! names, or a session whose own registry record shows it has none. The lead's kind never
+//! overrides a socket (FR-054). `delivery = "herdr"` is the operator's explicit way to
+//! switch sockets off.
 //!
 //! **The wire format is not documented by Claude Code.** It was measured on
 //! 2.1.283 and lives in `claude-wire`; a release may change it, which is why a session
@@ -28,10 +29,18 @@ pub mod transcript;
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use deliverer::SocketDeliverer;
-use relay_core::{PaneId, SessionId, receipts::DeliveryEvidence};
+use relay_core::{
+    PaneId, SessionId,
+    receipts::DeliveryEvidence,
+    socket_status::{self, SocketStatus},
+    text::sanitise_line,
+};
 
 use crate::{
     deliver::{BatchTarget, DeliverError, Deliverer, RegisteredLead, Route, Settlement},
@@ -43,11 +52,65 @@ use crate::{
 enum Sockets {
     /// `delivery = "herdr"`: every lead is typed into.
     Disabled,
-    /// Sockets are wanted but cannot be used on this host: why. Claude Code leads
-    /// wait, since whether they have a socket cannot be told.
-    Unavailable(Arc<str>),
+    /// Sockets are wanted but cannot be used on this host. Leads that have, or may
+    /// have, a socket wait.
+    Unavailable(Arc<Unavailable>),
     /// The socket deliverer.
     On(Arc<SocketDeliverer>),
+}
+
+/// Why sockets cannot be used here, and what can still be told about Claude Code.
+struct Unavailable {
+    why: String,
+    /// Claude Code's session registry, when even its location is known.
+    sessions_dir: Option<PathBuf>,
+    /// The status file that tells `doctor` why, removed when the watcher exits.
+    status: Option<PathBuf>,
+}
+
+impl Unavailable {
+    /// Writes the status file saying `why` into `status_dir`.
+    fn report(why: &str, sessions_dir: Option<PathBuf>, status_dir: Option<&Path>) -> Self {
+        let pid = std::process::id();
+        let status = status_dir.and_then(|dir| {
+            let path = socket_status::path_for(dir, pid);
+            let report = SocketStatus {
+                pid,
+                start_time: session::Procs::start_time(&session::ProcFs, pid),
+                updated_at_ms: crate::now_ms(),
+                unavailable: Some(sanitise_line(why)),
+                ..SocketStatus::default()
+            };
+            match report.write(&path) {
+                Ok(()) => Some(path),
+                Err(e) => {
+                    eprintln!("relay-watcher: cannot write {}: {e}", path.display());
+                    None
+                }
+            }
+        });
+        Self {
+            why: why.to_owned(),
+            sessions_dir,
+            status,
+        }
+    }
+
+    /// Whether `session` may have an inbox socket, whatever its lead's kind says.
+    fn may_have_socket(&self, session: &str) -> bool {
+        self.sessions_dir
+            .as_deref()
+            .is_none_or(|dir| session::advertises(dir, session))
+    }
+}
+
+impl Drop for Unavailable {
+    fn drop(&mut self) {
+        if let Some(path) = &self.status {
+            // Best effort, as for the deliverer's own status file.
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// The watcher's delivery: the socket for the leads that have one, herdr for the rest.
@@ -83,12 +146,23 @@ impl<H> Routed<H> {
         }
     }
 
-    /// Sockets cannot be used here (`why`): Claude Code leads are not typed into and
-    /// their mail waits; other harnesses go through herdr.
-    pub fn socket_unavailable(herdr: H, why: &str) -> Self {
+    /// Sockets cannot be used here (`why`): a Claude Code lead, and any lead whose
+    /// session a record in `sessions_dir` names with a socket, is not typed into and
+    /// its mail waits; the rest go through herdr. The reason is reported in a status
+    /// file in `status_dir`.
+    pub fn socket_unavailable(
+        herdr: H,
+        why: &str,
+        sessions_dir: Option<PathBuf>,
+        status_dir: Option<&Path>,
+    ) -> Self {
         Self {
             herdr,
-            sockets: Sockets::Unavailable(why.into()),
+            sockets: Sockets::Unavailable(Arc::new(Unavailable::report(
+                why,
+                sessions_dir,
+                status_dir,
+            ))),
         }
     }
 
@@ -113,6 +187,9 @@ impl<H: Herdr> Herdr for Routed<H> {
     fn layout(&self, machine: &relay_core::MachineName) -> Result<Layout, ProcessError> {
         self.herdr.layout(machine)
     }
+    fn session_alive(&self, session: &SessionId) -> bool {
+        self.socket().is_some_and(|s| s.session_alive(session))
+    }
     fn check(&self) -> relay_ops::herdr_check::HerdrCheck {
         self.herdr.check()
     }
@@ -129,19 +206,20 @@ impl<H: Herdr> Herdr for Routed<H> {
 
 impl<H: Deliverer> Deliverer for Routed<H> {
     fn route(&self, lead: &str, kind: &str, session: Option<&SessionId>) -> Route {
-        // The socket is Claude Code's: any other harness has no session record by design,
-        // so it goes straight to herdr, leaves no note, and Claude Code's registry is not
-        // read for it (FR-054).
-        if !relay_core::tries_socket(kind) {
-            if let Some(socket) = self.socket() {
-                socket.not_tried(lead);
-            }
-            return Route::Terminal;
-        }
         match &self.sockets {
             Sockets::Disabled => Route::Terminal,
-            Sockets::Unavailable(why) => Route::Wait(format!("inbox sockets unavailable: {why}")),
-            Sockets::On(socket) => socket.route(lead, session),
+            // The socket belongs to the session, so the kind label alone never decides
+            // that a lead may be typed into (FR-054).
+            Sockets::Unavailable(u) => {
+                if relay_core::tries_socket(kind)
+                    || session.is_some_and(|id| u.may_have_socket(id.as_str()))
+                {
+                    Route::Wait(format!("inbox sockets unavailable: {}", u.why))
+                } else {
+                    Route::Terminal
+                }
+            }
+            Sockets::On(socket) => socket.route(lead, kind, session),
         }
     }
 
@@ -149,11 +227,6 @@ impl<H: Deliverer> Deliverer for Routed<H> {
         let Some(socket) = self.socket() else {
             return Err(DeliverError::NotSent("no socket transport".to_owned()));
         };
-        if !relay_core::tries_socket(target.kind) {
-            return Err(DeliverError::NotSent(
-                "only Claude Code has an inbox socket".to_owned(),
-            ));
-        }
         socket.deliver(target, text).map_err(DeliverError::from)
     }
 
@@ -196,6 +269,10 @@ impl<H: Deliverer> Deliverer for Routed<H> {
 
     fn rotates(&self) -> bool {
         self.socket().is_some()
+    }
+
+    fn open(&self, lead: &str) -> bool {
+        self.socket().is_some_and(|s| s.open(lead))
     }
 
     fn alerts(&self) -> Vec<(String, String)> {

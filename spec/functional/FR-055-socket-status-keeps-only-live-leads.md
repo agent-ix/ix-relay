@@ -25,8 +25,9 @@ counting leads that no longer existed.
 ## Behavior
 
 - When a tick starts, the watcher shall drop from the resolved leads every entry whose lead has
-  no registration in the registry it read for the tick, whose registration is on another
-  machine, or whose registration's `kind` is not `claude` ([FR-054](./FR-054-socket-delivery-is-for-claude-leads.md)).
+  no registration in the registry it read for the tick or whose registration is on another
+  machine. A lead that is typed into again loses its entry when it is routed
+  ([FR-054](./FR-054-socket-delivery-is-for-claude-leads.md)).
 - At most once per place-refresh period, the watcher shall drop every entry whose process is
   gone: the pid has no process, or the process there started at another time than the entry
   resolved ([FR-044](./FR-044-watcher-delivers-through-claude-codes-inbox-socket.md)'s

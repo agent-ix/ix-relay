@@ -20,7 +20,9 @@
 //! without an id is vouched for by whatever agent sits in the pane, as the pruning
 //! rule already treats an uncertain id ("unknown means do not delete"). While
 //! herdr's output is in a shape ix-relay cannot read
-//! ([`crate::liveness::Liveness::delivery_blocked`]) the refresh is not run.
+//! ([`crate::liveness::Liveness::delivery_blocked`]) herdr is not asked: only a
+//! session whose own live Claude Code process vouches for it is refreshed ([`touch`]),
+//! and such a session is not pruned.
 
 use std::time::{Duration, Instant};
 
@@ -53,6 +55,7 @@ impl Liveness {
     /// Forgets the leads no longer watched.
     pub fn retain_touched(&mut self, seen: &std::collections::HashSet<relay_core::AgentName>) {
         self.touch_checked.retain(|name, _| seen.contains(name));
+        self.herdr_waiting.retain(|name| seen.contains(name));
     }
 }
 
@@ -96,6 +99,23 @@ pub fn refresh_if_live(
     if !alive {
         return Ok(false);
     }
+    touch(relay, live, reg, now_ms, now)
+}
+
+/// Moves `last_seen_ms` of a lead already shown to be alive to `now_ms`. Returns
+/// whether the stamp moved.
+///
+/// # Errors
+///
+/// As [`refresh_if_live`].
+pub fn touch(
+    relay: &mut relay_core::Relay,
+    live: &mut Liveness,
+    reg: &Registration,
+    now_ms: i64,
+    now: Instant,
+) -> relay_core::Result<bool> {
+    live.touch_checked.insert(reg.name.clone(), now);
     match relay.touch_last_seen(&reg.name, reg.last_seen_ms, now_ms) {
         Ok(moved) => Ok(moved),
         Err(e) => {

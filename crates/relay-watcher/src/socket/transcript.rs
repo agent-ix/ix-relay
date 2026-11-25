@@ -17,6 +17,9 @@ use claude_wire::{Scan, TranscriptMatch, scan_detail};
 /// just consumed, so it is near the end.
 pub const TAIL_BYTES: u64 = 512 * 1024;
 
+/// The most windows one [`Watch::catch_up`] reads: 2 GiB of transcript.
+const MAX_CATCH_UP_WINDOWS: u32 = 4096;
+
 /// Whether `session` is safe as a file name: Claude Code's ids are UUIDs, and
 /// anything else could reach outside the projects directory.
 #[must_use]
@@ -89,6 +92,40 @@ impl Watch {
             path,
             seen_to: None,
             mid_line: false,
+        }
+    }
+
+    /// A watch that starts where the transcript ended when the message was posted, as
+    /// a dead watcher recorded it: nothing written since is passed over.
+    #[must_use]
+    pub fn from_offset(path: PathBuf, offset: u64) -> Self {
+        Self {
+            path,
+            seen_to: Some(offset),
+            mid_line: false,
+        }
+    }
+
+    /// Where the next look starts, when it is known.
+    #[must_use]
+    pub fn position(&self) -> Option<u64> {
+        self.seen_to
+    }
+
+    /// Looks, window after window, until `msg_id` is found or nothing more is read:
+    /// what the transcript says now, before a decision that depends on its silence.
+    pub fn catch_up(&mut self, msg_id: &str) -> Scan {
+        let mut windows = 0_u32;
+        loop {
+            let before = self.seen_to;
+            let scan = self.look(msg_id);
+            windows += 1;
+            if scan.found != TranscriptMatch::Absent
+                || self.seen_to == before
+                || windows >= MAX_CATCH_UP_WINDOWS
+            {
+                return scan;
+            }
         }
     }
 

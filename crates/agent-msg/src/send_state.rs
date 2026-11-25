@@ -132,6 +132,7 @@ mod tests {
             sweep_secs: 15,
             herdr_ok,
             herdr_blocks_delivery: false,
+            herdr_waiting_leads: Vec::new(),
             herdr_problem: None,
             redis_ok: true,
             leads_watched: 1,

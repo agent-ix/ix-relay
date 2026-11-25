@@ -111,6 +111,9 @@ pub enum Outcome {
         /// Why it waits.
         why: String,
     },
+    /// The lead is on the terminal route and nothing may be typed: herdr's output is in
+    /// a shape ix-relay cannot read (FR-036). Nothing is popped.
+    TerminalBlocked,
     /// The socket certainly did not take the batch: it was put back, to be posted
     /// again. It is never typed.
     SocketNotSent {
@@ -209,6 +212,7 @@ impl Outcome {
             | Self::SocketNotSent { .. }
             | Self::SocketDeferred { .. } => Some(EpisodeKind::SocketWaiting),
             Self::InflightFull => Some(EpisodeKind::InflightFull),
+            Self::TerminalBlocked => Some(EpisodeKind::HerdrShape),
             Self::SocketPostponed { .. }
             | Self::SocketPending(_)
             | Self::SocketAmbiguous { .. }
@@ -260,6 +264,10 @@ impl Outcome {
             Self::SocketNotSent { requeued, why } => format!(
                 "{lead} ({pane}): the inbox socket did not take the batch ({why}); put \
                  {requeued} message(s) back to post again; nothing typed"
+            ),
+            Self::TerminalBlocked => format!(
+                "{lead} ({pane}): herdr's output is in a shape ix-relay cannot read; nothing \
+                 popped, nothing typed, its mail waits"
             ),
             Self::SocketPending(why) => format!("{lead} ({pane}): {why}"),
             Self::SocketAmbiguous { error, notified } => format!(
@@ -326,7 +334,8 @@ pub(crate) fn session_matches(registered: Option<&SessionId>, live: Option<&Sess
 ///
 /// - [`Route::Socket`]: posted to the session's inbox socket whatever its pane is
 ///   doing, with no pane read, and never typed.
-/// - [`Route::Terminal`]: typed, in this order: get, check the session id and
+/// - [`Route::Terminal`]: nothing while `terminal_blocked` (herdr's output cannot be
+///   read, FR-036); otherwise typed, in this order: get, check the session id and
 ///   readiness, recheck `state_change_seq`, only then `pop`, only then `prompt`, so
 ///   a lead that starts a turn (or gets replaced) between the check and the prompt
 ///   never gets typed into.
@@ -342,6 +351,7 @@ pub fn try_deliver<H: Herdr + Deliverer>(
     pane: &PaneId,
     registered_session_id: Option<&SessionId>,
     notice: Notice,
+    terminal_blocked: bool,
     inbox: &mut impl Inbox,
 ) -> Outcome {
     let via = match herdr.route(lead, kind, registered_session_id) {
@@ -353,6 +363,9 @@ pub fn try_deliver<H: Herdr + Deliverer>(
             Via::Socket
         }
         Route::Terminal => {
+            if terminal_blocked {
+                return Outcome::TerminalBlocked;
+            }
             if let Some(skip) = pane_not_ready(herdr, lead, pane, registered_session_id, notice) {
                 return skip;
             }
@@ -798,6 +811,7 @@ mod tests {
             &"w1:p1".parse().unwrap(),
             Some(&SID.parse().unwrap()),
             notice,
+            false,
             inbox,
         )
     }
@@ -1227,6 +1241,7 @@ mod tests {
             &"w1:p1".parse().unwrap(),
             None,
             Notice::Needed,
+            false,
             &mut FakeInbox::none(),
         );
         assert_eq!(outcome, Outcome::StaleRegistration);

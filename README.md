@@ -2,7 +2,7 @@
 
 ix-relay is a message bus that lets AI coding-agent team leads on different machines message each other.
 
-Each lead runs in a Herdr tab under Claude Code, Codex or opencode. On every machine, `agent-msg` sends and reads messages, and `relay-watcher` types queued messages into idle leads. The queues, the address directory and an escalation inbox for decisions that need a human live in one Redis, relay-redis, on a hub machine that every other machine reaches over WireGuard. Only leads use the bus; subagents report through their harness.
+Each lead runs in a Herdr tab under Claude Code, Codex or opencode. On every machine, `agent-msg` sends and reads messages, and `relay-watcher` delivers queued messages: to a Claude Code session through its inbox socket, and to a lead that has no socket by typing into its pane while it is idle. The queues, the address directory and an escalation inbox for decisions that need a human live in one Redis, relay-redis, on a hub machine that every other machine reaches over WireGuard. Only leads use the bus; subagents report through their harness.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/topology-dark.svg">

@@ -27,7 +27,8 @@ command line.
   time, the time of its last successful tick, the time of its last backup sweep,
   its sweep interval, whether herdr passes its version and shape check
   ([FR-036](./FR-036-herdr-version-and-shape-check.md)), what failed and whether
-  the watcher types into no pane because of it (`herdr_blocks_delivery`; a check
+  the watcher types into no pane because of it (`herdr_blocks_delivery`, with the
+  leads whose mail waits for that reason in `herdr_waiting_leads`, at most 50; a check
   that could not run, such as a timeout, is neither), whether a
   Redis connection error was ridden out since the previous heartbeat (`redis_ok` is
   `false` for that one heartbeat: a flap the expiry would hide), how many
@@ -68,5 +69,5 @@ command line.
 - Delivered by AGE-2033. Mixed versions: no earlier binary reads the record, so it
   is additive; an old watcher publishes none, and `doctor` reports that machine's
   watcher as having no heartbeat (worded "watcher stopped, or older than the
-  heartbeat"). `herdr_blocks_delivery` is absent from an older watcher's record and
-  reads as `false`.
+  heartbeat"). `herdr_blocks_delivery` and `herdr_waiting_leads` are absent from an older watcher's record and
+  read as `false` and empty.

@@ -22,7 +22,8 @@ the watcher shall never type that mail into its terminal and its hooks shall not
 consume it. Mail that is not delivered stays queued or in flight, and is retried or
 dead-lettered with a reason `doctor` or the watcher's log shows.
 
-herdr types mail only into a lead that has no socket at all: another harness, or a
+herdr types mail only into a lead that has no socket at all: another harness whose
+session no record names ([FR-054](./FR-054-socket-delivery-is-for-claude-leads.md)), or a
 Claude Code session whose own registry record shows it has none (below).
 
 `[watcher] delivery = "herdr"` is the one exception, and only an operator sets it: it
@@ -52,7 +53,7 @@ operator's decision; this requirement only makes the watcher notice.
   herdr, shall not read Claude Code's registry, bind a socket or write a status file,
   and shall say at start that sockets are switched off. An unknown value is a
   configuration error ([FR-027](./FR-027-malformed-configuration-per-command.md)).
-- Before popping anything for a `claude` lead the watcher shall decide, from the
+- Before popping anything for a lead the watcher shall decide, from the
   registry, one of three routes for its registered session: the socket, the terminal,
   or waiting.
 - The watcher shall choose the socket when the session resolves to a usable socket and
@@ -68,6 +69,14 @@ operator's decision; this requirement only makes the watcher notice.
   unknown protocol or version, a socket path that is unusable, a record that is not
   old enough to prove it has no socket, a parked session, an unbound reply socket, an
   unreadable registry and socket locations that cannot be told on this host.
+- When mail for a lead has waited 5 minutes because its socket could not take it (a wait,
+  a certain non-delivery, a deferral or a batch put back by a later decision), the watcher
+  shall show one notification naming the lead and the newest reason, and shall type
+  nothing. The stretch ends when mail gets through or none is left, queued or posted. It is
+  paused while a socket holds the mail unconsumed, and keeps its start if the mail comes
+  back. A notification that cannot be shown is tried again after a minute.
+- If sockets cannot be used on the host, then the watcher shall write a status file that
+  says why, remove it when it exits, and `doctor` shall warn with that reason.
 - A record with `parkedJobId` belongs to a process that handed its terminal to a
   background job: it still listens and queues what is posted but consumes none of it,
   and its pane shows another conversation. The watcher shall skip such a record, and
@@ -171,18 +180,18 @@ operator's decision; this requirement only makes the watcher notice.
   until the quiet period ends, and `doctor` shall show the lead as held.
 - When a restarted watcher finds no status file, the watcher shall treat the lead as not held.
 - When a restarted watcher finds no status file, the watcher shall redeliver the batch, marked `(redelivered)`, after its lease expires.
-- Known limit of a lost status file: the lead's own hook delivers the redelivered batch while the socket copy is still held, so an approval duplicates it.
+- Known limit of a lost status file: the watcher posts the redelivered batch again while the socket copy is still held, so an approval duplicates it. (The hook of a session with a socket pops nothing.)
 - The watcher shall adopt a restored batch only when its batch id is not 0, its lead and ids are
   valid names, and its times compute (checked arithmetic) to a moment neither in the future nor
-  more than the maximum hold ago.
+  more than 30 days ago.
 - The watcher shall apply the caps of the status file (256 open sends, 32 dead-letter reasons)
   to what it adopts, and drop reasons older than 24 hours.
 - The bus shall renew, dead-letter, acknowledge or requeue a batch only when its id, its lead
   and its popper match the caller's (the watcher's calls name the watcher, the hook's name the
   hook), so an id that the other consumer holds is left alone. A Redis counter that
   was reset can make a stale id collide with another batch the watcher itself popped: that is
-  not detectable, and the maximum hold bounds it.
-- The watcher shall keep, per lead, the reason (`denied`, `hold_expired`, `consumption_expired`) and batch id of every
+  not detectable.
+- The watcher shall keep, per lead, the reason (`denied`, `hold_expired`) and batch id of every
   batch it dead-lettered on its own account in the status file for 24 hours, where a later note
   does not overwrite it, and `doctor` shall show them. A dead-letter entry is a bare message
   with no reason and no batch id, so `agent-msg inbox --dead` cannot show which entry it was: the
@@ -218,15 +227,28 @@ operator's decision; this requirement only makes the watcher notice.
 - If the ack wait ends without a transcript record, the posted batch shall remain
   pending with its lease renewed. Delayed consumption shall not stop later batches from
   being posted. Pending consumption shall survive watcher restart without becoming an
-  approval hold, and shall be dead-lettered after 30 minutes as `consumption_expired`,
-  with one notification, without being posted again and without being typed. A partially
-  written batch shall retain the same ownership.
+  approval hold. A partially written batch shall retain the same ownership.
+- When a posted batch has not been consumed for 30 minutes and its receiver is alive (an
+  open dialog or a long tool call), the watcher shall keep it in flight, shall not post it
+  again, dead-letter or type it, shall note it in the status file and shall show one
+  notification.
+- At most once in 10 s for each pending batch that Claude Code has not reported delivered,
+  the watcher shall look at the process it posted to. If that process is gone (no process
+  with the pid, or one that started at another time; a look that fails proves nothing),
+  then the watcher shall read the transcript to its end, acknowledge the batch if it shows
+  the message, and otherwise put the batch back to be delivered again.
+- The watcher shall keep with each pending batch in its status file the process it was
+  posted to and where the transcript ended before the post, so that a restarted watcher
+  adopts the batch at any age up to 30 days, reads the transcript from that point, and
+  neither posts a consumed message again nor misses one followed by more than a read
+  window.
 - If a transcript line names a message's id without a structured `origin.msg_id`, then the batch is
   not ambiguous: it is acknowledged as received but unconfirmed, and
   nothing is redelivered ([FR-046](./FR-046-claude-code-formats-are-typed-and-drift-is-detected.md)).
-- When a batch is ambiguous, `doctor` shall name the possible causes (a transcript under another
-  `CLAUDE_CONFIG_DIR`, a socket that wants authentication, a cleared or busy session, a changed
-  wire format).
+- When a batch is ambiguous, or posted for 5 minutes without its transcript showing it, or
+  its transcript cannot be found, `doctor` shall warn and name the possible causes (a
+  transcript under another `CLAUDE_CONFIG_DIR`, a socket that wants authentication, a
+  cleared or busy session, a changed wire format).
 - The watcher shall act on a receipt (`type` `control`, `action` `peer_message_status`)
   by its exact `status` and `status_detail`, never by substring.
 - When a `held` receipt arrives, the watcher shall leave the batch in flight, raise one
@@ -259,7 +281,7 @@ operator's decision; this requirement only makes the watcher notice.
   silently.
 - The watcher shall never write to a Claude Code session, registry or settings file and never
   connect to a socket that is not a resolved, live session's.
-- The watcher shall try the socket only for leads whose registration kind is `claude`
+- The watcher shall use the socket of a session whatever kind its lead registered
   ([FR-054](./FR-054-socket-delivery-is-for-claude-leads.md)), and shall keep the resolved
   leads of its status file to registered leads with a live process
   ([FR-055](./FR-055-socket-status-keeps-only-live-leads.md)).
@@ -279,10 +301,10 @@ operator's decision; this requirement only makes the watcher notice.
 | FR-044-AC-3 | The line posted is exactly the measured one (golden), carries a UUID `msg_id`, the target session and the reply socket (mode 0600), asserts no `from-mode`, cannot be made to close or forge its wrapper, has a plain bounded `from-name`, and is not posted over 1 MiB; the exact receipt statuses parse to their outcomes (only `held` and `refused` were captured live from Claude Code 2.1.283; the others were read from the installed program's text and are fixtures only), a status that only contains a known word does not, and junk parses to none. | Test |
 | FR-044-AC-4 | A batch is acknowledged only when its `msg_id` is the `origin.msg_id` of a transcript line; an absent transcript or one without the id leaves it ambiguous, and the id in a line without a structured `origin.msg_id` is acknowledged as received but unconfirmed (FR-046-AC-5); a receiver that records the message at once into an existing transcript, with 0, 20 or 200 project directories to search, is never missed in 200 rounds; a transcript that grows past a read window between looks still yields the acknowledgement; a message that outlived its wait is acknowledged by a later tick. | Test |
 | FR-044-AC-5 | A `held` receipt leaves the batch in flight, pops nothing more for the lead, notifies once and dead-letters no mail sent meanwhile across 12 lease expiries; the held batch's lease is renewed each tick so that a reap past its old deadline and the lead's own hook find it in flight; an approval after the lease would have run out acknowledges once with one post in all; a denial after it dead-letters exactly once and never re-prompts; a prompt nobody answers is posted once and dead-lettered as `hold_expired` at the maximum hold with one notification; a batch held across a restart is restored and still renewed. | Test |
-| FR-044-AC-6 | In socket mode a batch for a session with a socket is never typed: after certain non-delivery (no record, a refused connection, an unbound reply socket, a `refused` or `dropped` receipt, a duplicate body) it is queued for a later socket attempt, and after an unknown or unconfirmed outcome it stays in flight with the socket. Non-Claude harnesses are typed through herdr. | Test |
+| FR-044-AC-6 | In socket mode a batch for a session with a socket is never typed: after certain non-delivery (no record, a refused connection, an unbound reply socket, a `refused` or `dropped` receipt, a duplicate body) it is queued for a later socket attempt, and after an unknown or unconfirmed outcome it stays in flight with the socket. A lead of another harness whose session no record names is typed through herdr. | Test |
 | FR-044-AC-7 | The same body is not posted to a session twice inside the window and is once the window has passed; a redelivered body differs from the original. | Test |
 | FR-044-AC-8 | A delivery changes no file of the registry or the projects; a live listener on the watcher's socket name, a non-socket file and a dead socket there are left, left and replaced; a previous watcher's dead socket and status file are removed (a reused pid counts as dead), and a live watcher's, another process's name or a path outside the socket directory are not; the reply socket and status file are removed on SIGTERM (the file kept only while a held batch or an owed decision must survive), and the interrupted wait of that stop is not recorded as a failure. | Test |
-| FR-044-AC-9 | Each live watcher's status has its own doctor check that is `ok`, `warn` (held, leads waiting for a socket, a reply socket not bound, dead letters made) or `unknown` (missing, unreadable, dead watcher, config failed), never `fail`, a held lead is named with the setting that clears it, a batch dead-lettered as `denied`, `hold_expired` or `consumption_expired` is shown with its reason for 24 hours, and an untrusted status directory is named plainly. | Test |
+| FR-044-AC-9 | Each live watcher's status has its own doctor check that is `ok`, `warn` (held, leads waiting for a socket, a reply socket not bound, dead letters made) or `unknown` (missing, unreadable, dead watcher, config failed), never `fail`, a held lead is named with the setting that clears it, a batch dead-lettered as `denied` or `hold_expired` is shown with its reason for 24 hours, a young unconsumed post is not a problem while one 5 minutes old or with no transcript warns with the possible causes, sockets that cannot be used are a warning with the reason, `delivery = "herdr"` is a warning, and an untrusted status directory is named plainly. | Test |
 | FR-044-AC-10 | A late drop names its messages and puts exactly those back, a hold timeout or late refusal puts the batch back unmarked, an unknown or ambiguous status settles nothing and leaves a note, and a receipt for a message nothing waits on changes nothing. | Test |
 | FR-044-AC-11 | A failed dead-letter, acknowledge or in-wait denial write is retried after a growing wait and never becomes a second post; after five failures one alert is raised, the decision stays pending and the batch is renewed; a dead-letter write that fails for twenty ticks leaves the message posted once; the `settlement_failed` note survives a later note for the lead and is cleared only by its own batch's write; owed decisions survive a restart (an owed denial stays `denied`, an owed acknowledgement is not lost). | Test |
 | FR-044-AC-12 | An approved message whose transcript line never shows is acknowledged after the grace with a `delivered_unconfirmed` note, never dead-lettered as `hold_expired`, also when the watcher restarted inside the grace; a `delivered` receipt alone does not acknowledge before the grace ends. | Test |
@@ -291,9 +313,13 @@ operator's decision; this requirement only makes the watcher notice.
 | FR-044-AC-15 | The status files are in a directory of their own created 0700 in one step; an existing directory that is open (0755, 0777), a symlink or of another user is neither written, read nor repaired (a forged file planted while it was open is never adopted, before or after a later start); a symlinked or foreign status file is not read; files are created 0600; when the directory is not trusted delivery goes on and one alert says held batches and owed decisions will not survive a restart. | Test |
 | FR-044-AC-16 | A reply socket whose directory appears later is bound on a later delivery, not more often than its backoff; a connect that never returns is abandoned and costs one helper thread in all; a probe of a wedged listener at the watcher's own socket name keeps one flag across retries. | Test |
 | FR-044-AC-17 | Working, blocked, idle and done Claude leads receive queued mail through a real Unix socket without a herdr state read. Whatever the post answers, nothing is typed. A Claude hook of a session with a socket registers the lead for all four events without popping or acknowledging mail; a hook of a session without one delivers it. | Test |
-| FR-044-AC-18 | Pending socket consumption persists across watcher restart, renews its lease without an approval hold, acknowledges a later transcript match once and is dead-lettered without a second post as `consumption_expired`. | Test |
-| FR-044-AC-19 | The route is the terminal only for another harness, for `delivery = "herdr"`, or for a Claude session that has no parked record and whose live records name no socket, with no socket file for their processes, each older than the publish grace. It is a wait, with nothing popped or typed, for no session id, no or a stale record, several processes, an unsupported or unusable record, a parked record without a live socket record, a record younger than the grace, a socket file the record does not name, an unbound reply socket and unavailable socket locations. Typing asks the route again and types nothing when it changed. | Test |
+| FR-044-AC-18 | Pending socket consumption persists across watcher restart, renews its lease without an approval hold and acknowledges a later transcript match once; past the maximum hold with a live receiver it is neither dead-lettered nor posted again, the status file notes it and one notification is shown. | Test |
+| FR-044-AC-19 | The route is the terminal only for a lead of another harness whose session no record names, for `delivery = "herdr"`, or for a Claude session that has no parked record and whose live records name no socket, with no socket file for their processes, each older than the publish grace. It is a wait, with nothing popped or typed, for no session id, no or a stale record, several processes, an unsupported or unusable record, a parked record without a live socket record, a record younger than the grace, a socket file the record does not name, an unbound reply socket and unavailable socket locations. Typing asks the route again and types nothing when it changed. | Test |
 | FR-044-AC-20 | A session whose only live record is parked, listening on its socket and consuming nothing, in a pane herdr reports idle with that session, is neither posted to nor typed into, its forwarded and redelivered mail stays queued with the reason shown, and mail is posted once the record is no longer parked. | Test |
+| FR-044-AC-21 | Mail that has waited past the bound for a socket raises one notification with the newest reason and nothing typed; delivery ends the stretch and a later wait is announced again; a notification that failed is retried. | Test |
+| FR-044-AC-22 | A pending batch whose receiving process exited or whose pid was reused is put back when the transcript does not show it and acknowledged when it does; a session resumed in a new process receives it on the new socket and nothing is dead-lettered. | Test |
+| FR-044-AC-23 | A watcher restarted two hours after a post adopts it, acknowledges one the transcript shows with more than a read window written after it, keeps one it does not show, and posts neither again. | Test |
+| FR-044-AC-24 | With 256 posts open, a further batch is put back unposted and no open post is dropped from the status file. | Test |
 
 ## Dependencies
 

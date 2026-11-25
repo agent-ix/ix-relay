@@ -34,6 +34,12 @@ pub trait Procs {
     fn domain(&self) -> Option<String>;
     /// The user id this process runs as, `None` when it cannot be told.
     fn uid(&self) -> Option<u32>;
+    /// Whether the process that was `pid` starting at `started` no longer exists.
+    /// `false` when it cannot be told: a receiver is never taken for gone on a
+    /// failed look.
+    fn gone(&self, pid: u32, started: &str) -> bool {
+        self.start_time(pid).as_deref() != Some(started)
+    }
 }
 
 /// Operating-system process identity, matching Claude Code's session records.
@@ -41,6 +47,18 @@ pub trait Procs {
 pub struct ProcFs;
 
 impl Procs for ProcFs {
+    fn gone(&self, pid: u32, started: &str) -> bool {
+        match self.start_time(pid) {
+            Some(now) => now != started,
+            // The look can fail for a live process (`ps` timing out): only the
+            // kernel saying there is no such process counts.
+            None => i32::try_from(pid).is_ok_and(|pid| {
+                nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None)
+                    == Err(nix::errno::Errno::ESRCH)
+            }),
+        }
+    }
+
     fn start_time(&self, pid: u32) -> Option<String> {
         #[cfg(target_os = "macos")]
         {
@@ -198,6 +216,22 @@ fn read_record(path: &Path) -> Option<SessionRecord> {
         .read_to_end(&mut bytes)
         .ok()?;
     SessionRecord::parse(&bytes)
+}
+
+/// Whether any record in `sessions_dir` names `session` together with a socket,
+/// whether or not its process can be checked: for a watcher that cannot use sockets
+/// and must still not treat such a session as one without.
+pub fn advertises(sessions_dir: &Path, session: &str) -> bool {
+    let Ok(entries) = fs::read_dir(sessions_dir) else {
+        return false;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .take(MAX_RECORDS)
+        .filter_map(|p| read_record(&p))
+        .any(|r| r.session_id == session && r.messaging_socket_path.is_some())
 }
 
 /// The socket of the live Claude Code process holding `session`, looked up in

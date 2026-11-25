@@ -42,6 +42,7 @@ mod stranded;
 mod supervise;
 #[cfg(test)]
 mod test_support;
+mod waits;
 mod watch;
 
 use std::{
@@ -64,6 +65,7 @@ use crate::{
     liveness::{HeartbeatConfig, Liveness},
     state_file::StateFile,
     supervise::{Bus, Supervisor, SystemClock, Wake},
+    waits::Waits,
     watch::{Inbox, Outcome, PopOutcome, PoppedBatch, try_deliver},
 };
 
@@ -225,6 +227,8 @@ struct WatcherState {
     /// Leads whose in-flight reap is failing or stuck, so a persistent trouble is
     /// logged once when it starts and once when it ends, not on every sweep.
     reap_trouble: HashSet<AgentName>,
+    /// Mail waiting for its lead's inbox socket, announced once per stretch.
+    waits: Waits,
     /// The heartbeat, the herdr check and the registration refresh (AGE-2033).
     live: Liveness,
     /// The OTLP metrics push (FR-045); disabled when no endpoint is configured.
@@ -239,6 +243,7 @@ impl WatcherState {
     fn new(retry_every: Duration, sweep_every: Duration) -> Self {
         Self {
             order_scan_failed: false,
+            waits: Waits::default(),
             episodes: Episodes::default(),
             skipped_reported: HashSet::new(),
             dropped_reported: false,
@@ -453,6 +458,47 @@ fn apply_stale_defects<E>(
 /// cannot fill the shared, capped moves stream.
 const RENAME_EVENT_GAP: Duration = Duration::from_secs(5 * 60);
 
+/// The local leads whose session a live process of its own vouches for (a session on
+/// the inbox socket): asked only while herdr's answer cannot be relied on, so that it
+/// costs them neither their address nor their queued mail.
+fn alive_leads(
+    herdr: &impl Herdr,
+    regs: &[relay_core::Registration],
+    machine: &MachineName,
+) -> HashSet<AgentName> {
+    regs.iter()
+        .filter(|r| r.machine == *machine)
+        .filter(|r| {
+            r.session_id
+                .as_ref()
+                .is_some_and(|s| herdr.session_alive(s))
+        })
+        .map(|r| r.name.clone())
+        .collect()
+}
+
+/// The registrations of `alive` that the directory can carry as last verified: a
+/// canonical session queue with a verified address, and a session `listed` does not
+/// already name.
+fn last_verified(
+    regs: &[relay_core::Registration],
+    alive: &HashSet<AgentName>,
+    listed: &[relay_core::Registration],
+) -> Vec<relay_core::Registration> {
+    regs.iter()
+        .filter(|r| alive.contains(&r.name) && r.verified_place().is_some())
+        .filter(|r| {
+            r.session_id.as_ref().is_some_and(|s| {
+                r.name == AgentName::for_session(&r.machine, s)
+                    && !listed.iter().any(|l| l.session_id.as_ref() == Some(s))
+            }) && !listed.iter().any(|l| l.full_address() == r.full_address())
+                && r.full_address()
+                    .is_some_and(|a| a.to_string().split(':').count() == 3)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Keeps each local lead's registered `server:workspace[:tab[:pane]]` place true to
 /// herdr's live layout. Hooks record a place at `SessionStart` and cannot
 /// refresh it (they make no herdr calls mid-session); without this a closed
@@ -507,6 +553,17 @@ fn refresh_places(
                      panes: {e}"
                 ));
             }
+            // The directory still carries the sessions that are alive, as last verified,
+            // so mail can be addressed to them.
+            if let Some(revision) = directory_revision {
+                let alive = alive_leads(herdr, regs, machine);
+                let kept = last_verified(regs, &alive, &[]);
+                if !kept.is_empty()
+                    && let Err(e) = relay.publish_directory(machine, revision, &kept)
+                {
+                    per_lead(e, "could not publish the addresses of live sessions")?;
+                }
+            }
             return Ok(HashSet::new());
         }
     };
@@ -523,6 +580,13 @@ fn refresh_places(
             if dropped == 1 { "y" } else { "ies" }
         ));
     }
+    // An answer this binary cannot read whole (FR-036) takes nothing from a session that
+    // is alive: not its address, and not its queued mail.
+    let protected = if state.live.delivery_blocked() || dropped > 0 {
+        alive_leads(herdr, regs, machine)
+    } else {
+        HashSet::new()
+    };
     // Reconcile all genuine Herdr sessions, including leads with no startup record.
     // Queue identity follows the session; mutable address labels never rename queues.
     if let Some(view) = &layout.view {
@@ -552,7 +616,10 @@ fn refresh_places(
                     }
                 }
                 if let Some(revision) = directory_revision {
-                    relay.publish_directory(machine, revision, &live)?;
+                    let kept = last_verified(regs, &protected, &live);
+                    let mut publication = live;
+                    publication.extend(kept);
+                    relay.publish_directory(machine, revision, &publication)?;
                 }
             }
             Err(error) => log(format!("cannot enroll Herdr sessions: {error}")),
@@ -585,6 +652,9 @@ fn refresh_places(
             continue;
         }
         if !relink::pane_has_current_location(reg, &layout) {
+            if protected.contains(&reg.name) {
+                continue;
+            }
             if reg.place.is_some() {
                 match relay.invalidate_place(reg) {
                     Ok(true) => reg.place = None,
@@ -645,6 +715,7 @@ fn refresh_places(
         .retain(|name| regs.iter().any(|r| r.name == *name));
     // Last, with the places as just refreshed: a new holder of an address has its
     // own by now.
+    state.stranded.spare(protected);
     stranded::pass(&mut state.stranded, relay, &layout, regs, machine, log)?;
     Ok(relinked)
 }
@@ -765,7 +836,7 @@ fn main() -> ExitCode {
                 .unwrap_or_default(),
         });
     }
-    let herdr = delivery(settings.delivery);
+    let herdr = delivery(settings.delivery, !cli.once);
     let bus = RedisBus {
         url: settings.core.url.value,
         prefix: settings.core.prefix.value,
@@ -816,8 +887,8 @@ fn install_signal_handlers() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
 /// The production delivery for `mode`: Claude Code's inbox sockets for the sessions
 /// that have one and herdr for the rest (the default), or herdr alone when the
 /// operator set `delivery = "herdr"` (FR-044). A socket whose locations cannot be
-/// told is reported and leaves Claude Code leads waiting, never typed into.
-fn delivery(mode: relay_core::config::DeliveryMode) -> socket::Routed<RealHerdr> {
+/// told is reported and leaves socket sessions waiting, never typed into.
+fn delivery(mode: relay_core::config::DeliveryMode, report: bool) -> socket::Routed<RealHerdr> {
     use relay_core::config::DeliveryMode;
     let herdr = RealHerdr::default();
     if mode == DeliveryMode::Herdr {
@@ -851,7 +922,12 @@ fn delivery(mode: relay_core::config::DeliveryMode) -> socket::Routed<RealHerdr>
                 "relay-watcher: inbox sockets are unavailable ({why}); Claude Code mail waits, \
                  other harnesses go through herdr"
             );
-            socket::Routed::socket_unavailable(herdr, &why)
+            let sessions = socket::deliverer::claude_dir().map(|dir| dir.join("sessions"));
+            // `--once` is a manual check: it leaves nothing behind.
+            let status = relay_core::config::state_dir()
+                .filter(|_| report)
+                .map(|d| relay_core::socket_status::dir_in(&d));
+            socket::Routed::socket_unavailable(herdr, &why, sessions, status.as_deref())
         }
     }
 }
@@ -991,13 +1067,12 @@ fn tick<H: Herdr + Deliverer>(
             (started, regs)
         }
     };
-    apply_settlements(relay, herdr, log)?;
+    apply_settlements(relay, herdr, &mut state.waits, log)?;
     herdr.registry_read(
         &regs
             .iter()
             .map(|r| deliver::RegisteredLead {
                 name: r.name.as_str(),
-                kind: &r.kind,
                 here: r.pane_on(machine).is_some(),
             })
             .collect::<Vec<_>>(),
@@ -1090,6 +1165,11 @@ fn tick<H: Herdr + Deliverer>(
             }
         };
         if len == 0 {
+            // Nothing queued and nothing posted that is still open: it got where it goes.
+            if !herdr.open(name.as_str()) {
+                state.waits.delivered(name);
+            }
+            state.live.herdr_waiting(name, false);
             state.retry_at.remove(name);
             state.last_len.remove(name);
             let ended = state.episodes.observe(name, None);
@@ -1097,28 +1177,44 @@ fn tick<H: Herdr + Deliverer>(
                 log(format!("{name}: {} ended", kind.describe()));
             }
             // A pane herdr still shows with the registered session is alive: its
-            // stamp moves forward instead of aging toward the prune rule.
-            let refreshed = !state.live.delivery_blocked()
-                && state.live.touch_due(reg, now_ms(), now)
-                && last_seen::refresh_if_live(
-                    relay,
-                    herdr,
-                    &mut state.live,
-                    reg,
-                    pane,
-                    now_ms(),
-                    now,
-                )?;
+            // stamp moves forward instead of aging toward the prune rule. While herdr's
+            // output cannot be read, a session on the socket is vouched for by its own
+            // live Claude Code process.
+            let blocked = state.live.delivery_blocked();
+            let alive = |herdr: &H| {
+                reg.session_id
+                    .as_ref()
+                    .is_some_and(|s| herdr.session_alive(s))
+            };
+            let mut refreshed = false;
+            if state.live.touch_due(reg, now_ms(), now) {
+                refreshed = if !blocked {
+                    last_seen::refresh_if_live(
+                        relay,
+                        herdr,
+                        &mut state.live,
+                        reg,
+                        pane,
+                        now_ms(),
+                        now,
+                    )?
+                } else {
+                    alive(herdr) && last_seen::touch(relay, &mut state.live, reg, now_ms(), now)?
+                };
+            }
             if !refreshed && old_enough_to_prune(reg.last_seen_ms) && state.prune_due(name, now) {
                 state.prune_checked.insert(name.clone(), now);
-                maybe_prune(
-                    relay,
-                    herdr,
-                    name,
-                    pane,
-                    reg.session_id.as_ref(),
-                    reg.last_seen_ms,
-                )?;
+                // What herdr cannot say proves nothing about a session that is alive.
+                if !(blocked && alive(herdr)) {
+                    maybe_prune(
+                        relay,
+                        herdr,
+                        name,
+                        pane,
+                        reg.session_id.as_ref(),
+                        reg.last_seen_ms,
+                    )?;
+                }
             }
             continue;
         }
@@ -1128,12 +1224,8 @@ fn tick<H: Herdr + Deliverer>(
         state.last_examined.insert(name.clone(), now);
         // Mail is queued and nothing new will announce it: come back.
         state.retry_at.insert(name.clone(), now + state.retry_every);
-        // herdr's output is in a shape ix-relay cannot read (FR-036): type into
-        // no pane. The mail stays queued until the check is rerun and passes.
-        if state.live.delivery_blocked() {
-            continue;
-        }
         let notice = state.episodes.notice(name, now);
+        let terminal_blocked = state.live.delivery_blocked();
         let mut inbox = RelayInbox {
             relay,
             lead: name,
@@ -1148,9 +1240,24 @@ fn tick<H: Herdr + Deliverer>(
             pane,
             reg.session_id.as_ref(),
             notice,
+            terminal_blocked,
             &mut inbox,
         );
         let lost = inbox.lost.take();
+        state
+            .live
+            .herdr_waiting(name, outcome == Outcome::TerminalBlocked);
+        match &outcome {
+            Outcome::SocketWaiting { why }
+            | Outcome::SocketNotSent { why, .. }
+            | Outcome::SocketDeferred { why, .. } => state.waits.undelivered(name, why, now),
+            Outcome::Delivered { .. }
+            | Outcome::SocketHeld { .. }
+            | Outcome::SocketHeldQuiet
+            | Outcome::TerminalBlocked => state.waits.delivered(name),
+            Outcome::SocketPending(_) => state.waits.posted(name),
+            _ => {}
+        }
         match &outcome {
             Outcome::Delivered { messages } => state.otlp.delivered(*messages),
             Outcome::PromptRejected { requeued, .. } | Outcome::SocketNotSent { requeued, .. } => {
@@ -1185,6 +1292,8 @@ fn tick<H: Herdr + Deliverer>(
         .prune_checked
         .retain(|name, _| seen.contains(name) || state.refused.iter().any(|r| r.name == *name));
     state.live.retain_touched(&seen);
+    state.waits.retain(&seen);
+    show_waits(herdr, &mut state.waits, log);
     scan_orders(relay, state, log)?;
     for (name, kind) in state.episodes.retain_present(&seen) {
         log(format!(
@@ -1261,12 +1370,25 @@ fn show_alerts<H: Herdr + Deliverer>(herdr: &H, log: &mut impl FnMut(String)) {
     }
 }
 
+/// Tells the operator, once per stretch, about mail that has waited too long for a
+/// socket (FR-044). Never types.
+fn show_waits<H: Herdr>(herdr: &H, waits: &mut Waits, log: &mut impl FnMut(String)) {
+    let now = Instant::now();
+    for notice in waits.due(now) {
+        if let Err(e) = herdr.notify(&notice.title, &notice.body) {
+            log(format!("{}: the notification failed: {e}", notice.lead));
+            waits.failed(&notice.lead, now);
+        }
+    }
+}
+
 /// Applies what the transport settled since the last tick (a receipt that came
 /// late): acknowledges, puts back or dead-letters the batch it is about. A batch
 /// that has meanwhile been reaped or acknowledged is simply not found.
 fn apply_settlements<H: Herdr + Deliverer>(
     relay: &mut Relay,
     herdr: &H,
+    waits: &mut Waits,
     log: &mut impl FnMut(String),
 ) -> relay_core::Result<()> {
     use deliver::SettleAction;
@@ -1318,6 +1440,13 @@ fn apply_settlements<H: Herdr + Deliverer>(
         );
         match result {
             Ok(moved) => {
+                if moved > 0 {
+                    match s.action {
+                        SettleAction::Requeue => waits.undelivered(&lead, &s.why, Instant::now()),
+                        SettleAction::Ack | SettleAction::AckUnconfirmed => waits.delivered(&lead),
+                        SettleAction::DeadLetter | SettleAction::Renew(_) => {}
+                    }
+                }
                 if moved > 0
                     && let Some((title, body)) = &s.notice
                     && let Err(e) = herdr.notify(title, body)

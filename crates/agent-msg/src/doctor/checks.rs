@@ -153,17 +153,28 @@ pub(crate) fn evaluate(f: &Facts) -> Vec<Check> {
     checks
 }
 
+/// How old a posted, unconsumed batch is before `doctor` warns about it.
+const UNCONSUMED_WARN_MS: i64 = 5 * 60 * 1000;
+
+/// Why a posted message may never show as consumed (FR-044).
+const UNCONSUMED_CAUSES: &str = "possible causes: another CLAUDE_CONFIG_DIR, socket \
+     authentication, a cleared or busy session, a changed wire format";
+
 /// Delivery through Claude Code's inbox sockets (FR-044). Reports the mode, the
 /// sockets each watcher resolved and the leads held or waiting; never a failure,
 /// because mail that cannot be posted stays queued.
 fn socket(f: &Facts, checks: &mut Vec<Check>) {
     let states = match &f.socket {
         SocketFacts::Herdr => {
-            checks.push(Check::ok(
+            checks.push(Check::warn(
                 Family::Socket,
+                Code::SocketDisabled,
                 None,
                 "delivery = herdr: Claude Code inbox sockets are switched off in config.toml, so \
                  mail is typed into every lead, sessions with a socket included",
+                "[watcher] delivery = \"herdr\" is set in config.toml",
+                "remove that line from ~/.ix/relay/config.toml (or set it to \"socket\") and \
+                 restart relay-watcher",
             ));
             return;
         }
@@ -244,6 +255,21 @@ fn socket_state(state: &SocketState, now_ms: i64, checks: &mut Vec<Check>) {
         )));
         return;
     }
+    if let Some(why) = &status.unavailable {
+        checks.push(Check::warn(
+            Family::Socket,
+            Code::SocketUnavailable,
+            Some(&format!("watcher pid {}", status.pid)),
+            format!(
+                "delivery = socket, but this watcher cannot use inbox sockets: {}",
+                relay_core::text::neutralise(why)
+            ),
+            "every Claude Code lead, and any lead whose session has a socket, waits; nothing is \
+             typed into them",
+            "give the watcher's service what the reason names and restart it",
+        ));
+        return;
+    }
     let mut details: Vec<String> = status
         .leads
         .iter()
@@ -280,18 +306,47 @@ fn socket_state(state: &SocketState, now_ms: i64, checks: &mut Vec<Check>) {
         .iter()
         .filter(|b| b.awaiting_consumption)
         .count();
+    // Posts that are not yet consumed are told apart from leads with a problem: young
+    // ones are the ordinary state of a busy lead, old ones and those whose transcript
+    // cannot be found are not.
+    let of_kind = |n: &str, kinds: &[&str]| kinds.iter().any(|k| n.contains(k));
+    let waiting = [": socket_pending:"];
+    let unconfirmed = [": socket_unconsumed:", ": socket_no_transcript:"];
     let problem_notes = status
         .notes
         .iter()
-        .filter(|n| !n.contains(": socket_pending:"))
+        .filter(|n| !of_kind(n, &waiting) && !of_kind(n, &unconfirmed))
         .count();
     details.extend(
         status
             .notes
             .iter()
-            .filter(|n| n.contains(": socket_pending:"))
+            .filter(|n| of_kind(n, &waiting))
             .cloned(),
     );
+    let overdue: Vec<String> = status
+        .held_batches
+        .iter()
+        .filter(|b| b.awaiting_consumption)
+        .filter_map(|b| {
+            let age = now_ms.saturating_sub(b.since_ms);
+            (age >= UNCONSUMED_WARN_MS).then(|| {
+                format!(
+                    "{}: batch {} posted {} minute(s) ago is not in its transcript",
+                    relay_core::text::neutralise(&b.lead),
+                    b.batch,
+                    age / 60_000
+                )
+            })
+        })
+        .chain(
+            status
+                .notes
+                .iter()
+                .filter(|n| of_kind(n, &unconfirmed))
+                .cloned(),
+        )
+        .collect();
     let summary = format!(
         "delivery = socket: {} lead(s) resolved, {} held, {} with a problem, {} awaiting \
          consumption",
@@ -312,9 +367,8 @@ fn socket_state(state: &SocketState, now_ms: i64, checks: &mut Vec<Check>) {
                     "the watcher dead-lettered {} batch(es) on its own account",
                     status.dead_lettered.len()
                 ),
-                "the receiver's user denied a held message, nobody answered its approval \
-                 prompt before the maximum hold, or a posted message was not consumed in that \
-                 time; a dead letter does not carry the reason",
+                "the receiver's user denied a held message, or nobody answered its approval \
+                 prompt before the maximum hold; a dead letter does not carry the reason",
                 "read them with `agent-msg inbox --dead`; to stop mail being held, set \
                  crossSessionInbound to accept",
             )
@@ -324,6 +378,22 @@ fn socket_state(state: &SocketState, now_ms: i64, checks: &mut Vec<Check>) {
                     d.lead, d.batch, d.reason
                 )
             })),
+        );
+    }
+    if !overdue.is_empty() {
+        checks.push(
+            Check::warn(
+                Family::Socket,
+                Code::SocketUnconsumed,
+                Some(&subject),
+                summary.clone(),
+                "the socket took a message and the lead's transcript does not show it",
+                "look at that session; the mail is kept in flight, and queued again if its \
+                 process exits without reading it",
+            )
+            .with_details(
+                std::iter::once(UNCONSUMED_CAUSES.to_owned()).chain(overdue.iter().cloned()),
+            ),
         );
     }
     if !status.held.is_empty() {
@@ -358,9 +428,16 @@ fn socket_state(state: &SocketState, now_ms: i64, checks: &mut Vec<Check>) {
                 "nothing is lost; see the lines below, and the README section on delivery \
                  through the inbox socket",
             )
-            .with_details(lines.into_iter().chain(details)),
+            .with_details(
+                lines
+                    .into_iter()
+                    .chain(std::iter::once(format!(
+                        "for an unconfirmed delivery, {UNCONSUMED_CAUSES}"
+                    )))
+                    .chain(details),
+            ),
         );
-    } else {
+    } else if overdue.is_empty() {
         checks.push(Check::ok(Family::Socket, Some(&subject), summary).with_details(details));
     }
 }
@@ -846,10 +923,14 @@ fn heartbeat_check(
     }
     if let (false, Some(problem)) = (hb.herdr_ok, hb.herdr_problem.as_deref()) {
         let consequence = if hb.herdr_blocks_delivery {
-            "it types into no pane until this passes"
+            "it types into no pane until this passes (leads with an inbox socket keep receiving)"
         } else {
             "it keeps running, but may skip leads"
         };
+        let waiting = hb
+            .herdr_waiting_leads
+            .iter()
+            .map(|lead| format!("{lead}: its mail waits because of this"));
         return Check::severe(
             hb.herdr_blocks_delivery,
             Family::Watcher,
@@ -860,7 +941,8 @@ fn heartbeat_check(
             ),
             "herdr was replaced or changed its output",
             "install a supported herdr on that machine; the watcher re-checks by itself",
-        );
+        )
+        .with_details(waiting);
     }
     if let Some(OtlpStatus::Failing {
         target,
@@ -2179,6 +2261,7 @@ mod tests {
                 herdr_ok: true,
                 herdr_problem: None,
                 herdr_blocks_delivery: false,
+                herdr_waiting_leads: Vec::new(),
                 redis_ok: true,
                 leads_watched: 1,
                 otlp: Some(OtlpStatus::Disabled),
@@ -2315,7 +2398,13 @@ mod tests {
             },
             panes: Ok(HashSet::from(["w1:p1".parse().unwrap()])),
             service: ServiceState::Active,
-            socket: SocketFacts::Herdr,
+            socket: SocketFacts::Socket(vec![SocketState::Read {
+                status: relay_core::socket_status::SocketStatus {
+                    reply_socket: Some("/run/user/1/cc-socks/42.sock".to_owned()),
+                    ..relay_core::socket_status::SocketStatus::default()
+                },
+                pid_alive: Some(true),
+            }]),
         }
     }
 
@@ -4160,8 +4249,8 @@ mod tests {
         );
     }
 
-    /// Tracing: TC-044-18
-    /// ACs: FR-044-AC-18
+    /// Tracing: TC-044-09
+    /// ACs: FR-044-AC-9
     #[test]
     fn pending_socket_consumption_is_not_reported_as_a_problem() {
         let status = socket_status(&[], &["ea: socket_pending: waiting for consumption"], true);
@@ -4174,6 +4263,96 @@ mod tests {
                 .details
                 .iter()
                 .any(|d| d.contains("socket_pending"))
+        );
+    }
+
+    /// Tracing: TC-044-09
+    /// ACs: FR-044-AC-9
+    ///
+    /// A post that is old, or whose transcript cannot be found, is a warning that names
+    /// the possible causes; a young one is not.
+    #[test]
+    fn tc_044_09_an_unconfirmed_post_warns_with_the_possible_causes() {
+        let posted = |age_ms: i64| {
+            let mut status = socket_status(&[], &[], true);
+            status.held_batches = vec![relay_core::socket_status::HeldBatch {
+                lead: "ea".into(),
+                batch: 3,
+                msg_id: "m".into(),
+                session: "s".into(),
+                since_ms: NOW - age_ms,
+                delivered_since_ms: None,
+                awaiting_consumption: true,
+                pid: None,
+                proc_start: None,
+                transcript_from: None,
+            }];
+            status
+        };
+        let young = socket_checks(posted(60_000));
+        assert_eq!(young.len(), 1);
+        assert_eq!(young[0].status, Status::Ok);
+        let lost = socket_status(
+            &[],
+            &["ea: socket_no_transcript: batch 3 was posted and no transcript is found"],
+            true,
+        );
+        for status in [posted(6 * 60_000), lost] {
+            let found = socket_checks(status);
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert_eq!(found[0].code, Code::SocketUnconsumed);
+            assert_eq!(found[0].status, Status::Warn);
+            assert!(found[0].details.iter().any(|d| d.contains("ea")));
+            let causes = &found[0].details[0];
+            for named in [
+                "CLAUDE_CONFIG_DIR",
+                "authentication",
+                "cleared or busy",
+                "wire format",
+            ] {
+                assert!(causes.contains(named), "{named}: {causes}");
+            }
+        }
+    }
+
+    /// Tracing: TC-044-09
+    /// ACs: FR-044-AC-9
+    #[test]
+    fn tc_044_09_unavailable_sockets_are_reported_with_their_reason() {
+        let status = relay_core::socket_status::SocketStatus {
+            pid: 42,
+            unavailable: Some("XDG_RUNTIME_DIR is not set".into()),
+            ..relay_core::socket_status::SocketStatus::default()
+        };
+        let found = socket_checks(status);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].code, Code::SocketUnavailable);
+        assert_eq!(found[0].status, Status::Warn);
+        assert!(found[0].message.contains("XDG_RUNTIME_DIR is not set"));
+    }
+
+    /// Tracing: TC-036-09
+    /// ACs: FR-036-AC-9
+    #[test]
+    fn tc_036_09_doctor_names_the_leads_waiting_on_an_unreadable_herdr() {
+        let mut f = healthy();
+        let mut b = beat("hub", 42, 1_000);
+        if let HeartbeatRead::Live(hb) = &mut b.read {
+            hb.herdr_ok = false;
+            hb.herdr_blocks_delivery = true;
+            hb.herdr_problem = Some("missing `state_change_seq`".into());
+            hb.herdr_waiting_leads = vec!["tl".parse().unwrap()];
+        }
+        up(&mut f).heartbeats = beats(vec![b, beat("node-a", 7, 1_000)]);
+        let check = evaluate(&f)
+            .into_iter()
+            .find(|c| c.code == Code::WatcherHerdrProblem)
+            .unwrap();
+        assert!(check.message.contains("state_change_seq"), "{check:?}");
+        assert!(check.message.contains("keep receiving"), "{check:?}");
+        assert!(
+            check.details.iter().any(|d| d.starts_with("tl: ")),
+            "{check:?}"
         );
     }
 
@@ -4230,7 +4409,7 @@ mod tests {
         let read =
             |status, pid_alive| SocketFacts::Socket(vec![SocketState::Read { status, pid_alive }]);
         let cases = [
-            (SocketFacts::Herdr, Code::Ok, Status::Ok),
+            (SocketFacts::Herdr, Code::SocketDisabled, Status::Warn),
             (
                 read(socket_status(&[], &[], true), Some(true)),
                 Code::Ok,
