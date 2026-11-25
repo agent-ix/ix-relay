@@ -60,7 +60,22 @@ end
 -- deadline index and the per-recipient unacted count. False when it was not open.
 order_close = function(original, status)
     local okey = order_key(original)
-    if redis.call('HGET', okey, 'status') ~= 'open' then return false end
+    if not readable(okey, 'hash') then
+        redis.call('HDEL', receipt_meta, 'orders_all_complete_since_ms')
+        return false
+    end
+    local stored_status = redis.call('HGET', okey, 'status')
+    if not stored_status then
+        redis.call('HDEL', receipt_meta, 'orders_all_complete_since_ms')
+        return false
+    end
+    if stored_status ~= 'open' then return false end
+    local enqueued = tonumber(redis.call('HGET', okey, 'enqueued_at') or '')
+    local all = receipt_meta .. ':orders-all'
+    local member = enqueued and string.format('%013d|%s', enqueued, original) or nil
+    if not member or not readable(all, 'zset') or not redis.call('ZSCORE', all, member) then
+        redis.call('HDEL', receipt_meta, 'orders_all_complete_since_ms')
+    end
     redis.call('HSET', okey, 'status', status)
     redis.call('ZREM', receipt_meta .. ':orders-due', original)
     local to = redis.call('HGET', okey, 'to')

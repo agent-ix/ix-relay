@@ -15,7 +15,7 @@ Commands:
   work             Report session scope, focus and agent assignments for the dashboard
   focuses          Durable, revisioned named focus definitions with one owner: create, list, show, update, archive, claim and transfer. Not `focus`, which sets this lane's free-text focus
   send             Send a message to one lead, or to `all`
-  orders           Read every retained order outcome in a bounded enqueue-time window; `orders expired` lists unacted expiries
+  orders           Read all retained order outcomes in a bounded enqueue-time window
   inbox            Print and remove your pending messages
   who              List registered leads
   focus            Set or clear this lead's lane focus
@@ -79,21 +79,31 @@ Both bounds are inclusive and apply to `enqueued_at`. Pages are newest first by
 orders share one millisecond. `truncated` is true exactly when the response has a
 cursor. Each row preserves the stored `state` and includes `expired`, true when
 the relay recorded `AckExpired` (including when it was later acted).
-`oldest_available_at` is the earliest indexed enqueue time, bounded by the
-eight-day order-record retention, and is `null` until indexing begins. `complete`
-and `incomplete_reason` say whether the requested window is known to be complete;
-the relay reports the index start, retention, visible unindexed open orders, and
-unreadable rows. Older `agent-msg` senders do not populate the all-outcome index.
-Upgrade `agent-msg` on every host that can send orders before consumers rely on
-complete results. Until that fleet upgrade is confirmed, `complete` remains false
-with `incomplete_reason: "sender_upgrade_required"`. Then the operator sets
-`orders_all_senders_upgraded=1` on the configured `receipt-meta` hash to enable
-complete responses. If a sending host rolls back to an older `agent-msg`, clear
-that field before the rollback. `skipped` counts unreadable indexed rows. Rows contain no
+`oldest_available_at` is the earliest time the operator-confirmed coverage,
+index start and eight-day order-record retention overlap; it is `null` until
+coverage is confirmed. Rows from the index remain listable before this boundary.
+The page has `complete`, `incomplete_reason` and `skipped`; consumers must require
+`complete: true` on every page. Reason values are `index_not_started`,
+`coverage_unconfirmed`, `outside_retention`, `before_index_start`,
+`before_complete_coverage`, `unreadable_order_records` and
+`unindexed_open_orders`.
+
+Upgrade `agent-msg` on every host that can send orders, then run
+`agent-msg orders coverage confirm`. This records the boundary using Redis server
+time. The command is an operator assertion: an order sent and closed entirely by
+old code before confirmation, or after a rollback whose confirmation was not
+cleared, is undetectable. That history cannot be represented as complete. Run
+`agent-msg orders coverage clear` before a sender rollback;
+`agent-msg orders coverage show` reports the current boundary. `skipped` counts
+unreadable indexed rows. Rows contain no
 message text or credentials. The read does not change Redis.
 
 `agent-msg orders expired --json` remains available for the older unacted-expiry
 view.
+
+```text
+agent-msg orders coverage confirm|clear|show
+```
 
 ### agent-msg inbox
 

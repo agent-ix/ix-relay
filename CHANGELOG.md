@@ -5,10 +5,11 @@
 - Add `agent-msg orders --since ... --until ... [--limit ...] [--cursor ...] [--json]` to
   list all retained order outcomes with stable pagination, relay-computed deadlines,
   explicit state and expiry fields, and completeness metadata. Upgrade `agent-msg` on every
-  host that can send orders before consumers rely on complete results; older senders do not
-  populate the all-outcome index. After upgrading every sending host, set
-  `orders_all_senders_upgraded=1` on the configured `receipt-meta` hash to enable complete
-  responses. `agent-msg orders expired` remains available.
+  host that can send orders, then run `agent-msg orders coverage confirm` before consumers
+  rely on complete results. Confirmation uses Redis server time and is an operator
+  assertion; an order sent and closed entirely by older code before confirmation cannot be
+  detected. Run `agent-msg orders coverage clear` before a sender rollback and `show` to
+  inspect the boundary. `agent-msg orders expired` remains available.
 
 ## 0.5.0
 

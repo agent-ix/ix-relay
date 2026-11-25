@@ -98,6 +98,21 @@ enum OrdersCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Confirm, clear, or inspect the operator's all-order coverage boundary.
+    Coverage {
+        #[command(subcommand)]
+        command: OrderCoverageCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum OrderCoverageCommand {
+    /// Assert that every order-sending host has an index-writing agent-msg installed.
+    Confirm,
+    /// Clear the assertion, including before rolling a sender back.
+    Clear,
+    /// Show the current relay-time coverage boundary, if confirmed.
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -132,7 +147,6 @@ enum Cmd {
         expect_ticket: Option<String>,
     },
     /// Read all retained order outcomes in a bounded enqueue-time window.
-    #[command(args_conflicts_with_subcommands = true)]
     Orders {
         #[command(subcommand)]
         command: Option<OrdersCommand>,
@@ -143,8 +157,8 @@ enum Cmd {
         #[arg(long, requires = "since")]
         until: Option<i64>,
         /// Maximum rows to return (1 to 500).
-        #[arg(long, default_value_t = 500)]
-        limit: usize,
+        #[arg(long)]
+        limit: Option<usize>,
         /// JSON object cursor from the previous page.
         #[arg(long)]
         cursor: Option<String>,
@@ -564,8 +578,20 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
         Cmd::Assign(args) => assign::run(args, &mut relay, settings, &mut out)?,
         Cmd::Orders {
             command: Some(OrdersCommand::Expired { json }),
-            ..
+            since,
+            until,
+            limit,
+            cursor,
+            json: parent_json,
         } => {
+            if since.is_some()
+                || until.is_some()
+                || limit.is_some()
+                || cursor.is_some()
+                || parent_json
+            {
+                return Err("agent-msg orders expired does not accept listing options (--since, --until, --limit, --cursor, or parent --json)".into());
+            }
             let report = retry::read(&mut relay, &redial, |r| Ok(r.expired_orders()?))?;
             if json {
                 json::write_line(&mut out, &report)?;
@@ -586,6 +612,39 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 }
                 if report.truncated {
                     writeln!(out, "truncated: more expired orders exist")?;
+                }
+            }
+        }
+        Cmd::Orders {
+            command: Some(OrdersCommand::Coverage { command }),
+            since,
+            until,
+            limit,
+            cursor,
+            json,
+        } => {
+            if since.is_some() || until.is_some() || limit.is_some() || cursor.is_some() || json {
+                return Err("agent-msg orders coverage does not accept listing options (--since, --until, --limit, --cursor, or --json)".into());
+            }
+            match command {
+                OrderCoverageCommand::Confirm => {
+                    let since = relay.confirm_orders_complete_since()?;
+                    writeln!(out, "order coverage confirmed since {since} (relay time)")?;
+                }
+                OrderCoverageCommand::Clear => {
+                    let cleared = relay.clear_orders_complete_since()?;
+                    if cleared {
+                        writeln!(out, "order coverage confirmation cleared")?;
+                    } else {
+                        writeln!(out, "order coverage was not confirmed")?;
+                    }
+                }
+                OrderCoverageCommand::Show => {
+                    let since = relay.orders_complete_since()?;
+                    match since {
+                        Some(since) => writeln!(out, "orders_all_complete_since_ms: {since}")?,
+                        None => writeln!(out, "orders_all_complete_since_ms: null")?,
+                    }
                 }
             }
         }
@@ -612,8 +671,13 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                     )
                 })
                 .transpose()?;
-            let request = relay_core::receipts::OrderListRequest::new(since, until, limit, cursor)
-                .map_err(io::Error::other)?;
+            let request = relay_core::receipts::OrderListRequest::new(
+                since,
+                until,
+                limit.unwrap_or(500),
+                cursor,
+            )
+            .map_err(io::Error::other)?;
             let page = retry::read(&mut relay, &redial, |r| Ok(r.orders(&request)?))?;
             if json {
                 json::write_line(&mut out, &page)?;

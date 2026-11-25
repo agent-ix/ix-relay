@@ -353,9 +353,9 @@ impl OrderListRequest {
     /// Makes a request with inclusive enqueue-time bounds and an optional stable cursor.
     ///
     /// # Errors
-    /// Returns an error when the bounds are negative or reversed, the upper bound cannot
-    /// exceeds the 13-digit lexicographic index range, the limit is outside 1 through 500,
-    /// or the cursor is outside the
+    /// Returns an error when the bounds are negative or reversed, `until_ms` exceeds
+    /// `9_999_999_999_998` (the largest bound whose exclusive upper edge fits the
+    /// 13-digit index), the limit is outside 1 through 500, or the cursor is outside the
     /// requested window or cannot be represented in the index.
     #[implements("FR-071-AC-12")]
     pub fn new(
@@ -365,7 +365,7 @@ impl OrderListRequest {
         cursor: Option<OrderCursor>,
     ) -> Result<Self, String> {
         if since_ms < 0 || until_ms < since_ms || until_ms > 9_999_999_999_998 {
-            return Err("order window must be non-negative, ordered Unix milliseconds".into());
+            return Err("order window must be non-negative, ordered Unix milliseconds with until <= 9999999999998".into());
         }
         if !(1..=ORDERS_PAGE_CAP).contains(&limit) {
             return Err(format!(

@@ -43,6 +43,13 @@ static LIST_ORDERS_SCRIPT: LazyLock<CachedScript> = LazyLock::new(|| {
     CachedScript::new(format!("#!lua flags=no-writes\n{body}"))
 });
 
+static ORDER_COVERAGE_SCRIPT: LazyLock<CachedScript> = LazyLock::new(|| {
+    CachedScript::new(script(
+        include_str!("lua/common.lua"),
+        include_str!("lua/order_coverage.lua"),
+    ))
+});
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawOrderState {
@@ -488,6 +495,62 @@ impl Relay {
             skipped,
             indexed_since_ms,
         })
+    }
+
+    /// Confirms all-outcome coverage from Redis server time. This is an operator
+    /// assertion that every order-sending host uses an index-writing `agent-msg`.
+    #[implements("FR-071-AC-12")]
+    pub fn confirm_orders_complete_since(&mut self) -> Result<i64> {
+        let reply: String = ORDER_COVERAGE_SCRIPT.run(&mut self.conn, |cmd| {
+            cmd.arg(0)
+                .arg("confirm")
+                .arg(self.keys.receipt_stream_key())
+                .arg(self.keys.receipt_meta_key());
+        })?;
+        reply.parse().map_err(|_| Error::UnexpectedScriptReply {
+            script: "order_coverage",
+            reply: "invalid confirmation timestamp".into(),
+        })
+    }
+
+    /// Clears the all-outcome coverage assertion, for example before a sender rollback.
+    #[implements("FR-071-AC-12")]
+    pub fn clear_orders_complete_since(&mut self) -> Result<bool> {
+        let reply: String = ORDER_COVERAGE_SCRIPT.run(&mut self.conn, |cmd| {
+            cmd.arg(0)
+                .arg("clear")
+                .arg(self.keys.receipt_stream_key())
+                .arg(self.keys.receipt_meta_key());
+        })?;
+        match reply.as_str() {
+            "0" => Ok(false),
+            "1" => Ok(true),
+            _ => Err(Error::UnexpectedScriptReply {
+                script: "order_coverage",
+                reply: "invalid clear result".into(),
+            }),
+        }
+    }
+
+    /// Reads the confirmed complete-coverage boundary, if the operator has set one.
+    #[implements("FR-071-AC-12")]
+    pub fn orders_complete_since(&mut self) -> Result<Option<i64>> {
+        let reply: String = ORDER_COVERAGE_SCRIPT.run(&mut self.conn, |cmd| {
+            cmd.arg(0)
+                .arg("show")
+                .arg(self.keys.receipt_stream_key())
+                .arg(self.keys.receipt_meta_key());
+        })?;
+        if reply.is_empty() {
+            return Ok(None);
+        }
+        reply
+            .parse()
+            .map(Some)
+            .map_err(|_| Error::UnexpectedScriptReply {
+                script: "order_coverage",
+                reply: "invalid confirmation timestamp".into(),
+            })
     }
 
     /// Reads one bounded page of every retained order status, newest enqueue first.
