@@ -65,15 +65,13 @@ order_close = function(original, status)
         return false
     end
     local stored_status = redis.call('HGET', okey, 'status')
-    if not stored_status then
-        redis.call('HDEL', receipt_meta, 'orders_all_complete_since_ms')
-        return false
-    end
     if stored_status ~= 'open' then return false end
     local enqueued = tonumber(redis.call('HGET', okey, 'enqueued_at') or '')
     local all = receipt_meta .. ':orders-all'
     local member = enqueued and string.format('%013d|%s', enqueued, original) or nil
-    if not member or not readable(all, 'zset') or not redis.call('ZSCORE', all, member) then
+    local confirmed = tonumber(redis.call('HGET', receipt_meta, 'orders_all_complete_since_ms') or '')
+    if confirmed and (not member or (enqueued >= confirmed
+        and (not readable(all, 'zset') or not redis.call('ZSCORE', all, member)))) then
         redis.call('HDEL', receipt_meta, 'orders_all_complete_since_ms')
     end
     redis.call('HSET', okey, 'status', status)

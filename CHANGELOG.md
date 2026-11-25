@@ -1,15 +1,17 @@
 # Release notes
 
-## Unreleased
+## 0.6.0
 
 - Add `agent-msg orders --since ... --until ... [--limit ...] [--cursor ...] [--json]` to
   list all retained order outcomes with stable pagination, relay-computed deadlines,
   explicit state and expiry fields, and completeness metadata. Upgrade `agent-msg` on every
-  host that can send orders, then run `agent-msg orders coverage confirm` before consumers
+  host that can send orders, upgrade and restart `relay-watcher` wherever it runs, then run
+  `agent-msg orders coverage confirm` before consumers
   rely on complete results. Confirmation uses Redis server time and is an operator
-  assertion; an order sent and closed entirely by older code before confirmation cannot be
-  detected. Run `agent-msg orders coverage clear` before a sender rollback and `show` to
-  inspect the boundary. `agent-msg orders expired` remains available.
+  assertion; an order sent and closed entirely by older code after confirmation cannot be
+  detected. Upgraded code removes the confirmation when it closes an unindexed order
+  enqueued at or after the boundary. Run `agent-msg orders coverage clear` before a sender
+  rollback and `show` to inspect the boundary. `agent-msg orders expired` remains available.
 
 ## 0.5.0
 

@@ -1,6 +1,6 @@
 # CLI reference
 
-This page is generated from the `--help` output of the built binaries (version 0.5.0). Run `<command> --help` for the same text. Every `agent-msg` subcommand also accepts `--url`, `--prefix` and `--human`; [Configuration](configuration.md) describes them.
+This page is generated from the `--help` output of the built binaries (version 0.6.0). Run `<command> --help` for the same text. Every `agent-msg` subcommand also accepts `--url`, `--prefix` and `--human`; [Configuration](configuration.md) describes them.
 
 ## agent-msg
 
@@ -88,11 +88,14 @@ The page has `complete`, `incomplete_reason` and `skipped`; consumers must requi
 `before_complete_coverage`, `unreadable_order_records` and
 `unindexed_open_orders`.
 
-Upgrade `agent-msg` on every host that can send orders, then run
+Upgrade `agent-msg` on every host that can send orders, and upgrade and restart
+`relay-watcher` on every host that runs it. Then run
 `agent-msg orders coverage confirm`. This records the boundary using Redis server
 time. The command is an operator assertion: an order sent and closed entirely by
-old code before confirmation, or after a rollback whose confirmation was not
-cleared, is undetectable. That history cannot be represented as complete. Run
+old code after confirmation, including after a rollback whose confirmation was not
+cleared, is undetectable, and `complete` can be true without it. Upgraded code
+removes the confirmation when it closes an unindexed order enqueued at or after the
+boundary; upgrade that sender, then confirm again. Run
 `agent-msg orders coverage clear` before a sender rollback;
 `agent-msg orders coverage show` reports the current boundary. `skipped` counts
 unreadable indexed rows. Rows contain no

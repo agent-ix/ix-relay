@@ -101,9 +101,11 @@ as an order: explicitly with `agent-msg send --order`, or by the orchestrator's
   and inspect it with `agent-msg orders coverage show`. Confirm SHALL record Redis server
   time in `orders_all_complete_since_ms`; clear SHALL remove it. Confirmation is an
   operator assertion that every order-sending host runs an index-writing `agent-msg`.
-  An order sent and closed entirely by older code before confirmation, or after a rollback
-  whose confirmation was not cleared, is undetectable and SHALL remain outside confirmed
-  coverage.
+  Orders enqueued before the confirmation SHALL remain outside confirmed coverage. An
+  order sent and closed entirely by older code after confirmation, including after a
+  rollback whose confirmation was not cleared, is not detectable. When the relay closes an
+  order that has no all-orders index member and was enqueued at or after the confirmation,
+  it SHALL remove the confirmation.
 - `oldest_available_at` SHALL be the maximum of the all-order index start, the confirmed
   coverage time and the current time minus eight-day order-record retention; it SHALL be
   `null` until coverage is confirmed. Rows SHALL remain listable from the index start even
@@ -159,7 +161,7 @@ as an order: explicitly with `agent-msg send --order`, or by the orchestrator's
 | FR-071-AC-9 | A tick that scans deadlines makes no key scan and adds at most one pipelined request. | Test |
 | FR-071-AC-10 | Given an order sent with `--expect-ticket`, the receipt export returns the expected ticket, and `focus_info` for the recipient lane shows the ticket parsed from its newest hook-reported branch; the relay records no acceptance of its own. | Test |
 | FR-071-AC-11 | Given delivered and never-delivered orders that expired, one acted after expiry, one with a failed escalation and one filed, `expired_orders` and `agent-msg orders expired --json` return every un-acted expired order with its fields and escalation state in one request and exclude the acted one, including after an acknowledgement, lease timeout, requeue, redelivery or dead letter that follows `Acted`; given more than 500, exactly 500 come back with `truncated` set; a row that cannot be decoded is counted in `skipped`, `indexed_since_ms` names the index start, and more than 1,000 index rows or a size-bound trim set `truncated`; a `DUMP` of every relay key before and after the call is identical. | Test |
-| FR-071-AC-12 | Given orders in every stored status and both delivered and never-delivered orders in the bounded enqueue-time window, `agent-msg orders` returns only the requested range, newest first by `(enqueued_at, order_id)`, with all required fields and relay-computed deadlines; same-millisecond pages continue strictly after the cursor tuple and `truncated`/`next_cursor` obey their invariant. Empty pages remain JSON arrays; the upper bound above `9999999999998` is refused. Coverage confirmation records relay time, can be shown and cleared, keeps pre-boundary indexed rows listable while reporting an incomplete reason, and is invalidated when a closing order lacks its all-orders index member. Every page reports `complete`, `incomplete_reason` from the specified set and `skipped`; consumers require complete on every page. `orders expired` rejects listing-only options while global connection options remain accepted. Bodies and credentials are absent, and a `DUMP` of every relay key before and after the read is identical. | Test |
+| FR-071-AC-12 | Given orders in every stored status and both delivered and never-delivered orders in the bounded enqueue-time window, `agent-msg orders` returns only the requested range, newest first by `(enqueued_at, order_id)`, with all required fields and relay-computed deadlines; same-millisecond pages continue strictly after the cursor tuple and `truncated`/`next_cursor` obey their invariant. Empty pages remain JSON arrays; the upper bound above `9999999999998` is refused. Coverage confirmation records relay time, can be shown and cleared, keeps pre-boundary indexed rows listable while reporting an incomplete reason, is invalidated when a closing order enqueued at or after the boundary lacks its all-orders index member, and is kept when that order was enqueued before it. Every page reports `complete`, `incomplete_reason` from the specified set and `skipped`; consumers require complete on every page. `orders expired` rejects listing-only options while global connection options remain accepted. Bodies and credentials are absent, and a `DUMP` of every relay key before and after the read is identical. | Test |
 
 ## Dependencies
 

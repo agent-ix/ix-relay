@@ -761,6 +761,7 @@ fn closing_an_unindexed_order_clears_the_confirmed_coverage_boundary() {
         bus.relay.orders_complete_since().unwrap()
     );
 
+    let confirmed_at = bus.relay.confirm_orders_complete_since().unwrap();
     assert_eq!(bus.send(&["--order"], None).status, 0);
     let members: Vec<String> = redis::cmd("ZREVRANGE")
         .arg(format!("{}receipt-meta:orders-all", bus.prefix))
@@ -770,7 +771,6 @@ fn closing_an_unindexed_order_clears_the_confirmed_coverage_boundary() {
         .unwrap();
     let member = &members[0];
     let order_id = member.split_once('|').unwrap().1.to_owned();
-    let confirmed_at = bus.relay.confirm_orders_complete_since().unwrap();
     assert_eq!(
         Some(confirmed_at),
         bus.relay.orders_complete_since().unwrap()
@@ -793,6 +793,41 @@ fn closing_an_unindexed_order_clears_the_confirmed_coverage_boundary() {
         .unwrap();
     assert_eq!(expired.len(), 2);
     assert!(bus.relay.orders_complete_since().unwrap().is_none());
+
+    assert_eq!(bus.send(&["--order"], None).status, 0);
+    let members: Vec<String> = redis::cmd("ZREVRANGE")
+        .arg(format!("{}receipt-meta:orders-all", bus.prefix))
+        .arg(0)
+        .arg(0)
+        .query(&mut bus.raw)
+        .unwrap();
+    let member = &members[0];
+    let (enqueued, order_id) = member.split_once('|').unwrap();
+    let enqueued: i64 = enqueued.parse().unwrap();
+    let order_id = order_id.to_owned();
+    redis::cmd("ZREM")
+        .arg(format!("{}receipt-meta:orders-all", bus.prefix))
+        .arg(member)
+        .exec(&mut bus.raw)
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(3));
+    let confirmed_at = bus.relay.confirm_orders_complete_since().unwrap();
+    assert!(confirmed_at > enqueued);
+    redis::cmd("ZADD")
+        .arg(format!("{}receipt-meta:orders-due", bus.prefix))
+        .arg(0)
+        .arg(&order_id)
+        .exec(&mut bus.raw)
+        .unwrap();
+    let expired = bus
+        .relay
+        .expire_orders(relay_core::Now::AtMs(now_ms() + 10_000))
+        .unwrap();
+    assert!(expired.iter().any(|order| order.original_id == order_id));
+    assert_eq!(
+        Some(confirmed_at),
+        bus.relay.orders_complete_since().unwrap()
+    );
 }
 
 #[trace("FR-071-AC-12")]
