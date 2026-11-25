@@ -74,6 +74,36 @@ as an order: explicitly with `agent-msg send --order`, or by the orchestrator's
   entries, the oldest dropped first. These bounds are the index's own; the 7-day and
   10,000-event bounds of FR-067 apply to the receipt stream.
 
+### All retained orders are readable in a bounded window
+
+- `Relay::orders` and `agent-msg orders --since <time> --until <time> --limit <n> [--cursor <json>] --json`
+  SHALL expose all indexed order records, regardless of whether they are open, acted,
+  expired, evicted or in another stored status. `--since` and `--until` are inclusive
+  Unix-millisecond bounds on `enqueued_at`; `since` SHALL be no later than `until`, and
+  `limit` SHALL be between 1 and 500. Results SHALL be newest first by the stable tuple
+  `(enqueued_at, order_id)`, descending.
+- Each row SHALL contain `order_id`, `sender`, `recipient` (the stored lane address),
+  `receipt_target` (the stored message target), `expect_ticket`, `ack_ms`, `deadline_at`,
+  `enqueued_at`, `delivered_at`, `acted_at`, and `state`. `deadline_at` SHALL be computed
+  by the relay as `delivered_at + ack_ms` when delivered, otherwise `enqueued_at + ack_ms`;
+  absent optional values SHALL be JSON `null`. `state` SHALL be the explicit stored order
+  status, including `open`, `acted`, `expired`, `evicted`, or any other status value, with
+  unknown values preserved verbatim. Rows SHALL contain no message body or credentials.
+- The response SHALL contain `orders`, `truncated`, `next_cursor`, `window`, `limit`, and
+  `oldest_available_at`. `window` SHALL identify both inclusive enqueue-time bounds and the
+  descending order. `oldest_available_at` SHALL identify the oldest enqueue time for which
+  this index can provide complete data, accounting for the index start and the eight-day
+  order-record retention. An order's absence before that time is outside retained coverage.
+- `next_cursor`, when non-null, SHALL be the JSON tuple `{"enqueued_at": <Unix ms>,
+  "order_id": <id>}` for the last returned order. A continuation SHALL return only tuples
+  strictly older than that tuple, including all rows at the same millisecond through the
+  order-id tie-breaker. `truncated` SHALL be true exactly when another matching row is
+  available and SHALL then have a usable `next_cursor`; otherwise it SHALL be false and
+  `next_cursor` SHALL be null.
+- The order index SHALL cover the same eight-day lifetime as the order records and SHALL be
+  populated when each order is enqueued. Reads SHALL use a bounded, single read-only Redis
+  script, SHALL NOT scan keys, and SHALL change nothing on the bus.
+
 ### Order acceptance is confirmed by the consumer
 
 - `Acted` shows that the recipient session acted after delivery; it is not proof that the
@@ -102,6 +132,7 @@ as an order: explicitly with `agent-msg send --order`, or by the orchestrator's
 | FR-071-AC-9 | A tick that scans deadlines makes no key scan and adds at most one pipelined request. | Test |
 | FR-071-AC-10 | Given an order sent with `--expect-ticket`, the receipt export returns the expected ticket, and `focus_info` for the recipient lane shows the ticket parsed from its newest hook-reported branch; the relay records no acceptance of its own. | Test |
 | FR-071-AC-11 | Given delivered and never-delivered orders that expired, one acted after expiry, one with a failed escalation and one filed, `expired_orders` and `agent-msg orders expired --json` return every un-acted expired order with its fields and escalation state in one request and exclude the acted one, including after an acknowledgement, lease timeout, requeue, redelivery or dead letter that follows `Acted`; given more than 500, exactly 500 come back with `truncated` set; a row that cannot be decoded is counted in `skipped`, `indexed_since_ms` names the index start, and more than 1,000 index rows or a size-bound trim set `truncated`; a `DUMP` of every relay key before and after the call is identical. | Test |
+| FR-071-AC-12 | Given orders in every stored status and both delivered and never-delivered orders in the bounded enqueue-time window, `agent-msg orders` returns only the requested range, newest first by `(enqueued_at, order_id)`, with all required fields and relay-computed deadlines; same-millisecond pages continue strictly after the cursor tuple, `truncated` and `next_cursor` obey their invariant, retention metadata identifies the oldest complete coverage, bodies and credentials are absent, and a `DUMP` of every relay key before and after the read is identical. | Test |
 
 ## Dependencies
 
