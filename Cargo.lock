@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "agent-msg"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "clap",
  "claude-wire",
@@ -498,7 +498,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "claude-wire"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "proptest",
  "serde",
@@ -1174,7 +1174,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "herdr-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "rustix",
  "serde",
@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "host-probe"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ix-trace-rs",
  "libc",
@@ -2608,7 +2608,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "relay-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "gethostname",
  "ix-board",
@@ -2629,7 +2629,7 @@ dependencies = [
 
 [[package]]
 name = "relay-ops"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "herdr-cli",
  "ix-board",
@@ -2646,7 +2646,7 @@ dependencies = [
 
 [[package]]
 name = "relay-test-support"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "redis",
  "relay-core",
@@ -2654,7 +2654,7 @@ dependencies = [
 
 [[package]]
 name = "relay-tools"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "ix-trace-rs",
@@ -2670,7 +2670,7 @@ dependencies = [
 
 [[package]]
 name = "relay-tui"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "clap",
  "herdr-cli",
@@ -2689,7 +2689,7 @@ dependencies = [
 
 [[package]]
 name = "relay-watcher"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "clap",
  "claude-wire",
@@ -2713,7 +2713,7 @@ dependencies = [
 
 [[package]]
 name = "relay-work-wire"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
 ]

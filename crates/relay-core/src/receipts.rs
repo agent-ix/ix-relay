@@ -1,5 +1,6 @@
 //! Content-free, bounded transport lifecycle evidence (FR-067).
 
+use ix_trace_rs::implements;
 use serde::{Deserialize, Serialize};
 
 /// One plain inbox entry, retaining its storage identity for an explicit requeue.
@@ -320,6 +321,144 @@ pub const EXPIRED_ORDERS_CAP: usize = 500;
 
 /// Most index rows one [`crate::Relay::expired_orders`] call examines.
 pub const EXPIRED_ORDERS_SCAN_CAP: usize = 1_000;
+
+/// The maximum number of all-outcome orders returned by one page (FR-071).
+pub const ORDERS_PAGE_CAP: usize = 500;
+
+/// The all-outcome order index and order records are retained for eight days.
+pub const ORDER_RETENTION_MS: i64 = 691_200_000;
+
+/// Stable continuation position for the all-outcome order listing (FR-071).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrderCursor {
+    /// Relay enqueue time, Unix milliseconds.
+    #[serde(rename = "enqueued_at")]
+    pub enqueued_at_ms: i64,
+    /// The order's original message identity, the tie-breaker for same-ms orders.
+    #[serde(rename = "order_id")]
+    pub order_id: String,
+}
+
+/// A validated bounded-window request for every retained order outcome (FR-071).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderListRequest {
+    pub(crate) since_ms: i64,
+    pub(crate) until_ms: i64,
+    pub(crate) limit: usize,
+    pub(crate) cursor: Option<OrderCursor>,
+}
+
+impl OrderListRequest {
+    /// Makes a request with inclusive enqueue-time bounds and an optional stable cursor.
+    ///
+    /// # Errors
+    /// Returns an error when the bounds are negative or reversed, `until_ms` exceeds
+    /// `9_999_999_999_998` (the largest bound whose exclusive upper edge fits the
+    /// 13-digit index), the limit is outside 1 through 500, or the cursor is outside the
+    /// requested window or cannot be represented in the index.
+    #[implements("FR-071-AC-12")]
+    pub fn new(
+        since_ms: i64,
+        until_ms: i64,
+        limit: usize,
+        cursor: Option<OrderCursor>,
+    ) -> Result<Self, String> {
+        if since_ms < 0 || until_ms < since_ms || until_ms > 9_999_999_999_998 {
+            return Err("order window must be non-negative, ordered Unix milliseconds with until <= 9999999999998".into());
+        }
+        if !(1..=ORDERS_PAGE_CAP).contains(&limit) {
+            return Err(format!(
+                "order page limit must be between 1 and {ORDERS_PAGE_CAP}"
+            ));
+        }
+        if let Some(position) = &cursor
+            && (position.enqueued_at_ms < since_ms
+                || position.enqueued_at_ms > until_ms
+                || position.order_id.is_empty()
+                || position.order_id.contains('|')
+                || position.order_id.chars().any(char::is_control))
+        {
+            return Err("order cursor must identify an order inside the requested window".into());
+        }
+        Ok(Self {
+            since_ms,
+            until_ms,
+            limit,
+            cursor,
+        })
+    }
+}
+
+/// One retained order, independent of its current or terminal outcome (FR-071).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrderState {
+    /// The original message identity.
+    #[serde(rename = "order_id")]
+    pub order_id: String,
+    /// Sender address as stored at enqueue.
+    pub sender: String,
+    /// Recipient lane address as stored at enqueue.
+    pub recipient: String,
+    /// The immutable message target as stored at enqueue.
+    pub receipt_target: String,
+    /// Expected ticket, if one was set.
+    pub expect_ticket: Option<String>,
+    /// Ack interval in milliseconds.
+    pub ack_ms: i64,
+    /// Relay-computed deadline in Unix milliseconds.
+    pub deadline_at: i64,
+    /// Relay enqueue time in Unix milliseconds.
+    #[serde(rename = "enqueued_at")]
+    pub enqueued_at_ms: i64,
+    /// First delivery time in Unix milliseconds.
+    #[serde(rename = "delivered_at")]
+    pub delivered_at_ms: Option<i64>,
+    /// First acted time in Unix milliseconds.
+    #[serde(rename = "acted_at")]
+    pub acted_at_ms: Option<i64>,
+    /// Stored order status, preserved verbatim.
+    pub state: String,
+    /// Whether the relay recorded `AckExpired` for this order.
+    pub expired: bool,
+}
+
+/// Enqueue-time window metadata in the response from [`crate::Relay::orders`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OrderWindow {
+    /// Inclusive lower bound in Unix milliseconds.
+    pub since: i64,
+    /// Inclusive upper bound in Unix milliseconds.
+    pub until: i64,
+    /// The field used by the bounds.
+    pub filter: &'static str,
+    /// Stable page ordering.
+    pub order: &'static str,
+}
+
+/// One bounded page of retained orders, newest first (FR-071).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OrderPage {
+    /// Orders in descending `(enqueued_at, order_id)` order.
+    pub orders: Vec<OrderState>,
+    /// True exactly when another matching order follows this page.
+    pub truncated: bool,
+    /// Continuation position when `truncated` is true; null otherwise.
+    pub next_cursor: Option<OrderCursor>,
+    /// The requested window and its ordering semantics.
+    pub window: OrderWindow,
+    /// Requested page size.
+    pub limit: usize,
+    /// Earliest enqueue time for which this index can provide complete data.
+    pub oldest_available_at: Option<i64>,
+    /// Whether the requested window is known to be fully represented.
+    pub complete: bool,
+    /// Reason the requested window cannot be confirmed complete.
+    pub incomplete_reason: Option<String>,
+    /// Count of indexed members whose order record could not be read.
+    pub skipped: usize,
+}
 
 /// Where the escalation of an expired order stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

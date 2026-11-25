@@ -54,6 +54,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-073 | FR-073-AC-2 | TC-073-02 | ✅ written (`relay-tools/tests/archive.rs`) |
 | FR-073 | FR-073-AC-3 | TC-073-03 | ✅ written (`relay-tools/tests/archive_cli.rs`) |
 | FR-073 | FR-073-AC-4 | TC-073-04 | ✅ written (`relay-tools` `session_start::tests`) |
+| FR-071 | FR-071-AC-12 | TC-071-12 | ✅ written (`all_order_statuses_are_listed_in_stable_read_only_pages`, `empty_pages_and_aged_out_cursors_are_json_arrays_with_coverage_metadata`, `order_writer_and_reader_share_retention_and_report_visible_legacy_gaps`, `unreadable_index_rows_are_skipped_and_make_coverage_incomplete`, `order_send_refuses_wrong_typed_history_index_before_writing`, `order_listing_reports_each_wrong_type_error_without_writing`, `order_listing_rejects_bounds_that_break_the_padded_lexical_index`, `order_listing_options_cannot_be_silently_ignored_by_expired_subcommand`; Redis lane) |
 
 | FR-007 | FR-007-AC-1 | TC-007-01 | 🚧 pending |
 | FR-007 | FR-007-AC-2 | TC-007-02 | 🚧 pending |
@@ -820,12 +821,13 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-044-22 | A post whose receiving process is gone is put back unless the transcript shows it. | Integration | FR-044-AC-22 | ✅ written (`tc_044_22_a_post_whose_receiver_is_gone_is_queued_again_unless_consumed`, `tc_044_22_a_restarted_session_receives_the_mail_its_old_process_never_read`) |
 | TC-044-23 | A restarted watcher adopts an old post, judges it by its whole transcript and posts it no more. | Integration | FR-044-AC-23 | ✅ written (`tc_044_23_an_old_post_is_adopted_and_judged_by_its_whole_transcript`) |
 | TC-044-24 | At 256 open posts a further batch is put back and none is dropped. | Integration | FR-044-AC-24 | ✅ written (`tc_044_24_pending_capacity_defers_without_evicting_socket_ownership`) |
+| TC-071-12 | Given orders in every stored status and both delivered and never-delivered orders in the bounded enqueue-time window, `agent-msg orders` returns the requested range newest first by `(enqueued_at, order_id)` with relay-computed deadlines and `expired`; same-millisecond pages continue strictly after the cursor tuple, truncation and cursor agree, empty and aged-out pages return JSON arrays, coverage commands confirm/clear/show a Redis-time boundary, indexed rows remain listable before it, closing an unindexed order clears it, visible legacy gaps and unreadable rows are reported, retention writer/reader bounds agree, corrupt Redis types are refused or reported, invalid time bounds and listing options with `expired` are rejected while global options remain accepted, no body or credential is exposed, and the read leaves Redis unchanged. | Integration | FR-071-AC-12 | ✅ written (`all_order_statuses_are_listed_in_stable_read_only_pages`, `empty_pages_and_aged_out_cursors_are_json_arrays_with_coverage_metadata`, `order_writer_and_reader_share_retention_and_report_visible_legacy_gaps`, `coverage_commands_confirm_clear_and_show_a_relay_time_boundary`, `closing_an_unindexed_order_clears_the_confirmed_coverage_boundary`, `unreadable_index_rows_are_skipped_and_make_coverage_incomplete`, `order_send_refuses_wrong_typed_history_index_before_writing`, `order_listing_reports_each_wrong_type_error_without_writing`, `order_listing_rejects_bounds_that_break_the_padded_lexical_index`, `order_listing_options_cannot_be_silently_ignored_by_expired_subcommand`; Redis lane) |
 
 ## Coverage Gaps
 
 | Gap ID | Description | Risk Level | Mitigation |
 |--------|-------------|------------|------------|
-| GAP-001 | 288 of 386 rows have a written test; changed 0.3.0 obligations have replacement evidence above. Retired alias tests are not evidence for the new contract. Remaining pending/partial rows require their stated evidence. | High | Complete remaining evidence without claiming full coverage. |
+| GAP-001 | 289 of 387 rows have a written test; changed 0.3.0 obligations have replacement evidence above. Retired alias tests are not evidence for the new contract. Remaining pending/partial rows require their stated evidence. | High | Complete remaining evidence without claiming full coverage. |
 | GAP-002 | 15 rows still say `red on main`: obligations of requirements `main` does not yet meet, red when written (FR-031, FR-033-AC-2, FR-034-AC-4, FR-035, FR-037). The rest of FR-032..FR-034 are written or partial since the relink work (FR-043). | High | AGE-2033 (AGE-2032 landed; the NFR-001 stdin row landed under AGE-2033). |
 | GAP-003 | No `herdr` stub or blackholed-Redis harness exists yet for the fault-injection and benchmark rows. | Medium | Build with the NFR-001..003 suites. |
 
@@ -836,7 +838,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | Benchmark | 8 | 5 | 0 | 0 | 0 | 0 | 62% |
 | Fuzz | 3 | 0 | 3 | 0 | 0 | 0 | 0% |
 | Inspection | 3 | 0 | 0 | 0 | 0 | 0 | 0% |
-| Integration | 211 | 151 | 0 | 12 | 0 | 0 | 72% |
+| Integration | 212 | 152 | 0 | 12 | 0 | 0 | 72% |
 | Property | 38 | 29 | 0 | 5 | 0 | 0 | 76% |
 | Static | 2 | 0 | 2 | 0 | 0 | 0 | 0% |
 | Unit | 121 | 93 | 0 | 3 | 0 | 0 | 76% |

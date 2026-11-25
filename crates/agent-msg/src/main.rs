@@ -40,6 +40,7 @@ use std::{
 };
 
 use clap::{Parser, Subcommand, ValueEnum};
+use ix_trace_rs::implements;
 use relay_core::{
     AddressBook, AgentName, EscalationStatus, MachineName, Message, PaneId, Registration, Relay,
 };
@@ -97,6 +98,21 @@ enum OrdersCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Confirm, clear, or inspect the operator's all-order coverage boundary.
+    Coverage {
+        #[command(subcommand)]
+        command: OrderCoverageCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum OrderCoverageCommand {
+    /// Assert that every order-sending host has an index-writing agent-msg installed.
+    Confirm,
+    /// Clear the assertion, including before rolling a sender back.
+    Clear,
+    /// Show the current relay-time coverage boundary, if confirmed.
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -130,10 +146,25 @@ enum Cmd {
         #[arg(long, value_name = "ID", requires = "order")]
         expect_ticket: Option<String>,
     },
-    /// Read order state. Changes nothing.
+    /// Read all retained order outcomes in a bounded enqueue-time window.
     Orders {
         #[command(subcommand)]
-        command: OrdersCommand,
+        command: Option<OrdersCommand>,
+        /// Inclusive lower enqueue time in Unix milliseconds (required without `expired`).
+        #[arg(long, requires = "until")]
+        since: Option<i64>,
+        /// Inclusive upper enqueue time in Unix milliseconds (required without `expired`).
+        #[arg(long, requires = "since")]
+        until: Option<i64>,
+        /// Maximum rows to return (1 to 500).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// JSON object cursor from the previous page.
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Print the structured page as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Print and remove your pending messages.
     Inbox {
@@ -508,6 +539,7 @@ fn core_flags(cli: &Cli) -> relay_core::config::CoreFlags {
 
 pub(crate) type BoxError = Box<dyn std::error::Error>;
 
+#[implements("FR-071-AC-12")]
 fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxError> {
     let redial = retry::Redial::new(&settings.url.value, &settings.prefix.value);
     let mut out = io::stdout().lock();
@@ -545,8 +577,21 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
         Cmd::Work(args) => work::run(args, &mut relay, settings, &mut out)?,
         Cmd::Assign(args) => assign::run(args, &mut relay, settings, &mut out)?,
         Cmd::Orders {
-            command: OrdersCommand::Expired { json },
+            command: Some(OrdersCommand::Expired { json }),
+            since,
+            until,
+            limit,
+            cursor,
+            json: parent_json,
         } => {
+            if since.is_some()
+                || until.is_some()
+                || limit.is_some()
+                || cursor.is_some()
+                || parent_json
+            {
+                return Err("agent-msg orders expired does not accept listing options (--since, --until, --limit, --cursor, or parent --json)".into());
+            }
             let report = retry::read(&mut relay, &redial, |r| Ok(r.expired_orders()?))?;
             if json {
                 json::write_line(&mut out, &report)?;
@@ -567,6 +612,101 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 }
                 if report.truncated {
                     writeln!(out, "truncated: more expired orders exist")?;
+                }
+            }
+        }
+        Cmd::Orders {
+            command: Some(OrdersCommand::Coverage { command }),
+            since,
+            until,
+            limit,
+            cursor,
+            json,
+        } => {
+            if since.is_some() || until.is_some() || limit.is_some() || cursor.is_some() || json {
+                return Err("agent-msg orders coverage does not accept listing options (--since, --until, --limit, --cursor, or --json)".into());
+            }
+            match command {
+                OrderCoverageCommand::Confirm => {
+                    let since = relay.confirm_orders_complete_since()?;
+                    writeln!(out, "order coverage confirmed since {since} (relay time)")?;
+                }
+                OrderCoverageCommand::Clear => {
+                    let cleared = relay.clear_orders_complete_since()?;
+                    if cleared {
+                        writeln!(out, "order coverage confirmation cleared")?;
+                    } else {
+                        writeln!(out, "order coverage was not confirmed")?;
+                    }
+                }
+                OrderCoverageCommand::Show => {
+                    let since = relay.orders_complete_since()?;
+                    match since {
+                        Some(since) => writeln!(out, "orders_all_complete_since_ms: {since}")?,
+                        None => writeln!(out, "orders_all_complete_since_ms: null")?,
+                    }
+                }
+            }
+        }
+        Cmd::Orders {
+            command: None,
+            since,
+            until,
+            limit,
+            cursor,
+            json,
+        } => {
+            let (Some(since), Some(until)) = (since, until) else {
+                return Err("agent-msg orders requires --since and --until".into());
+            };
+            let cursor = cursor
+                .map(|value| {
+                    serde_json::from_str::<relay_core::receipts::OrderCursor>(&value).map_err(
+                        |_| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "invalid order cursor JSON; expected enqueued_at and order_id",
+                            )
+                        },
+                    )
+                })
+                .transpose()?;
+            let request = relay_core::receipts::OrderListRequest::new(
+                since,
+                until,
+                limit.unwrap_or(500),
+                cursor,
+            )
+            .map_err(io::Error::other)?;
+            let page = retry::read(&mut relay, &redial, |r| Ok(r.orders(&request)?))?;
+            if json {
+                json::write_line(&mut out, &page)?;
+            } else {
+                for order in &page.orders {
+                    writeln!(
+                        out,
+                        "{} {} state={} expired={} deadline_at={}",
+                        order.order_id,
+                        order.recipient,
+                        order.state,
+                        order.expired,
+                        order.deadline_at
+                    )?;
+                }
+                writeln!(out, "oldest_available_at: {:?}", page.oldest_available_at)?;
+                writeln!(out, "complete: {}", page.complete)?;
+                if let Some(reason) = &page.incomplete_reason {
+                    writeln!(out, "incomplete_reason: {reason}")?;
+                }
+                if page.skipped > 0 {
+                    writeln!(out, "skipped: {} unreadable indexed rows", page.skipped)?;
+                }
+                if let Some(cursor) = &page.next_cursor {
+                    writeln!(
+                        out,
+                        "truncated: next_cursor={}",
+                        serde_json::to_string(cursor)?
+                    )?;
                 }
             }
         }

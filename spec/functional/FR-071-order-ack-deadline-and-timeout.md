@@ -74,6 +74,65 @@ as an order: explicitly with `agent-msg send --order`, or by the orchestrator's
   entries, the oldest dropped first. These bounds are the index's own; the 7-day and
   10,000-event bounds of FR-067 apply to the receipt stream.
 
+### All retained orders are readable in a bounded window
+
+- `Relay::orders` and `agent-msg orders --since <time> --until <time> --limit <n> [--cursor <json>] --json`
+  SHALL expose all indexed order records, regardless of whether they are open, acted,
+  expired, evicted or in another stored status. `--since` and `--until` are inclusive
+  Unix-millisecond bounds on `enqueued_at`; `since` SHALL be no later than `until`, and
+  `until` SHALL not exceed `9_999_999_999_998`, the largest bound whose exclusive upper
+  edge fits the 13-digit lexical index. `limit` SHALL be between 1 and 500 (default 500).
+  Results SHALL be newest first by the stable tuple
+  `(enqueued_at, order_id)`, descending.
+- Each row SHALL contain `order_id`, `sender`, `recipient` (the stored lane address),
+  `receipt_target` (the stored receipt event target queue identity), `expect_ticket`, `ack_ms`, `deadline_at`,
+  `enqueued_at`, `delivered_at`, `acted_at`, `expired`, and `state`. `deadline_at` SHALL be computed
+  by the relay as `delivered_at + ack_ms` when delivered, otherwise `enqueued_at + ack_ms`;
+  absent optional values SHALL be JSON `null`. `state` SHALL be the explicit stored order
+  status, including `open`, `acted`, `expired`, `evicted`, or any other status value, with
+  unknown values preserved verbatim. `expired` SHALL be true exactly when the relay
+  recorded `AckExpired`, and SHALL remain true if an order was acted after expiry; it SHALL
+  be false for open orders even when their deadline has passed but expiry was not recorded.
+  Rows SHALL contain no message body or credentials.
+- The response SHALL contain `orders`, `truncated`, `next_cursor`, `window`, `limit`,
+  `oldest_available_at`, `complete`, `incomplete_reason`, and `skipped`. `window` SHALL identify both inclusive enqueue-time bounds and the
+  descending order. The operator SHALL confirm coverage with
+  `agent-msg orders coverage confirm`, clear it with `agent-msg orders coverage clear`,
+  and inspect it with `agent-msg orders coverage show`. Confirm SHALL record Redis server
+  time in `orders_all_complete_since_ms`; clear SHALL remove it. Confirmation is an
+  operator assertion that every order-sending host runs an index-writing `agent-msg`.
+  Orders enqueued before the confirmation SHALL remain outside confirmed coverage. An
+  order sent and closed entirely by older code after confirmation, including after a
+  rollback whose confirmation was not cleared, is not detectable. When the relay closes an
+  order that has no all-orders index member and was enqueued at or after the confirmation,
+  it SHALL remove the confirmation.
+- `oldest_available_at` SHALL be the maximum of the all-order index start, the confirmed
+  coverage time and the current time minus eight-day order-record retention; it SHALL be
+  `null` until coverage is confirmed. Rows SHALL remain listable from the index start even
+  before this boundary. `complete` SHALL be true only when the requested `since` is at or
+  after `oldest_available_at` and no unreadable indexed row or visible unindexed open order
+  was found. `incomplete_reason` SHALL be null when complete and otherwise one of
+  `index_not_started`, `coverage_unconfirmed`, `outside_retention`, `before_index_start`,
+  `before_complete_coverage`, `unreadable_order_records` or `unindexed_open_orders`.
+  `skipped` SHALL count unreadable indexed rows. Consumers SHALL require `complete=true`
+  on every page before treating a window as complete. Before rolling any sending host back
+  to older code, the operator SHALL clear the confirmation. An order closed entirely by
+  old code after confirmation is undetectable; coverage confirmation is an operator
+  assertion and upgrades/rollbacks SHALL be coordinated accordingly.
+- `next_cursor`, when non-null, SHALL be the JSON tuple `{"enqueued_at": <Unix ms>,
+  "order_id": <id>}` for the last returned order. A continuation SHALL return only tuples
+  strictly older than that tuple, including all rows at the same millisecond through the
+  order-id tie-breaker. `truncated` SHALL be true exactly when another matching row is
+  available and SHALL then have a usable `next_cursor`; otherwise it SHALL be false and
+  `next_cursor` SHALL be null.
+- `orders expired` SHALL reject the listing-only `--since`, `--until`, `--limit`, `--cursor`
+  and parent `--json` options; global `--url`, `--prefix` and `--human` options SHALL remain
+  accepted after the subcommand.
+- The order index SHALL cover the same eight-day lifetime as the order records and SHALL be
+  populated when each order is enqueued. The writer and reader SHALL use the same retention
+  value. Reads SHALL use a bounded, single read-only Redis
+  script, SHALL NOT scan keys, and SHALL change nothing on the bus.
+
 ### Order acceptance is confirmed by the consumer
 
 - `Acted` shows that the recipient session acted after delivery; it is not proof that the
@@ -102,6 +161,7 @@ as an order: explicitly with `agent-msg send --order`, or by the orchestrator's
 | FR-071-AC-9 | A tick that scans deadlines makes no key scan and adds at most one pipelined request. | Test |
 | FR-071-AC-10 | Given an order sent with `--expect-ticket`, the receipt export returns the expected ticket, and `focus_info` for the recipient lane shows the ticket parsed from its newest hook-reported branch; the relay records no acceptance of its own. | Test |
 | FR-071-AC-11 | Given delivered and never-delivered orders that expired, one acted after expiry, one with a failed escalation and one filed, `expired_orders` and `agent-msg orders expired --json` return every un-acted expired order with its fields and escalation state in one request and exclude the acted one, including after an acknowledgement, lease timeout, requeue, redelivery or dead letter that follows `Acted`; given more than 500, exactly 500 come back with `truncated` set; a row that cannot be decoded is counted in `skipped`, `indexed_since_ms` names the index start, and more than 1,000 index rows or a size-bound trim set `truncated`; a `DUMP` of every relay key before and after the call is identical. | Test |
+| FR-071-AC-12 | Given orders in every stored status and both delivered and never-delivered orders in the bounded enqueue-time window, `agent-msg orders` returns only the requested range, newest first by `(enqueued_at, order_id)`, with all required fields and relay-computed deadlines; same-millisecond pages continue strictly after the cursor tuple and `truncated`/`next_cursor` obey their invariant. Empty pages remain JSON arrays; the upper bound above `9999999999998` is refused. Coverage confirmation records relay time, can be shown and cleared, keeps pre-boundary indexed rows listable while reporting an incomplete reason, is invalidated when a closing order enqueued at or after the boundary lacks its all-orders index member, and is kept when that order was enqueued before it. Every page reports `complete`, `incomplete_reason` from the specified set and `skipped`; consumers require complete on every page. `orders expired` rejects listing-only options while global connection options remain accepted. Bodies and credentials are absent, and a `DUMP` of every relay key before and after the read is identical. | Test |
 
 ## Dependencies
 

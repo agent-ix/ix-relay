@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeMap, sync::LazyLock};
 
+use ix_trace_rs::implements;
 use redis::streams::StreamRangeReply;
 use serde::Deserialize;
 
@@ -13,8 +14,9 @@ use crate::{
     AgentName, BatchId, Error, Message, Now, Popper, Result, Target,
     receipts::{
         DeliveryEvidence, EXPIRED_ORDERS_CAP, EXPIRED_ORDERS_SCAN_CAP, ExpiredOrder,
-        ExpiredOrderState, ExpiredOrders, OrderEscalationState, OrderLatency, OrderSpec,
-        OrderStats, OrderedReceipt, RECEIPT_EVENT_CAP, RECEIPT_PAGE_CAP, RECEIPT_WINDOW_MS,
+        ExpiredOrderState, ExpiredOrders, ORDER_RETENTION_MS, OrderCursor, OrderEscalationState,
+        OrderLatency, OrderListRequest, OrderPage, OrderSpec, OrderState, OrderStats, OrderWindow,
+        OrderedReceipt, RECEIPT_EVENT_CAP, RECEIPT_PAGE_CAP, RECEIPT_WINDOW_MS,
         ReceiptCoverageReason, ReceiptEvent, ReceiptExport, ReceiptRequest,
     },
 };
@@ -32,6 +34,47 @@ static OBSERVE_SCRIPT: LazyLock<String> = LazyLock::new(|| {
         include_str!("lua/receipt_observe.lua"),
     )
 });
+
+static LIST_ORDERS_SCRIPT: LazyLock<CachedScript> = LazyLock::new(|| {
+    let body = script(
+        include_str!("lua/common.lua"),
+        include_str!("lua/order_list_all.lua"),
+    );
+    CachedScript::new(format!("#!lua flags=no-writes\n{body}"))
+});
+
+static ORDER_COVERAGE_SCRIPT: LazyLock<CachedScript> = LazyLock::new(|| {
+    CachedScript::new(script(
+        include_str!("lua/common.lua"),
+        include_str!("lua/order_coverage.lua"),
+    ))
+});
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawOrderState {
+    order_id: String,
+    sender: String,
+    recipient: String,
+    receipt_target: String,
+    expect_ticket: Option<String>,
+    ack_ms: i64,
+    enqueued_at: i64,
+    delivered_at: Option<i64>,
+    acted_at: Option<i64>,
+    state: String,
+    expired: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawOrderPage {
+    orders: Vec<RawOrderState>,
+    oldest_available_at: Option<i64>,
+    complete: bool,
+    incomplete_reason: Option<String>,
+    skipped: usize,
+}
 
 /// The stored envelope is distinct from the public message/history shape.
 #[derive(Deserialize)]
@@ -85,6 +128,7 @@ pub(crate) fn decode_message(bytes: &[u8]) -> std::result::Result<Message, serde
 }
 
 impl Relay {
+    #[implements("FR-071-AC-12")]
     pub(super) fn enqueue_receipted(
         &mut self,
         message: &Message,
@@ -119,6 +163,7 @@ impl Relay {
             command.arg(recipient.as_str());
         }
         Ok(command
+            .arg(ORDER_RETENTION_MS)
             .arg(self.keys.receipt_stream_key())
             .arg(self.keys.receipt_meta_key())
             .query(&mut self.conn)?)
@@ -449,6 +494,145 @@ impl Relay {
             truncated,
             skipped,
             indexed_since_ms,
+        })
+    }
+
+    /// Confirms all-outcome coverage from Redis server time. This is an operator
+    /// assertion that every order-sending host uses an index-writing `agent-msg`.
+    #[implements("FR-071-AC-12")]
+    pub fn confirm_orders_complete_since(&mut self) -> Result<i64> {
+        let reply: String = ORDER_COVERAGE_SCRIPT.run(&mut self.conn, |cmd| {
+            cmd.arg(0)
+                .arg("confirm")
+                .arg(self.keys.receipt_stream_key())
+                .arg(self.keys.receipt_meta_key());
+        })?;
+        reply.parse().map_err(|_| Error::UnexpectedScriptReply {
+            script: "order_coverage",
+            reply: "invalid confirmation timestamp".into(),
+        })
+    }
+
+    /// Clears the all-outcome coverage assertion, for example before a sender rollback.
+    #[implements("FR-071-AC-12")]
+    pub fn clear_orders_complete_since(&mut self) -> Result<bool> {
+        let reply: String = ORDER_COVERAGE_SCRIPT.run(&mut self.conn, |cmd| {
+            cmd.arg(0)
+                .arg("clear")
+                .arg(self.keys.receipt_stream_key())
+                .arg(self.keys.receipt_meta_key());
+        })?;
+        match reply.as_str() {
+            "0" => Ok(false),
+            "1" => Ok(true),
+            _ => Err(Error::UnexpectedScriptReply {
+                script: "order_coverage",
+                reply: "invalid clear result".into(),
+            }),
+        }
+    }
+
+    /// Reads the confirmed complete-coverage boundary, if the operator has set one.
+    #[implements("FR-071-AC-12")]
+    pub fn orders_complete_since(&mut self) -> Result<Option<i64>> {
+        let reply: String = ORDER_COVERAGE_SCRIPT.run(&mut self.conn, |cmd| {
+            cmd.arg(0)
+                .arg("show")
+                .arg(self.keys.receipt_stream_key())
+                .arg(self.keys.receipt_meta_key());
+        })?;
+        if reply.is_empty() {
+            return Ok(None);
+        }
+        reply
+            .parse()
+            .map(Some)
+            .map_err(|_| Error::UnexpectedScriptReply {
+                script: "order_coverage",
+                reply: "invalid confirmation timestamp".into(),
+            })
+    }
+
+    /// Reads one bounded page of every retained order status, newest enqueue first.
+    /// This is a read-only single Redis script; message content is never read.
+    ///
+    /// # Errors
+    /// Fails when Redis is unavailable or a required history key has the wrong type.
+    /// Unreadable indexed rows are counted in `skipped` and make coverage incomplete.
+    #[implements("FR-071-AC-12")]
+    pub fn orders(&mut self, request: &OrderListRequest) -> Result<OrderPage> {
+        let cursor = request.cursor.as_ref();
+        let reply: String = LIST_ORDERS_SCRIPT.run(&mut self.conn, |cmd| {
+            cmd.arg(0)
+                .arg(request.since_ms)
+                .arg(request.until_ms)
+                .arg(request.limit)
+                .arg(cursor.map_or_else(String::new, |c| c.enqueued_at_ms.to_string()))
+                .arg(cursor.map_or("", |c| c.order_id.as_str()))
+                .arg(ORDER_RETENTION_MS)
+                .arg(self.keys.receipt_stream_key())
+                .arg(self.keys.receipt_meta_key());
+        })?;
+        let raw: RawOrderPage =
+            serde_json::from_str(&reply).map_err(|_| Error::UnexpectedScriptReply {
+                script: "orders",
+                reply: "invalid order history response".into(),
+            })?;
+        let truncated = raw.orders.len() > request.limit;
+        let orders: Vec<OrderState> = raw
+            .orders
+            .into_iter()
+            .take(request.limit)
+            .map(|order| {
+                let deadline_at = order
+                    .delivered_at
+                    .unwrap_or(order.enqueued_at)
+                    .saturating_add(order.ack_ms);
+                OrderState {
+                    order_id: order.order_id,
+                    sender: order.sender,
+                    recipient: order.recipient,
+                    receipt_target: order.receipt_target,
+                    expect_ticket: order.expect_ticket,
+                    ack_ms: order.ack_ms,
+                    deadline_at,
+                    enqueued_at_ms: order.enqueued_at,
+                    delivered_at_ms: order.delivered_at,
+                    acted_at_ms: order.acted_at,
+                    state: order.state,
+                    expired: order.expired,
+                }
+            })
+            .collect();
+        let next_cursor = if truncated {
+            orders.last().map(|order| OrderCursor {
+                enqueued_at_ms: order.enqueued_at_ms,
+                order_id: order.order_id.clone(),
+            })
+        } else {
+            None
+        };
+        if truncated && next_cursor.is_none() {
+            return Err(Error::UnexpectedScriptReply {
+                script: "orders",
+                reply: "truncated order history page has no continuation position".into(),
+            });
+        }
+        Ok(OrderPage {
+            orders,
+            truncated,
+            next_cursor,
+            window: OrderWindow {
+                since: request.since_ms,
+                until: request.until_ms,
+                filter: "enqueued_at",
+                order: "newest_first",
+            },
+            limit: request.limit,
+            oldest_available_at: raw.oldest_available_at,
+            complete: raw.complete,
+            incomplete_reason: raw.incomplete_reason,
+            skipped: raw.skipped,
         })
     }
 

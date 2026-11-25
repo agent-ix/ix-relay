@@ -1,6 +1,6 @@
 # CLI reference
 
-This page is generated from the `--help` output of the built binaries (version 0.5.0). Run `<command> --help` for the same text. Every `agent-msg` subcommand also accepts `--url`, `--prefix` and `--human`; [Configuration](configuration.md) describes them.
+This page is generated from the `--help` output of the built binaries (version 0.6.0). Run `<command> --help` for the same text. Every `agent-msg` subcommand also accepts `--url`, `--prefix` and `--human`; [Configuration](configuration.md) describes them.
 
 ## agent-msg
 
@@ -15,6 +15,7 @@ Commands:
   work             Report session scope, focus and agent assignments for the dashboard
   focuses          Durable, revisioned named focus definitions with one owner: create, list, show, update, archive, claim and transfer. Not `focus`, which sets this lane's free-text focus
   send             Send a message to one lead, or to `all`
+  orders           Read all retained order outcomes in a bounded enqueue-time window
   inbox            Print and remove your pending messages
   who              List registered leads
   focus            Set or clear this lead's lane focus
@@ -59,6 +60,52 @@ Options:
       --prefix <PREFIX>  Redis key prefix. Lets tests (and, in principle, separate buses) share one Redis without colliding. Defaults come from `~/.ix/relay/config.toml`, then `IX_RELAY_PREFIX`, then [`relay_core::DEFAULT_PREFIX`]
       --human <HUMAN>    The human inbox `escalate`/`resolve` notify/sign as. Defaults come from `~/.ix/relay/config.toml`'s `human` key, then `IX_RELAY_HUMAN`, then `operator`
   -h, --help             Print help
+```
+
+### agent-msg orders
+
+```text
+Read all retained order outcomes in a bounded enqueue-time window
+
+Usage: agent-msg orders --since <UNIX-MS> --until <UNIX-MS> [--limit <N>]
+       [--cursor '{"enqueued_at": <UNIX-MS>, "order_id": "<ID>"}'] [--json]
+```
+
+`--limit` defaults to 500; `--json` is optional.
+
+Both bounds are inclusive and apply to `enqueued_at`. Pages are newest first by
+`(enqueued_at, order_id)`. The returned `next_cursor` can be passed back as the
+`--cursor` value to continue strictly after the last row, including when several
+orders share one millisecond. `truncated` is true exactly when the response has a
+cursor. Each row preserves the stored `state` and includes `expired`, true when
+the relay recorded `AckExpired` (including when it was later acted).
+`oldest_available_at` is the earliest time the operator-confirmed coverage,
+index start and eight-day order-record retention overlap; it is `null` until
+coverage is confirmed. Rows from the index remain listable before this boundary.
+The page has `complete`, `incomplete_reason` and `skipped`; consumers must require
+`complete: true` on every page. Reason values are `index_not_started`,
+`coverage_unconfirmed`, `outside_retention`, `before_index_start`,
+`before_complete_coverage`, `unreadable_order_records` and
+`unindexed_open_orders`.
+
+Upgrade `agent-msg` on every host that can send orders, and upgrade and restart
+`relay-watcher` on every host that runs it. Then run
+`agent-msg orders coverage confirm`. This records the boundary using Redis server
+time. The command is an operator assertion: an order sent and closed entirely by
+old code after confirmation, including after a rollback whose confirmation was not
+cleared, is undetectable, and `complete` can be true without it. Upgraded code
+removes the confirmation when it closes an unindexed order enqueued at or after the
+boundary; upgrade that sender, then confirm again. Run
+`agent-msg orders coverage clear` before a sender rollback;
+`agent-msg orders coverage show` reports the current boundary. `skipped` counts
+unreadable indexed rows. Rows contain no
+message text or credentials. The read does not change Redis.
+
+`agent-msg orders expired --json` remains available for the older unacted-expiry
+view.
+
+```text
+agent-msg orders coverage confirm|clear|show
 ```
 
 ### agent-msg inbox
