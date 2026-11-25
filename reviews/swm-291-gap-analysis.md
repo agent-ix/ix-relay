@@ -52,3 +52,11 @@ Head `c1945bdb1530cf5892b3209bff4c4bae5118f32f`. `quire matrix` now reports FR-0
 | --- | ------- | ------ |
 | FND-001 | fixed | The launcher tests carry `#[trace("FR-006-AC-3")]` (3 unit tests and 3 binary tests), and `quire matrix` reports the criterion tagged. TC-006-03 in spec/tests.md now names the Rust tests. |
 | FND-002 | fixed | The new FR-073 owns check-test-matrix, the archive and the capture hook, with AC-1..4 tagged by the relay-tools tests, rows TC-073-01..04, and updated GAP-001 and category totals (`make check-matrix`: 377 rows, consistent). |
+| FND-003 | fixed | Round 2, head `d2ec890`. FR-073:26 now says only totals made entirely of numeric characters that are not all ASCII digits are reported, and other text is ignored, which matches matrix.rs. |
+| FND-004 | fixed | Round 2, head `d2ec890`. The stray ",." is gone from FR-073:25 and FR-073:27. |
+
+## New findings (disposition pass 2)
+
+| ID      | Severity | Summary | Refs |
+| ------- | -------- | ------- | ---- |
+| FND-005 | low | The reworded FR-073:26 bullet now holds two obligations: it SHALL report a non-ASCII numeric total, and SHALL ignore other text. `quire validate` warns `ears:non-singular`, and the warning is new in this PR because FR-073 is new. Split it into two bullets, one per `shall`. | spec/functional/FR-073-operator-tools.md:26 |

@@ -23,7 +23,8 @@ their own terminal context is owned by [FR-006](./FR-006-registration-records-pl
 - `check-test-matrix` SHALL print every problem, sorted, and exit 1 when there is one.
 - `check-test-matrix` SHALL print the recount and exit 0 when there is none.
 - `check-test-matrix` SHALL count a Test Case row after any Unicode line break as a row.
-- `check-test-matrix` SHALL report a Test Execution Summary total made entirely of numeric characters that are not all ASCII digits (such as `²`) as a problem, and SHALL ignore a total cell that holds other text.
+- `check-test-matrix` SHALL report a Test Execution Summary total made entirely of numeric characters that are not all ASCII digits (such as `²`) as a problem.
+- `check-test-matrix` SHALL ignore a Test Execution Summary total cell that holds other text.
 - `archive-relay-namespace` SHALL write the keys of a named prior namespace (never the `ixr:v3:` namespace, never an empty prefix) to a new file with their binary-safe dumps and remaining TTLs.
 - `archive-relay-namespace` SHALL NOT write to, delete from or modify the source.
 - `archive-relay-namespace` SHALL create the output exclusively with mode 0600 so an existing archive is never overwritten.

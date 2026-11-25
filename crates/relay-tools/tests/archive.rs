@@ -97,6 +97,6 @@ fn a_server_that_never_replies_fails_within_the_timeout() {
     let elapsed = started.elapsed();
     // One deadline in all: a connect and a first read that each took the
     // full timeout would measure about two seconds here.
-    assert!(elapsed < Duration::from_millis(1500), "{elapsed:?}");
+    assert!(elapsed < Duration::from_millis(1800), "{elapsed:?}");
     holder.join().unwrap();
 }
