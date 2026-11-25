@@ -60,3 +60,9 @@ Head `c1945bdb1530cf5892b3209bff4c4bae5118f32f`. `quire matrix` now reports FR-0
 | ID      | Severity | Summary | Refs |
 | ------- | -------- | ------- | ---- |
 | FND-005 | low | The reworded FR-073:26 bullet now holds two obligations: it SHALL report a non-ASCII numeric total, and SHALL ignore other text. `quire validate` warns `ears:non-singular`, and the warning is new in this PR because FR-073 is new. Split it into two bullets, one per `shall`. | spec/functional/FR-073-operator-tools.md:26 |
+
+## Dispositions (disposition pass 2 findings)
+
+| FND | outcome | reason |
+| --- | ------- | ------ |
+| FND-005 | fixed | Round 3, head `8429ddd6e7be336bae43c988c8274415b0fdbc8f`. FR-073:26 is split into two bullets with one `shall` each. `quire validate` on FR-073 exits 0 and reports no `ears:non-singular` warning. |
