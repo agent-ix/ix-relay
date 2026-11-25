@@ -242,6 +242,18 @@ fn all_order_statuses_are_listed_in_stable_read_only_pages() {
                 .arg(at - 100)
                 .exec(&mut bus.raw)
                 .unwrap();
+        } else if position == 1 {
+            redis::cmd("HSET")
+                .arg(&order_key)
+                .arg("acted_at")
+                .arg(at + 50)
+                .exec(&mut bus.raw)
+                .unwrap();
+            redis::cmd("HDEL")
+                .arg(&order_key)
+                .arg("delivered_at")
+                .exec(&mut bus.raw)
+                .unwrap();
         } else {
             redis::cmd("HDEL")
                 .arg(&order_key)
@@ -354,6 +366,7 @@ fn all_order_statuses_are_listed_in_stable_read_only_pages() {
     assert_eq!(fourth_json["truncated"], true);
     assert_eq!(fourth_json["orders"][0]["state"], "expired");
     assert_eq!(fourth_json["orders"][0]["expired"], true);
+    assert_eq!(fourth_json["orders"][0]["acted_at"], at + 50);
     let fifth = read(Some(
         serde_json::to_string(&fourth_json["next_cursor"].clone()).unwrap(),
     ));
