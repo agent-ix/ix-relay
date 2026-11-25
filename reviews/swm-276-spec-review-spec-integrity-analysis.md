@@ -28,3 +28,12 @@ Clean: the bullet sits in the right section, after the skip/drop counting bullet
 | --- | --- | --- | --- |
 | FND-001 | high | FR-068-AC-14 and the new bullet claim that a lock-skipped update is returned to its caller as skipped and none is lost silently. In production `update()` discards `try_update`'s result, so every lock skip is silent and uncounted (module doc: "an uncounted event"). The AC-14 test exercises only the private `try_update` | spec/functional/FR-068-hook-activity-events.md:137 |
 | FND-002 | low | "within the lock bound" / "a bounded wait" never states the bound (50 ms, `LOCK_WAIT`); the test asserts `< 500 ms`, so two readers would derive different pass thresholds | spec/functional/FR-068-hook-activity-events.md:103 |
+
+## Dispositions
+
+Round 1, fix head `5d430030829a5d07f38e9a373f4f2ae7ddc51655`.
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | The bullet now says a lock-waiting update "SHALL be dropped and not counted … and no update that was applied SHALL be lost", and points to SWM-293 (Backlog, Fleet W1) for making drops visible. That matches `update()` discarding the result and the module doc. |
+| FND-002 | fixed | The bullet states "wait for it at most 50 milliseconds"; AC-14 says "within the 50 millisecond lock bound plus a margin for scheduling"; the test asserts `waited >= LOCK_WAIT` and `< LOCK_WAIT + 450 ms`. |

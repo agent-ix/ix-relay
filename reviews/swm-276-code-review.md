@@ -64,6 +64,12 @@ Round 1, fix head `56266b17b52d5ee4c0a6bcdf8a7455b859ad156b` (cff98b1, 56266b1 a
 | FND-006 | fixed | The comment now says 3300 ms for SessionStart. |
 | FND-007 | fixed | The test is renamed `concurrent_updates_are_each_applied_or_returned_skipped_and_a_held_lock_never_blocks` and asserts `counted > 0`. |
 
+Round 2, fix head `5d430030829a5d07f38e9a373f4f2ae7ddc51655`. This artifact was renumbered SR-6118 → SR-6121 (and the gap analysis SR-6119 → SR-6122) to avoid the ids that SWM-277 (#63) took on main. Earlier Linear comments carry the old ids. Reviewer gate on 5d43003: `cargo fmt --check` and workspace clippy `-D warnings` clean; `cargo test -p relay-core` and the agent-msg bin unit tests plus `doctor`, `hook`, `hook_stdin` and `stranded_notice` against native redis-server 8.10.2 on a random port: 758 passed, 0 failed, at load up to 37.
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-008 | fixed | `canonical_dump` sorts only `hash` and `set`. Every other type, including unknown ones, returns `DUMP`, so stream metadata and pending-entry ownership are compared again. |
+
 ## New findings (disposition pass 1)
 
 | ID | Severity | Summary | Refs |

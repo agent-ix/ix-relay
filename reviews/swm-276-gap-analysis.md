@@ -55,3 +55,9 @@ Round 1, fix head `56266b17b52d5ee4c0a6bcdf8a7455b859ad156b`.
 | FND-001 | fixed | The env knob is removed from `doctor/facts.rs`, so no unowned production behaviour remains and FR-029's 5 s bound holds unconditionally. |
 | FND-002 | fixed | `address.rs` runs as `hub:EA:code`, so it used `write_transport_herdr`, which was the Python stub that was replaced. The coder reports 8 green load iterations of it after the switch, plus 5/5 full workspace runs at load 10–52. That meets the 5/5 acceptance box. |
 | FND-003 | still-open | The test is retagged to the new FR-068-AC-14, but AC-14 and the new FR-068 bullet claim a skipped update is "returned to its caller as skipped" and "none is lost silently". The production entry points (`unregistered`, `dropped`, `failed`, `succeeded`) go through `update()`, which discards `try_update`'s result (`let _ =`), and the module doc calls the skip "an uncounted event". The test calls `try_update` directly, so it cannot catch this. See SR-6120 FND-001. |
+
+Round 2, fix head `5d430030829a5d07f38e9a373f4f2ae7ddc51655` (artifact renumbered from SR-6119; see SR-6121).
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-003 | fixed | FR-068-AC-14 now states the real design (the file holds exactly the updates that took the lock; a held lock drops the update uncounted within 50 ms plus scheduling margin). The test asserts exactly that through the same path production uses (`unregistered` for the held-lock half), so the binding is correct. |
