@@ -65,16 +65,18 @@ const ENV_WATCHER_INTERVAL_SECS: &str = "IX_RELAY_WATCHER_INTERVAL_SECS";
 
 /// How `relay-watcher` gets a popped batch into a lead's session (FR-044).
 ///
-/// Off by default: an unset `[watcher] delivery` is [`DeliveryMode::Herdr`], so
-/// nothing changes for anyone who has not opted in.
+/// Sockets are used by default: an unset `[watcher] delivery` is
+/// [`DeliveryMode::Socket`], so a Claude Code session that has an inbox socket is
+/// never typed into unless the operator writes `delivery = "herdr"`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DeliveryMode {
-    /// Type the batch in through `herdr agent prompt` (the default).
-    #[default]
+    /// Switch inbox sockets off: every batch is typed in through `herdr agent prompt`,
+    /// Claude Code sessions with a socket included.
     Herdr,
-    /// Post the batch to the lead's Claude Code inbox socket, and fall back to
-    /// herdr for a batch the socket certainly did not take.
+    /// Post to the lead's Claude Code inbox socket whenever its session has one; type
+    /// through herdr only into a lead that has none (the default).
+    #[default]
     Socket,
 }
 
@@ -106,7 +108,7 @@ pub struct WatcherFile {
     pub otlp_headers: Option<toml::Value>,
     /// Seconds between pushes (at least 5); raw like `otlp_endpoint`.
     pub otlp_interval_secs: Option<toml::Value>,
-    /// How batches reach a lead: `"herdr"` (default) or `"socket"`. A raw value, tolerated
+    /// How batches reach a lead: `"socket"` (default) or `"herdr"`. A raw value, tolerated
     /// like the OTLP keys: only `relay-watcher` validates it ([`load`]), so a typo never
     /// stops `agent-msg` or a hook, and `agent-msg doctor` reports it
     /// ([`watcher_delivery`]).
@@ -262,7 +264,7 @@ pub struct Settings {
     pub watcher_interval_secs: Resolved<u64>,
     /// Where the watcher pushes OTLP metrics, if anywhere (FR-045).
     pub watcher_otlp: otlp::OtlpSettings,
-    /// `[watcher] delivery`: [`DeliveryMode::Herdr`] unless the file opts in.
+    /// `[watcher] delivery`: [`DeliveryMode::Socket`] unless the file says `"herdr"`.
     pub delivery: DeliveryMode,
     /// `[fleet]`: the collector host profile, raw (validated by the watcher).
     pub fleet: FleetFile,
@@ -458,19 +460,19 @@ struct StrictDelivery {
     delivery: Option<DeliveryMode>,
 }
 
-/// The file's `[watcher] delivery`, validated: [`DeliveryMode::Herdr`] when absent.
+/// The file's `[watcher] delivery`, validated: [`DeliveryMode::Socket`] when absent.
 /// Only reads the file again when it holds the key, so the typed read reports a
 /// typo at its real line and column. Only the watcher and `agent-msg doctor` call
 /// this: every other binary loads the raw value and ignores it.
 fn delivery_from_file(file: &FileConfig) -> Result<DeliveryMode, ConfigError> {
     if file.watcher.delivery.is_none() {
-        return Ok(DeliveryMode::Herdr);
+        return Ok(DeliveryMode::Socket);
     }
     let Some(path) = config_path() else {
-        return Ok(DeliveryMode::Herdr);
+        return Ok(DeliveryMode::Socket);
     };
     let Ok(text) = std::fs::read_to_string(&path) else {
-        return Ok(DeliveryMode::Herdr);
+        return Ok(DeliveryMode::Socket);
     };
     match toml::from_str::<StrictDeliveryFile>(&text) {
         Ok(strict) => Ok(strict.watcher.delivery.unwrap_or_default()),
@@ -700,7 +702,7 @@ mod tests {
     /// Tracing: TC-044-01
     /// ACs: FR-044-AC-1
     #[test]
-    fn tc_044_01_the_mode_is_herdr_unless_the_file_says_socket() {
+    fn tc_044_01_the_mode_is_socket_unless_the_file_says_herdr() {
         let _guard = ENV_LOCK.lock().unwrap();
         let mode = |toml: &str| {
             let dir = scratch_dir("delivery-mode");
@@ -710,10 +712,10 @@ mod tests {
             std::fs::remove_dir_all(&dir).ok();
             loaded
         };
-        assert_eq!(mode("").unwrap(), DeliveryMode::Herdr);
+        assert_eq!(mode("").unwrap(), DeliveryMode::Socket);
         assert_eq!(
             mode("[watcher]\ninterval_secs = 3\n").unwrap(),
-            DeliveryMode::Herdr
+            DeliveryMode::Socket
         );
         assert_eq!(
             mode("[watcher]\ndelivery = \"herdr\"\n").unwrap(),

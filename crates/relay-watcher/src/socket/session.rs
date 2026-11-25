@@ -12,6 +12,7 @@ use std::{
     io::Read,
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use claude_wire::{KNOWN_PEER_PROTOCOL, MIN_VERSION, RecordVerdict, SessionRecord};
@@ -33,6 +34,12 @@ pub trait Procs {
     fn domain(&self) -> Option<String>;
     /// The user id this process runs as, `None` when it cannot be told.
     fn uid(&self) -> Option<u32>;
+    /// Whether the process that was `pid` starting at `started` no longer exists.
+    /// `false` when it cannot be told: a receiver is never taken for gone on a
+    /// failed look.
+    fn gone(&self, pid: u32, started: &str) -> bool {
+        self.start_time(pid).as_deref() != Some(started)
+    }
 }
 
 /// Operating-system process identity, matching Claude Code's session records.
@@ -40,6 +47,18 @@ pub trait Procs {
 pub struct ProcFs;
 
 impl Procs for ProcFs {
+    fn gone(&self, pid: u32, started: &str) -> bool {
+        match self.start_time(pid) {
+            Some(now) => now != started,
+            // The look can fail for a live process (`ps` timing out): only the
+            // kernel saying there is no such process counts.
+            None => i32::try_from(pid).is_ok_and(|pid| {
+                nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None)
+                    == Err(nix::errno::Errno::ESRCH)
+            }),
+        }
+    }
+
     fn start_time(&self, pid: u32) -> Option<String> {
         #[cfg(target_os = "macos")]
         {
@@ -58,7 +77,7 @@ impl Procs for ProcFs {
                         "-p",
                         &pid.to_string(),
                     ],
-                    std::time::Duration::from_secs(1),
+                    Duration::from_secs(1),
                 )
                 .ok()?;
             if !output.success {
@@ -124,6 +143,12 @@ pub enum Unresolved {
     /// The record names no usable socket: not the process's own `<pid>.sock`, not
     /// in an expected directory, not owned by this user, or open to others.
     NoSocket(String),
+    /// Every live process holding the session has handed its terminal to a background
+    /// job (the job id): its socket queues mail that is never consumed.
+    Parked(String),
+    /// The session has no inbox socket at all: its live record names none and no
+    /// socket of its process exists. The only case a Claude Code lead is typed into.
+    NoInboxSocket,
 }
 
 impl std::fmt::Display for Unresolved {
@@ -155,8 +180,32 @@ impl std::fmt::Display for Unresolved {
                 MIN_VERSION.2
             ),
             Self::NoSocket(why) => write!(f, "the session record has no usable socket: {why}"),
+            Self::Parked(job) => write!(
+                f,
+                "the session is parked (its terminal shows background job {job}), so it \
+                 consumes no mail until it is resumed"
+            ),
+            Self::NoInboxSocket => f.write_str("the session has no inbox socket"),
         }
     }
+}
+
+/// How long after a session starts a record without a socket path is not yet proof
+/// that it has none: Claude Code writes the record first and publishes the socket
+/// into it once bound.
+const SOCKET_PUBLISH_GRACE: Duration = Duration::from_secs(60);
+
+/// Whether `record`'s process is old enough that a socket would have been published.
+fn past_publish_grace(record: &SessionRecord) -> bool {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_millis()).ok());
+    let grace = i64::try_from(SOCKET_PUBLISH_GRACE.as_millis()).unwrap_or(i64::MAX);
+    matches!(
+        (now, record.started_at),
+        (Some(now), Some(started)) if now.saturating_sub(started) >= grace
+    )
 }
 
 fn read_record(path: &Path) -> Option<SessionRecord> {
@@ -167,6 +216,22 @@ fn read_record(path: &Path) -> Option<SessionRecord> {
         .read_to_end(&mut bytes)
         .ok()?;
     SessionRecord::parse(&bytes)
+}
+
+/// Whether any record in `sessions_dir` names `session` together with a socket,
+/// whether or not its process can be checked: for a watcher that cannot use sockets
+/// and must still not treat such a session as one without.
+pub fn advertises(sessions_dir: &Path, session: &str) -> bool {
+    let Ok(entries) = fs::read_dir(sessions_dir) else {
+        return false;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .take(MAX_RECORDS)
+        .filter_map(|p| read_record(&p))
+        .any(|r| r.session_id == session && r.messaging_socket_path.is_some())
 }
 
 /// The socket of the live Claude Code process holding `session`, looked up in
@@ -212,6 +277,35 @@ pub fn resolve(
     if live.is_empty() {
         return Err(Unresolved::Stale(total));
     }
+    let parked = live.iter().find_map(|r| r.parked_job_id.clone());
+    live.retain(|r| r.parked_job_id.is_none());
+    if let Some(job) = parked.clone().filter(|_| live.is_empty()) {
+        return Err(Unresolved::Parked(job));
+    }
+    if live.iter().all(|r| r.messaging_socket_path.is_none()) {
+        // A parked process may still show another conversation in the pane herdr
+        // names for this session, so the session is not proven to be typed into safely.
+        if let Some(job) = parked {
+            return Err(Unresolved::Parked(job));
+        }
+        let unnamed = live.iter().any(|r| {
+            socket_dirs
+                .iter()
+                .any(|dir| dir.join(format!("{}.sock", r.pid)).exists())
+        });
+        if unnamed {
+            return Err(Unresolved::NoSocket(
+                "messagingSocketPath is absent but a socket of this process exists".to_owned(),
+            ));
+        }
+        if !live.iter().all(past_publish_grace) {
+            return Err(Unresolved::NoSocket(
+                "messagingSocketPath is not published yet".to_owned(),
+            ));
+        }
+        return Err(Unresolved::NoInboxSocket);
+    }
+    live.retain(|r| r.messaging_socket_path.is_some());
     if live
         .iter()
         .any(|r| r.kind.as_deref() == Some("interactive"))

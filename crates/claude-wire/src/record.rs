@@ -3,7 +3,8 @@
 //! Pure parsing: reading the file, checking the process and the socket stay
 //! with the caller. **Provenance:** the field names (`sessionId`, `procStart`,
 //! `pidDomain`, `kind`, `version`, `peerProtocol`, `messagingSocketPath`) were
-//! captured live from Claude Code 2.1.283; `MIN_VERSION` is the oldest
+//! captured live from Claude Code 2.1.283 (`startedAt` and `parkedJobId` from
+//! 2.1.332); `MIN_VERSION` is the oldest
 //! version the upstream documentation says has the inbox socket. The record has
 //! many other fields, ignored on purpose.
 
@@ -54,6 +55,12 @@ pub struct SessionRecord {
     pub peer_protocol: Option<u32>,
     /// The inbox socket it bound.
     pub messaging_socket_path: Option<PathBuf>,
+    /// Set while this process has handed its terminal to a background job: it still
+    /// holds its socket and queues what is posted there, but consumes none of it
+    /// (read from Claude Code 2.1.332, whose own peer lookup skips such a record).
+    pub parked_job_id: Option<String>,
+    /// When the process started its session, Unix milliseconds.
+    pub started_at: Option<i64>,
 }
 
 /// Whether a record describes a Claude Code this crate knows how to talk to.
@@ -137,6 +144,8 @@ mod tests {
             version: version.map(str::to_owned),
             peer_protocol: protocol,
             messaging_socket_path: socket.then(|| PathBuf::from("/r/1.sock")),
+            parked_job_id: None,
+            started_at: None,
         }
     }
 

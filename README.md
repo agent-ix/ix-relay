@@ -2,7 +2,7 @@
 
 ix-relay is a message bus that lets AI coding-agent team leads on different machines message each other.
 
-Each lead runs in a Herdr tab under Claude Code, Codex or opencode. On every machine, `agent-msg` sends and reads messages, and `relay-watcher` types queued messages into idle leads. The queues, the address directory and an escalation inbox for decisions that need a human live in one Redis, relay-redis, on a hub machine that every other machine reaches over WireGuard. Only leads use the bus; subagents report through their harness.
+Each lead runs in a Herdr tab under Claude Code, Codex or opencode. On every machine, `agent-msg` sends and reads messages, and `relay-watcher` delivers queued messages: to a Claude Code session through its inbox socket, and to a lead that has no socket by typing into its pane while it is idle. The queues, the address directory and an escalation inbox for decisions that need a human live in one Redis, relay-redis, on a hub machine that every other machine reaches over WireGuard. Only leads use the bus; subagents report through their harness.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/topology-dark.svg">
@@ -33,6 +33,8 @@ Matching ignores case. Quote an address that contains spaces. Renames and moves 
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/delivery-dark.svg">
   <img alt="A send looks up the recipient in the directory and queues the message in the recipient's inbox. A working lead gets it from a hook, a starting lead from the SessionStart hook, an idle lead from relay-watcher, and a blocked lead keeps it queued while the operator is notified once." src="docs/images/delivery-light.svg">
 </picture>
+
+A Claude Code session with an inbox socket gets its mail through that socket and is never typed into; the figure shows a lead without one.
 
 A send prints the recipient's state after `queued for`, for example `queued for hub:team:code (watcher heartbeat from hub (last tick 3s ago), 1 waiting)`. [How it works](docs/how-it-works.md) describes the directory leases, enrollment and the hooks.
 

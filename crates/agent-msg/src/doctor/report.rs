@@ -176,7 +176,8 @@ pub(crate) enum Code {
     ServiceUnknown,
     /// Claude Code holds a lead's relay mail behind an approval prompt.
     SocketHeld,
-    /// Batches for a lead went to herdr because its socket could not be used.
+    /// A Claude Code lead's mail is waiting or in trouble: its socket could not be
+    /// used. Nothing is typed.
     SocketFallback,
     /// The watcher dead-lettered a batch on its own account (denied, or held past the
     /// maximum hold).
@@ -190,6 +191,13 @@ pub(crate) enum Code {
     /// A transcript line names a message id without a structured `origin.msg_id`: the
     /// transcript's shape may have changed; the batch is acknowledged as received but unconfirmed.
     SocketTranscriptShapeUnrecognised,
+    /// `delivery = "herdr"` is configured: sockets are switched off and every lead is
+    /// typed into.
+    SocketDisabled,
+    /// The watcher cannot use inbox sockets on its host, so socket leads wait.
+    SocketUnavailable,
+    /// A posted message is not confirmed consumed.
+    SocketUnconsumed,
 }
 
 impl Code {
@@ -486,6 +494,9 @@ mod tests {
             Code::SocketStatusUnknown => "socket_status_unknown",
             Code::SocketWireDrift => "socket_wire_drift",
             Code::SocketTranscriptShapeUnrecognised => "socket_transcript_shape_unrecognised",
+            Code::SocketDisabled => "socket_disabled",
+            Code::SocketUnavailable => "socket_unavailable",
+            Code::SocketUnconsumed => "socket_unconsumed",
         }
     }
 
@@ -549,6 +560,9 @@ mod tests {
             Code::SocketStatusUnknown,
             Code::SocketWireDrift,
             Code::SocketTranscriptShapeUnrecognised,
+            Code::SocketDisabled,
+            Code::SocketUnavailable,
+            Code::SocketUnconsumed,
         ] {
             assert_eq!(code.name(), pinned(code));
         }

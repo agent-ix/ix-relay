@@ -141,6 +141,10 @@ pub fn base_cmd(args: &[&str], name: Option<&str>) -> Command {
     cmd.env("IX_RELAY_CONFIG", nonexistent_config_path());
     cmd.env_remove("HERDR_PANE_ID");
     cmd.env_remove("CODEX_THREAD_ID");
+    // The runner may itself be a Claude Code session with an inbox socket; a hook
+    // under test must not see that one, nor the real session registry.
+    cmd.env_remove("CLAUDE_CODE_MESSAGING_SOCKET");
+    cmd.env("IX_RELAY_CLAUDE_DIR", "/nonexistent/ix-relay-test-claude");
     cmd.env_remove("HERDR_ENV");
     if matches!(name, Some("hub:EA:code" | "hub:EA:sender" | "hub:qsl:code")) {
         let config = cmd

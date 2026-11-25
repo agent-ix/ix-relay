@@ -4,8 +4,8 @@
 //! `~/.ix/relay/state/socket/socket-<watcher pid>.json` and read by `agent-msg doctor`,
 //! which cannot see the watcher's memory. One file per watcher process, so two
 //! watchers on one machine never overwrite each other and doctor reports each
-//! live one. The files exist only when `[watcher] delivery = "socket"`; with the
-//! default (herdr) nothing writes them.
+//! live one. The files exist only when sockets are used (the default); with
+//! `[watcher] delivery = "herdr"` nothing writes them.
 
 use std::{
     fs, io,
@@ -128,8 +128,9 @@ pub struct LeadSocket {
     pub version: String,
 }
 
-/// A batch whose message Claude Code is holding behind an approval prompt, kept
-/// so a restarted watcher goes on renewing its lease instead of posting it again.
+/// A posted batch not yet settled (held behind an approval prompt, or not yet
+/// consumed), kept so a restarted watcher goes on renewing its lease instead of
+/// posting it again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeldBatch {
     /// The lead whose batch it is.
@@ -147,6 +148,19 @@ pub struct HeldBatch {
     /// restart, and an approved message is never dead-lettered as never approved.
     #[serde(default)]
     pub delivered_since_ms: Option<i64>,
+    /// Fully posted, awaiting consumption rather than an approval decision.
+    #[serde(default)]
+    pub awaiting_consumption: bool,
+    /// The Claude Code process it was posted to.
+    #[serde(default)]
+    pub pid: Option<u32>,
+    /// That process's start time: with the pid, whether the receiver still exists.
+    #[serde(default)]
+    pub proc_start: Option<String>,
+    /// Where the receiver's transcript ended before the line was written: where a
+    /// restarted watcher looks for the message from.
+    #[serde(default)]
+    pub transcript_from: Option<u64>,
 }
 
 /// A decision about a batch whose write to the bus has not succeeded yet, kept so a
@@ -522,8 +536,8 @@ pub struct SocketStatus {
     pub start_time: Option<String>,
     /// When it was written, Unix milliseconds.
     pub updated_at_ms: i64,
-    /// The watcher's own reply socket, `None` when it could not be bound (every
-    /// batch then goes to herdr).
+    /// The watcher's own reply socket, `None` when it could not be bound (Claude Code
+    /// mail then waits).
     pub reply_socket: Option<String>,
     /// The leads whose socket was resolved by their last delivery.
     pub leads: Vec<LeadSocket>,
@@ -545,8 +559,12 @@ pub struct SocketStatus {
     #[serde(default)]
     pub versions: Vec<VersionDrift>,
     /// One line per lead the socket cannot be used for (no record, unsupported
-    /// version, ambiguous), and why; these batches go to herdr.
+    /// version, ambiguous, parked), and why; their mail waits, queued or in flight.
     pub notes: Vec<String>,
+    /// Why this watcher cannot use inbox sockets at all on this host, when it
+    /// cannot: every Claude Code lead then waits.
+    #[serde(default)]
+    pub unavailable: Option<String>,
 }
 
 impl SocketStatus {
@@ -642,6 +660,10 @@ mod tests {
                 session: "s".into(),
                 since_ms: 5,
                 delivered_since_ms: Some(6),
+                awaiting_consumption: false,
+                pid: Some(3),
+                proc_start: Some("100".into()),
+                transcript_from: Some(8),
             }],
             owed: vec![OwedSettlement {
                 lead: "b".into(),
@@ -663,6 +685,7 @@ mod tests {
                 book.snapshot(7_000)
             },
             notes: vec!["c: no record".into()],
+            unavailable: Some("no XDG_RUNTIME_DIR".into()),
         };
         status.write(&path).unwrap();
         assert_eq!(SocketStatus::read(&path).unwrap(), status);

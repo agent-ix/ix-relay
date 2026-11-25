@@ -11,13 +11,16 @@
 //! the tick loop has a hook per concern and none of the logic.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     time::{Duration, Instant},
 };
 
 use relay_core::{
     AgentName, MachineName, Relay,
-    health::{HeartbeatError, HeartbeatErrorKind, MAX_PROBLEM_CHARS, WatcherHeartbeat},
+    health::{
+        HeartbeatError, HeartbeatErrorKind, MAX_HERDR_WAITING_LEADS, MAX_PROBLEM_CHARS,
+        WatcherHeartbeat,
+    },
 };
 use relay_ops::herdr_check::HerdrCheck;
 
@@ -82,6 +85,8 @@ pub struct Liveness {
     pub leads_watched: u32,
     /// When each lead's liveness was last checked for the registration refresh.
     pub(crate) touch_checked: HashMap<AgentName, Instant>,
+    /// The leads with mail that waits because herdr cannot be read (FR-036).
+    pub(crate) herdr_waiting: BTreeSet<AgentName>,
     /// A herdr call failed to decode and the check has not run since.
     decode_failure_pending: bool,
     /// The herdr check outstanding on its own thread, if any.
@@ -95,6 +100,7 @@ impl Default for Liveness {
             gate: HerdrGate::new(crate::PLACE_REFRESH_EVERY),
             leads_watched: 0,
             touch_checked: HashMap::new(),
+            herdr_waiting: BTreeSet::new(),
             decode_failure_pending: false,
             running: None,
         }
@@ -170,6 +176,15 @@ impl Liveness {
         }
     }
 
+    /// Records whether `lead`'s mail waits because herdr cannot be read.
+    pub fn herdr_waiting(&mut self, lead: &AgentName, waiting: bool) {
+        if waiting {
+            self.herdr_waiting.insert(lead.clone());
+        } else {
+            self.herdr_waiting.remove(lead);
+        }
+    }
+
     /// Whether the watcher must type into no pane: herdr's output is in a shape
     /// ix-relay cannot read (FR-036).
     #[must_use]
@@ -204,6 +219,12 @@ impl Liveness {
     ) -> relay_core::Result<()> {
         let leads = self.leads_watched;
         let herdr = self.gate.status().clone();
+        let waiting: Vec<AgentName> = self
+            .herdr_waiting
+            .iter()
+            .take(MAX_HERDR_WAITING_LEADS)
+            .cloned()
+            .collect();
         let Some(beat) = self.beat.as_mut() else {
             return result;
         };
@@ -218,7 +239,10 @@ impl Liveness {
         }) {
             return Ok(());
         }
-        let heartbeat = beat.snapshot(now_ms, leads, &herdr);
+        let mut heartbeat = beat.snapshot(now_ms, leads, &herdr);
+        if herdr.blocks_delivery() {
+            heartbeat.herdr_waiting_leads = waiting;
+        }
         match relay.write_heartbeat(&heartbeat, beat.config.ttl) {
             Ok(()) => {
                 beat.last_write_ms = Some(now_ms);
@@ -271,6 +295,7 @@ impl Beat {
             // meaning `doctor` gives it locally.
             herdr_ok: !herdr.is_problem(),
             herdr_blocks_delivery: herdr.blocks_delivery(),
+            herdr_waiting_leads: Vec::new(),
             herdr_problem: herdr
                 .is_problem()
                 .then(|| herdr.problem())

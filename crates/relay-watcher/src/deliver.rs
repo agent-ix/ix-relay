@@ -2,17 +2,32 @@
 //!
 //! [`Deliverer`] is the seam between the watcher's decision (is this lead
 //! ready, has it changed under us, what do we do when delivery fails) and the
-//! transport that types the text in. `herdr agent prompt` ([`crate::herdr::RealHerdr`])
-//! is the only implementation today; a Claude Code inbox-socket transport is
-//! meant to be a second one, so a transport reports only what the decision
-//! needs: whether it is certain nothing was sent ([`DeliverError::NotSent`],
+//! transports. There are two: the session's inbox socket, and `herdr agent prompt`
+//! ([`crate::herdr::RealHerdr`]), which types into the terminal. A lead is on exactly
+//! one of them at a time ([`Route`]): a Claude Code session with an inbox socket is
+//! never typed into, whatever happens to a post. A transport reports only what the
+//! decision needs: whether it is certain nothing was sent ([`DeliverError::NotSent`],
 //! the batch goes back to the front of the inbox) or not
-//! ([`DeliverError::Ambiguous`], it does not, or the batch could be typed twice).
+//! ([`DeliverError::Ambiguous`], it does not, or the batch could be delivered twice).
 
 use std::fmt;
 
 use herdr_cli::ProcessError;
 use relay_core::{BatchId, PaneId, SessionId};
+
+/// How a lead's mail may reach it now (FR-044).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    /// The session has no inbox socket at all (its own record names none, another harness
+    /// whose session no record names, or `delivery = "herdr"`): typed into its pane,
+    /// after the session and readiness checks.
+    Terminal,
+    /// The session has an inbox socket: posted to it, whatever the pane is doing.
+    Socket,
+    /// A Claude Code session whose socket cannot take mail now, or whose lack of one
+    /// cannot be shown: nothing is popped and nothing is typed. The text says why.
+    Wait(String),
+}
 
 /// Why a delivery failed, in the only terms the caller acts on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +38,8 @@ pub enum DeliverError {
     /// Input may have reached the session (a timeout, an unrecognised failure).
     /// Retrying could type the batch twice, so it is not retried.
     Ambiguous(String),
+    /// Posted through a socket; ownership is retained until consumption is known.
+    Pending(String),
     /// The session's Claude Code holds the batch behind an approval prompt (a
     /// bypass-mode receiver without `crossSessionInbound: "accept"`). It is in
     /// the session's hold queue, so it is neither requeued nor sent again by
@@ -48,6 +65,7 @@ impl fmt::Display for DeliverError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (Self::NotSent(why)
         | Self::Ambiguous(why)
+        | Self::Pending(why)
         | Self::Held(why)
         | Self::Deferred(why)
         | Self::Postponed(why)
@@ -72,8 +90,7 @@ impl From<ProcessError> for DeliverError {
 pub struct BatchTarget<'a> {
     /// The lead's bus name.
     pub lead: &'a str,
-    /// The harness kind the lead registered (`claude`, `codex`, ...): the socket is tried
-    /// only for a Claude Code lead (FR-054).
+    /// The harness kind the lead registered (`claude`, `codex`, ...).
     pub kind: &'a str,
     /// The in-flight batch being delivered.
     pub batch: BatchId,
@@ -90,8 +107,6 @@ pub struct BatchTarget<'a> {
 pub struct RegisteredLead<'a> {
     /// The lead's bus name.
     pub name: &'a str,
-    /// The harness kind it registered.
-    pub kind: &'a str,
     /// Whether the registration is on this watcher's machine.
     pub here: bool,
 }
@@ -132,9 +147,29 @@ pub enum SettleAction {
     Renew(std::time::Duration),
 }
 
-/// Types `text` into the session in `pane` and submits it.
+/// Gets a batch into a lead's session: typed into its pane, or posted to its socket.
 pub trait Deliverer {
-    /// Delivers one rendered batch.
+    /// Which transport may carry this lead's mail now. Asked before anything is popped.
+    /// The default transport only types.
+    fn route(&self, _lead: &str, _kind: &str, _session: Option<&SessionId>) -> Route {
+        Route::Terminal
+    }
+
+    /// Posts a batch to the lead's inbox socket; only for a lead [`Deliverer::route`]
+    /// put on [`Route::Socket`]. Never types.
+    ///
+    /// # Errors
+    ///
+    /// [`DeliverError`]. The default has no socket, so nothing is sent.
+    fn post(
+        &self,
+        _target: &BatchTarget<'_>,
+        _text: &str,
+    ) -> Result<relay_core::receipts::DeliveryEvidence, DeliverError> {
+        Err(DeliverError::NotSent("no socket transport".to_owned()))
+    }
+
+    /// Types one rendered batch into `pane` and submits it.
     ///
     /// # Errors
     ///
@@ -147,8 +182,8 @@ pub trait Deliverer {
     ///
     /// # Errors
     ///
-    /// As [`Deliverer::deliver`], and [`DeliverError::Held`] for a transport that
-    /// can tell a batch is being held for approval.
+    /// As [`Deliverer::deliver`], and [`DeliverError::Deferred`] when the lead may no
+    /// longer be typed into (it is off [`Route::Terminal`]).
     fn deliver_to(
         &self,
         _target: &BatchTarget<'_>,
@@ -176,6 +211,12 @@ pub trait Deliverer {
     /// decision only once the write is confirmed, and returns it again until then.
     /// The default ignores it.
     fn applied(&self, _settlement: &Settlement, _result: &Result<usize, String>) {}
+
+    /// Whether the transport still has a send to the lead that it has not settled. The
+    /// default has none.
+    fn open(&self, _lead: &str) -> bool {
+        false
+    }
 
     /// Whether the transport's time per tick is limited, so the watcher looks at the
     /// leads in a rotating order. The default is no.

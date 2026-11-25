@@ -86,6 +86,7 @@ use crate::{
     activity::{self, BRANCH_READ_LIMIT},
     activity_state::ActivityState,
     budget::{Budget, Clock},
+    claude_inbox::ClaudeInbox,
     hook::{self, Event, HOOK_BATCH, HookInput},
     identity::{self, Derived, HookIdentity, HookRequest, IdentityError},
     spool::{ErrorKind, Spool, SpoolRecord, Stage, Subject},
@@ -329,6 +330,10 @@ pub(crate) struct HookCtx<'a> {
     pub(crate) harness: relay_core::Harness,
     /// The local activity backoff and counts; `None` when there is no config directory.
     pub(crate) activity: Option<&'a ActivityState>,
+    /// Set for a Claude Code hook while the watcher delivers through inbox sockets: a
+    /// session that has one keeps its mail for the watcher (FR-044). `None` leaves
+    /// delivery to the hook.
+    pub(crate) claude_inbox: Option<&'a ClaudeInbox>,
 }
 
 /// Everything that can fail in a hook call. One value is one failure, and one
@@ -839,7 +844,12 @@ fn try_call<B: Bus>(
         apply(&mut bus, &budget, &commit, rec)?;
     }
 
-    let mail = if event.delivers_mail() {
+    // Mail of a session with an inbox socket is the watcher's: nothing is popped for it.
+    let socket_owns_mail = event.delivers_mail()
+        && cx
+            .claude_inbox
+            .is_some_and(|inbox| inbox.has_socket(input.session_id.as_ref()));
+    let mail = if event.delivers_mail() && !socket_owns_mail {
         deliver_mail(&mut bus, &budget, event, (rtt, sampled), &name, rec, out)
     } else {
         Ok(false)

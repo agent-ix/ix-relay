@@ -76,4 +76,4 @@ agent-msg log             # recent bus history
 
 ## Idle leads
 
-An opencode lead that is fully idle is outside the plugin's reach, because no opencode hook fires without a turn. `relay-watcher` covers that case. It wakes the lead by typing into its Herdr pane with `herdr agent prompt`, as it does for Claude Code and Codex leads.
+An opencode lead that is fully idle is outside the plugin's reach, because no opencode hook fires without a turn. `relay-watcher` covers that case. It wakes the lead by typing into its Herdr pane with `herdr agent prompt`, as it does for Codex leads. A Claude Code session with an inbox socket is reached through that socket and is never typed into.

@@ -51,6 +51,9 @@ pub struct Stranded {
     /// Where `addresses` is kept so a restart does not forget them: a lead name to its
     /// address, rewritten whenever they change. `None` keeps them in memory only.
     file: Option<PathBuf>,
+    /// Leads left alone by the next pass: sessions known to be alive while herdr's
+    /// listing cannot be relied on.
+    spared: HashSet<AgentName>,
     /// Leads whose last move failed for a lasting reason, reported once.
     trouble: HashSet<AgentName>,
 }
@@ -132,8 +135,14 @@ impl Stranded {
         Self {
             addresses,
             file: Some(file),
+            spared: HashSet::new(),
             trouble: HashSet::new(),
         }
+    }
+
+    /// The leads the next pass leaves alone.
+    pub fn spare(&mut self, leads: HashSet<AgentName>) {
+        self.spared = leads;
     }
 
     /// Remembers the address of each lead on `machine` that has one now: called by
@@ -221,6 +230,7 @@ pub fn pass(
     let candidates: Vec<(Registration, Left)> = regs
         .iter()
         .filter(|r| r.machine == *machine)
+        .filter(|r| !state.spared.contains(&r.name))
         .filter_map(|r| Some((r.clone(), left(r, layout)?)))
         .collect();
     if candidates.is_empty() {

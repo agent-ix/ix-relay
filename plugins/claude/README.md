@@ -56,9 +56,9 @@ A lead's address is its Herdr `server:workspace:tab`. Run `agent-msg whoami` to 
 - `/join` (`skills/join/SKILL.md`) checks whether the machine is connected and whether the session has its intended address.
 - `/doctor` (`skills/doctor/SKILL.md`) diagnoses identity, registration and delivery.
 
-## Optional inbox socket delivery
+## Inbox socket delivery
 
-The watcher can post mail to a lead's Claude Code inbox socket. The default is to type it through Herdr. It is off by default and is enabled per machine with `[watcher] delivery = "socket"`. A lead in bypass mode needs `crossSessionInbound: "accept"` in its user settings, which a plugin cannot set. [How it works](../../docs/how-it-works.md#delivery-through-the-claude-code-inbox-socket) describes the behavior and the undocumented wire format.
+The watcher posts mail to a lead's Claude Code inbox socket. This is the default. A session that has a socket is never typed into, and its hooks leave its mail for the watcher. A lead in bypass mode needs `crossSessionInbound: "accept"` in its user settings, which a plugin cannot set. [How it works](../../docs/how-it-works.md#delivery-through-the-claude-code-inbox-socket) describes the routes and the undocumented wire format.
 
 ## Verify
 

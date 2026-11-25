@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::MachineName;
+use crate::{AgentName, ids::MachineName};
 
 /// The file name of the local state file, inside [`crate::config::state_dir`].
 pub const WATCHER_FILE_NAME: &str = "watcher.json";
@@ -59,6 +59,9 @@ pub fn heartbeat_ttl(sweep: Duration) -> Duration {
 
 /// The longest text kept in [`WatcherHeartbeat::herdr_problem`], in characters.
 pub const MAX_PROBLEM_CHARS: usize = 200;
+
+/// The most leads a heartbeat names as waiting for a readable herdr.
+pub const MAX_HERDR_WAITING_LEADS: usize = 50;
 
 /// How a watcher's last failed tick failed, as a stable code (never message
 /// text: a heartbeat is read by other machines and rendered to a terminal).
@@ -204,6 +207,10 @@ pub struct WatcherHeartbeat {
     /// which reads as `false`.
     #[serde(default)]
     pub herdr_blocks_delivery: bool,
+    /// The leads (at most [`MAX_HERDR_WAITING_LEADS`]) with queued mail that waits
+    /// because of it. Absent from a record an older watcher wrote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub herdr_waiting_leads: Vec<AgentName>,
     /// Whether every tick since the previous heartbeat reached Redis: `false`
     /// when a connection error was ridden out in between, a flap the expiry
     /// alone would have hidden.
@@ -294,6 +301,7 @@ mod tests {
             herdr_ok: true,
             herdr_problem: None,
             herdr_blocks_delivery: false,
+            herdr_waiting_leads: vec!["ea".parse().unwrap()],
             redis_ok: true,
             leads_watched: 2,
             otlp: Some(OtlpStatus::Failing {
@@ -323,6 +331,7 @@ mod tests {
                 "herdr_blocks_delivery",
                 "herdr_ok",
                 "herdr_problem",
+                "herdr_waiting_leads",
                 "last_error",
                 "last_sweep_ms",
                 "last_tick_ms",

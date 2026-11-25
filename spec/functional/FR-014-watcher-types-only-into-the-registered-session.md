@@ -10,10 +10,14 @@ relationships:
 
 ## Description
 
-The watcher shall type queued messages into a lead's pane only if herdr reports
-that the pane's live session id equals the session id the lead registered, the
-lead is idle or done, and herdr's state-change sequence number is unchanged
-between two reads taken immediately before the pop.
+For a lead on the terminal route of
+[FR-044](./FR-044-watcher-delivers-through-claude-codes-inbox-socket.md) (another
+harness, a Claude Code session with no inbox socket, or `delivery = "herdr"`), the
+watcher shall type queued messages into a lead's pane only if herdr reports that the
+pane's live session id equals the session id the lead registered, the lead is idle or
+done, and herdr's state-change sequence number is unchanged between two reads taken
+immediately before the pop. A Claude Code session that has an inbox socket is never
+on the terminal route.
 
 ## Behavior
 
@@ -35,7 +39,7 @@ between two reads taken immediately before the pop.
 
 | ID | Criteria | Verification |
 |----|----------|--------------|
-| FR-014-AC-1 | For every combination of registered session id, live session id, status, both sequence numbers and herdr call outcomes, the watcher calls herdr's prompt only when both session ids are present and equal, the status is idle or done, and the two sequence numbers are equal. | Test |
+| FR-014-AC-1 | For a lead on the terminal route, for every combination of registered session id, live session id, status, both sequence numbers and herdr call outcomes, the watcher calls herdr's prompt only when both session ids are present and equal, the status is idle or done, and the two sequence numbers are equal. | Test |
 | FR-014-AC-2 | Given a mismatched session id on two consecutive ticks, the stale registration is logged on the first tick only and the inbox is unchanged after both. | Test |
 | FR-014-AC-3 | Given a lead blocked on a dialog for three ticks, exactly one notification is raised and the inbox is unchanged. | Test |
 | FR-014-AC-4 | Given a lead with an empty inbox, a tick makes no herdr status call for it. | Test |
