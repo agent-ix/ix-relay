@@ -1,0 +1,25 @@
+[package]
+name = "relay-tools"
+description = "Operator tools for ix-relay: test-matrix recount, namespace archive, Codex launcher and SessionStart capture."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = "0.22"
+nix.workspace = true
+redis = { workspace = true, features = ["tls-native-tls"] }
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
