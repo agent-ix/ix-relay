@@ -145,13 +145,13 @@ pub const HERDR_LIST_ONE_CLAUDE_PANE_WITHOUT_A_SESSION: &str = r#"{"id":"cli:age
      "tab_id":"w1:t2","terminal_id":"term_2","terminal_title":"lead-a",
      "terminal_title_stripped":"lead-a","workspace_id":"w1"}],"type":"agent_list"}}"#;
 
-/// A canonical, order-independent image of one key's value, for tests that assert a read
-/// left a key unchanged.
+/// An image of one key's value for tests that assert a read left a key unchanged.
 ///
-/// `DUMP` is not that: a hash or set is serialised in its table's iteration order, which
-/// changes while Redis rehashes incrementally, so two dumps of an untouched key can
-/// differ with timing alone. Hash fields and set members are sorted here; lists, sorted
-/// sets and streams are read in their own order, with a stream's consumer groups.
+/// `DUMP` serialises a hash or set in its table's iteration order, which changes while
+/// Redis rehashes incrementally, so two dumps of an untouched key can differ with timing
+/// alone. Those two types are read as sorted fields or members; every other type, and
+/// any type this does not know, keeps `DUMP`, which also carries what a read-only view
+/// would miss (a stream's last id and pending entries, say).
 ///
 /// # Panics
 ///
@@ -159,16 +159,12 @@ pub const HERDR_LIST_ONE_CLAUDE_PANE_WITHOUT_A_SESSION: &str = r#"{"id":"cli:age
 #[must_use]
 pub fn canonical_dump(con: &mut redis::Connection, key: &str) -> Vec<u8> {
     let kind: String = redis::cmd("TYPE").arg(key).query(con).expect("TYPE");
-    let image = match kind.as_str() {
-        "string" => {
-            let value: Vec<u8> = redis::cmd("GET").arg(key).query(con).expect("GET");
-            format!("{value:?}")
-        }
+    match kind.as_str() {
         "hash" => {
             let mut fields: Vec<(Vec<u8>, Vec<u8>)> =
                 redis::cmd("HGETALL").arg(key).query(con).expect("HGETALL");
             fields.sort();
-            format!("{fields:?}")
+            format!("hash\n{fields:?}").into_bytes()
         }
         "set" => {
             let mut members: Vec<Vec<u8>> = redis::cmd("SMEMBERS")
@@ -176,42 +172,8 @@ pub fn canonical_dump(con: &mut redis::Connection, key: &str) -> Vec<u8> {
                 .query(con)
                 .expect("SMEMBERS");
             members.sort();
-            format!("{members:?}")
+            format!("set\n{members:?}").into_bytes()
         }
-        "list" => {
-            let items: Vec<Vec<u8>> = redis::cmd("LRANGE")
-                .arg(key)
-                .arg(0)
-                .arg(-1)
-                .query(con)
-                .expect("LRANGE");
-            format!("{items:?}")
-        }
-        "zset" => {
-            let items: Vec<(Vec<u8>, f64)> = redis::cmd("ZRANGE")
-                .arg(key)
-                .arg(0)
-                .arg(-1)
-                .arg("WITHSCORES")
-                .query(con)
-                .expect("ZRANGE");
-            format!("{items:?}")
-        }
-        "stream" => {
-            let entries: redis::Value = redis::cmd("XRANGE")
-                .arg(key)
-                .arg("-")
-                .arg("+")
-                .query(con)
-                .expect("XRANGE");
-            let groups: redis::Value = redis::cmd("XINFO")
-                .arg("GROUPS")
-                .arg(key)
-                .query(con)
-                .expect("XINFO GROUPS");
-            format!("{entries:?}{groups:?}")
-        }
-        other => other.to_owned(),
-    };
-    format!("{kind}\n{image}").into_bytes()
+        _ => redis::cmd("DUMP").arg(key).query(con).expect("DUMP"),
+    }
 }

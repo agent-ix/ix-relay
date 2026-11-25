@@ -1,5 +1,5 @@
 ---
-id: SR-6119
+id: SR-6122
 title: "Gap analysis — ix-relay SWM-276 against FR-029, FR-053, FR-057, FR-068, NFR-001"
 type: SpecReview
 analysis: gap-analysis
@@ -12,7 +12,7 @@ relationships:
     type: "references"
 ---
 
-# SR-6119: Gap analysis — ix-relay SWM-276 against FR-029, FR-053, FR-057, FR-068, NFR-001
+# SR-6122: Gap analysis — ix-relay SWM-276 against FR-029, FR-053, FR-057, FR-068, NFR-001
 
 ## Summary
 
@@ -25,7 +25,7 @@ Ticket: SWM-276. PR agent-ix/ix-relay#64 at `a83dc87cf548c7da39828c5695b77f7a440
 Semantic checks that were clean:
 
 - FR-057-AC-4/5: the new tc_057 wait plus `1s` matches "strictly greater than the threshold". The strict boundary cases (30,000 vs 30,001 ms) are not this test's job.
-- FR-053-AC-2/12: the assertions on the notice content and the 6 KiB bound are unchanged. Only the hook invocation is wrapped (its retry gating is SR-6118 FND-002).
+- FR-053-AC-2/12: the assertions on the notice content and the 6 KiB bound are unchanged. Only the hook invocation is wrapped (its retry gating is SR-6121 FND-002).
 - NFR-001-M-5: `spawn_closed` keeps the "closed empty pipe → one malformed record, one ship attempt" outcome. The benchmark-lane wall-clock tests are untouched.
 - No stubs, `todo!()` or placeholder returns were added.
 
@@ -45,3 +45,13 @@ Semantic checks that were clean:
 - Reverse gap: one item (FND-001).
 - Semantic review: targeted to the changed tests (above), not repository-wide.
 - Plan completion: not assessed
+
+## Dispositions
+
+Round 1, fix head `56266b17b52d5ee4c0a6bcdf8a7455b859ad156b`.
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | The env knob is removed from `doctor/facts.rs`, so no unowned production behaviour remains and FR-029's 5 s bound holds unconditionally. |
+| FND-002 | fixed | `address.rs` runs as `hub:EA:code`, so it used `write_transport_herdr`, which was the Python stub that was replaced. The coder reports 8 green load iterations of it after the switch, plus 5/5 full workspace runs at load 10–52. That meets the 5/5 acceptance box. |
+| FND-003 | still-open | The test is retagged to the new FR-068-AC-14, but AC-14 and the new FR-068 bullet claim a skipped update is "returned to its caller as skipped" and "none is lost silently". The production entry points (`unregistered`, `dropped`, `failed`, `succeeded`) go through `update()`, which discards `try_update`'s result (`let _ =`), and the module doc calls the skip "an uncounted event". The test calls `try_update` directly, so it cannot catch this. See SR-6120 FND-001. |

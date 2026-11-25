@@ -1,5 +1,5 @@
 ---
-id: SR-6118
+id: SR-6121
 title: "Code review — ix-relay SWM-276 test flakes under host load"
 type: SpecReview
 analysis: code-review
@@ -7,7 +7,7 @@ scope: "agent-ix/ix-relay; crates/agent-msg/src/activity_state.rs, crates/agent-
 review_set: subset
 ---
 
-# SR-6118: Code review — ix-relay SWM-276 test flakes under host load
+# SR-6121: Code review — ix-relay SWM-276 test flakes under host load
 
 ## Summary
 
@@ -49,3 +49,23 @@ Checked and clean:
 - **FND-001.** Suggested fix: delete `PROBE_SCALE_ENV`/`probe_scale` and restore the constants. In tc_029_03, assert the herdr check is present and not `fail`, so `ok` or `unknown`/`herdr_unchecked` are both accepted. That is what FR-029-AC-3 states ("still reports the herdr check"). The deterministic `ok` path is already reachable through the injectable `Probes`/`ProcessRunner` seams (`herdr_check::check_within(runner, timeout, budget)`) in a unit test. If a production knob is really wanted, it needs an FR-029 line, a config field (not a hidden env var), a cap that keeps the 5 s bound, and an entry in `base_cmd`'s cleared list.
 - **FND-002.** Suggested fix: give these calls an explicit `IX_RELAY_CONFIG` (as `hook_failures.rs`'s `Env` does), read `spool_path(&config)` after each run, and return `false` only when `support::ran_out_of_time(&records)`. Otherwise assert the outcome directly. The ticket's own comment attributes the tc_053_02/tc_053_12 failures to `redis: unexpected end of file`. A hook that hits that exits 0, spools a non-timeout record and does not register, and the current loop re-runs it silently. The same applies to `hook.rs:219` (`session_start_hook_records_the_herdr_pane_from_env`) and `stranded_notice.rs:107` (`session_start_output`).
 - **FND-003.** All four call `Hook::spawn` (piped) and then `hook.write(...)`. If the test thread is descheduled past `STDIN_TOTAL`/the idle window after the child starts reading, the hook records `decode/stdin_timeout` with 0 connections, and `assert_connections(1)` / `assert_ne!(stage, "decode")` / `rec("decode","malformed")` fail. Fix: build the stdin from `std::io::pipe()` (stable on the pinned 1.98.1), write the payload into the pipe *before* `spawn`, and hold the writer for the "open pipe" cases (drop it for the two-pieces case).
+
+## Dispositions
+
+Round 1, fix head `56266b17b52d5ee4c0a6bcdf8a7455b859ad156b` (cff98b1, 56266b1 after a83dc87). Each fix was checked against the code on the branch. Reviewer gate on this head: `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -D warnings`, and `cargo test --workspace --no-fail-fast` against native redis-server 8.10.2 on a random port, at load about 16: 1,604 passed, 0 failed, no out-of-time re-run printed. `make ci` with redis:7 ran green at a83dc87 in the review pass; the round-1 delta is tests, test support and one spec bullet.
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | `PROBE_SCALE_ENV`/`probe_scale` are deleted and the constants restored. tc_029_03 accepts `ok`, or `unknown` with code `herdr_unchecked`. `relay_ops::herdr_check` adds a stub-runner unit test that pins `ok` under doctor's 1 s/2 s deadlines. |
+| FND-002 | fixed | `support::run_hook_recording` gives each run its own config dir and returns the spool records. All three callers return `false` only on `ran_out_of_time(&records)` and otherwise assert that `records` is empty and that the hook registered or printed. |
+| FND-003 | fixed | `Hook::spawn_with_input` pre-fills a `std::io::pipe()` before spawn (and holds the writer for the open-pipe cases). All four named tests use it. |
+| FND-004 | fixed | The ssh stubs loop only while `$# -gt 0` and then `exit 1` when there is no `herdr` token. Both herdr stubs `exit 1` on a `--session`/`--machine` with no value. |
+| FND-005 | fixed | The transport stub has a `*)` arm that prints to stderr and exits 1. |
+| FND-006 | fixed | The comment now says 3300 ms for SessionStart. |
+| FND-007 | fixed | The test is renamed `concurrent_updates_are_each_applied_or_returned_skipped_and_a_held_lock_never_blocks` and asserts `counted > 0`. |
+
+## New findings (disposition pass 1)
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-008 | low | `canonical_dump` replaces `DUMP` for every type, but only hash and set iteration order can move under incremental rehash. For streams it drops what XRANGE + XINFO GROUPS do not show (last-generated-id, entries-added, max-deleted-id, per-consumer PEL ownership), so an XADD+XDEL or XCLAIM by a "read" would pass. An unknown type reduces to its type name. Keep `DUMP` for string, list, zset and stream, and canonicalise only hash and set | crates/relay-test-support/src/lib.rs:160-216 |

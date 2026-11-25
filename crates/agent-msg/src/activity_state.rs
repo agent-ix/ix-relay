@@ -229,12 +229,12 @@ mod tests {
         assert_eq!(state.counts().backoff_ms, 5_000);
     }
 
-    /// Concurrent hooks lose no update silently: each attempt is applied to the file or
-    /// returned as skipped, and a held lock skips the update without waiting past the
-    /// bound.
+    /// Concurrent hooks lose no applied update: the file holds exactly the updates that
+    /// took the lock, and an update that finds the lock held is dropped uncounted after
+    /// the 50 ms bound, not after the holder lets go.
     #[trace("FR-068-AC-14")]
     #[test]
-    fn concurrent_updates_are_each_applied_or_returned_skipped_and_a_held_lock_never_blocks() {
+    fn concurrent_updates_apply_exactly_the_counted_ones_and_a_held_lock_drops_within_the_bound() {
         let dir = tempfile::tempdir().unwrap();
         let state = ActivityState::at(dir.path().join("activity.json"));
         let counted = std::sync::atomic::AtomicU64::new(0);
@@ -260,8 +260,17 @@ mod tests {
         let held = state.lock().unwrap();
         let started = Instant::now();
         state.unregistered();
-        assert!(started.elapsed() < Duration::from_millis(500));
-        assert_eq!(state.counts().unregistered, base, "skipped, not counted");
+        let waited = started.elapsed();
+        assert!(
+            waited >= LOCK_WAIT,
+            "it waited the bound before giving up: {waited:?}"
+        );
+        // The margin is scheduling slack on a loaded host, not part of the bound.
+        assert!(
+            waited < LOCK_WAIT + Duration::from_millis(450),
+            "{waited:?}"
+        );
+        assert_eq!(state.counts().unregistered, base, "dropped, not counted");
         drop(held);
         state.unregistered();
         assert_eq!(state.counts().unregistered, base + 1);
