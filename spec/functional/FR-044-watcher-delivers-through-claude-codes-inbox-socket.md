@@ -57,10 +57,11 @@ operator's decision; this requirement only makes the watcher notice.
   or waiting.
 - The watcher shall choose the socket when the session resolves to a usable socket and
   the reply socket is bound.
-- The watcher shall choose the terminal for a `claude` lead only when every live,
-  unparked record of the session names no `messagingSocketPath`, no `<pid>.sock` of
-  those processes exists in a socket directory, and each process started at least 60 s
-  ago (Claude Code writes the record before it publishes the socket into it).
+- The watcher shall choose the terminal for a `claude` lead only when no live record of
+  the session is parked, every live record names no `messagingSocketPath`, no
+  `<pid>.sock` of those processes exists in a socket directory, and each process
+  started at least 60 s ago (Claude Code writes the record before it publishes the
+  socket into it).
 - In every other case the watcher shall make the lead wait: nothing is popped, nothing
   is typed, the reason is logged once per stretch and kept in the status file. These
   cases are: no session id, no record, no live record, several live processes, an
@@ -291,7 +292,7 @@ operator's decision; this requirement only makes the watcher notice.
 | FR-044-AC-16 | A reply socket whose directory appears later is bound on a later delivery, not more often than its backoff; a connect that never returns is abandoned and costs one helper thread in all; a probe of a wedged listener at the watcher's own socket name keeps one flag across retries. | Test |
 | FR-044-AC-17 | Working, blocked, idle and done Claude leads receive queued mail through a real Unix socket without a herdr state read. Whatever the post answers, nothing is typed. A Claude hook of a session with a socket registers the lead for all four events without popping or acknowledging mail; a hook of a session without one delivers it. | Test |
 | FR-044-AC-18 | Pending socket consumption persists across watcher restart, renews its lease without an approval hold, acknowledges a later transcript match once and is dead-lettered without a second post as `consumption_expired`. | Test |
-| FR-044-AC-19 | The route is the terminal only for a live, unparked session record that names no socket, with no socket file for its process, older than the publish grace (and for another harness, or `delivery = "herdr"`); it is a wait, with nothing popped or typed, for no session id, no or a stale record, several processes, an unsupported or unusable record, a record younger than the grace, a socket file the record does not name, an unbound reply socket and unavailable socket locations; typing asks the route again and types nothing when it changed. | Test |
+| FR-044-AC-19 | The route is the terminal only for another harness, for `delivery = "herdr"`, or for a Claude session that has no parked record and whose live records name no socket, with no socket file for their processes, each older than the publish grace. It is a wait, with nothing popped or typed, for no session id, no or a stale record, several processes, an unsupported or unusable record, a parked record without a live socket record, a record younger than the grace, a socket file the record does not name, an unbound reply socket and unavailable socket locations. Typing asks the route again and types nothing when it changed. | Test |
 | FR-044-AC-20 | A session whose only live record is parked, listening on its socket and consuming nothing, in a pane herdr reports idle with that session, is neither posted to nor typed into, its forwarded and redelivered mail stays queued with the reason shown, and mail is posted once the record is no longer parked. | Test |
 
 ## Dependencies

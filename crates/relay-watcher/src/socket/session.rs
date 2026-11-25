@@ -245,10 +245,15 @@ pub fn resolve(
     }
     let parked = live.iter().find_map(|r| r.parked_job_id.clone());
     live.retain(|r| r.parked_job_id.is_none());
-    if let Some(job) = parked.filter(|_| live.is_empty()) {
+    if let Some(job) = parked.clone().filter(|_| live.is_empty()) {
         return Err(Unresolved::Parked(job));
     }
     if live.iter().all(|r| r.messaging_socket_path.is_none()) {
+        // A parked process may still show another conversation in the pane herdr
+        // names for this session, so the session is not proven to be typed into safely.
+        if let Some(job) = parked {
+            return Err(Unresolved::Parked(job));
+        }
         let unnamed = live.iter().any(|r| {
             socket_dirs
                 .iter()

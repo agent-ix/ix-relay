@@ -1088,6 +1088,11 @@ fn tc_044_19_a_parked_record_is_passed_over_for_a_live_one() {
     let _parked = listen(home.socket(4242)).unwrap();
     let _live = listen(home.socket(4343)).unwrap();
     assert_eq!(route_of(&home, &[4242, 4343]), Route::Socket);
+    // The other live process has no socket: with one parked, nothing proves the pane
+    // shows this session, so it waits and is not typed into.
+    home.record(4343, SESSION, without_socket(OLD));
+    fs::remove_file(home.socket(4343)).unwrap();
+    assert!(matches!(route_of(&home, &[4242, 4343]), Route::Wait(why) if why.contains("parked")));
 }
 
 /// Tracing: TC-044-19
