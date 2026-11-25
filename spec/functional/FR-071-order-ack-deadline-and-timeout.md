@@ -105,7 +105,8 @@ as an order: explicitly with `agent-msg send --order`, or by the orchestrator's
   requires upgrading `agent-msg` on every host that can send orders before consumers rely
   on complete results; older senders do not populate this index. After that fleet upgrade,
   the operator SHALL set `orders_all_senders_upgraded=1` on the receipt metadata hash to
-  enable `complete=true` responses.
+  enable `complete=true` responses. Before rolling any sending host back to an older
+  `agent-msg`, the operator SHALL clear that metadata field.
 - `next_cursor`, when non-null, SHALL be the JSON tuple `{"enqueued_at": <Unix ms>,
   "order_id": <id>}` for the last returned order. A continuation SHALL return only tuples
   strictly older than that tuple, including all rows at the same millisecond through the

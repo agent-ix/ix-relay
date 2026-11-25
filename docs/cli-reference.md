@@ -88,7 +88,8 @@ Upgrade `agent-msg` on every host that can send orders before consumers rely on
 complete results. Until that fleet upgrade is confirmed, `complete` remains false
 with `incomplete_reason: "sender_upgrade_required"`. Then the operator sets
 `orders_all_senders_upgraded=1` on the configured `receipt-meta` hash to enable
-complete responses. `skipped` counts unreadable indexed rows. Rows contain no
+complete responses. If a sending host rolls back to an older `agent-msg`, clear
+that field before the rollback. `skipped` counts unreadable indexed rows. Rows contain no
 message text or credentials. The read does not change Redis.
 
 `agent-msg orders expired --json` remains available for the older unacted-expiry
