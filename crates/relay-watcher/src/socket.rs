@@ -2,8 +2,8 @@
 //!
 //! Opt-in (`[watcher] delivery = "socket"`): the watcher posts a batch to the
 //! Unix socket Claude Code binds for the lead's session instead of typing it in
-//! through herdr. herdr stays the fallback for every batch the socket certainly
-//! did not take, so delivery is never worse than without it.
+//! through herdr. Claude mail that cannot be confirmed stays queued or in flight;
+//! it is never typed into the active prompt.
 //!
 //! **The wire format is not documented by Claude Code.** It was measured on
 //! 2.1.283 and lives in `claude-wire`; a release may change it, which is why a session
@@ -122,27 +122,7 @@ impl<H: Deliverer + Herdr> Deliverer for Routed<H> {
         }
         match socket.deliver(target, text) {
             Ok(()) => Ok(()),
-            Err(deliverer::SocketError::NotSent(why)) => {
-                eprintln!(
-                    "relay-watcher: {}: inbox socket not used ({why}); checking herdr fallback identity",
-                    target.lead
-                );
-                // Pane activity does not determine whether the socket or its
-                // fallback is used. Both reads must still name the registered
-                // session before typing into a terminal.
-                let first = self.herdr.get(pane).ok().flatten();
-                let second = self.herdr.get(pane).ok().flatten();
-                let safe = matches!((&first, &second), (Some(a), Some(b))
-                    if crate::watch::session_matches(target.session, a.session_id.as_ref())
-                    && crate::watch::session_matches(target.session, b.session_id.as_ref()));
-                if safe {
-                    self.herdr.deliver_to(target, pane, text)
-                } else {
-                    Err(DeliverError::Deferred(format!(
-                        "socket unavailable ({why}); queued until herdr confirms the target session"
-                    )))
-                }
-            }
+            Err(error) => Err(error.into()),
             Err(other) => Err(other.into()),
         }
     }
