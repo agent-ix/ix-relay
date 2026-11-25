@@ -15,6 +15,7 @@ Commands:
   work             Report session scope, focus and agent assignments for the dashboard
   focuses          Durable, revisioned named focus definitions with one owner: create, list, show, update, archive, claim and transfer. Not `focus`, which sets this lane's free-text focus
   send             Send a message to one lead, or to `all`
+  orders           Read every retained order outcome in a bounded enqueue-time window; `orders expired` lists unacted expiries
   inbox            Print and remove your pending messages
   who              List registered leads
   focus            Set or clear this lead's lane focus
@@ -60,6 +61,25 @@ Options:
       --human <HUMAN>    The human inbox `escalate`/`resolve` notify/sign as. Defaults come from `~/.ix/relay/config.toml`'s `human` key, then `IX_RELAY_HUMAN`, then `operator`
   -h, --help             Print help
 ```
+
+### agent-msg orders
+
+```text
+Usage: agent-msg orders --since <UNIX-MS> --until <UNIX-MS> [--limit <N>]
+       [--cursor '{"enqueued_at": <UNIX-MS>, "order_id": "<ID>"}'] --json
+```
+
+Both bounds are inclusive and apply to `enqueued_at`. Pages are newest first by
+`(enqueued_at, order_id)`. The returned `next_cursor` can be passed back as the
+`--cursor` value to continue strictly after the last row, including when several
+orders share one millisecond. `truncated` is true exactly when the response has a
+cursor. `oldest_available_at` marks the earliest time with complete indexed data
+and is `null` until the first all-outcome order is indexed; order records and the
+index are retained for eight days. Rows contain no message text or credentials.
+The read does not change Redis.
+
+`agent-msg orders expired --json` remains available for the older unacted-expiry
+view.
 
 ### agent-msg inbox
 

@@ -13,6 +13,10 @@ local log = KEYS[fences + recipients + 1]
 if not readable(log, 'stream') or not receipt_ready() then
     return redis.error_reply('message or receipt history has wrong type')
 end
+if ARGV[fences + 6] ~= ''
+    and not readable(receipt_meta .. ':orders-all', 'zset') then
+    return redis.error_reply('order history has wrong type')
+end
 local now = now_ms(ARGV[fences + 5])
 local entry = ARGV[fences + 3]
 local id = redis.call('XADD', log, 'MAXLEN', '~', ARGV[fences + 4], '*', 'msg', entry)

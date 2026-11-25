@@ -7,7 +7,7 @@
 
 mod support;
 
-use std::time::Duration;
+use std::{process::Command, time::Duration};
 
 use ix_trace_rs::trace;
 use relay_core::{Registration, Relay};
@@ -173,6 +173,199 @@ fn an_order_has_a_five_minute_deadline_unless_the_option_or_the_config_sets_one(
             .all(|(got, want)| (got - want).abs() < 1_000),
         "{deadlines:?}"
     );
+}
+
+#[trace("FR-071-AC-12")]
+#[test]
+fn all_order_statuses_are_listed_in_stable_read_only_pages() {
+    let Some(mut bus) = Bus::new("all-orders") else {
+        return;
+    };
+    for extra in [
+        vec!["--order", "--expect-ticket", "SWM-309"],
+        vec!["--order"],
+        vec!["--order"],
+        vec!["--order"],
+        vec!["--order"],
+    ] {
+        let out = bus.send(&extra, None);
+        assert_eq!(out.status, 0, "{}", out.stderr);
+    }
+
+    // Pin the stored rows to one millisecond so the test proves the order-id tie-breaker,
+    // independently of how quickly the host clock advanced while sending.
+    let index = format!("{}receipt-meta:orders-all", bus.prefix);
+    let ids: Vec<String> = redis::cmd("ZRANGE")
+        .arg(&index)
+        .arg(0)
+        .arg(-1)
+        .query(&mut bus.raw)
+        .unwrap();
+    assert_eq!(ids.len(), 5);
+    let at = now_ms();
+    for (position, member) in ids.iter().enumerate() {
+        let (_, id) = member.split_once('|').unwrap();
+        redis::cmd("ZREM")
+            .arg(&index)
+            .arg(member)
+            .exec(&mut bus.raw)
+            .unwrap();
+        let enqueued_at = if position == 4 { at - 1 } else { at };
+        redis::cmd("ZADD")
+            .arg(&index)
+            .arg(0)
+            .arg(format!("{enqueued_at:013}|{id}"))
+            .exec(&mut bus.raw)
+            .unwrap();
+        let status = match position {
+            0 => "acted",
+            1 => "expired",
+            2 => "evicted",
+            3 => "cancelled",
+            _ => "open",
+        };
+        let order_key = format!("{}receipt-meta:order:{id}", bus.prefix);
+        redis::cmd("HSET")
+            .arg(&order_key)
+            .arg("enqueued_at")
+            .arg(enqueued_at)
+            .arg("status")
+            .arg(status)
+            .exec(&mut bus.raw)
+            .unwrap();
+        if position == 0 {
+            redis::cmd("HSET")
+                .arg(&order_key)
+                .arg("delivered_at")
+                .arg(at - 250)
+                .arg("acted_at")
+                .arg(at - 100)
+                .exec(&mut bus.raw)
+                .unwrap();
+        } else {
+            redis::cmd("HDEL")
+                .arg(&order_key)
+                .arg("delivered_at")
+                .arg("acted_at")
+                .exec(&mut bus.raw)
+                .unwrap();
+        }
+    }
+    redis::cmd("HSET")
+        .arg(format!("{}receipt-meta", bus.prefix))
+        .arg("orders_all_since_ms")
+        .arg(at)
+        .exec(&mut bus.raw)
+        .unwrap();
+
+    let url = bus.url.clone();
+    let prefix = bus.prefix.clone();
+    let at_text = at.to_string();
+    let read = |cursor: Option<String>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_agent-msg"));
+        command
+            .args(["--url", &url, "--prefix", &prefix, "orders"])
+            .args(["--since", &at_text, "--until", &at_text])
+            .args(["--limit", "1", "--json"]);
+        if let Some(cursor) = cursor {
+            command.args(["--cursor", &cursor]);
+        }
+        command.output().unwrap()
+    };
+    let keys: Vec<String> = redis::cmd("KEYS")
+        .arg(format!("{}*", bus.prefix))
+        .query(&mut bus.raw)
+        .unwrap();
+    let before: std::collections::BTreeMap<String, Vec<u8>> = keys
+        .iter()
+        .map(|key| {
+            (
+                key.clone(),
+                relay_test_support::canonical_dump(&mut bus.raw, key),
+            )
+        })
+        .collect();
+
+    let first = read(None);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_json: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first_json["orders"].as_array().unwrap().len(), 1);
+    assert_eq!(first_json["truncated"], true);
+    assert_eq!(first_json["window"]["filter"], "enqueued_at");
+    assert_eq!(first_json["window"]["order"], "newest_first");
+    assert_eq!(first_json["oldest_available_at"], at);
+    let cursor = first_json["next_cursor"].clone();
+    assert_eq!(cursor["enqueued_at"], at);
+    let first_order = &first_json["orders"][0];
+    assert_eq!(first_order["recipient"], "hub:EA:code");
+    assert!(
+        first_order["receipt_target"]
+            .as_str()
+            .unwrap()
+            .starts_with("session/")
+    );
+    assert_eq!(first_order["state"], "cancelled");
+    assert_eq!(
+        first_order["deadline_at"],
+        first_order["enqueued_at"].as_i64().unwrap() + first_order["ack_ms"].as_i64().unwrap()
+    );
+    assert!(first_order.get("text").is_none());
+    assert!(!String::from_utf8_lossy(&first.stdout).contains("hi"));
+
+    let second = read(Some(serde_json::to_string(&cursor).unwrap()));
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_json: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(second_json["truncated"], true);
+    assert_eq!(second_json["orders"][0]["state"], "evicted");
+    let third = read(Some(
+        serde_json::to_string(&second_json["next_cursor"].clone()).unwrap(),
+    ));
+    assert!(
+        third.status.success(),
+        "{}",
+        String::from_utf8_lossy(&third.stderr)
+    );
+    let third_json: serde_json::Value = serde_json::from_slice(&third.stdout).unwrap();
+    assert_eq!(third_json["truncated"], true);
+    assert_eq!(third_json["orders"][0]["state"], "expired");
+    let fourth = read(Some(
+        serde_json::to_string(&third_json["next_cursor"].clone()).unwrap(),
+    ));
+    assert!(
+        fourth.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fourth.stderr)
+    );
+    let fourth_json: serde_json::Value = serde_json::from_slice(&fourth.stdout).unwrap();
+    assert_eq!(fourth_json["truncated"], false);
+    assert!(fourth_json["next_cursor"].is_null());
+    assert_eq!(fourth_json["orders"][0]["state"], "acted");
+    assert_eq!(fourth_json["orders"][0]["acted_at"], at - 100);
+    assert_eq!(fourth_json["orders"][0]["expect_ticket"], "SWM-309");
+    assert_eq!(
+        fourth_json["orders"][0]["deadline_at"],
+        fourth_json["orders"][0]["delivered_at"].as_i64().unwrap()
+            + fourth_json["orders"][0]["ack_ms"].as_i64().unwrap()
+    );
+
+    let after: std::collections::BTreeMap<String, Vec<u8>> = keys
+        .iter()
+        .map(|key| {
+            (
+                key.clone(),
+                relay_test_support::canonical_dump(&mut bus.raw, key),
+            )
+        })
+        .collect();
+    assert_eq!(after, before, "all-outcome reads leave Redis unchanged");
 }
 
 #[trace("FR-071-AC-1")]
