@@ -9,9 +9,14 @@
 //! `AGENT_MSG_NAME` stays env-only: one machine can run several leads, so it
 //! can't live in the machine-level config file.
 
+mod activity;
+mod activity_state;
+mod assign;
 mod budget;
+mod claude_inbox;
 mod doctor;
 mod find;
+mod focuses;
 mod hook;
 mod hook_run;
 mod identity;
@@ -82,9 +87,28 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum OrdersCommand {
+    /// List the orders whose ack deadline passed without `Acted`, newest first, in one
+    /// request (at most 500; `truncated` says more exist).
+    Expired {
+        /// Print `{"orders": [...], "truncated": bool, "skipped": N, "indexed_since_ms": ms|null}`
+        /// instead of plain text. `skipped` counts rows that could not be decoded and
+        /// `indexed_since_ms` is when the relay began indexing expiries.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
+    /// Write and read the ordered per-lane assignment list: set, append, remove, reorder,
+    /// show and history. Writes need `[assign] orchestrator = true` in config.toml.
+    Assign(assign::AssignArgs),
     /// Report session scope, focus and agent assignments for the dashboard.
     Work(work::WorkArgs),
+    /// Durable, revisioned named focus definitions with one owner: create, list, show,
+    /// update, archive, claim and transfer. Not `focus`, which sets this lane's free-text focus.
+    Focuses(focuses::FocusesArgs),
     /// Send a message to one lead, or to `all`.
     Send {
         /// Full server:workspace:tab, :workspace:tab, :tab, or all.
@@ -93,6 +117,23 @@ enum Cmd {
         /// The message.
         #[arg(required = true, num_args = 1..)]
         text: Vec<String>,
+        /// Send as an order: it has an ack deadline, and the relay records `AckExpired` and
+        /// raises one escalation when the recipient shows no activity before it passes.
+        #[arg(long)]
+        order: bool,
+        /// How long the recipient has to act, e.g. 90s or 5m (10 seconds to 24 hours).
+        /// Defaults to `[send] ack_deadline` in config.toml, else 5m.
+        #[arg(long, value_name = "AGE", requires = "order")]
+        ack_deadline: Option<Since>,
+        /// The ticket the order expects its recipient to take up (at most 64 bytes),
+        /// returned in the receipt export.
+        #[arg(long, value_name = "ID", requires = "order")]
+        expect_ticket: Option<String>,
+    },
+    /// Read order state. Changes nothing.
+    Orders {
+        #[command(subcommand)]
+        command: OrdersCommand,
     },
     /// Print and remove your pending messages.
     Inbox {
@@ -109,7 +150,7 @@ enum Cmd {
         /// them (the opencode plugin's idle path does this).
         #[arg(long)]
         count: bool,
-        /// Print your dead letters (messages whose redeliveries ran out, FR-040)
+        /// Print your dead letters (messages whose redeliveries ran out)
         /// instead of popping, oldest first, and leave them where they are.
         #[arg(long, conflicts_with_all = ["count", "json"])]
         dead: bool,
@@ -160,8 +201,8 @@ enum Cmd {
     },
     /// Look up a live lead by address, workspace/tab label, session name,
     /// pane id or `server:workspace[:tab[:pane]]` address, joining the bus registry
-    /// against live herdr state on this machine and every saved one
-    /// (AGE-2018). Ends with the address(es) to use with `send`. Not needed
+    /// against live herdr state on this machine and every saved one.
+    /// Ends with the address(es) to use with `send`. Not needed
     /// before `send`: `send` resolves an address itself.
     Find {
         /// Case-insensitive substring to match; omit to list everyone.
@@ -190,6 +231,21 @@ enum Cmd {
         /// Most messages to show.
         #[arg(long, default_value_t = 100)]
         max: usize,
+        /// Emit structured message history or receipt evidence.
+        #[arg(long)]
+        json: bool,
+        /// Read content-free lifecycle receipts instead of message bodies.
+        #[arg(long, requires = "json")]
+        receipts: bool,
+        /// Inclusive Unix-millisecond interval start for receipt export.
+        #[arg(long, requires = "receipts")]
+        since_ms: Option<i64>,
+        /// Inclusive Unix-millisecond interval end for receipt export.
+        #[arg(long, requires = "receipts")]
+        until_ms: Option<i64>,
+        /// Continue after the ordering cursor returned by the preceding page.
+        #[arg(long, requires = "receipts")]
+        after: Option<String>,
     },
     /// Register yourself by hand. Hooks do this on session start.
     Register {
@@ -211,7 +267,7 @@ enum Cmd {
     },
     /// File an escalation: a decision only the operator can make. Prints its id.
     Escalate {
-        /// The Linear ticket this decision belongs to, e.g. `AGE-2014`.
+        /// The Linear ticket this decision belongs to, e.g. `ENG-123`.
         ticket: String,
         /// What needs deciding.
         #[arg(long)]
@@ -278,7 +334,7 @@ enum EscalationCmd {
 enum ServerCapacityCmd {
     /// Record explicit capacity for one server.
     Set {
-        /// Relay server name such as terra, luna, titan, or draco.
+        /// Relay server name, such as the machine name in `agent-msg who`.
         server: String,
         /// Cores allocated to agent work.
         #[arg(long)]
@@ -369,11 +425,20 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
         };
+        let activity_state = activity_state::ActivityState::in_config_dir();
+        // A configuration that cannot say keeps the default, sockets.
+        let claude_inbox = (matches!(kind, HookKind::Claude)
+            && relay_core::config::watcher_delivery()
+                != Ok(relay_core::config::DeliveryMode::Herdr))
+        .then(claude_inbox::ClaudeInbox::from_env);
         let cx = HookCtx {
             machine: &settings.machine.value,
-            socket_delivery: matches!(kind, HookKind::Claude)
-                && relay_core::config::watcher_delivery()
-                    == Ok(relay_core::config::DeliveryMode::Socket),
+            harness: match kind {
+                HookKind::Claude => relay_core::Harness::Claude,
+                HookKind::Codex => relay_core::Harness::Codex,
+            },
+            activity: activity_state.as_ref(),
+            claude_inbox: claude_inbox.as_ref(),
         };
         // A panic anywhere in the hook is caught inside `run` and recorded;
         // this second net keeps even a panic in that recording from becoming a
@@ -417,6 +482,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // `focuses` reports every failure as a typed error (one JSON object with `--json`), so it
+    // connects for itself.
+    if let Cmd::Focuses(args) = &cli.cmd {
+        return focuses::main(args, &settings);
+    }
     match run(cli, &settings) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -440,11 +510,76 @@ pub(crate) type BoxError = Box<dyn std::error::Error>;
 
 fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxError> {
     let redial = retry::Redial::new(&settings.url.value, &settings.prefix.value);
-    let mut relay = redial.dial(CLI_TIMEOUT)?;
     let mut out = io::stdout().lock();
+    let mut relay = match redial.dial(CLI_TIMEOUT) {
+        Ok(relay) => relay,
+        Err(error) => {
+            if let Cmd::Log {
+                receipts: true,
+                since,
+                max,
+                since_ms,
+                until_ms,
+                after,
+                ..
+            } = &cli.cmd
+                && error.is_connection()
+            {
+                let window = i64::try_from(since.0.as_millis()).unwrap_or(i64::MAX);
+                let now = now_ms();
+                let request = relay_core::receipts::ReceiptRequest {
+                    since_ms: since_ms.unwrap_or_else(|| now.saturating_sub(window)),
+                    until_ms: until_ms.unwrap_or(now),
+                    now_ms: now,
+                    page_size: *max,
+                    after: after.clone(),
+                };
+                let report = relay_core::receipts::ReceiptExport::source_unavailable(&request)?;
+                json::write_line(&mut out, &report)?;
+                return Ok(());
+            }
+            return Err(error.into());
+        }
+    };
     match cli.cmd {
         Cmd::Work(args) => work::run(args, &mut relay, settings, &mut out)?,
-        Cmd::Send { to, text } => {
+        Cmd::Assign(args) => assign::run(args, &mut relay, settings, &mut out)?,
+        Cmd::Orders {
+            command: OrdersCommand::Expired { json },
+        } => {
+            let report = retry::read(&mut relay, &redial, |r| Ok(r.expired_orders()?))?;
+            if json {
+                json::write_line(&mut out, &report)?;
+            } else {
+                for o in &report.orders {
+                    writeln!(
+                        out,
+                        "{} {} ticket={} last={} escalation={}",
+                        o.original_id,
+                        o.recipient,
+                        o.expect_ticket.as_deref().unwrap_or("-"),
+                        o.last_state,
+                        o.escalation.as_str()
+                    )?;
+                }
+                if report.skipped > 0 {
+                    writeln!(out, "skipped: {} undecodable rows", report.skipped)?;
+                }
+                if report.truncated {
+                    writeln!(out, "truncated: more expired orders exist")?;
+                }
+            }
+        }
+        Cmd::Send {
+            to,
+            text,
+            order,
+            ack_deadline,
+            expect_ticket,
+        } => {
+            let order = order
+                .then(|| order_spec(ack_deadline, expect_ticket))
+                .transpose()?;
             let mut resolved = resolve_send_target(&mut relay, &settings.machine.value, &to)?;
             let broadcast = matches!(resolved.target, relay_core::Target::All);
             let unreadable = resolved.unreadable;
@@ -462,7 +597,15 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 sent_at_ms: now_ms(),
                 forwarded: false,
             };
-            let recipients = enqueue_resolved(&mut relay, &mut resolved, &mut msg)?;
+            if order.is_some() && broadcast {
+                return Err("an order goes to one lane, not to all".into());
+            }
+            // The order's deadline, unacted count and Acted are kept per lane address: a
+            // recipient that is not a verified server:workspace:tab lane cannot take one.
+            if order.is_some() && resolved.directory.is_none() {
+                return Err("an order goes to a lane address server:workspace:tab".into());
+            }
+            let recipients = enqueue_resolved(&mut relay, &mut resolved, &mut msg, order.as_ref())?;
             let recipient = recipient_registration(
                 resolved.recipient,
                 resolved.registry.as_deref(),
@@ -722,20 +865,45 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 }
             }
         }
-        Cmd::Log { since, max } => {
+        Cmd::Log {
+            since,
+            max,
+            json,
+            receipts,
+            since_ms,
+            until_ms,
+            after,
+        } => {
             let window = i64::try_from(since.0.as_millis()).unwrap_or(i64::MAX);
-            let book = display_book(&mut relay, &redial);
-            let since_ms = now_ms().saturating_sub(window);
-            let messages = retry::read(&mut relay, &redial, |r| Ok(r.log(since_ms, max)?))?;
-            for m in messages {
-                writeln!(
-                    out,
-                    "{} {} -> {}: {}",
-                    clock(m.sent_at_ms),
-                    book.label(&m.from),
-                    book.label_target(&m.to),
-                    relay_core::text::neutralise(&m.text)
-                )?;
+            let now = now_ms();
+            let since_ms = since_ms.unwrap_or_else(|| now.saturating_sub(window));
+            if receipts {
+                let request = relay_core::receipts::ReceiptRequest {
+                    since_ms,
+                    until_ms: until_ms.unwrap_or(now),
+                    now_ms: now,
+                    page_size: max,
+                    after,
+                };
+                let report = relay.receipt_export(&request)?;
+                json::write_line(&mut out, &report)?;
+            } else {
+                let messages = retry::read(&mut relay, &redial, |r| Ok(r.log(since_ms, max)?))?;
+                if json {
+                    json::write_line(&mut out, &messages)?;
+                } else {
+                    let book = display_book(&mut relay, &redial);
+                    for m in messages {
+                        writeln!(
+                            out,
+                            "{} {} -> {}: {}",
+                            clock(m.sent_at_ms),
+                            book.label(&m.from),
+                            book.label_target(&m.to),
+                            relay_core::text::neutralise(&m.text)
+                        )?;
+                    }
+                }
             }
         }
         Cmd::Register { kind } => {
@@ -814,7 +982,11 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
             cmd: EscalationCmd::PostLinear { id },
         } => {
             let esc = escalate::run_escalation_post_linear(&mut relay, &RealLinear::new(), &id)?;
-            writeln!(out, "{}", render::post_linear_line(&esc.filing.ticket))?;
+            writeln!(
+                out,
+                "{}",
+                render::post_linear_line(&esc.filing.ticket_text())
+            )?;
         }
         Cmd::Whoami { json } => {
             // AGE-2018 PR review, finding 11: a Redis failure inside
@@ -848,7 +1020,9 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 None => writeln!(out, "not a lead")?,
             }
         }
-        Cmd::Hook { .. } | Cmd::Doctor { .. } => unreachable!("handled in main"),
+        Cmd::Hook { .. } | Cmd::Doctor { .. } | Cmd::Focuses(_) => {
+            unreachable!("handled in main")
+        }
     }
     Ok(())
 }
@@ -932,6 +1106,7 @@ fn enqueue_resolved(
     relay: &mut Relay,
     resolved: &mut SendTarget,
     msg: &mut Message,
+    order: Option<&relay_core::receipts::OrderSpec>,
 ) -> relay_core::Result<Vec<AgentName>> {
     if matches!(msg.to, relay_core::Target::All) {
         return relay.send_directory_broadcast(msg);
@@ -939,9 +1114,9 @@ fn enqueue_resolved(
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
         let Some(proof) = &resolved.directory else {
-            return relay.send(msg);
+            return relay.send_as(msg, order);
         };
-        match relay.send_directory(msg, proof) {
+        match relay.send_directory_as(msg, proof, order) {
             Err(relay_core::Error::DirectoryChanged) if std::time::Instant::now() < deadline => {
                 let address = proof
                     .registration
@@ -1064,4 +1239,29 @@ fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// The order an `--order` send makes: the deadline from `--ack-deadline`, else
+/// `[send] ack_deadline` of the config file, else five minutes.
+fn order_spec(
+    ack_deadline: Option<Since>,
+    expect_ticket: Option<String>,
+) -> Result<relay_core::receipts::OrderSpec, BoxError> {
+    let age = match ack_deadline {
+        Some(since) => since,
+        None => {
+            let file = relay_core::config::load_file()?
+                .unwrap_or(relay_core::config::FileConfig::default());
+            match file.send.ack_deadline_text()? {
+                Some(text) => text
+                    .parse::<Since>()
+                    .map_err(|e| format!("[send] ack_deadline: {e}"))?,
+                None => Since(Duration::from_millis(
+                    relay_core::receipts::ORDER_ACK_DEFAULT_MS.unsigned_abs(),
+                )),
+            }
+        }
+    };
+    let ms = i64::try_from(age.0.as_millis()).unwrap_or(i64::MAX);
+    Ok(relay_core::receipts::OrderSpec::new(ms, expect_ticket)?)
 }

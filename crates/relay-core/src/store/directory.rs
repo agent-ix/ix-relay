@@ -4,7 +4,7 @@ use std::time::Duration;
 use redis::Commands;
 use serde::{Deserialize, Serialize};
 
-use super::{LOG_CAP, MAX_MESSAGE_BYTES, Relay, encode};
+use super::{MAX_MESSAGE_BYTES, Relay, encode};
 use crate::{Address, AgentName, Error, MachineName, Message, Registration, Result, Target};
 
 /// A failed observer cannot extend this lease; successful sweeps renew it.
@@ -292,38 +292,11 @@ impl Relay {
             proofs.push((machine, raw));
         }
         let recipients: Vec<_> = recipients.into_iter().collect();
-        let mut command = redis::cmd("EVAL");
-        command.arg(r#"
-            local n = tonumber(ARGV[1])
-            local count = tonumber(ARGV[2])
-            for i=1,n do if redis.call('GET', KEYS[i]) ~= ARGV[i+2] then return 0 end end
-            for i=n+1,n+count do
-                local kind=redis.call('TYPE', KEYS[i]).ok
-                if kind ~= 'none' and kind ~= 'list' then return redis.error_reply('broadcast inbox has wrong type') end
-            end
-            local kind=redis.call('TYPE', KEYS[n+count+1]).ok
-            if kind ~= 'none' and kind ~= 'stream' then return redis.error_reply('broadcast log has wrong type') end
-            for i=n+1,n+count do redis.call('RPUSH', KEYS[i], ARGV[n+3]) end
-            redis.call('XADD', KEYS[n+count+1], 'MAXLEN', '~', ARGV[n+4], '*', 'msg', ARGV[n+3])
-            return 1
-        "#).arg(proofs.len() + recipients.len() + 1);
-        for (machine, _) in &proofs {
-            command.arg(self.keys.directory_key(machine));
-        }
-        for recipient in &recipients {
-            command.arg(self.keys.inbox_key(recipient));
-        }
-        command
-            .arg(self.keys.log_key())
-            .arg(proofs.len())
-            .arg(recipients.len());
-        for (_, raw) in &proofs {
-            command.arg(raw);
-        }
-        let accepted: bool = command
-            .arg(encode(msg))
-            .arg(LOG_CAP)
-            .query(&mut self.conn)?;
+        let publications: Vec<_> = proofs
+            .into_iter()
+            .map(|(machine, raw)| (self.keys.directory_key(&machine), raw))
+            .collect();
+        let accepted = self.enqueue_receipted(msg, &recipients, &publications, None)?;
         if !accepted {
             return Err(Error::DirectoryChanged);
         }
@@ -336,6 +309,16 @@ impl Relay {
         &mut self,
         msg: &Message,
         recipient: &DirectoryRecipient,
+    ) -> Result<Vec<AgentName>> {
+        self.send_directory_as(msg, recipient, None)
+    }
+
+    /// [`Relay::send_directory`], as an order (FR-071) when `order` is given.
+    pub fn send_directory_as(
+        &mut self,
+        msg: &Message,
+        recipient: &DirectoryRecipient,
+        order: Option<&crate::receipts::OrderSpec>,
     ) -> Result<Vec<AgentName>> {
         if msg.to != Target::Agent(recipient.registration.name.clone()) {
             return Err(Error::UnverifiedEnrollment {
@@ -363,25 +346,15 @@ impl Relay {
                 })?;
         let mut stored = msg.clone();
         stored.to = Target::Agent(address.to_string().parse()?);
-        let accepted: bool = redis::cmd("EVAL")
-            .arg(r#"
-                if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
-                local inbox = redis.call('TYPE', KEYS[2]).ok
-                local log = redis.call('TYPE', KEYS[3]).ok
-                if inbox ~= 'none' and inbox ~= 'list' then return redis.error_reply('directory inbox has wrong type') end
-                if log ~= 'none' and log ~= 'stream' then return redis.error_reply('directory log has wrong type') end
-                redis.call('RPUSH', KEYS[2], ARGV[2])
-                redis.call('XADD', KEYS[3], 'MAXLEN', '~', ARGV[3], '*', 'msg', ARGV[2])
-                return 1
-            "#)
-            .arg(3)
-            .arg(self.keys.directory_key(&recipient.machine))
-            .arg(self.keys.inbox_key(&recipient.registration.name))
-            .arg(self.keys.log_key())
-            .arg(&recipient.publication)
-            .arg(encode(&stored))
-            .arg(LOG_CAP)
-            .query(&mut self.conn)?;
+        let accepted = self.enqueue_receipted(
+            &stored,
+            std::slice::from_ref(&recipient.registration.name),
+            &[(
+                self.keys.directory_key(&recipient.machine),
+                recipient.publication.clone(),
+            )],
+            order,
+        )?;
         if !accepted {
             return Err(Error::DirectoryChanged);
         }

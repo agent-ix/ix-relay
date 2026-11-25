@@ -44,7 +44,9 @@ fn msg(from: &str, text: &str, at: i64) -> Message {
 }
 
 fn queue(relay: &mut Relay, lead: &str, messages: &[Message]) {
-    relay.requeue_front(&name(lead), messages).unwrap();
+    relay
+        .requeue_front(&name(lead), &inbox_entries(messages))
+        .unwrap();
 }
 
 /// The inbox of `lead` as stored, entry by entry.
@@ -65,7 +67,7 @@ fn texts(bus: &mut Bus, lead: &str) -> Vec<String> {
         .unwrap()
         .messages
         .into_iter()
-        .map(|m| m.text)
+        .map(|m| m.message.text)
         .collect()
 }
 
@@ -314,4 +316,14 @@ fn tc_053_11_a_registration_with_a_batch_in_flight_is_not_pruned_with_its_mail()
         .reap_expired(&name("old-lead"), Now::AtMs(1_000 + 61_000))
         .unwrap();
     assert_eq!(bus.relay.dead_letter_stranded(&a).unwrap(), Buried::Done(2));
+}
+
+fn inbox_entries(messages: &[Message]) -> Vec<relay_core::receipts::InboxEntry> {
+    messages
+        .iter()
+        .map(|message| {
+            let json = serde_json::to_vec(message).unwrap();
+            relay_core::receipts::InboxEntry::try_from(json.as_slice()).unwrap()
+        })
+        .collect()
 }

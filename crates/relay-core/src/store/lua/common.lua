@@ -11,6 +11,10 @@
 -- (`readable`) and refuses without writing anything, and then writes the
 -- destination of each move before it deletes the source.
 
+local receipt_ready, receipt_metadata, receipt_entry, receipt_gap, receipt_append
+local receipt_pending, receipt_finish, receipt_enqueue, receipt_observe
+local receipt_without_metadata, receipt_emit, order_close, receipt_acted
+
 local function now_ms(override)
     if override ~= '' then return tonumber(override) end
     local t = redis.call('TIME')
@@ -77,14 +81,21 @@ local function reap(inbox, inflight, dead, now, max_redeliveries, dead_cap)
             end
         else
             local core, n = split_count(entry)
+            local can_move = n < max_redeliveries or dead_ok
+            if can_move then
+                receipt_append(entry, 'timed_out', now, nil, 'lease_expired')
+                receipt_finish(entry, now, true)
+            end
             if n >= max_redeliveries then
                 if dead_ok then
+                    receipt_append(entry, 'dead_lettered', now, nil, 'redelivery_limit')
                     buried[#buried + 1] = core
                     gone[#gone + 1] = row
                 else
                     stuck = stuck + 1
                 end
             else
+                receipt_append(entry, 'requeued', now, nil, 'lease_expired')
                 back[#back + 1] = core .. string.rep(' ', n + 1)
                 gone[#gone + 1] = row
             end

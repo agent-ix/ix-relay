@@ -7,7 +7,7 @@ local now = now_ms(ARGV[1])
 local out = {}
 for i = 0, #KEYS / 3 - 1 do
     local inbox, inflight, dead = KEYS[3 * i + 1], KEYS[3 * i + 2], KEYS[3 * i + 3]
-    if readable(inbox, 'list') and readable(inflight, 'list') then
+    if readable(inbox, 'list') and readable(inflight, 'list') and receipt_ready() then
         out[#out + 1] = reap(inbox, inflight, dead, now, tonumber(ARGV[2]), tonumber(ARGV[3]))
     else
         out[#out + 1] = { -1, 0, 0, 0 }

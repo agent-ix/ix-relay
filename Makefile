@@ -7,6 +7,8 @@ CARGO ?= cargo
 .PHONY: help
 help:
 	@echo "Available targets:"
+	@echo "  make figures          - Regenerate docs/images from docs/images/figures.json (ixd build)"
+	@echo "  make figures-check    - Fail when docs/images are stale; writes nothing"
 	@echo "  make fmt              - Format with rustfmt"
 	@echo "  make fmt-check        - Verify formatting (CI gate)"
 	@echo "  make lint             - Clippy with -D warnings"
@@ -17,7 +19,7 @@ help:
 	@echo "  make audit-unsafe     - Enforce // SAFETY: comments on unsafe blocks"
 	@echo "  make docs             - cargo doc, denying missing/broken doc links"
 	@echo "  make fuzz             - Property-based fuzz lanes at a raised case count (see fuzz/README.md)"
-	@echo "  make check-matrix     - Recount spec/tests.md against its summary tables (needs python3)"
+	@echo "  make check-matrix     - Recount spec/tests.md against its summary tables"
 	@echo "  make ci               - All CI gates locally (fmt-check + lint + test-redis + deny + audit-unsafe + docs + check-matrix)"
 
 # =============================================================================
@@ -60,6 +62,10 @@ fuzz:
 build:
 	$(CARGO) build --release
 
+.PHONY: build-agent-msg
+build-agent-msg:
+	$(CARGO) build --release -p agent-msg
+
 .PHONY: clean
 clean:
 	$(CARGO) clean
@@ -93,7 +99,7 @@ docs:
 # The test matrix's summary tables must reconcile with its rows.
 .PHONY: check-matrix
 check-matrix:
-	python3 scripts/check_test_matrix.py
+	$(CARGO) run --quiet -p relay-tools --bin check-test-matrix
 
 # =============================================================================
 # Composite
@@ -101,3 +107,28 @@ check-matrix:
 
 .PHONY: ci
 ci: fmt-check lint test-redis deny audit-unsafe docs check-matrix
+
+# Native deployment smoke check with the installed Redis; isolated Unix socket only.
+.PHONY: test-native-redis
+test-native-redis:
+	bash scripts/test-native-redis.sh
+
+.PHONY: test-native-readiness
+test-native-readiness:
+	bash scripts/test-native-readiness.sh
+
+# =============================================================================
+# Documentation figures
+# =============================================================================
+# docs/images/figures.json defines the figures; `ixd build` (agent-ix/ix-diagrams) renders them.
+# Install it with: cargo install --git https://github.com/agent-ix/ix-diagrams ix-diagrams
+
+IXD ?= ixd
+
+.PHONY: figures
+figures:
+	$(IXD) build docs/images/figures.json --out docs/images
+
+.PHONY: figures-check
+figures-check:
+	$(IXD) build docs/images/figures.json --out docs/images --check

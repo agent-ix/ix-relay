@@ -8,13 +8,13 @@ description: Use when setting up, adding, re-keying or fixing a machine's connec
 The bus is a Redis (relay-redis) on one **hub** machine, reached by every
 machine, hub included, at `10.99.0.1:6380` over **WireGuard**. Each machine
 has its own WireGuard key and its own Redis user. Background and design:
-README.md "Transport".
+docs/setup.md.
 
 | Name | Value |
 |---|---|
 | hub | the machine that runs relay-redis; peers reach it at its LAN address |
 | WireGuard net | `10.99.0.0/24`, hub `10.99.0.1`, peers `10.99.0.2`… |
-| WireGuard port | UDP `51820` (LAN only for now; off-LAN is AGE-2068) |
+| WireGuard port | UDP `51820` (accepted from the hub's LAN only) |
 | bus address | `10.99.0.1:6380` (TCP; the only port a peer reaches over `wg0`) |
 | hub admin tool | `scripts/relay-admin` in an ix-relay checkout on the hub |
 
@@ -165,7 +165,7 @@ sed -i '' "s|^url = .*|url = \"$u\"|" ~/.ix/relay/config.toml   # macOS (BSD sed
 ```
 
 A new machine with no `config.toml` yet: create it with `url = "…"` and
-`machine = "<machine>"` (README.md "Configuration"); `chmod 600` it either way,
+`machine = "<machine>"` (docs/configuration.md); `chmod 600` it either way,
 since it now holds a password.
 
 ### 3c. Run the watcher

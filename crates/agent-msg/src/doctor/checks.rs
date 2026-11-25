@@ -23,6 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use relay_core::ScanCut;
+use relay_core::hook_skips;
 use relay_core::moves::{MoveEvent, MoveKind};
 use relay_core::{
     LinkFault, MachineName, Registration,
@@ -135,9 +136,11 @@ pub(crate) fn evaluate(f: &Facts) -> Vec<Check> {
     }
     watcher_file(f, up, &mut checks);
     spool(f, &mut checks);
+    activity_skips(f, &mut checks);
     if let Some(up) = up {
         bus_failures(f, up, &mut checks);
         recent_moves(f, up, &mut checks);
+        assignments(up, &mut checks);
     }
     herdr(f, &mut checks);
     if let Some(up) = up {
@@ -151,15 +154,16 @@ pub(crate) fn evaluate(f: &Facts) -> Vec<Check> {
 }
 
 /// Delivery through Claude Code's inbox sockets (FR-044). Reports the mode, the
-/// sockets each watcher resolved and the leads held; never a failure, because the
-/// socket is opt-in and herdr is behind it.
+/// sockets each watcher resolved and the leads held or waiting; never a failure,
+/// because mail that cannot be posted stays queued.
 fn socket(f: &Facts, checks: &mut Vec<Check>) {
     let states = match &f.socket {
         SocketFacts::Herdr => {
             checks.push(Check::ok(
                 Family::Socket,
                 None,
-                "delivery = herdr (the default): Claude Code inbox sockets are not used",
+                "delivery = herdr: Claude Code inbox sockets are switched off in config.toml, so \
+                 mail is typed into every lead, sessions with a socket included",
             ));
             return;
         }
@@ -276,7 +280,7 @@ fn socket_state(state: &SocketState, now_ms: i64, checks: &mut Vec<Check>) {
         .iter()
         .filter(|b| b.awaiting_consumption)
         .count();
-    let fallback_notes = status
+    let problem_notes = status
         .notes
         .iter()
         .filter(|n| !n.contains(": socket_pending:"))
@@ -289,10 +293,11 @@ fn socket_state(state: &SocketState, now_ms: i64, checks: &mut Vec<Check>) {
             .cloned(),
     );
     let summary = format!(
-        "delivery = socket: {} lead(s) resolved, {} held, {} using herdr, {} awaiting consumption",
+        "delivery = socket: {} lead(s) resolved, {} held, {} with a problem, {} awaiting \
+         consumption",
         status.leads.len(),
         status.held.len(),
-        fallback_notes,
+        problem_notes,
         pending
     );
     wire_drift(&versions, now_ms, &subject, checks);
@@ -307,10 +312,11 @@ fn socket_state(state: &SocketState, now_ms: i64, checks: &mut Vec<Check>) {
                     "the watcher dead-lettered {} batch(es) on its own account",
                     status.dead_lettered.len()
                 ),
-                "the receiver's user denied a held message, or nobody answered its approval \
-                 prompt before the maximum hold; a dead letter does not carry the reason",
+                "the receiver's user denied a held message, nobody answered its approval \
+                 prompt before the maximum hold, or a posted message was not consumed in that \
+                 time; a dead letter does not carry the reason",
                 "read them with `agent-msg inbox --dead`; to stop mail being held, set \
-                 crossSessionInbound to accept or delivery = herdr",
+                 crossSessionInbound to accept",
             )
             .with_details(status.dead_lettered.iter().map(|d| {
                 format!(
@@ -329,15 +335,14 @@ fn socket_state(state: &SocketState, now_ms: i64, checks: &mut Vec<Check>) {
                 summary,
                 "Claude Code holds relay mail behind an approval prompt for a bypass-mode lead \
                  without crossSessionInbound: accept; the mail waits in flight",
-                "set crossSessionInbound to accept in that lead's Claude Code settings, or set \
-                 delivery = herdr in ~/.ix/relay/config.toml",
+                "set crossSessionInbound to accept in that lead's Claude Code settings",
             )
             .with_details(status.notes.iter().cloned().chain(details)),
         );
-    } else if fallback_notes > 0 || status.reply_socket.is_none() {
+    } else if problem_notes > 0 || status.reply_socket.is_none() {
         let mut lines = status.notes.clone();
         if status.reply_socket.is_none() && !lines.iter().any(|n| n.contains("not bound")) {
-            lines.push("reply socket not bound: every batch goes to herdr".to_owned());
+            lines.push("reply socket not bound: Claude Code mail waits".to_owned());
         }
         checks.push(
             Check::warn(
@@ -346,9 +351,10 @@ fn socket_state(state: &SocketState, now_ms: i64, checks: &mut Vec<Check>) {
                 Some(&subject),
                 summary,
                 "the socket could not be used for these leads (no session record, an unsupported \
-                 Claude Code, several processes on one session, a refused connection, an \
-                 unconfirmed delivery or a reply socket that is not bound yet); terminal fallback \
-                 is allowed only for a verified idle session, otherwise mail stays queued",
+                 Claude Code, several processes on one session, a parked session, a refused \
+                 connection, an unconfirmed delivery or a reply socket that is not bound yet); \
+                 a session with a socket is never typed into, so its mail stays queued or in \
+                 flight",
                 "nothing is lost; see the lines below, and the README section on delivery \
                  through the inbox socket",
             )
@@ -743,6 +749,7 @@ fn heartbeats(f: &Facts, up: &RedisUp, checks: &mut Vec<Check>) {
                 .get(&machine)
                 .map(|t| f.now_ms.saturating_sub(*t)),
         ));
+        checks.extend(fleet_checks(&machine, by_machine.get(&machine).copied()));
     }
     if beats.unreadable > 0 {
         checks.push(Check::warn(
@@ -881,6 +888,97 @@ fn heartbeat_check(
         format!("watcher on {machine}: {summary}"),
     )
     .with_details(heartbeat_details(f, hb))
+}
+
+/// The collector warnings of a heartbeat (FR-070, FR-045): each is its own check, so one
+/// never hides the other nor the heartbeat's own state.
+fn fleet_checks(machine: &MachineName, beat: Option<&MachineHeartbeat>) -> Vec<Check> {
+    let Some(HeartbeatRead::Live(hb)) = beat.map(|b| &b.read) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if !hb.fleet_failed_sources.is_empty() {
+        let named: Vec<String> = hb
+            .fleet_failed_sources
+            .iter()
+            .map(|s| relay_core::text::neutralise(s))
+            .collect();
+        out.push(Check::warn(
+            Family::Watcher,
+            Code::CollectorSourceFailed,
+            Some(machine.as_str()),
+            format!(
+                "the watcher on {machine} reports collector sources failing: {}",
+                named.join(", ")
+            ),
+            "a host measurement or lane source did not read; its series are left out and ix_fleet_probe_ok reads 0",
+            "check that host (its /proc, herdr, Redis or capacity entry), or list the source under [fleet] unavailable_sources if the host cannot provide it",
+        ));
+    }
+    if hb.fleet_lanes_dropped > 0 {
+        out.push(Check::warn(
+            Family::Watcher,
+            Code::FleetLanesDropped,
+            Some(machine.as_str()),
+            format!(
+                "the watcher on {machine} left {} lane(s) out of its metrics: more than 50 lanes",
+                hb.fleet_lanes_dropped
+            ),
+            "the per-lane series are capped at 50 lanes per host",
+            "retire idle lanes on that host; the cap is fixed",
+        ));
+    }
+    out
+}
+
+/// The standing defects of the assignment lists (FR-072): a warning for each host whose stale
+/// lanes refused a write and for each list that did not follow its lane. Nothing is added
+/// while there are none.
+fn assignments(up: &RedisUp, checks: &mut Vec<Check>) {
+    let defects = match &up.assignments {
+        Ok(defects) => defects,
+        Err(error) => {
+            checks.push(Check::unknown(
+                Family::Assignments,
+                Code::AssignmentsUnreadable,
+                None,
+                format!("could not read the assignment list defects: {error}"),
+                "read the `assign-defects` and `assign-move-defects` keys with redis-cli",
+            ));
+            return;
+        }
+    };
+    for host in &defects.hosts {
+        let name = relay_core::text::neutralise(&host.host);
+        checks.push(Check::warn(
+            Family::Assignments,
+            Code::AssignmentHostRegistryStale,
+            Some(&name),
+            format!(
+                "{} write(s) to assignment lists of lanes on {name} were refused as host_registry_stale",
+                host.refused
+            ),
+            "the registry lease of that host has expired, so its lanes are stale and the orchestrator cannot assign to them",
+            "restart or repair the watcher on that host; the defect ends when it publishes its lane list again",
+        ));
+    }
+    for defect in &defects.moves {
+        let (from, to) = (
+            relay_core::text::neutralise(&defect.from),
+            relay_core::text::neutralise(&defect.to),
+        );
+        checks.push(Check::warn(
+            Family::Assignments,
+            Code::AssignmentMoveFailed,
+            Some(&from),
+            format!(
+                "the assignment list of {from} did not follow its lane to {to}: {}",
+                relay_core::text::neutralise(&defect.reason)
+            ),
+            "the lane was renamed or moved while the new address held a list or the store could not take the move, so the list is still under the old address",
+            "write the list again with `agent-msg assign set` under the lane's current address; a write to that address ends this warning",
+        ));
+    }
 }
 
 /// No key: the wording and the severity depend on whether anything there needs
@@ -1171,6 +1269,93 @@ fn any_recent(f: &Facts, records: &[&SpoolRecord]) -> bool {
     records
         .iter()
         .any(|r| f.now_ms.saturating_sub(r.at_ms) < RECENT_FAILURE_MS)
+}
+
+/// Hook activity updates that were dropped (FR-068) are counted in sidecar files; each
+/// count warns only while it grew in the last [`DAY_MS`] (the window of
+/// `hook_failures_recorded`), then reads as information. Deleting the sidecar resets it.
+fn activity_skips(f: &Facts, checks: &mut Vec<Check>) {
+    let subject = Some("hook activity state");
+    if f.activity_spool_unwritable {
+        checks.push(Check::warn(
+            Family::HookSpool,
+            Code::ActivitySpoolUnwritable,
+            subject,
+            "the spool directory cannot be written, so dropped activity updates cannot be counted",
+            "no hook can update spool/activity.json or record a drop beside it",
+            "make the spool directory beside config.toml writable by the user that runs hooks",
+        ));
+    }
+    for (series, file, unreadable, drop_code, what, cause, fix) in [
+        (
+            &f.activity_lock_skips,
+            "spool/activity.lockskips",
+            Code::ActivitySkipsUnreadable,
+            Code::ActivityLockSkipped,
+            "dropped because the state file lock was held",
+            "concurrent hooks held spool/activity.lock past the 50 ms bound, so those updates were not applied",
+            "look for a stuck hook process holding spool/activity.lock",
+        ),
+        (
+            &f.activity_write_failures,
+            "spool/activity.writefails",
+            Code::ActivitySkipsUnreadable,
+            Code::ActivityWriteFailed,
+            "dropped because the state files could not be written",
+            "the spool directory or spool/activity.json is unwritable, a symlink, or the disk is full",
+            "check the permissions, free space and type of spool/ and spool/activity.json",
+        ),
+    ] {
+        let count = match &series.count {
+            Ok(0) => continue,
+            Ok(n) => *n,
+            Err(error) => {
+                checks.push(Check::warn(
+                    Family::HookSpool,
+                    unreadable,
+                    subject,
+                    format!("{file} cannot be read: {error}"),
+                    "the count file is a symlink, not a regular file, or unreadable",
+                    &format!("remove {file} beside config.toml"),
+                ));
+                continue;
+            }
+        };
+        let shown = if hook_skips::saturated(count) {
+            format!("at least {count} (cap reached)")
+        } else {
+            count.to_string()
+        };
+        // A full sidecar stops growing, so its age says nothing about recency: it stays a warning.
+        let recent = hook_skips::saturated(count)
+            || series
+                .last_ms
+                .is_none_or(|t| f.now_ms.saturating_sub(t) < DAY_MS);
+        if recent {
+            checks.push(Check::warn(
+                Family::HookSpool,
+                drop_code,
+                subject,
+                if hook_skips::saturated(count) {
+                    format!("{shown} hook activity update(s) {what}, and the count has stopped so recent drops cannot be seen")
+                } else {
+                    format!("{shown} hook activity update(s) {what}, the latest within 24 hours")
+                },
+                cause,
+                &format!(
+                    "{fix}; the count is cumulative, deleting {file} beside config.toml resets it"
+                ),
+            ));
+        } else {
+            checks.push(Check::ok(
+                Family::HookSpool,
+                subject,
+                format!(
+                    "{shown} hook activity update(s) {what}, none in the last 24 hours (delete {file} to reset)"
+                ),
+            ));
+        }
+    }
 }
 
 fn spool(f: &Facts, checks: &mut Vec<Check>) {
@@ -1961,7 +2146,8 @@ fn service(f: &Facts, up: Option<&RedisUp>, checks: &mut Vec<Check>) {
 
 #[cfg(test)]
 mod tests {
-    use crate::doctor::facts::MovesRead;
+    use crate::doctor::facts::{AssignmentDefects, MovesRead, SkipSeries};
+    use ix_trace_rs::trace;
     use std::{collections::HashSet, time::Duration};
 
     use relay_core::{
@@ -1996,6 +2182,8 @@ mod tests {
                 redis_ok: true,
                 leads_watched: 1,
                 otlp: Some(OtlpStatus::Disabled),
+                fleet_failed_sources: Vec::new(),
+                fleet_lanes_dropped: 0,
                 last_error: Some(HeartbeatError {
                     kind: HeartbeatErrorKind::PollFailed,
                     at_ms: NOW - HOUR_MS,
@@ -2103,6 +2291,7 @@ mod tests {
                 hook_failures: Ok(vec![]),
                 hook_unreadable: 0,
                 moves: Ok(MovesRead::default()),
+                assignments: Ok(AssignmentDefects::default()),
             })),
             watcher_file: FileState::Read {
                 file: WatcherFile {
@@ -2117,6 +2306,9 @@ mod tests {
                 pid_alive: Some(true),
             },
             spool: SpoolState::Empty,
+            activity_lock_skips: SkipSeries::default(),
+            activity_write_failures: SkipSeries::default(),
+            activity_spool_unwritable: false,
             herdr: HerdrCheck::Ok {
                 version: MIN_HERDR_VERSION,
                 shape_verified: true,
@@ -2187,6 +2379,44 @@ mod tests {
             .find(|c| c.code == code)
             .unwrap_or_else(|| panic!("{code:?} never fired"))
             .status
+    }
+
+    /// A heartbeat that lists failed collector sources is a warning naming each, and one
+    /// that reports dropped lanes is a warning with the count; neither is a failure.
+    #[trace("FR-070-AC-5", "FR-045-AC-31")]
+    #[test]
+    fn tc_070_05_doctor_warns_naming_each_failed_collector_source_and_dropped_lanes() {
+        let with = |sources: &[&str], dropped: u32| {
+            let mut f = healthy();
+            let mut b = beat("hub", 42, 1_000);
+            if let HeartbeatRead::Live(hb) = &mut b.read {
+                hb.fleet_failed_sources = sources.iter().map(|s| (*s).to_owned()).collect();
+                hb.fleet_lanes_dropped = dropped;
+            }
+            up(&mut f).heartbeats = beats(vec![b, beat("node-a", 7, 1_000)]);
+            f
+        };
+        let failed = with(&["cpu", "pane_tail"], 0);
+        assert_eq!(
+            status_of(&failed, Code::CollectorSourceFailed),
+            Status::Warn
+        );
+        let message = evaluate(&failed)
+            .into_iter()
+            .find(|c| c.code == Code::CollectorSourceFailed)
+            .unwrap()
+            .message;
+        assert!(
+            message.contains("cpu") && message.contains("pane_tail"),
+            "{message}"
+        );
+        let dropped = with(&[], 1);
+        assert_eq!(status_of(&dropped, Code::FleetLanesDropped), Status::Warn);
+        // Both at once: neither hides the other.
+        let both = with(&["cpu"], 2);
+        assert_eq!(status_of(&both, Code::CollectorSourceFailed), Status::Warn);
+        assert_eq!(status_of(&both, Code::FleetLanesDropped), Status::Warn);
+        assert!(statuses(&with(&[], 0)).is_empty());
     }
 
     /// Tracing: TC-045-08
@@ -2514,6 +2744,7 @@ mod tests {
     /// One row per code and severity: the facts that make it fire. A code that
     /// cannot be provoked is dead, and a severity that changes is a change to the
     /// catalogue in FR-029.
+    #[trace("FR-068-AC-15")]
     #[test]
     fn every_code_fires_with_its_documented_severity_a_cause_and_a_fix() {
         type Mutate = fn(&mut Facts);
@@ -2635,6 +2866,27 @@ mod tests {
                     )],
                     undecodable: 0,
                 };
+            }),
+            (Code::ActivityLockSkipped, Warn, |f| {
+                f.activity_lock_skips = SkipSeries {
+                    count: Ok(2),
+                    last_ms: Some(NOW - 1_000),
+                };
+            }),
+            (Code::ActivityWriteFailed, Warn, |f| {
+                f.activity_write_failures = SkipSeries {
+                    count: Ok(hook_skips::MAX_SKIPS),
+                    last_ms: None,
+                };
+            }),
+            (Code::ActivitySkipsUnreadable, Warn, |f| {
+                f.activity_lock_skips = SkipSeries {
+                    count: Err("not a regular file".into()),
+                    last_ms: None,
+                };
+            }),
+            (Code::ActivitySpoolUnwritable, Warn, |f| {
+                f.activity_spool_unwritable = true;
             }),
             (Code::HookSpoolUnlocated, Unknown, |f| {
                 f.spool = SpoolState::NoPath
@@ -3121,6 +3373,77 @@ mod tests {
         assert!(moved.contains("nothing is queued"), "{moved}");
     }
 
+    /// A lock-skip count warns only while it grew in the last 24 hours and then reads as
+    /// A count at the cap has stopped growing, so its age proves nothing and it warns however old.
+    #[trace("FR-068-AC-15")]
+    #[test]
+    fn a_full_skip_count_warns_whatever_its_age() {
+        let mut f = healthy();
+        f.activity_lock_skips = SkipSeries {
+            count: Ok(hook_skips::MAX_SKIPS),
+            last_ms: Some(NOW - 30 * DAY_MS),
+        };
+        let check = evaluate(&f)
+            .into_iter()
+            .find(|c| c.code == Code::ActivityLockSkipped)
+            .expect("a full count warns");
+        assert!(
+            check.message.starts_with("at least 1048576 (cap reached)")
+                && check.message.contains("stopped"),
+            "{}",
+            check.message
+        );
+    }
+
+    /// information; a count at the cap reads "at least", and each reason has its own fix.
+    #[trace("FR-068-AC-15")]
+    #[test]
+    fn a_skip_count_warns_only_on_recent_growth_and_a_full_one_reads_at_least() {
+        let mut f = healthy();
+        f.activity_lock_skips = SkipSeries {
+            count: Ok(7),
+            last_ms: Some(NOW - DAY_MS - 1),
+        };
+        let old = evaluate(&f);
+        assert!(old.iter().all(|c| c.code != Code::ActivityLockSkipped));
+        assert!(
+            old.iter()
+                .any(|c| c.message.contains("7 hook activity update(s)")
+                    && c.message.contains("none in the last 24 hours")),
+            "the cumulative count stays in the information text"
+        );
+        f.activity_lock_skips.last_ms = Some(NOW - DAY_MS + 1);
+        f.activity_write_failures = SkipSeries {
+            count: Ok(hook_skips::MAX_SKIPS),
+            last_ms: Some(NOW),
+        };
+        let checks = evaluate(&f);
+        let lock = checks
+            .iter()
+            .find(|c| c.code == Code::ActivityLockSkipped)
+            .unwrap();
+        let failed = checks
+            .iter()
+            .find(|c| c.code == Code::ActivityWriteFailed)
+            .unwrap();
+        assert!(lock.message.starts_with("7 hook"), "{}", lock.message);
+        assert!(
+            failed.message.starts_with("at least 1048576 (cap reached)"),
+            "{}",
+            failed.message
+        );
+        let (lock_cause, failed_cause) = (lock.cause.as_deref(), failed.cause.as_deref());
+        assert_ne!(lock_cause, failed_cause, "separate causes");
+        assert_ne!(lock.fix, failed.fix, "separate fixes");
+        for check in [lock, failed] {
+            assert!(
+                check.fix.as_deref().unwrap().contains("deleting"),
+                "{:?}",
+                check.fix
+            );
+        }
+    }
+
     /// The spool's `dropped` count (records dropped for the bound, lines removed
     /// unreadable) is shown, not only carried on the record.
     #[test]
@@ -3145,6 +3468,39 @@ mod tests {
             "{:?}",
             check.details
         );
+    }
+
+    /// Tracing: TC-072-12
+    /// ACs: FR-072-AC-9
+    #[trace("FR-072-AC-9")]
+    #[test]
+    fn tc_072_12_stale_host_refusals_and_unfollowed_lists_are_warnings_and_none_adds_nothing() {
+        use relay_core::assignment::{MoveDefect, ProbeDefect};
+        let mut f = healthy();
+        assert!(
+            evaluate(&f).iter().all(|c| c.check != Family::Assignments),
+            "no defect, no check"
+        );
+        up(&mut f).assignments = Ok(AssignmentDefects {
+            hosts: vec![ProbeDefect {
+                host: "oldhost".into(),
+                refused: 3,
+                last_ms: 1,
+            }],
+            moves: vec![MoveDefect {
+                from: "hub:EA:code".into(),
+                to: "hub:EA:review".into(),
+                reason: "target_occupied".into(),
+                at_ms: 1,
+            }],
+        });
+        assert_eq!(
+            status_of(&f, Code::AssignmentHostRegistryStale),
+            Status::Warn
+        );
+        assert_eq!(status_of(&f, Code::AssignmentMoveFailed), Status::Warn);
+        up(&mut f).assignments = Err("boom".into());
+        assert_eq!(status_of(&f, Code::AssignmentsUnreadable), Status::Unknown);
     }
 
     /// Tracing: TC-043-07
@@ -3807,12 +4163,12 @@ mod tests {
     /// Tracing: TC-044-18
     /// ACs: FR-044-AC-18
     #[test]
-    fn pending_socket_consumption_is_not_reported_as_herdr_fallback() {
+    fn pending_socket_consumption_is_not_reported_as_a_problem() {
         let status = socket_status(&[], &["ea: socket_pending: waiting for consumption"], true);
         let checks = socket_checks(status);
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].status, Status::Ok);
-        assert!(checks[0].message.contains("0 using herdr"));
+        assert!(checks[0].message.contains("0 with a problem"));
         assert!(
             checks[0]
                 .details
@@ -3825,7 +4181,7 @@ mod tests {
     /// ACs: FR-054-AC-3
     ///
     /// A status file with no entry and no note for the codex and opencode leads (the watcher
-    /// creates none) gives no warning, no using-herdr count and no note; one with a note for a
+    /// creates none) gives no warning, no problem count and no note; one with a note for a
     /// `claude` lead warns for that lead only.
     #[test]
     fn tc_054_03_doctor_does_not_warn_about_leads_that_do_not_try_the_socket() {
@@ -3835,7 +4191,7 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].status, Status::Ok);
         assert!(
-            found[0].message.contains("0 using herdr"),
+            found[0].message.contains("0 with a problem"),
             "{}",
             found[0].message
         );
@@ -3850,7 +4206,7 @@ mod tests {
         assert_eq!(warned[0].code, Code::SocketFallback);
         assert_eq!(warned[0].status, Status::Warn);
         assert!(
-            warned[0].message.contains("1 using herdr"),
+            warned[0].message.contains("1 with a problem"),
             "{}",
             warned[0].message
         );
@@ -3954,7 +4310,7 @@ mod tests {
                 .unwrap()
                 .contains("crossSessionInbound")
         );
-        assert!(check.fix.as_deref().unwrap().contains("delivery = herdr"));
+        assert!(!check.fix.as_deref().unwrap().contains("delivery = herdr"));
         assert!(check.details.iter().any(|d| d.contains("/cc-socks/9.sock")));
     }
 

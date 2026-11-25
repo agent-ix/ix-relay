@@ -29,8 +29,13 @@ reported; pane activity is observed only when the native session matches.
 - Redis reports: immediately at startup, then every **minute**, independently
   of Herdr. These reads check scope, focus and agent assignments, not Linear.
 
-`r` requests an immediate Linear fetch unless rate limited, in which case it
-coalesces with the next scheduled attempt. `s` toggles source timestamps (hidden by default). Errors are always visible.
+`r` requests an immediate Linear fetch. During a server rate limit, a local allocation hold or a server reserve hold, `r` waits for the next scheduled attempt.
+The tracker row names what held the read. The names are local allocation, server reserve, quota evidence unavailable, request not admissible and rate-limited.
+The rate-limited name marks an actual server rate limit.
+In Tickets, Agents and Scope, `e` opens the tracker inspector. It lists every hold, value and action for the latest read.
+Up, Down, Page Up and Page Down scroll the inspector, and Esc or `e` closes it.
+In Status, Health and Retro, `e` lists source errors.
+`s` toggles source timestamps (hidden by default). Errors are always visible.
 `d` or Enter toggles details;
 arrows, j/k and Page Up/Down select assignments. `q` or Escape quits.
 

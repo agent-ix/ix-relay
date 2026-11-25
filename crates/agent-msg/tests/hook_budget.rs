@@ -18,6 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ix_trace_rs::trace;
 use support::{base_cmd, run};
 
 /// A Redis that accepts every connection and reads without ever replying, as a
@@ -129,4 +130,76 @@ fn tc_n001_m_06_a_cache_miss_with_herdr_hanging_stays_within_the_budget() {
             "{event} took {elapsed:?}"
         );
     }
+}
+
+/// One activity-only hook call against `url`, state in `dir`; its wall time.
+fn activity_wall_time(url: &str, dir: &std::path::Path, event: &str, extra: &str) -> Duration {
+    let mut cmd = base_cmd(&["hook", "claude"], Some("hub:EA:code"));
+    cmd.env("IX_RELAY_URL", url);
+    cmd.env("IX_RELAY_CONFIG", dir.join("config.toml"));
+    let stdin =
+        format!(r#"{{"hook_event_name":"{event}","session_id":"s1","cwd":"/work"{extra}}}"#);
+    let started = Instant::now();
+    let r = run(cmd, &stdin);
+    let elapsed = started.elapsed();
+    assert_eq!(r.status, 0, "a hook never fails the turn: {}", r.stderr);
+    assert!(r.stdout.is_empty(), "nothing to print: {}", r.stdout);
+    elapsed
+}
+
+fn warm() {
+    assert_eq!(run(base_cmd(&["--version"], None), "").status, 0);
+}
+
+/// `PreToolUse` against a blackholed Redis is within 400 ms.
+#[trace("NFR-001-M-7")]
+#[test]
+#[ignore = "benchmark lane: wall-clock threshold"]
+fn nfr_001_m_7_pre_tool_use_against_a_blackholed_redis_is_within_400ms() {
+    warm();
+    let dir = support::Scratch::new("ix-relay-m7-");
+    let elapsed = activity_wall_time(
+        &blackhole(),
+        dir.path(),
+        "PreToolUse",
+        r#","tool_name":"Bash""#,
+    );
+    eprintln!("M-7 PreToolUse blackholed: {elapsed:?}");
+    assert!(elapsed < Duration::from_millis(400), "took {elapsed:?}");
+}
+
+/// `Notification` and `SessionEnd` against a blackholed Redis are within 1000 ms.
+#[trace("NFR-001-M-8")]
+#[test]
+#[ignore = "benchmark lane: wall-clock threshold"]
+fn nfr_001_m_8_notification_and_session_end_against_a_blackholed_redis_are_within_1000ms() {
+    warm();
+    for (event, extra) in [
+        ("Notification", r#","notification_type":"idle_prompt""#),
+        ("SessionEnd", ""),
+    ] {
+        let dir = support::Scratch::new("ix-relay-m8-");
+        let elapsed = activity_wall_time(&blackhole(), dir.path(), event, extra);
+        eprintln!("M-8 {event} blackholed: {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_millis(1000),
+            "{event} took {elapsed:?}"
+        );
+    }
+}
+
+/// `PreToolUse` during a failure backoff is within 400 ms: after
+/// one failed call it makes no connection at all.
+#[trace("NFR-001-M-9")]
+#[test]
+#[ignore = "benchmark lane: wall-clock threshold"]
+fn nfr_001_m_9_pre_tool_use_during_a_backoff_is_within_400ms() {
+    warm();
+    let url = blackhole();
+    let dir = support::Scratch::new("ix-relay-m9-");
+    let extra = r#","tool_name":"Bash""#;
+    activity_wall_time(&url, dir.path(), "PreToolUse", extra);
+    let elapsed = activity_wall_time(&url, dir.path(), "PreToolUse", extra);
+    eprintln!("M-9 PreToolUse in backoff: {elapsed:?}");
+    assert!(elapsed < Duration::from_millis(400), "took {elapsed:?}");
 }

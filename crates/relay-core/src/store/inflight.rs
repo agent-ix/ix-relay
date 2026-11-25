@@ -105,13 +105,75 @@ pub const BACKLOG_SCAN_BOUND: usize = 1_000;
 /// comments, indentation and blank lines removed (a hook sends the pop's body on
 /// every call, so the bytes are worth saving; Lua does not care).
 pub(super) fn script(common: &str, own: &str) -> String {
-    common
-        .lines()
-        .chain(own.lines())
+    stripped(
+        common
+            .lines()
+            .chain(include_str!("lua/receipt_core.lua").lines())
+            .chain(include_str!("lua/receipts.lua").lines())
+            .chain(own.lines()),
+    )
+}
+
+/// The body of a script that writes only receipt events: the clock, the type check
+/// and the receipt core, without the entry parsing and the pop helpers. Hook
+/// activity writes and the deadline scan send theirs often, so they stay small.
+pub(super) fn slim_script(own: &str) -> String {
+    stripped(
+        include_str!("lua/slim_prelude.lua")
+            .lines()
+            .chain(include_str!("lua/receipt_core.lua").lines())
+            .chain(own.lines()),
+    )
+}
+
+fn stripped<'a>(lines: impl Iterator<Item = &'a str>) -> String {
+    lines
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with("--"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A script sent by its SHA-1, with its body only when the server does not know it.
+/// Redis caches a body it runs with `EVAL`, so the fallback costs one extra request
+/// once per server start, never one per call.
+pub(super) struct CachedScript {
+    body: String,
+    sha: String,
+}
+
+impl CachedScript {
+    pub(super) fn new(body: String) -> Self {
+        let sha = redis::Script::new(&body).get_hash().to_owned();
+        Self { body, sha }
+    }
+
+    /// The body as sent on a cache miss.
+    #[cfg(test)]
+    pub(super) fn body(&self) -> &str {
+        &self.body
+    }
+
+    /// Runs the script with the arguments `args` adds to the command (the key count
+    /// first): `EVALSHA`, then `EVAL` when the server answers `NOSCRIPT`.
+    pub(super) fn run<T: redis::FromRedisValue>(
+        &self,
+        conn: &mut impl redis::ConnectionLike,
+        args: impl Fn(&mut redis::Cmd),
+    ) -> redis::RedisResult<T> {
+        let mut by_sha = redis::cmd("EVALSHA");
+        by_sha.arg(&self.sha);
+        args(&mut by_sha);
+        match by_sha.query(conn) {
+            Err(e) if e.kind() == redis::ErrorKind::Server(redis::ServerErrorKind::NoScript) => {
+                let mut by_body = redis::cmd("EVAL");
+                by_body.arg(&self.body);
+                args(&mut by_body);
+                by_body.query(conn)
+            }
+            other => other,
+        }
+    }
 }
 
 static POP_SCRIPT: LazyLock<String> =
@@ -149,7 +211,7 @@ pub enum Popper {
 }
 
 impl Popper {
-    fn letter(self) -> char {
+    pub(super) fn letter(self) -> char {
         match self {
             Self::Hook => 'h',
             Self::Watcher => 'w',
@@ -179,7 +241,7 @@ pub enum Now {
 
 impl Now {
     /// The script argument: empty for the server's clock.
-    fn arg(self) -> String {
+    pub(super) fn arg(self) -> String {
         match self {
             Self::Server => String::new(),
             Self::AtMs(ms) => ms.to_string(),
@@ -380,6 +442,9 @@ impl Relay {
             .arg(MAX_INFLIGHT_BYTES)
             .arg(INFLIGHT_ROW_OVERHEAD)
             .arg(crate::message::FORWARDED_NOTICE_MAX)
+            .arg(agent.as_str())
+            .arg(self.keys.receipt_stream_key())
+            .arg(self.keys.receipt_meta_key())
             .query(&mut self.conn)?;
         if status < 0 {
             return Err(Error::InflightUnreadable {
@@ -411,12 +476,44 @@ impl Relay {
     /// [`Error::InflightUnreadable`] when the in-flight key holds a value of
     /// the wrong type.
     pub fn ack(&mut self, agent: &AgentName, batch: BatchId, popper: Popper) -> Result<bool> {
+        self.settle_batch(agent, batch, popper, None)
+    }
+
+    /// Records successful transport delivery and acknowledges its matching batch in one request.
+    /// The delivered receipt precedes the atomic acknowledged receipt and in-flight removal.
+    /// A stale batch or mismatched popper returns `false` without recording either outcome.
+    /// Repeated settlement creates no duplicate receipts, including after a lost reply.
+    ///
+    /// # Errors
+    ///
+    /// Wrong-type in-flight or receipt keys return [`Error::InflightUnreadable`] without
+    /// mutation. An entry remains in flight until its receipt writes succeed.
+    pub fn ack_delivered(
+        &mut self,
+        agent: &AgentName,
+        batch: BatchId,
+        popper: Popper,
+        evidence: crate::receipts::DeliveryEvidence,
+    ) -> Result<bool> {
+        self.settle_batch(agent, batch, popper, Some(evidence))
+    }
+
+    fn settle_batch(
+        &mut self,
+        agent: &AgentName,
+        batch: BatchId,
+        popper: Popper,
+        evidence: Option<crate::receipts::DeliveryEvidence>,
+    ) -> Result<bool> {
         let removed: i64 = redis::cmd("EVAL")
             .arg(ACK_SCRIPT.as_str())
             .arg(1)
             .arg(self.keys.inflight_key(agent))
             .arg(batch.0)
             .arg(popper.letter().to_string())
+            .arg(evidence.map_or("", crate::receipts::DeliveryEvidence::code))
+            .arg(self.keys.receipt_stream_key())
+            .arg(self.keys.receipt_meta_key())
             .query(&mut self.conn)?;
         if removed < 0 {
             return Err(Error::InflightUnreadable {
@@ -455,6 +552,8 @@ impl Relay {
             .arg(agent.as_str())
             .arg(LOG_CAP)
             .arg(popper.letter().to_string())
+            .arg(self.keys.receipt_stream_key())
+            .arg(self.keys.receipt_meta_key())
             .query(&mut self.conn)?;
         usize::try_from(moved).map_err(|_| Error::InflightUnreadable {
             lead: agent.clone(),
@@ -476,6 +575,7 @@ impl Relay {
         agent: &AgentName,
         batch: BatchId,
         popper: Popper,
+        reason: crate::receipts::DeadLetterReason,
     ) -> Result<usize> {
         let moved: i64 = redis::cmd("EVAL")
             .arg(DEAD_LETTER_SCRIPT.as_str())
@@ -485,6 +585,9 @@ impl Relay {
             .arg(batch.0)
             .arg(DEAD_LETTER_CAP)
             .arg(popper.letter().to_string())
+            .arg(reason.code())
+            .arg(self.keys.receipt_stream_key())
+            .arg(self.keys.receipt_meta_key())
             .query(&mut self.conn)?;
         usize::try_from(moved).map_err(|_| Error::InflightUnreadable {
             lead: agent.clone(),
@@ -521,6 +624,8 @@ impl Relay {
             .arg(u64::try_from(lease.as_millis()).unwrap_or(u64::MAX))
             .arg(u64::try_from(MAX_LEASE.as_millis()).unwrap_or(u64::MAX))
             .arg(popper.letter().to_string())
+            .arg(self.keys.receipt_stream_key())
+            .arg(self.keys.receipt_meta_key())
             .query(&mut self.conn)?;
         usize::try_from(moved).map_err(|_| Error::InflightUnreadable {
             lead: agent.clone(),
@@ -549,7 +654,9 @@ impl Relay {
         }
         cmd.arg(now.arg())
             .arg(MAX_REDELIVERIES)
-            .arg(DEAD_LETTER_CAP);
+            .arg(DEAD_LETTER_CAP)
+            .arg(self.keys.receipt_stream_key())
+            .arg(self.keys.receipt_meta_key());
         cmd
     }
 
@@ -714,7 +821,7 @@ fn decode_claimed(
     let mut redelivered = Vec::new();
     let mut rejected = Vec::new();
     for (entry, count) in raw.into_iter().zip(counts) {
-        match serde_json::from_slice(&entry) {
+        match super::receipts::decode_message(&entry) {
             Ok(m) => {
                 messages.push(m);
                 redelivered.push(*count > 0);

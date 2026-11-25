@@ -4,8 +4,8 @@
 //! `~/.ix/relay/state/socket/socket-<watcher pid>.json` and read by `agent-msg doctor`,
 //! which cannot see the watcher's memory. One file per watcher process, so two
 //! watchers on one machine never overwrite each other and doctor reports each
-//! live one. The files exist only when `[watcher] delivery = "socket"`; with the
-//! default (herdr) nothing writes them.
+//! live one. The files exist only when sockets are used (the default); with
+//! `[watcher] delivery = "herdr"` nothing writes them.
 
 use std::{
     fs, io,

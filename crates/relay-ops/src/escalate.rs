@@ -118,7 +118,7 @@ pub fn run_escalate(
     args: EscalateArgs,
     now_ms: i64,
 ) -> Result<EscalateOutcome> {
-    let ticket = args.ticket.parse()?;
+    let ticket = Some(args.ticket.parse()?);
     let reg = match relay.agent_slot(me)? {
         relay_core::AgentSlot::Registered(reg) => reg,
         relay_core::AgentSlot::Absent => {
@@ -154,7 +154,9 @@ pub fn run_escalate(
             // `escalation show`, not the content itself.
             let notice = format!(
                 "escalation {} filed by {me} on {}: run `agent-msg escalation show {}`",
-                esc.id, esc.filing.ticket, esc.id
+                esc.id,
+                esc.filing.ticket_text(),
+                esc.id
             );
             relay
                 .notify_human(me, &human, &notice, now_ms)
@@ -222,7 +224,7 @@ pub fn render_escalation_detail(esc: &Escalation) -> String {
     // to the operator's terminal: none of it is trusted to be free of escape codes.
     let mut out = String::new();
     let _ = writeln!(out, "id:             {}", esc.id);
-    let _ = writeln!(out, "ticket:         {}", esc.filing.ticket);
+    let _ = writeln!(out, "ticket:         {}", esc.filing.ticket_text());
     let _ = writeln!(out, "lead:           {}", esc.filing.lead);
     let _ = writeln!(
         out,
@@ -288,7 +290,8 @@ pub fn run_escalation_post_linear(
         });
     };
     let body = render_linear_comment(&esc, decision);
-    linear.comment(esc.filing.ticket.as_str(), &body)?;
+    let ticket = esc.filing.ticket.as_ref().ok_or(LinearError::NoTicket)?;
+    linear.comment(ticket.as_str(), &body)?;
     Ok(esc)
 }
 
@@ -372,7 +375,8 @@ pub fn run_investigate(
         // never appears here.
         let prompt = format!(
             "Escalation {id} from {} on {}. Run `agent-msg escalation show {id}` and help the operator decide.",
-            esc.filing.lead, esc.filing.ticket
+            esc.filing.lead,
+            esc.filing.ticket_text()
         );
         herdr.agent_start(
             machine,
@@ -508,7 +512,13 @@ pub fn run_resolve(
     let lead_notified = relay.send(&notify).is_ok();
 
     let body = render_linear_comment(&esc, decision);
-    let linear = match linear.comment(esc.filing.ticket.as_str(), &body) {
+    let linear = match esc
+        .filing
+        .ticket
+        .as_ref()
+        .ok_or(LinearError::NoTicket)
+        .and_then(|ticket| linear.comment(ticket.as_str(), &body))
+    {
         Ok(()) => LinearOutcome::Posted,
         Err(e) => LinearOutcome::Failed(e),
     };
@@ -739,7 +749,7 @@ mod tests {
         let outcome = run_escalations(&mut r, None).unwrap();
         assert!(outcome.rejected.is_empty());
         assert_eq!(outcome.escalations.len(), 1);
-        assert_eq!(outcome.escalations[0].filing.ticket.as_str(), "AGE-2014");
+        assert_eq!(outcome.escalations[0].filing.ticket_text(), "AGE-2014");
         assert_eq!(outcome.escalations[0].filing.lead, name("qsl-lead"));
     }
 
@@ -929,7 +939,7 @@ mod tests {
         })
         .unwrap();
         r.escalate(EscalationFiling {
-            ticket: "AGE-2014".parse().unwrap(),
+            ticket: Some("AGE-2014".parse().unwrap()),
             lead: name(lead),
             machine: machine.parse().unwrap(),
             session_id: "sid-fork".parse().unwrap(),
@@ -1138,7 +1148,7 @@ mod tests {
         };
         let esc = r
             .escalate(EscalationFiling {
-                ticket: "AGE-2014".parse().unwrap(),
+                ticket: Some("AGE-2014".parse().unwrap()),
                 lead: name("qsl-lead"),
                 machine: "node-a".parse().unwrap(),
                 session_id: "sid-fork".parse().unwrap(),
@@ -1223,7 +1233,7 @@ mod tests {
     fn escalate_for_resolve(r: &mut Relay) -> Escalation {
         register(r, "qsl-lead", "node-a", Some("sid-1"), Some("/work"));
         r.escalate(EscalationFiling {
-            ticket: "AGE-2014".parse().unwrap(),
+            ticket: Some("AGE-2014".parse().unwrap()),
             lead: name("qsl-lead"),
             machine: "node-a".parse().unwrap(),
             session_id: "sid-1".parse().unwrap(),
@@ -1302,7 +1312,7 @@ mod tests {
         let Some(mut r) = relay("resolve-notify-fails") else {
             return;
         };
-        let ticket = "AGE-2014".parse().unwrap();
+        let ticket = Some("AGE-2014".parse().unwrap());
         // File the escalation the normal way, then remove the lead's own
         // registration before resolving — `Relay::send` refuses an unknown
         // target, exactly what a deregistered lead would look like.
@@ -1443,7 +1453,7 @@ mod tests {
         Escalation {
             id: "e1".parse().unwrap(),
             filing: EscalationFiling {
-                ticket: "AGE-1".parse().unwrap(),
+                ticket: Some("AGE-1".parse().unwrap()),
                 lead: name("qsl-lead"),
                 machine: "node-a".parse().unwrap(),
                 session_id: "sid-1".parse().unwrap(),

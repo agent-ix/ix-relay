@@ -88,9 +88,8 @@ message is already in Claude Code's hands, which delivers it on approval.
   as received but unconfirmed, like `delivered_unconfirmed`, with a drift note, count it,
   and log one line for the first: our fresh `msg_id` in the receiver's transcript is
   evidence Claude Code received the message.
-- If a transcript look finds `ShapeUnrecognised`, then the watcher shall not mark the lead
-  suspect, so there is no herdr fallback while the shape is unrecognised, and shall not
-  redeliver the batch after its lease or dead-letter it.
+- If a transcript look finds `ShapeUnrecognised`, then the watcher shall not redeliver the
+  batch after its lease or dead-letter it.
 - A transcript with no line naming the id is `Absent` (not yet consumed) and shall not be
   counted.
 - Counters shall saturate and shall never fail a delivery.
@@ -154,9 +153,8 @@ Recorded because they are delivery-visible, though neither is reachable from Cla
 `JSON.stringify`:
 
 - A `peer_message_status` naming a message with `status` absent or null was `Receipt(Unknown)`
-  (ambiguous, the lead not suspect). It is now `Unrecognised(StatusMissing)`: counted and
-  otherwise ignored, so after the ack wait the lead is marked suspect and its mail goes
-  through herdr.
+  (ambiguous). It is now `Unrecognised(StatusMissing)`: counted and
+  otherwise ignored, so after the ack wait the batch stays pending with the socket.
 - Duplicate JSON keys: a receipt line is now read with the last key winning (it used to be
   refused), and a transcript line with two `origin` keys is `ShapeUnrecognised` (it used
   to be acknowledged, last key winning).

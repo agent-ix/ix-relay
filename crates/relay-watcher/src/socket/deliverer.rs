@@ -4,8 +4,8 @@
 //! The watcher distinguishes definite non-delivery from socket-owned batches:
 //!
 //! - [`SocketError::NotSent`]: certain nothing was delivered (no socket, refused
-//!   connection, a receipt saying refused or dropped). The caller falls back to
-//!   herdr.
+//!   connection, a receipt saying refused or dropped). The batch goes back to the
+//!   inbox and is tried again over the socket; it is never typed.
 //! - [`SocketError::Held`]: Claude Code holds it behind an approval prompt.
 //!   Sending it again, by any transport, would duplicate it.
 //! - [`SocketError::Pending`]: the socket took the line and consumption is not
@@ -57,7 +57,7 @@ use super::{
     session::{self, Procs},
     transcript::{self, Watch},
 };
-use crate::deliver::{BatchTarget, DeliverError, RegisteredLead, SettleAction, Settlement};
+use crate::deliver::{BatchTarget, DeliverError, RegisteredLead, Route, SettleAction, Settlement};
 
 /// How long a delivery waits, after posting, for a receipt or the transcript to
 /// show the message. An idle session records it within a second or two; what it
@@ -579,7 +579,7 @@ impl SocketDeliverer {
     ///
     /// Never fails: a reply socket that cannot be bound (the directory may not
     /// exist yet at login) leaves a deliverer that sends nothing (every batch is
-    /// [`SocketError::NotSent`], so it goes to herdr), says why in its status and
+    /// [`SocketError::NotSent`], so mail waits), says why in its status and
     /// binds again, with a growing wait, on a later delivery.
     pub fn start(config: SocketConfig, procs: Box<dyn Procs + Send + Sync>) -> Self {
         let adopted = remove_stale(&config, procs.as_ref());
@@ -589,7 +589,7 @@ impl SocketDeliverer {
             Ok(reply) => ReplyState::Bound(reply),
             Err(why) => {
                 eprintln!(
-                    "relay-watcher: reply socket not bound ({why}); batches go through herdr \
+                    "relay-watcher: reply socket not bound ({why}); Claude Code mail waits \
                      until it binds"
                 );
                 ReplyState::Unbound {
@@ -692,6 +692,7 @@ impl SocketDeliverer {
         for o in adopted.owed.into_iter().take(MAX_PENDING) {
             let action = match o.action.as_str() {
                 "ack" => SettleAction::Ack,
+                "ack_unconfirmed" => SettleAction::AckUnconfirmed,
                 "requeue" => SettleAction::Requeue,
                 "dead_letter" => SettleAction::DeadLetter,
                 _ => continue,
@@ -700,6 +701,7 @@ impl SocketDeliverer {
                 None => None,
                 Some("denied") => Some("denied"),
                 Some("hold_expired") => Some("hold_expired"),
+                Some("consumption_expired") => Some("consumption_expired"),
                 Some(_) => continue,
             };
             let age_ok = now.checked_sub(o.since_ms).is_some_and(|a| {
@@ -912,16 +914,67 @@ impl SocketDeliverer {
         }
     }
 
+    /// Which transport may carry mail for a Claude Code lead's `session` (FR-044): the
+    /// socket when the session has one that can take mail, the terminal only when its own
+    /// registry record shows it has none, and neither when that cannot be shown or the
+    /// socket cannot take mail now. The reason for a wait is kept in the status file.
+    pub fn route(&self, lead: &str, session: Option<&relay_core::SessionId>) -> Route {
+        let mut state = self.lock();
+        self.ensure_bound(&mut state);
+        let route = match session.map(relay_core::SessionId::as_str) {
+            None => Route::Wait("the lead registered no session id".to_owned()),
+            Some(id) if !transcript::is_plain_id(id) => {
+                Route::Wait("the session id is not a plain id".to_owned())
+            }
+            Some(id) => match session::resolve(
+                &self.config.sessions_dir,
+                id,
+                self.procs.as_ref(),
+                &self.socket_dirs(),
+            ) {
+                Ok(_) => match &state.reply {
+                    ReplyState::Bound(_) => Route::Socket,
+                    ReplyState::Unbound { why, .. } => {
+                        Route::Wait(format!("reply socket not bound: {why}"))
+                    }
+                },
+                Err(session::Unresolved::NoInboxSocket) => Route::Terminal,
+                Err(unresolved) => Route::Wait(unresolved.to_string()),
+            },
+        };
+        let changed = match &route {
+            Route::Socket => false,
+            Route::Terminal => {
+                state.leads.remove(lead).is_some() | state.notes.remove(lead).is_some()
+            }
+            Route::Wait(why) => {
+                let note = sanitise_line(why);
+                let gone = state.leads.remove(lead).is_some();
+                let new = state.notes.get(lead) != Some(&note);
+                state.notes.insert(lead.to_owned(), note);
+                gone || new
+            }
+        };
+        if changed {
+            self.publish(&mut state);
+        }
+        route
+    }
+
     /// Posts `text` for `target` and waits for the outcome.
     ///
     /// # Errors
     ///
     /// [`SocketError`], as the module docs describe.
-    pub fn deliver(&self, target: &BatchTarget<'_>, text: &str) -> Result<(), SocketError> {
+    pub fn deliver(
+        &self,
+        target: &BatchTarget<'_>,
+        text: &str,
+    ) -> Result<relay_core::receipts::DeliveryEvidence, SocketError> {
         let result = self.attempt(target, text);
         let mut state = self.lock();
         match &result {
-            Ok(()) => {
+            Ok(_) => {
                 state.notes.remove(target.lead);
             }
             Err(SocketError::NotSent(why)) => {
@@ -947,7 +1000,11 @@ impl SocketDeliverer {
         result
     }
 
-    fn attempt(&self, target: &BatchTarget<'_>, text: &str) -> Result<(), SocketError> {
+    fn attempt(
+        &self,
+        target: &BatchTarget<'_>,
+        text: &str,
+    ) -> Result<relay_core::receipts::DeliveryEvidence, SocketError> {
         let session = target
             .session
             .map(relay_core::SessionId::as_str)
@@ -1107,7 +1164,7 @@ impl SocketDeliverer {
     /// it (a batch is only posted when the tick's budget covers that). What is still
     /// open at the end stays in the pending table, and [`SocketDeliverer::settle`]
     /// finishes it. A wait that ends with neither is a receiver the socket cannot
-    /// confirm: that lead goes through herdr for a while.
+    /// confirm yet: the batch stays owned by the socket.
     fn await_outcome(
         &self,
         shared: &Shared,
@@ -1115,7 +1172,7 @@ impl SocketDeliverer {
         session: &str,
         msg_id: &str,
         mut watch: Option<Watch>,
-    ) -> Result<(), SocketError> {
+    ) -> Result<relay_core::receipts::DeliveryEvidence, SocketError> {
         let deadline = Instant::now() + self.config.ack_wait;
         let mut step = POLL_START;
         loop {
@@ -1139,7 +1196,7 @@ impl SocketDeliverer {
                         state.drift.acknowledged(&p.version);
                     }
                     state.held.remove(target.lead);
-                    return Ok(());
+                    return Ok(relay_core::receipts::DeliveryEvidence::SocketConfirmed);
                 }
                 Some(Scan {
                     found: TranscriptMatch::ShapeUnrecognised,
@@ -1147,7 +1204,7 @@ impl SocketDeliverer {
                 }) => {
                     // Our fresh id is in the transcript, so Claude Code received the message;
                     // the shape it recorded it in is not one this build knows. Acknowledge it as
-                    // received but unconfirmed: no herdr fallback, no redelivery loop.
+                    // received but unconfirmed: no redelivery loop.
                     let mut state = self.lock();
                     if let Some(p) = state.pending.remove(msg_id) {
                         state.drift.count(
@@ -1160,7 +1217,7 @@ impl SocketDeliverer {
                         );
                     }
                     state.held.remove(target.lead);
-                    return Ok(());
+                    return Ok(relay_core::receipts::DeliveryEvidence::SocketUnconfirmed);
                 }
                 Some(Scan {
                     found: TranscriptMatch::Absent,
@@ -1211,7 +1268,7 @@ impl SocketDeliverer {
         session: &str,
         msg_id: &str,
         verdict: Verdict,
-    ) -> Option<Result<(), SocketError>> {
+    ) -> Option<Result<relay_core::receipts::DeliveryEvidence, SocketError>> {
         let mut state = self.lock();
         match verdict {
             Verdict::Held => {
@@ -1525,7 +1582,7 @@ impl SocketDeliverer {
                     line_type,
                 }) => {
                     p.resolution = Some(Resolution {
-                        action: SettleAction::Ack,
+                        action: SettleAction::AckUnconfirmed,
                         why: "transcript_shape_unrecognised: the transcript names the message \
                               without a structured origin.msg_id; acknowledged as received"
                             .to_owned(),
@@ -1573,7 +1630,7 @@ impl SocketDeliverer {
             if p.delivered_at.is_some_and(|at| at.elapsed() >= grace) {
                 unconfirmed.push((p.lead.clone(), p.version.clone()));
                 p.resolution = Some(Resolution {
-                    action: SettleAction::Ack,
+                    action: SettleAction::AckUnconfirmed,
                     why: "delivered_unconfirmed: Claude Code reported it delivered; the \
                           transcript never showed it"
                         .to_owned(),
@@ -1605,8 +1662,9 @@ impl SocketDeliverer {
                         } else {
                             "Claude Code held it behind an approval prompt that nobody answered; it \
                              was dead-lettered (reason hold_expired) and will not be posted again. \
-                             Set crossSessionInbound to accept, or delivery = herdr."
-                        }.to_owned(),
+                             Set crossSessionInbound to accept in that session's settings."
+                        }
+                        .to_owned(),
                     )),
                     reason: Some(if awaiting {
                         "consumption_expired"
@@ -1635,6 +1693,7 @@ impl SocketDeliverer {
                     action: SettleAction::Renew(HELD_RENEW_LEASE),
                     why: "socket delivery awaits consumption or approval".to_owned(),
                     notice: None,
+                    dead_letter_reason: None,
                 });
             }
             let due = p.next_try.is_none_or(|t| Instant::now() >= t);
@@ -1645,6 +1704,18 @@ impl SocketDeliverer {
                     action: r.action,
                     why: r.why.clone(),
                     notice: r.notice.clone(),
+                    dead_letter_reason: match r.reason {
+                        Some("denied") => {
+                            Some(relay_core::receipts::DeadLetterReason::ReceiverDenied)
+                        }
+                        Some("hold_expired") => {
+                            Some(relay_core::receipts::DeadLetterReason::HoldExpired)
+                        }
+                        Some("consumption_expired") => {
+                            Some(relay_core::receipts::DeadLetterReason::ConsumptionExpired)
+                        }
+                        _ => None,
+                    },
                 });
             }
         }
@@ -1773,7 +1844,7 @@ impl SocketDeliverer {
             ReplyState::Bound(reply) => Some(reply.path.display().to_string()),
             ReplyState::Unbound { why, .. } => {
                 notes.push(format!(
-                    "reply socket not bound, every batch goes to herdr until it binds: {why}"
+                    "reply socket not bound, Claude Code mail waits until it binds: {why}"
                 ));
                 None
             }
@@ -1815,6 +1886,7 @@ impl SocketDeliverer {
                         batch: p.batch.get(),
                         action: match r.action {
                             SettleAction::Ack => "ack",
+                            SettleAction::AckUnconfirmed => "ack_unconfirmed",
                             SettleAction::Requeue => "requeue",
                             SettleAction::DeadLetter => "dead_letter",
                             SettleAction::Renew(_) => return None,

@@ -141,6 +141,10 @@ pub fn base_cmd(args: &[&str], name: Option<&str>) -> Command {
     cmd.env("IX_RELAY_CONFIG", nonexistent_config_path());
     cmd.env_remove("HERDR_PANE_ID");
     cmd.env_remove("CODEX_THREAD_ID");
+    // The runner may itself be a Claude Code session with an inbox socket; a hook
+    // under test must not see that one, nor the real session registry.
+    cmd.env_remove("CLAUDE_CODE_MESSAGING_SOCKET");
+    cmd.env("IX_RELAY_CLAUDE_DIR", "/nonexistent/ix-relay-test-claude");
     cmd.env_remove("HERDR_ENV");
     if matches!(name, Some("hub:EA:code" | "hub:EA:sender" | "hub:qsl:code")) {
         let config = cmd
@@ -465,35 +469,25 @@ esac
 
 #[allow(dead_code, reason = "shared fixture")]
 fn write_transport_herdr(directory: &Path) {
-    let script = r#"#!/usr/bin/env python3
-import sys,json
-args=sys.argv[1:]
-if '--session' in args:
- i=args.index('--session'); del args[i:i+2]
-if '--machine' in args:
- i=args.index('--machine'); del args[i:i+2]
-key=args[0]
-if key=='machine':
- print(json.dumps([{'label':s,'enabled':True,'target':'fixture-'+s,'session':'default'} for s in ['hub','node-a','terra']]))
-else:
- data={
- 'agent': {'agents':[
-  {'pane_id':'w1:p1','tab_id':'w1:t1','workspace_id':'w1','agent_status':'idle','agent_session':{'kind':'id','value':'s1'}},
-  {'pane_id':'w1:p2','tab_id':'w1:t2','workspace_id':'w1','agent_status':'idle','agent_session':{'kind':'id','value':'sender-session'}}]},
- 'workspace': {'workspaces':[{'workspace_id':'w1','label':'EA'}]},
- 'tab': {'tabs':[{'tab_id':'w1:t1','label':'code'},{'tab_id':'w1:t2','label':'sender'}]}
- }
- print(json.dumps({'result':data[key]}))
+    // A shell script, not an interpreter: it runs inside a hook's 300 to 900 ms budget,
+    // and starting an interpreter on a loaded host can take most of that.
+    let script = r#"#!/bin/sh
+key=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session|--machine) [ $# -ge 2 ] || exit 1; shift 2 ;;
+    *) [ -z "$key" ] && key=$1; shift ;;
+  esac
+done
+case "$key" in
+  machine) echo '[{"label":"hub","enabled":true,"target":"fixture-hub","session":"default"},{"label":"node-a","enabled":true,"target":"fixture-node-a","session":"default"},{"label":"terra","enabled":true,"target":"fixture-terra","session":"default"}]' ;;
+  agent) echo '{"result":{"agents":[{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","agent_status":"idle","agent_session":{"kind":"id","value":"s1"}},{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1","agent_status":"idle","agent_session":{"kind":"id","value":"sender-session"}}]}}' ;;
+  workspace) echo '{"result":{"workspaces":[{"workspace_id":"w1","label":"EA"}]}}' ;;
+  tab) echo '{"result":{"tabs":[{"tab_id":"w1:t1","label":"code"},{"tab_id":"w1:t2","label":"sender"}]}}' ;;
+  *) echo "herdr stub: unknown subcommand $key" >&2; exit 1 ;;
+esac
 "#;
-    std::fs::write(
-        directory.join("ssh"),
-        r#"#!/usr/bin/env python3
-import os,sys,shlex,subprocess
-args=shlex.split(sys.argv[-1]);i=args.index('herdr');args=args[i+1:]
-raise SystemExit(subprocess.run([os.path.join(os.path.dirname(__file__),'herdr'),*args]).returncode)
-"#,
-    )
-    .unwrap();
+    std::fs::write(directory.join("ssh"), SSH_TO_HERDR).unwrap();
     std::fs::write(directory.join("herdr"), script).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(
@@ -506,4 +500,49 @@ raise SystemExit(subprocess.run([os.path.join(os.path.dirname(__file__),'herdr')
         std::fs::Permissions::from_mode(0o755),
     )
     .unwrap();
+}
+
+/// An `ssh` stub: runs the `herdr` stub beside it with the arguments the remote command
+/// string carries after `herdr`.
+const SSH_TO_HERDR: &str = r#"#!/bin/sh
+for last; do :; done
+eval "set -- $last"
+while [ $# -gt 0 ] && [ "$1" != herdr ]; do shift; done
+[ $# -gt 0 ] || exit 1
+shift
+exec "$(dirname "$0")/herdr" "$@"
+"#;
+
+/// Runs a hook as `name` with its own config directory, so the spool it leaves is read
+/// back (`run` deletes the directories it makes itself), and returns the run with the
+/// spool's records. Pair it with [`until_in_time`] and [`ran_out_of_time`]: only a
+/// spool record that proves the hook ran out of time may justify running it again.
+#[allow(
+    dead_code,
+    reason = "shared by every agent-msg test binary, each using a different subset, so #[expect] is unfulfilled where the item is used"
+)]
+pub fn run_hook_recording(
+    name: &str,
+    url: &str,
+    prefix: &str,
+    pane: Option<&str>,
+    stdin: &str,
+) -> (Run, Vec<serde_json::Value>) {
+    let dir = Scratch::new("ix-relay-hookrun-");
+    let config = dir.path().join("config.toml");
+    let mut cmd = base_cmd(&["hook", "claude"], Some(name));
+    cmd.env("IX_RELAY_URL", url)
+        .env("IX_RELAY_PREFIX", prefix)
+        .env("IX_RELAY_CONFIG", &config);
+    match pane {
+        Some(pane) => cmd.env("HERDR_PANE_ID", pane),
+        None => cmd.env_remove("HERDR_PANE_ID"),
+    };
+    let ran = run(cmd, stdin);
+    let records = std::fs::read_to_string(spool_path(&config))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    (ran, records)
 }

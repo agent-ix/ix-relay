@@ -49,6 +49,9 @@ pub enum EpisodeKind {
     /// The lead's Claude Code holds relay mail behind an approval prompt
     /// (FR-044); the operator is told once when this begins.
     SocketHeld,
+    /// The lead's mail waits for its inbox socket (FR-044): no usable socket, or the
+    /// socket did not take it. Nothing is typed.
+    SocketWaiting,
 }
 
 impl EpisodeKind {
@@ -63,6 +66,7 @@ impl EpisodeKind {
             Self::NotifyFailed => "blocked, notification failing",
             Self::InflightFull => "in-flight cap reached",
             Self::SocketHeld => "mail held by Claude Code for approval",
+            Self::SocketWaiting => "mail waiting for the inbox socket",
         }
     }
 }
@@ -128,7 +132,13 @@ impl Episodes {
             // A failed notification keeps its retry clock; a failing `get`
             // says nothing about whether the lead is still blocked.
             Some(EpisodeKind::NotifyFailed | EpisodeKind::GetFailed) => {}
-            Some(EpisodeKind::Stale | EpisodeKind::NoAgent | EpisodeKind::InflightFull) | None => {
+            Some(
+                EpisodeKind::Stale
+                | EpisodeKind::NoAgent
+                | EpisodeKind::InflightFull
+                | EpisodeKind::SocketWaiting,
+            )
+            | None => {
                 self.notified.remove(name);
                 self.notify_failed_at.remove(name);
             }
@@ -210,6 +220,7 @@ mod tests {
             Just(Some(EpisodeKind::GetFailed)),
             Just(Some(EpisodeKind::NotifyFailed)),
             Just(Some(EpisodeKind::SocketHeld)),
+            Just(Some(EpisodeKind::SocketWaiting)),
         ]
     }
 

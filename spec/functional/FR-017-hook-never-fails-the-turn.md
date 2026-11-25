@@ -27,11 +27,14 @@ output JSON object.
   fails or times out, if herdr fails, or if the time budget is exhausted, then the
   hook handler shall report the failure on stderr and exit 0.
 - If the hook event is not one of `SessionStart`, `UserPromptSubmit`,
-  `PostToolUse` or `Stop`, then the hook handler shall print nothing and exit 0.
+  `PreToolUse`, `PostToolUse`, `Notification`, `Stop` or `SessionEnd`, then the hook handler shall print nothing and exit 0.
 - If no bus name is set and the process is not running in a herdr pane, then the
   hook handler shall print nothing, read no configuration file and exit 0.
 - When the popped messages are empty, the hook handler shall print nothing, so a
   `Stop` hook never blocks the turn without a message to deliver.
+- When the event is `PreToolUse`, `Notification` or `SessionEnd`, the hook handler shall
+  print nothing, because those events carry activity reports under
+  [FR-068](./FR-068-hook-activity-events.md) and no mail.
 
 ## Acceptance Criteria
 
@@ -41,9 +44,10 @@ output JSON object.
 | FR-017-AC-2 | Given an unknown flag on the command line after `hook`, the process exits 0. | Test |
 | FR-017-AC-3 | Given `AGENT_MSG_NAME=Bad Name`, a `Stop` hook exits 0 and prints nothing on stdout. | Test |
 | FR-017-AC-4 | Given a config file containing `url = ` (a TOML syntax error), a hook in a herdr pane exits 0 and stderr names the file, line and column. | Test |
-| FR-017-AC-5 | Given the Redis URL points at a closed port, each of the four hook events exits 0 with empty stdout. | Test |
+| FR-017-AC-5 | Given the Redis URL points at a closed port, each hook event (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, `SessionEnd`) exits 0 with empty stdout. | Test |
 | FR-017-AC-6 | Given no bus name and no herdr pane environment, a hook exits 0 without opening the configuration file, even when that file is unreadable. | Test |
 | FR-017-AC-7 | Given a `Stop` event and an empty inbox, stdout is empty. | Test |
+| FR-017-AC-8 | Given a `PreToolUse`, `Notification` or `SessionEnd` event, with and without queued mail, stdout is empty and holds no permission decision. | Test |
 
 ## Dependencies
 

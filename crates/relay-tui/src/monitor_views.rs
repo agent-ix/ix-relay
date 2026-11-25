@@ -4,6 +4,7 @@
 
 use crate::{
     monitor::{App, display_text},
+    monitor_scope::{Entry, ScopeProjection},
     monitor_tracker::{DashboardView, ScopeProgress},
     monitor_ui::{
         FOREGROUND, MUTED, PRIMARY, SELECTION, WARNING, age_ms, agent_activity, reported_status,
@@ -13,8 +14,8 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::Style,
-    text::Span,
-    widgets::{Block, Paragraph, Row, Table, Wrap},
+    text::{Line, Span},
+    widgets::{Block, Cell, Paragraph, Row, Table, Wrap},
 };
 use relay_core::work::WorkStatus;
 use std::time::Instant;
@@ -190,40 +191,80 @@ pub(crate) fn render_agents(
     }
 }
 
+/// A count cell where a zero is a dim middle dot so the non-zero counts stand out.
+fn count_cell(count: usize) -> Cell<'static> {
+    if count == 0 {
+        Cell::from(Span::styled("\u{b7}", Style::default().fg(MUTED)))
+    } else {
+        Cell::from(count.to_string())
+    }
+}
+
 /// Gives each initiative and project its own scrollable progress row.
 pub(crate) fn render_scope(
     frame: &mut Frame,
     app: &mut App,
-    view: Option<&DashboardView>,
+    scoped: Option<(&DashboardView, &ScopeProjection)>,
+    unavailable: &str,
     area: Rect,
 ) {
     let [_, area] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    let Some(view) = view else {
+    let Some((view, projection)) = scoped else {
         select_row(app, 0);
         frame.render_widget(
-            Paragraph::new("Scope progress unavailable until scope and Linear load.")
-                .style(Style::default().fg(MUTED))
-                .wrap(Wrap { trim: true }),
+            Paragraph::new(format!(
+                "Scope progress unavailable: {}",
+                display_text(unavailable, 512)
+            ))
+            .style(Style::default().fg(MUTED))
+            .wrap(Wrap { trim: true }),
             area,
         );
         return;
     };
-    let entries: Vec<(&str, &str, &ScopeProgress)> = view
-        .initiatives
+    app.scope.restore_selection(&mut app.table, projection);
+    let selected = select_row(app, projection.rows.len());
+    app.scope.remember_selection(projection, selected);
+    let entries: Vec<(&str, &ScopeProgress)> = projection
+        .rows
         .iter()
-        .map(|p| ("Initiative", "🎯", p))
-        .chain(view.projects.iter().map(|p| ("Project", "📁", p)))
+        .map(|row| match row.entry {
+            Entry::Initiative(i) => ("Initiative", &view.initiatives[i]),
+            Entry::Project(p) => ("Project", &view.projects[p]),
+        })
         .collect();
-    let selected = select_row(app, entries.len());
-    let rows = entries.iter().map(|(_, icon, progress)| {
-        Row::new([
-            format!("{icon} {}", display_text(&progress.name, 128)),
-            format!("{}/{}", progress.done, progress.total),
-            progress.total.saturating_sub(progress.done).to_string(),
-            progress.ready.to_string(),
-            progress.blocked.to_string(),
-        ])
-    });
+    let rows = projection
+        .rows
+        .iter()
+        .zip(&entries)
+        .map(|(row, (kind, progress))| {
+            let icon = if *kind == "Initiative" {
+                "🎯"
+            } else {
+                "📁"
+            };
+            let mut name = vec![Span::raw(format!(
+                "{}{icon} {}",
+                if row.nested { "  " } else { "" },
+                display_text(&progress.name, 128)
+            ))];
+            if row.shared {
+                name.push(Span::styled(" · shared", Style::default().fg(MUTED)));
+            }
+            if let Some(label) = row.label {
+                name.push(Span::styled(
+                    format!(" {label}"),
+                    Style::default().fg(MUTED),
+                ));
+            }
+            Row::new([
+                Cell::from(Line::from(name)),
+                Cell::from(format!("{}/{}", progress.done, progress.total)),
+                count_cell(progress.total.saturating_sub(progress.done)),
+                count_cell(progress.ready),
+                count_cell(progress.blocked),
+            ])
+        });
     let [table_area, detail_area] = content_areas(area, app.details);
     frame.render_stateful_widget(
         Table::new(
@@ -252,14 +293,16 @@ pub(crate) fn render_scope(
         &mut app.table,
     );
     if entries.is_empty() && !app.details {
+        let message = projection
+            .all_hidden_message()
+            .unwrap_or_else(|| "Scope has no associated initiative or project.".into());
         frame.render_widget(
-            Paragraph::new("Ticket-only scope has no associated initiative or project.")
-                .style(Style::default().fg(WARNING)),
+            Paragraph::new(message).style(Style::default().fg(WARNING)),
             table_area,
         );
     }
     if app.details {
-        let text = entries.get(selected).map_or_else(|| "No initiative or project selected".into(), |(kind, _, progress)| {
+        let text = entries.get(selected).map_or_else(|| "No initiative or project selected".into(), |(kind, progress)| {
             let stages = progress.remaining_by_stage.iter().map(|(stage, count)| format!("{count} {}", display_text(stage, 64))).collect::<Vec<_>>().join(" · ");
             format!("{kind}: {}\n{}{}{}\nTasks: {}/{} done · {} remaining\nReady: {} · Blocked: {}\nRemaining stages: {}\nCounts include only scoped leaf tasks; groups may overlap.",
                 display_text(&progress.name, 128), if progress.status.is_some() { "Project status: " } else { "" }, progress.status.as_deref().map_or_else(String::new, |s| display_text(s, 64)), if progress.status.is_some() { " (Linear)" } else { "Progress across scoped projects" },

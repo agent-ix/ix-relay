@@ -65,16 +65,18 @@ const ENV_WATCHER_INTERVAL_SECS: &str = "IX_RELAY_WATCHER_INTERVAL_SECS";
 
 /// How `relay-watcher` gets a popped batch into a lead's session (FR-044).
 ///
-/// Off by default: an unset `[watcher] delivery` is [`DeliveryMode::Herdr`], so
-/// nothing changes for anyone who has not opted in.
+/// Sockets are used by default: an unset `[watcher] delivery` is
+/// [`DeliveryMode::Socket`], so a Claude Code session that has an inbox socket is
+/// never typed into unless the operator writes `delivery = "herdr"`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DeliveryMode {
-    /// Type the batch in through `herdr agent prompt` (the default).
-    #[default]
+    /// Switch inbox sockets off: every batch is typed in through `herdr agent prompt`,
+    /// Claude Code sessions with a socket included.
     Herdr,
-    /// Post the batch to the lead's Claude Code inbox socket, and fall back to
-    /// herdr for a batch the socket certainly did not take.
+    /// Post to the lead's Claude Code inbox socket whenever its session has one; type
+    /// through herdr only into a lead that has none (the default).
+    #[default]
     Socket,
 }
 
@@ -106,11 +108,80 @@ pub struct WatcherFile {
     pub otlp_headers: Option<toml::Value>,
     /// Seconds between pushes (at least 5); raw like `otlp_endpoint`.
     pub otlp_interval_secs: Option<toml::Value>,
-    /// How batches reach a lead: `"herdr"` (default) or `"socket"`. A raw value, tolerated
+    /// How batches reach a lead: `"socket"` (default) or `"herdr"`. A raw value, tolerated
     /// like the OTLP keys: only `relay-watcher` validates it ([`load`]), so a typo never
     /// stops `agent-msg` or a hook, and `agent-msg doctor` reports it
     /// ([`watcher_delivery`]).
     pub delivery: Option<toml::Value>,
+}
+
+/// The `[fleet]` table in `config.toml` (FR-070): the host profile of the watcher's
+/// collector. Raw values on purpose, like the watcher keys: only `relay-watcher`
+/// validates them, so a typo never stops `agent-msg` or a hook.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FleetFile {
+    /// Sources this host is expected to provide (an array of source names).
+    pub expected_sources: Option<toml::Value>,
+    /// Sources this host declares absent (an array of source names).
+    pub unavailable_sources: Option<toml::Value>,
+    /// Seconds a `prompt` or `post_tool` event keeps a lane working (default 600).
+    pub working_window_secs: Option<toml::Value>,
+    /// Seconds without an activity event after which a non-idle lane is reported as
+    /// not reporting (default 1800).
+    pub no_events_after_secs: Option<toml::Value>,
+    /// Seconds an unmatched `pre_tool` may run before the lane is stuck (default 7200).
+    pub max_tool_runtime_secs: Option<toml::Value>,
+    /// Ticket team keys recognised in a lane's branch or cwd (an array of strings;
+    /// default: the known Linear team keys).
+    pub ticket_prefixes: Option<toml::Value>,
+}
+
+/// The `[send]` table in `config.toml` (FR-071). Raw like the watcher keys, so a typo
+/// never stops a hook; `agent-msg send --order` validates it when it needs it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendFile {
+    /// The default order ack deadline, a duration such as `5m` (10 seconds to 24 hours).
+    pub ack_deadline: Option<toml::Value>,
+}
+
+impl SendFile {
+    /// The configured default ack deadline text, if one is set.
+    ///
+    /// # Errors
+    /// Fails when the value is not a string.
+    pub fn ack_deadline_text(&self) -> Result<Option<&str>, String> {
+        match &self.ack_deadline {
+            None => Ok(None),
+            Some(toml::Value::String(text)) => Ok(Some(text)),
+            Some(_) => Err("[send] ack_deadline: expected a duration like 5m".into()),
+        }
+    }
+}
+
+/// The `[assign]` table in `config.toml` (FR-072): whether this machine's callers hold the
+/// orchestrator role. A guard against accidental writes, not authentication.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssignFile {
+    /// `true` lets `agent-msg assign` write lists. Raw like the other tables, so a typo
+    /// never stops a hook.
+    pub orchestrator: Option<toml::Value>,
+}
+
+impl AssignFile {
+    /// Whether the orchestrator role is set; absent means it is not.
+    ///
+    /// # Errors
+    /// Fails when the value is not a boolean.
+    pub fn is_orchestrator(&self) -> Result<bool, String> {
+        match &self.orchestrator {
+            None => Ok(false),
+            Some(toml::Value::Boolean(on)) => Ok(*on),
+            Some(_) => Err("[assign] orchestrator: expected true or false".into()),
+        }
+    }
 }
 
 /// The shape of `config.toml`. Every field is optional: an absent key falls
@@ -131,6 +202,15 @@ pub struct FileConfig {
     /// Watcher settings.
     #[serde(default)]
     pub watcher: WatcherFile,
+    /// Collector host profile.
+    #[serde(default)]
+    pub fleet: FleetFile,
+    /// Send settings.
+    #[serde(default)]
+    pub send: SendFile,
+    /// Assignment-list role.
+    #[serde(default)]
+    pub assign: AssignFile,
 }
 
 /// Values an invoking CLI got on its own command line, to feed the flag tier
@@ -184,8 +264,10 @@ pub struct Settings {
     pub watcher_interval_secs: Resolved<u64>,
     /// Where the watcher pushes OTLP metrics, if anywhere (FR-045).
     pub watcher_otlp: otlp::OtlpSettings,
-    /// `[watcher] delivery`: [`DeliveryMode::Herdr`] unless the file opts in.
+    /// `[watcher] delivery`: [`DeliveryMode::Socket`] unless the file says `"herdr"`.
     pub delivery: DeliveryMode,
+    /// `[fleet]`: the collector host profile, raw (validated by the watcher).
+    pub fleet: FleetFile,
 }
 
 /// Where `config.toml` lives: `$IX_RELAY_CONFIG` when set, else
@@ -280,6 +362,7 @@ pub fn load(flags: Flags) -> Result<Settings, ConfigError> {
         watcher_interval_secs,
         watcher_otlp,
         delivery: delivery_from_file(&file)?,
+        fleet: file.fleet.clone(),
     })
 }
 
@@ -377,19 +460,19 @@ struct StrictDelivery {
     delivery: Option<DeliveryMode>,
 }
 
-/// The file's `[watcher] delivery`, validated: [`DeliveryMode::Herdr`] when absent.
+/// The file's `[watcher] delivery`, validated: [`DeliveryMode::Socket`] when absent.
 /// Only reads the file again when it holds the key, so the typed read reports a
 /// typo at its real line and column. Only the watcher and `agent-msg doctor` call
 /// this: every other binary loads the raw value and ignores it.
 fn delivery_from_file(file: &FileConfig) -> Result<DeliveryMode, ConfigError> {
     if file.watcher.delivery.is_none() {
-        return Ok(DeliveryMode::Herdr);
+        return Ok(DeliveryMode::Socket);
     }
     let Some(path) = config_path() else {
-        return Ok(DeliveryMode::Herdr);
+        return Ok(DeliveryMode::Socket);
     };
     let Ok(text) = std::fs::read_to_string(&path) else {
-        return Ok(DeliveryMode::Herdr);
+        return Ok(DeliveryMode::Socket);
     };
     match toml::from_str::<StrictDeliveryFile>(&text) {
         Ok(strict) => Ok(strict.watcher.delivery.unwrap_or_default()),
@@ -619,7 +702,7 @@ mod tests {
     /// Tracing: TC-044-01
     /// ACs: FR-044-AC-1
     #[test]
-    fn tc_044_01_the_mode_is_herdr_unless_the_file_says_socket() {
+    fn tc_044_01_the_mode_is_socket_unless_the_file_says_herdr() {
         let _guard = ENV_LOCK.lock().unwrap();
         let mode = |toml: &str| {
             let dir = scratch_dir("delivery-mode");
@@ -629,10 +712,10 @@ mod tests {
             std::fs::remove_dir_all(&dir).ok();
             loaded
         };
-        assert_eq!(mode("").unwrap(), DeliveryMode::Herdr);
+        assert_eq!(mode("").unwrap(), DeliveryMode::Socket);
         assert_eq!(
             mode("[watcher]\ninterval_secs = 3\n").unwrap(),
-            DeliveryMode::Herdr
+            DeliveryMode::Socket
         );
         assert_eq!(
             mode("[watcher]\ndelivery = \"herdr\"\n").unwrap(),
@@ -1312,5 +1395,26 @@ mod tests {
             proptest::prop_assert!(!redacted.contains(&pass));
             proptest::prop_assert!(redacted.ends_with(&tail));
         }
+    }
+}
+
+#[cfg(test)]
+mod fleet_file_tests {
+    use super::*;
+    use ix_trace_rs::trace;
+
+    #[trace("FR-070-AC-1")]
+    #[test]
+    fn the_fleet_table_loads_raw_and_an_unknown_key_is_refused_like_the_other_tables() {
+        let file: FileConfig =
+            toml::from_str("[fleet]\nexpected_sources = [\"cpu\"]\nunavailable_sources = 3\n")
+                .unwrap();
+        assert!(file.fleet.expected_sources.is_some());
+        assert!(file.fleet.unavailable_sources.is_some());
+        assert!(toml::from_str::<FileConfig>("[fleet]\nbogus = 1\n").is_err());
+        assert_eq!(
+            toml::from_str::<FileConfig>("").unwrap().fleet,
+            FleetFile::default()
+        );
     }
 }

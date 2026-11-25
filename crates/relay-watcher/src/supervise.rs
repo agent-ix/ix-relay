@@ -154,6 +154,10 @@ pub trait Bus {
     ///
     /// A connection-level failure, or the failure of the wait itself.
     fn wait(&mut self, conn: &mut Self::Conn) -> relay_core::Result<Wake>;
+    /// Called after every failed poll or connect, before the backoff sleep: the
+    /// work that must go on without the bus (the metrics push of FR-070, whose
+    /// `redis` source reads 0 while the bus is down). The default does nothing.
+    fn offline(&mut self) {}
 }
 
 /// Where the watcher's [`WatcherFile`] goes.
@@ -348,6 +352,7 @@ impl<B: Bus, C: Clock, H: Herdr, S: StateSink> Supervisor<B, C, H, S> {
             }
             Err(e) => {
                 self.on_failure(&e);
+                self.bus.offline();
                 Step {
                     ok: false,
                     sleep: self.backoff.next_delay(),

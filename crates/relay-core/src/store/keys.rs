@@ -7,9 +7,11 @@
 //! here and a row to `KEY_TABLE`, which the tests hold to the builders.
 
 use crate::{
+    address::Address,
     escalation::EscalationId,
     ids::{MachineName, SessionId},
     name::AgentName,
+    named_focus::FocusId,
     status::StatusRequestId,
 };
 
@@ -20,6 +22,41 @@ pub(super) struct Keys {
 }
 
 impl Keys {
+    pub(super) fn work_activity_key(
+        &self,
+        machine: &MachineName,
+        session: &SessionId,
+        process_id: u32,
+    ) -> String {
+        format!(
+            "{}work-activity:{machine}:{session}:{process_id}",
+            self.prefix
+        )
+    }
+
+    pub(super) fn work_events_key(&self) -> String {
+        format!("{}work-events", self.prefix)
+    }
+
+    /// The capped stream of hook activity events (FR-068).
+    pub(super) fn activity_key(&self) -> String {
+        format!("{}activity", self.prefix)
+    }
+
+    /// One lane's last-activity hash: the newest event of each kind and overall.
+    pub(super) fn activity_last_key(&self, lane: &Address) -> String {
+        format!("{}activity-last:{lane}", self.prefix)
+    }
+
+    /// What every [`Keys::activity_last_key`] starts with, for the script that
+    /// derives the lane address server-side.
+    pub(super) fn activity_last_stem(&self) -> String {
+        format!("{}activity-last:", self.prefix)
+    }
+
+    pub(super) fn work_events_start_key(&self) -> String {
+        format!("{}work-events-start", self.prefix)
+    }
     pub(super) fn new(prefix: impl Into<String>) -> Self {
         Self {
             prefix: prefix.into(),
@@ -51,6 +88,32 @@ impl Keys {
         format!("{}work:{machine}:{session}:{process_id}", self.prefix)
     }
 
+    /// One named focus definition's record (a hash: `meta`, `owner`, `rev:<n>`, `pin:<…>`).
+    pub(super) fn focus_key(&self, id: &FocusId) -> String {
+        format!("{}focus:def:{id}", self.prefix)
+    }
+
+    /// What every [`Keys::focus_key`] starts with, for the scripts that reach other
+    /// definitions' records.
+    pub(super) fn focus_stem(&self) -> String {
+        format!("{}focus:def:", self.prefix)
+    }
+
+    /// [`Keys::focus_stem`] as a script argument.
+    pub(super) fn focus_stem_arg(&self) -> Vec<u8> {
+        self.focus_stem().into_bytes()
+    }
+
+    /// The index of definitions by focus ID, archived ones included.
+    pub(super) fn focus_index_key(&self) -> String {
+        format!("{}focus:index", self.prefix)
+    }
+
+    /// The index of non-archived names by team and folded name.
+    pub(super) fn focus_names_key(&self) -> String {
+        format!("{}focus:names", self.prefix)
+    }
+
     pub(super) fn inbox_key(&self, agent: &AgentName) -> String {
         format!("{}inbox:{agent}", self.prefix)
     }
@@ -65,6 +128,55 @@ impl Keys {
 
     pub(super) fn server_capacity_key(&self) -> String {
         format!("{}lane:server-capacity", self.prefix)
+    }
+
+    pub(super) fn fleet_lanes_key(&self) -> String {
+        format!("{}fleet-lanes", self.prefix)
+    }
+
+    /// One lane's ordered assignment list (FR-072): a list of JSON entries.
+    pub(super) fn assign_list_key(&self, lane: &Address) -> String {
+        format!("{}assign-list:{lane}", self.prefix)
+    }
+
+    /// What every [`Keys::assign_list_key`] starts with, for the read of all lists.
+    pub(super) fn assign_list_stem(&self) -> String {
+        format!("{}assign-list:", self.prefix)
+    }
+
+    /// One lane's list metadata: `version` and `at_ms`.
+    pub(super) fn assign_meta_key(&self, lane: &Address) -> String {
+        format!("{}assign-meta:{lane}", self.prefix)
+    }
+
+    /// What every [`Keys::assign_meta_key`] starts with.
+    pub(super) fn assign_meta_stem(&self) -> String {
+        format!("{}assign-meta:", self.prefix)
+    }
+
+    /// The set of lanes that hold a list, so a read of all lists needs no key scan.
+    pub(super) fn assign_lanes_key(&self) -> String {
+        format!("{}assign-lanes", self.prefix)
+    }
+
+    /// The capped stream of assignment transitions.
+    pub(super) fn assign_events_key(&self) -> String {
+        format!("{}assign-events", self.prefix)
+    }
+
+    /// When the transition stream began, for its retained lower bound.
+    pub(super) fn assign_events_start_key(&self) -> String {
+        format!("{}assign-events-start", self.prefix)
+    }
+
+    /// Hosts whose stale lanes were written to, until the host refreshes its lanes.
+    pub(super) fn assign_defects_key(&self) -> String {
+        format!("{}assign-defects", self.prefix)
+    }
+
+    /// Lists that did not follow their lane, under both addresses, until a write settles them.
+    pub(super) fn assign_move_defects_key(&self) -> String {
+        format!("{}assign-move-defects", self.prefix)
     }
 
     pub(super) fn status_sequence_key(&self) -> String {
@@ -83,6 +195,14 @@ impl Keys {
         format!("{}log", self.prefix)
     }
 
+    pub(super) fn receipt_stream_key(&self) -> String {
+        format!("{}receipts", self.prefix)
+    }
+
+    pub(super) fn receipt_meta_key(&self) -> String {
+        format!("{}receipt-meta", self.prefix)
+    }
+
     pub(super) fn health_hooks_key(&self) -> String {
         format!("{}health:hooks", self.prefix)
     }
@@ -98,6 +218,11 @@ impl Keys {
 
     pub(super) fn esc_attempts_key(&self, id: &EscalationId) -> String {
         format!("{}esc:{id}:attempts", self.prefix)
+    }
+
+    /// What every escalation hash key starts with, for the script that files one.
+    pub(super) fn esc_stem(&self) -> String {
+        format!("{}esc:", self.prefix)
     }
 
     pub(super) fn esc_seq_key(&self) -> String {
@@ -199,7 +324,17 @@ mod tests {
         let sid: SessionId = "sid-1".parse().unwrap();
         let machine: MachineName = "node-a".parse().unwrap();
         let request: StatusRequestId = "r1".parse().unwrap();
+        let focus: FocusId = "foc-00000000000000000000000000000001".parse().unwrap();
+        let lane = Address::new("node-a", "EA", Some("code"));
         vec![
+            ("focus_key", relay.focus_key(&focus)),
+            ("focus_stem", relay.focus_stem()),
+            (
+                "focus_stem_arg",
+                String::from_utf8(relay.focus_stem_arg()).unwrap(),
+            ),
+            ("focus_index_key", relay.focus_index_key()),
+            ("focus_names_key", relay.focus_names_key()),
             (
                 "directory_committed_key",
                 relay.directory_committed_key(&machine),
@@ -214,19 +349,41 @@ mod tests {
                 relay.directory_refresh_key(&machine),
             ),
             ("work_key", relay.work_key(&machine, &sid, 42)),
+            (
+                "work_activity_key",
+                relay.work_activity_key(&machine, &sid, 42),
+            ),
+            ("activity_key", relay.activity_key()),
+            ("activity_last_key", relay.activity_last_key(&lane)),
+            ("activity_last_stem", relay.activity_last_stem()),
+            ("work_events_key", relay.work_events_key()),
+            ("work_events_start_key", relay.work_events_start_key()),
             ("inbox_key", relay.inbox_key(&agent)),
             ("agents_key", relay.agents_key()),
             ("lane_focus_key", relay.lane_focus_key()),
             ("server_capacity_key", relay.server_capacity_key()),
+            ("fleet_lanes_key", relay.fleet_lanes_key()),
+            ("assign_list_key", relay.assign_list_key(&lane)),
+            ("assign_list_stem", relay.assign_list_stem()),
+            ("assign_meta_key", relay.assign_meta_key(&lane)),
+            ("assign_meta_stem", relay.assign_meta_stem()),
+            ("assign_lanes_key", relay.assign_lanes_key()),
+            ("assign_events_key", relay.assign_events_key()),
+            ("assign_events_start_key", relay.assign_events_start_key()),
+            ("assign_defects_key", relay.assign_defects_key()),
+            ("assign_move_defects_key", relay.assign_move_defects_key()),
             ("status_sequence_key", relay.status_sequence_key()),
             ("status_request_key", relay.status_request_key(&request)),
             ("status_reply_key", relay.status_reply_key(&request, &agent)),
             ("log_key", relay.log_key()),
+            ("receipt_stream_key", relay.receipt_stream_key()),
+            ("receipt_meta_key", relay.receipt_meta_key()),
             ("health_hooks_key", relay.health_hooks_key()),
             ("health_hooks_shipped_key", relay.health_hooks_shipped_key()),
             ("esc_key", relay.esc_key(&id)),
             ("esc_attempts_key", relay.esc_attempts_key(&id)),
             ("esc_seq_key", relay.esc_seq_key()),
+            ("esc_stem", relay.esc_stem()),
             ("esc_index_key", relay.esc_index_key()),
             ("session_key", relay.session_key(&sid)),
             ("suppressed_key", relay.suppressed_key(&sid)),
@@ -247,24 +404,51 @@ mod tests {
     #[test]
     fn the_keys_are_the_documented_ones() {
         let want = [
+            (
+                "focus_key",
+                "p:focus:def:foc-00000000000000000000000000000001",
+            ),
+            ("focus_stem", "p:focus:def:"),
+            ("focus_stem_arg", "p:focus:def:"),
+            ("focus_index_key", "p:focus:index"),
+            ("focus_names_key", "p:focus:names"),
             ("directory_committed_key", "p:directory-committed:node-a"),
             ("directory_key", "p:directory:node-a"),
             ("directory_sequence_key", "p:directory-sequence:node-a"),
             ("directory_refresh_key", "p:directory-refresh:node-a"),
             ("work_key", "p:work:node-a:sid-1:42"),
+            ("work_activity_key", "p:work-activity:node-a:sid-1:42"),
+            ("activity_key", "p:activity"),
+            ("activity_last_key", "p:activity-last:node-a:EA:code"),
+            ("activity_last_stem", "p:activity-last:"),
+            ("work_events_key", "p:work-events"),
+            ("work_events_start_key", "p:work-events-start"),
             ("inbox_key", "p:inbox:lead-a"),
             ("agents_key", "p:agents"),
             ("lane_focus_key", "p:lane:focus"),
             ("server_capacity_key", "p:lane:server-capacity"),
+            ("fleet_lanes_key", "p:fleet-lanes"),
+            ("assign_list_key", "p:assign-list:node-a:EA:code"),
+            ("assign_list_stem", "p:assign-list:"),
+            ("assign_meta_key", "p:assign-meta:node-a:EA:code"),
+            ("assign_meta_stem", "p:assign-meta:"),
+            ("assign_lanes_key", "p:assign-lanes"),
+            ("assign_events_key", "p:assign-events"),
+            ("assign_events_start_key", "p:assign-events-start"),
+            ("assign_defects_key", "p:assign-defects"),
+            ("assign_move_defects_key", "p:assign-move-defects"),
             ("status_sequence_key", "p:status:sequence"),
             ("status_request_key", "p:status:request:r1"),
             ("status_reply_key", "p:status:reply:r1:lead-a"),
             ("log_key", "p:log"),
+            ("receipt_stream_key", "p:receipts"),
+            ("receipt_meta_key", "p:receipt-meta"),
             ("health_hooks_key", "p:health:hooks"),
             ("health_hooks_shipped_key", "p:health:hooks-shipped"),
             ("esc_key", "p:esc:e1"),
             ("esc_attempts_key", "p:esc:e1:attempts"),
             ("esc_seq_key", "p:esc:seq"),
+            ("esc_stem", "p:esc:"),
             ("esc_index_key", "p:esc:index"),
             ("session_key", "p:session:sid-1"),
             ("suppressed_key", "p:suppressed:sid-1"),
@@ -310,25 +494,51 @@ mod tests {
         let sid: SessionId = "sid-1".parse().unwrap();
         let machine: MachineName = "node-a".parse().unwrap();
         let request: StatusRequestId = "r1".parse().unwrap();
+        let focus: FocusId = "foc-00000000000000000000000000000001".parse().unwrap();
+        let lane = Address::new("node-a", "EA", Some("code"));
         let moved = [
+            other.focus_key(&focus),
+            other.focus_stem(),
+            String::from_utf8(other.focus_stem_arg()).unwrap(),
+            other.focus_index_key(),
+            other.focus_names_key(),
             other.directory_committed_key(&machine),
             other.directory_key(&machine),
             other.directory_sequence_key(&machine),
             other.directory_refresh_key(&machine),
             other.work_key(&machine, &sid, 42),
+            other.work_activity_key(&machine, &sid, 42),
+            other.activity_key(),
+            other.activity_last_key(&lane),
+            other.activity_last_stem(),
+            other.work_events_key(),
+            other.work_events_start_key(),
             other.inbox_key(&agent),
             other.agents_key(),
             other.lane_focus_key(),
             other.server_capacity_key(),
+            other.fleet_lanes_key(),
+            other.assign_list_key(&lane),
+            other.assign_list_stem(),
+            other.assign_meta_key(&lane),
+            other.assign_meta_stem(),
+            other.assign_lanes_key(),
+            other.assign_events_key(),
+            other.assign_events_start_key(),
+            other.assign_defects_key(),
+            other.assign_move_defects_key(),
             other.status_sequence_key(),
             other.status_request_key(&request),
             other.status_reply_key(&request, &agent),
             other.log_key(),
+            other.receipt_stream_key(),
+            other.receipt_meta_key(),
             other.health_hooks_key(),
             other.health_hooks_shipped_key(),
             other.esc_key(&id),
             other.esc_attempts_key(&id),
             other.esc_seq_key(),
+            other.esc_stem(),
             other.esc_index_key(),
             other.session_key(&sid),
             other.suppressed_key(&sid),

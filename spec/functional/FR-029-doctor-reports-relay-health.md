@@ -96,6 +96,8 @@ and shall exit 0 unless a check failed.
 | | `watcher_heartbeat_unreadable` | warn |
 | | `watcher_herdr_problem` | fail when the watcher types into no pane, else warn |
 | | `watcher_otlp_failing` (the watcher cannot push metrics to its collector and is backing off; deliveries are not affected; [FR-045](./FR-045-watcher-pushes-metrics-over-otlp.md)) | warn |
+| | `collector_source_failed` (the heartbeat lists collector sources whose last read failed; [FR-070](./FR-070-collector-source-health.md)) | warn |
+| | `fleet_lanes_dropped` (the watcher left lanes out of its per-lane series past the cap of 50; [FR-045](./FR-045-watcher-pushes-metrics-over-otlp.md)) | warn |
 | | `heartbeat_scan_truncated` (says which bound: keys, calls, or the time budget) | warn |
 | `state/watcher.json` against the heartbeat | `watcher_pid_gone`, `watcher_file_stale` | fail |
 | | `watcher_file_missing` | fail without a live heartbeat, else warn |
@@ -104,6 +106,8 @@ and shall exit 0 unless a check failed.
 | hook spool | `hook_spool_pending` | fail while the newest record (the file's last write, when none decodes) is under 15 min old, else warn |
 | | `hook_spool_unreadable` | warn |
 | | `hook_spool_unlocated` | unknown |
+| hook activity drops (FR-068; the sidecar counts beside `spool/activity.json`) | `activity_lock_skipped`, `activity_write_failed` | warn while the count grew in the last 24 h, else information; at the cap the count reads "at least"; deleting the sidecar resets it |
+| | `activity_skips_unreadable`, `activity_spool_unwritable` | warn |
 | hook failures on the bus, 24 h, by stage and error kind | `hook_failures_recorded` | fail while the recent failures reach the volume threshold or a session keeps failing (below), else warn |
 | herdr | `herdr_missing`, `herdr_shape_mismatch` | fail |
 | | `herdr_unsupported_version`, `herdr_version_unreadable` | warn |

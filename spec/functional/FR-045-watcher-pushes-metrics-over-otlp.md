@@ -120,7 +120,7 @@ survey and the TLS question are recorded in the README and the pull request, not
   shall skip or fail any of them: the watcher shall log such a failure once per episode
   and leave the affected series out. A tick that pushes shall add at most two pipelined
   requests to the store, one for the local leads' queues and one for the newest hook
-  failures, and no key scan; a tick inside the interval shall add none. The time
+  failures together with the order metrics, and no key scan; a tick inside the interval shall add none. The time
   arithmetic on the interval shall not overflow.
 
 ### Export
@@ -197,13 +197,37 @@ exports.
 | `ix.relay.watcher.tick.duration` | histogram | `s` | none | How long each watcher tick took, buckets 5 ms to 10 s, since the watcher started. |
 | `ix.relay.registrations` | gauge | `{registration}` | machine | Leads registered on this machine. |
 | `ix.relay.watcher.health_snapshot.read_failures` | sum | `{failure}` | snapshot | Failed reads used to build the relay-health snapshot, cumulative since this watcher started; `snapshot` is `lead_overviews` or `hook_health_newest`. |
+| `ix.fleet.lane.state` | gauge | `1` | host, lane, state | One series per lane of the lane registry ([FR-069](./FR-069-host-collector.md)), value 1, `lane` the lane address `server:workspace:tab`, `state` one of `working`, `idle`, `blocked`, `stuck`, `ended`. There is no `unknown` state. Rules: `blocked` when the newest blocked event is newer than the newest activity event or the pane class maps to a blocked reason; `working` when the newest `prompt` or `post_tool` is within the working window, or the newest event is a `pre_tool` with no later `post_tool` and no more than `max_tool_runtime` old, or a compiler process is attributed to the lane; `stuck` when a `pre_tool` has no later `post_tool` past `max_tool_runtime`; `ended` after `session_end`; otherwise `idle`, including a lane that has no event. Prometheus `ix_fleet_lane_state`. |
+| `ix.fleet.lane.last_activity` | gauge | `s` | host, lane | Seconds since the lane's newest activity event, or since the watcher first saw the lane when it has none. Every registry lane has this series. Prometheus `ix_fleet_lane_last_activity_seconds`. |
+| `ix.fleet.lane.no_events` | gauge | `1` | host, lane | Value 1 for a registry lane whose last known state was non-idle (open `pre_tool`, herdr working, or `prompt` with no later `stop`) and that has emitted no activity event for `no_events_after`; the defect that its hooks are not reporting. A lane whose newest event is `stop`, `idle`, `session_end` or `blocked` is quiet and never carries it. |
+| `ix.fleet.lane.blocked` | gauge | `1` | host, lane, reason | Value 1 for a blocked lane, `reason` one of `permission`, `dialog`, `login`, `usage_limit`, `question`, `queued_question`, `wait_loop`; every pane class and hook cause maps to exactly one reason ([FR-069](./FR-069-host-collector.md)). |
+| `ix.fleet.lane.compile_seconds` | sum | `s` | host, lane | Cumulative seconds in which at least one compiler process was attributed to the lane; interim per-lane build-duty evidence. |
+| `ix.fleet.lane.focus_info` | gauge | `1` | host, lane, ticket, branch | Value 1 per lane; `ticket` parsed from the lane's hook-reported branch or cwd, empty when none or when the lane's newest event is more than 6 hours old; only the configured team keys (`[fleet] ticket_prefixes`, default the Linear team keys of the fleet) count as a ticket. |
+| `ix.fleet.lane.dropped` | gauge | `{lane}` | host | Registry lanes left out of the per-lane series because more than 50 exist; nonzero is a defect and `agent-msg doctor` warns. |
+| `ix.fleet.host.busy_ratio` | gauge | `1` | host | Measured CPU busy ratio, 0 to 1. Absent when its source fails. |
+| `ix.fleet.host.memory_used_bytes` | gauge | `By` | host | Memory in use on the host (total minus available); absent when its source fails. |
+| `ix.fleet.host.memory_total_bytes` | gauge | `By` | host | Total memory of the host; absent when its source fails. |
+| `ix.fleet.host.temperature` | gauge | `Cel` | host | Highest CPU package or `Tctl` temperature in degrees Celsius; present only where the host profile expects `temperature` and it reads. |
+| `ix.fleet.host.pressure` | gauge | `%` | host, resource, kind | Linux pressure stall percentage over the last 10 or 60 seconds: `resource` is `cpu`, `io` or `memory`, `kind` is `some_avg10`, `some_avg60`, `full_avg10` or `full_avg60` (the `full` kinds are absent where the kernel gives no `full` line). Present only where the `pressure` source reads; off Linux the source is unavailable. |
+| `ix.fleet.host.capacity_slots` | gauge | `{slot}` | host | Operator-entered capacity slots ([FR-058](./FR-058-explicit-server-capacity.md)); absent when none is entered. |
+| `ix.fleet.host.capacity_configured` | gauge | `1` | host | 1 when capacity is entered, 0 otherwise; always exported. |
+| `ix.fleet.host.native_windows_agents` | gauge | `{process}` | host | On a WSL host, native Windows agent, herdr or build processes seen; nonzero is a defect. |
+| `ix.fleet.probe_ok` | gauge | `1` | host, source | Source health ([FR-070](./FR-070-collector-source-health.md)), 1 or 0, for each source the host profile expects. Prometheus `ix_fleet_probe_ok`. |
+| `ix.fleet.probe_unavailable` | gauge | `1` | host, source | Value 1 for a source the host profile declares absent on this host; not a failure. |
+| `ix.fleet.config` | gauge | `s` | host, name | The configured `working_window`, `no_events_after` and `max_tool_runtime` in seconds, so consumers read them instead of holding their own constants. |
+| `ix.relay.hook.activity_skipped` | sum | `{event}` | host, reason | Activity events a hook skipped (`backoff`), dropped (`failed`, which includes a write that ran past its budget), did not write because its lead had no verified lane (`unregistered`), dropped because the state file lock was held (`lock`), or dropped because the state files could not be written (`write_failed`), cumulative since the hook state file began; absent while the file is missing or unreadable and no skip is recorded, never zero; a sidecar that cannot be read leaves out only its own reason; each sidecar stops counting at 1,048,576 (see `ix.relay.hook.activity_skip_saturated`). |
+| `ix.relay.hook.activity_skip_saturated` | gauge | `1` | host, reason | 1 while the skip count of a sidecar reason (`lock`, `write_failed`) has reached its cap and so reads "at least", else 0; absent with the reason's count. |
+| `ix.relay.orders.unacted` | gauge | `{order}` | recipient | Orders awaiting `Acted` or `AckExpired` ([FR-071](./FR-071-order-ack-deadline-and-timeout.md)); `recipient` is the lane address, bounded as the other per-lead series; a watcher reports only the lanes of its own host, so a sum over hosts counts each order once. |
+| `ix.relay.orders.escalation_failed` | gauge | `{order}` | none | Orders of this watcher's host whose `AckExpired` escalation could not be filed and was given up after three attempts ([FR-071](./FR-071-order-ack-deadline-and-timeout.md)), so a failed escalation is visible in a push as well as in the log; retained for seven days at most. |
+| `ix.relay.order.act_latency` | histogram | `s` | none | Seconds from `Delivered` to `Acted` of orders delivered to lanes of this watcher's host, buckets 1 s to 1 h. |
 
 The health-read failure sum starts at zero for both `snapshot` values and is
 monotonic for the lifetime of this watcher process; it resets when the watcher
 restarts and is not persisted. Each failed `lead_overviews` result for a local
 lead counts once (including a per-lead Redis error such as a wrong-type queue
 key); a top-level failure of the `lead_overviews` read counts once. A failed
-`hook_health_newest` read counts once. These are counts of read results, not
+`hook_health_newest` read counts once; that request also carries the order metrics, so
+its failure leaves the three order series out of the push, never at zero. These are counts of read results, not
 outage episodes, failed fields, skipped entries or ticks: a successful read
 with malformed hook records does not count as a read failure because that
 reader intentionally skips malformed entries. The `snapshot` attribute has
@@ -237,7 +261,8 @@ acknowledgement needs a send time per message that the watcher does not keep), a
 - The relay series come from what the watcher counts as it works (the counters and the
   histogram) and from two pipelined store requests per push (`lead_overviews`, one
   request over the local leads' own keys, and `hook_health_newest`, the newest 1,000 hook
-  failures first), after the tick's deliveries. `lead` is an attribute only where it is bounded: at most 50 leads have
+  failures first, which also carries the order counts and act latency of FR-071 for this
+  machine's lanes), after the tick's deliveries. `lead` is an attribute only where it is bounded: at most 50 leads have
   series of their own and the rest are folded into `lead=other` (depth summed, oldest age
   the largest), and the number folded is reported in the heartbeat (`dropped`) and by
   `doctor`. No series carries message text. An error of any kind reading the store leaves those
@@ -268,13 +293,20 @@ acknowledgement needs a send time per message that the watcher does not keep), a
 | FR-045-AC-19 | A collector that never answers holds the exporter thread only: `submit` never waits, the queue holds two snapshots, the oldest are dropped and counted, and the newest are sent when the collector lets go; a panic in the send path is a counted failed push and leaves a working exporter. | Test |
 | FR-045-AC-20 | Against a real listener a 500, a 429 with `Retry-After`, garbage and a closed connection each back off, in that order and by those waits, on an injected clock, and a configured header value never appears in a log line or in the status. | Test |
 | FR-045-AC-21 | The heartbeat carries the exporter's counters (pushes sent and failed, snapshots dropped, points rejected) when not all zero and they round-trip; a send that has run longer than 30 seconds reads as `failing` with reason `stuck` until it ends, and a send within the limit does not; `doctor` shows the counters. | Test |
-| FR-045-AC-22 | At most one push per interval and the first on the first tick; a tick that pushes makes exactly the two ordinary requests of an idle tick plus two pipelined ones (the local leads' queues, the newest hook failures) and no key scan, the next tick inside the interval makes two; a huge interval never overflows time arithmetic; and a failing push read is logged once and leaves the registry cache updated and the tick Ok. | Test |
+| FR-045-AC-22 | At most one push per interval and the first on the first tick; a tick that pushes makes exactly the three ordinary requests of an idle tick (the order-deadline scan of FR-071 is the third) plus two pipelined ones (the local leads' queues, the newest hook failures with the order metrics) and no key scan, the next tick inside the interval makes three; a huge interval never overflows time arithmetic; and a failing push read is logged once and leaves the registry cache updated and the tick Ok. | Test |
 | FR-045-AC-23 | Given more than 1,000 entries in the hook health stream, the hook gauge counts the newest failures, not the oldest 1,000. | Test |
 | FR-045-AC-24 | On an injected resolver and clock: two pushes within 5 minutes make one lookup, one second short of 5 minutes is still cached, and a push at 5 minutes makes another. | Test |
 | FR-045-AC-25 | On an injected resolver: a push after every address failed to connect makes another lookup with no time passed; a push whose deadline ended before an address was tried, twice, makes one lookup in all and leaves the cache in place. | Test |
 | FR-045-AC-26 | On an injected resolver: a lookup that failed or returned no address is not cached and is repeated on the next push; at the end of the 5 minutes a failed or empty lookup leaves the expired addresses in use, the push succeeds, and the next push looks up again. | Test |
 | FR-045-AC-27 | A lookup that takes longer than the whole request budget still lets the push succeed; a resolver that returns 6 addresses leaves 4 in use, in the order returned. | Test |
 | FR-045-AC-28 | Given a local lead whose queue overview read returns a Redis error, including one lead with a wrong-type key among otherwise readable leads, the next OTLP push increments only `snapshot=lead_overviews` once per failed lead and preserves the other leads' gauges; a failed `hook_health_newest` read increments only `snapshot=hook_health_newest` once; one whole-read connection error counts once for that read source; malformed entries in a successful hook read do not increment either counter; repeated failed pushes accumulate, a recovered read adds nothing, and both zero-valued points are present before any failure and on every later push. The sum is monotonic from zero for one watcher process and resets on process restart, uses `{failure}`, and carries only the bounded `snapshot` attribute with values `lead_overviews` and `hook_health_newest`; no host, machine, lead, key, error, credential or other high-cardinality value is an attribute. | Test |
+| FR-045-AC-29 | Given lane events and collector fixtures, a push exports every series of the catalogue added for fleet lanes, hosts, probes and orders with exactly the catalogued attributes, each lane series carrying the lane address in `lane` (or `recipient`); the AC-11 catalogue test covers them and they appear under their `ix_fleet_*` and `ix_relay_*` Prometheus names. | Test |
+| FR-045-AC-30 | Given registry lanes with no event, a `blocked` event, a question Stop, a pane class of each kind, an unmatched `pre_tool` of 1 hour, an unmatched `pre_tool` of 3 hours with `max_tool_runtime` 2 hours, and activity 11 minutes old, the states are `idle` (with `no_events` only if its last state was non-idle and it was silent past `no_events_after`), `blocked`, `blocked`, the mapped reasons, `working`, `stuck` and `idle`; no lane ever has state `unknown`, and every registry lane has state and last-activity series. | Test |
+| FR-045-AC-31 | Given 51 registry lanes, the 51st is not folded into another lane: `ix.fleet.lane.dropped` is 1 and `agent-msg doctor` warns `fleet_lanes_dropped`. | Test |
+| FR-045-AC-32 | Given `[fleet]` settings, `ix.fleet.config` reports the configured working window (default 10 minutes), `no_events_after` and `max_tool_runtime` (default 2 hours), and the lane state rules use those values and no other. | Test |
+| FR-045-AC-33 | Given a compiler process attributed to a lane across 90 seconds of fixture ticks, `ix.fleet.lane.compile_seconds` for that lane rises by 90 seconds and never decreases. | Test |
+| FR-045-AC-34 | Given orders whose escalation failed three times, a push shows `ix.relay.orders.escalation_failed` equal to the number of such orders whose recipient lane is on the pushing host, `0` when there are none, and none for orders of another host. | Test |
+| FR-045-AC-35 | Given a failed read of the order metrics, a push exports none of `ix.relay.orders.unacted`, `ix.relay.orders.escalation_failed` and `ix.relay.order.act_latency`, and the failure is counted under `health_snapshot.read_failures`. | Test |
 
 ## Dependencies
 

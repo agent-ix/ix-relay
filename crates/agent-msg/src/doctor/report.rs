@@ -50,6 +50,8 @@ pub(crate) enum Family {
     HookFailures,
     /// Panes moved and places renamed, as the watcher recorded them (FR-043).
     Moves,
+    /// Assignment lists (FR-072).
+    Assignments,
     /// The `herdr` binary.
     Herdr,
     /// Registrations.
@@ -96,6 +98,16 @@ pub(crate) enum Code {
     WatcherHerdrProblem,
     /// A watcher cannot push metrics to its OTLP collector and is backing off.
     WatcherOtlpFailing,
+    /// A watcher reports collector sources whose last read failed (FR-070).
+    CollectorSourceFailed,
+    /// A watcher left registry lanes out of its per-lane series past the cap (FR-045).
+    FleetLanesDropped,
+    /// A write to a lane of a host with an expired registry lease was refused (FR-072).
+    AssignmentHostRegistryStale,
+    /// An assignment list did not follow its lane to the lane's new address (FR-072).
+    AssignmentMoveFailed,
+    /// The assignment defects could not be read.
+    AssignmentsUnreadable,
     /// `watcher.json` is absent.
     WatcherFileMissing,
     /// There is no config location, so no `watcher.json` is looked for.
@@ -114,6 +126,14 @@ pub(crate) enum Code {
     HookSpoolUnlocated,
     /// The local spool is not readable.
     HookSpoolUnreadable,
+    /// Hook activity updates were dropped because the state file lock was held.
+    ActivityLockSkipped,
+    /// Hook activity updates were dropped because the state files could not be written.
+    ActivityWriteFailed,
+    /// A skip count file cannot be read.
+    ActivitySkipsUnreadable,
+    /// The spool directory cannot be written, so a dropped update cannot be counted.
+    ActivitySpoolUnwritable,
     /// Hook failures were recorded on the bus in the last 24 hours.
     HookFailuresRecorded,
     /// The recorded pane moves could not be read.
@@ -156,7 +176,8 @@ pub(crate) enum Code {
     ServiceUnknown,
     /// Claude Code holds a lead's relay mail behind an approval prompt.
     SocketHeld,
-    /// Batches for a lead went to herdr because its socket could not be used.
+    /// A Claude Code lead's mail is waiting or in trouble: its socket could not be
+    /// used. Nothing is typed.
     SocketFallback,
     /// The watcher dead-lettered a batch on its own account (denied, or held past the
     /// maximum hold).
@@ -423,6 +444,11 @@ mod tests {
             Code::WatcherOtlpConfigInvalid => "watcher_otlp_config_invalid",
             Code::WatcherHerdrProblem => "watcher_herdr_problem",
             Code::WatcherOtlpFailing => "watcher_otlp_failing",
+            Code::CollectorSourceFailed => "collector_source_failed",
+            Code::FleetLanesDropped => "fleet_lanes_dropped",
+            Code::AssignmentHostRegistryStale => "assignment_host_registry_stale",
+            Code::AssignmentMoveFailed => "assignment_move_failed",
+            Code::AssignmentsUnreadable => "assignments_unreadable",
             Code::WatcherFileMissing => "watcher_file_missing",
             Code::WatcherFileUnlocated => "watcher_file_unlocated",
             Code::WatcherFileUnreadable => "watcher_file_unreadable",
@@ -432,6 +458,10 @@ mod tests {
             Code::HookSpoolPending => "hook_spool_pending",
             Code::HookSpoolUnlocated => "hook_spool_unlocated",
             Code::HookSpoolUnreadable => "hook_spool_unreadable",
+            Code::ActivityLockSkipped => "activity_lock_skipped",
+            Code::ActivityWriteFailed => "activity_write_failed",
+            Code::ActivitySkipsUnreadable => "activity_skips_unreadable",
+            Code::ActivitySpoolUnwritable => "activity_spool_unwritable",
             Code::HookFailuresRecorded => "hook_failures_recorded",
             Code::MovesUnreadable => "moves_unreadable",
             Code::HerdrMissing => "herdr_missing",
@@ -477,6 +507,11 @@ mod tests {
             Code::WatcherOtlpConfigInvalid,
             Code::WatcherHerdrProblem,
             Code::WatcherOtlpFailing,
+            Code::CollectorSourceFailed,
+            Code::FleetLanesDropped,
+            Code::AssignmentHostRegistryStale,
+            Code::AssignmentMoveFailed,
+            Code::AssignmentsUnreadable,
             Code::WatcherFileMissing,
             Code::WatcherFileUnlocated,
             Code::WatcherFileUnreadable,
@@ -486,6 +521,10 @@ mod tests {
             Code::HookSpoolPending,
             Code::HookSpoolUnlocated,
             Code::HookSpoolUnreadable,
+            Code::ActivityLockSkipped,
+            Code::ActivityWriteFailed,
+            Code::ActivitySkipsUnreadable,
+            Code::ActivitySpoolUnwritable,
             Code::HookFailuresRecorded,
             Code::MovesUnreadable,
             Code::HerdrMissing,

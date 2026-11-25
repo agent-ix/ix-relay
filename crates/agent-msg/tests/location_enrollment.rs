@@ -226,11 +226,7 @@ fn renamed_tabs_keep_the_session_queue_and_preserve_public_history_snapshots() {
     let mut state: serde_json::Value =
         serde_json::from_slice(&std::fs::read(f.dir.join("state.json")).unwrap()).unwrap();
     state["draco"]["tabs"][1]["label"] = "review".into();
-    std::fs::write(
-        f.dir.join("state.json"),
-        serde_json::to_vec(&state).unwrap(),
-    )
-    .unwrap();
+    f.write_state(&state);
     // The owning watcher, not the sender, publishes topology changes.
     f.publish("draco");
     let old = run(
@@ -276,11 +272,7 @@ fn one_session_claimed_by_multiple_panes_is_not_enrolled_even_in_separate_tabs()
     let mut state: serde_json::Value =
         serde_json::from_slice(&std::fs::read(f.dir.join("state.json")).unwrap()).unwrap();
     state["draco"]["agents"][0]["agent_session"]["value"] = "recipient-session".into();
-    std::fs::write(
-        f.dir.join("state.json"),
-        serde_json::to_vec(&state).unwrap(),
-    )
-    .unwrap();
+    f.write_state(&state);
     let result = run(f.cmd(&["send", "draco:misc:code", "refuse"]), "");
     assert_ne!(result.status, 0);
     assert!(
@@ -342,11 +334,7 @@ fn malformed_topology_and_unaddressable_labels_never_create_fallback_identities(
             "colon-label" => state["draco"]["tabs"][1]["label"] = "bad:label".into(),
             _ => state["draco"]["tabs"][1]["label"] = "x".repeat(200).into(),
         }
-        std::fs::write(
-            f.dir.join("state.json"),
-            serde_json::to_vec(&state).unwrap(),
-        )
-        .unwrap();
+        f.write_state(&state);
         let result = run(f.cmd(&["send", "draco:misc:code", "refuse"]), "");
         assert_ne!(result.status, 0, "{changed}: {}", result.stdout);
         assert!(f.relay().log(0, 100).unwrap().is_empty());

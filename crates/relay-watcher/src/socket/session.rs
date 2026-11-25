@@ -12,6 +12,7 @@ use std::{
     io::Read,
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use claude_wire::{KNOWN_PEER_PROTOCOL, MIN_VERSION, RecordVerdict, SessionRecord};
@@ -58,7 +59,7 @@ impl Procs for ProcFs {
                         "-p",
                         &pid.to_string(),
                     ],
-                    std::time::Duration::from_secs(1),
+                    Duration::from_secs(1),
                 )
                 .ok()?;
             if !output.success {
@@ -124,6 +125,12 @@ pub enum Unresolved {
     /// The record names no usable socket: not the process's own `<pid>.sock`, not
     /// in an expected directory, not owned by this user, or open to others.
     NoSocket(String),
+    /// Every live process holding the session has handed its terminal to a background
+    /// job (the job id): its socket queues mail that is never consumed.
+    Parked(String),
+    /// The session has no inbox socket at all: its live record names none and no
+    /// socket of its process exists. The only case a Claude Code lead is typed into.
+    NoInboxSocket,
 }
 
 impl std::fmt::Display for Unresolved {
@@ -155,8 +162,32 @@ impl std::fmt::Display for Unresolved {
                 MIN_VERSION.2
             ),
             Self::NoSocket(why) => write!(f, "the session record has no usable socket: {why}"),
+            Self::Parked(job) => write!(
+                f,
+                "the session is parked (its terminal shows background job {job}), so it \
+                 consumes no mail until it is resumed"
+            ),
+            Self::NoInboxSocket => f.write_str("the session has no inbox socket"),
         }
     }
+}
+
+/// How long after a session starts a record without a socket path is not yet proof
+/// that it has none: Claude Code writes the record first and publishes the socket
+/// into it once bound.
+const SOCKET_PUBLISH_GRACE: Duration = Duration::from_secs(60);
+
+/// Whether `record`'s process is old enough that a socket would have been published.
+fn past_publish_grace(record: &SessionRecord) -> bool {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_millis()).ok());
+    let grace = i64::try_from(SOCKET_PUBLISH_GRACE.as_millis()).unwrap_or(i64::MAX);
+    matches!(
+        (now, record.started_at),
+        (Some(now), Some(started)) if now.saturating_sub(started) >= grace
+    )
 }
 
 fn read_record(path: &Path) -> Option<SessionRecord> {
@@ -212,6 +243,30 @@ pub fn resolve(
     if live.is_empty() {
         return Err(Unresolved::Stale(total));
     }
+    let parked = live.iter().find_map(|r| r.parked_job_id.clone());
+    live.retain(|r| r.parked_job_id.is_none());
+    if let Some(job) = parked.filter(|_| live.is_empty()) {
+        return Err(Unresolved::Parked(job));
+    }
+    if live.iter().all(|r| r.messaging_socket_path.is_none()) {
+        let unnamed = live.iter().any(|r| {
+            socket_dirs
+                .iter()
+                .any(|dir| dir.join(format!("{}.sock", r.pid)).exists())
+        });
+        if unnamed {
+            return Err(Unresolved::NoSocket(
+                "messagingSocketPath is absent but a socket of this process exists".to_owned(),
+            ));
+        }
+        if !live.iter().all(past_publish_grace) {
+            return Err(Unresolved::NoSocket(
+                "messagingSocketPath is not published yet".to_owned(),
+            ));
+        }
+        return Err(Unresolved::NoInboxSocket);
+    }
+    live.retain(|r| r.messaging_socket_path.is_some());
     if live
         .iter()
         .any(|r| r.kind.as_deref() == Some("interactive"))

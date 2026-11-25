@@ -25,7 +25,7 @@ use relay_test_support::Bus;
 
 fn new_escalation(session_id: &str, context: &str) -> EscalationFiling {
     EscalationFiling {
-        ticket: "AGE-2029".parse().expect("valid ticket"),
+        ticket: Some("AGE-2029".parse().expect("valid ticket")),
         lead: "qsl-lead".parse::<AgentName>().expect("valid name"),
         machine: "node-a".parse().expect("valid id"),
         session_id: session_id.parse().expect("valid id"),

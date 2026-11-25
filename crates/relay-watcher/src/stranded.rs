@@ -443,7 +443,12 @@ mod tests {
         let entries: Vec<String> = bus.raw.lrange(key, 0, -1).unwrap();
         entries
             .iter()
-            .map(|e| serde_json::from_str::<Message>(e).unwrap().text)
+            .map(|e| {
+                relay_core::receipts::InboxEntry::try_from(e.as_bytes())
+                    .unwrap()
+                    .message
+                    .text
+            })
             .collect()
     }
 

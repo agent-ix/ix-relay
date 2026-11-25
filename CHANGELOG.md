@@ -2,17 +2,31 @@
 
 ## Unreleased
 
-- Prefer Claude inbox sockets while leads are busy, idle, or blocked; Claude hooks
-  keep enrollment current but leave delivery to the watcher in socket mode.
-- Gate terminal fallback on two matching session identity checks, independent of
-  pane activity. Accepted socket
-  messages keep renewable leases across delayed consumption and watcher restart;
-  after 30 minutes without confirmation they expire without a terminal duplicate.
-- Restore the valid Cargo lockfile preceding the truncated lockfile committed upstream.
-- Count matching batch ownership on lease renewal even when the requested deadline
-  is already covered, so two renewals in one millisecond do not abandon a live batch.
-- Recognize Claude Code 2.1.302's consumed mid-turn peer attachment as a structured
-  acknowledgement, using the shape captured during titan's live loopback acceptance.
+- A Claude Code session that has an inbox socket now receives relay mail only through that socket (SWM-121 to SWM-124). `[watcher] delivery` defaults to `socket`; set `delivery = "herdr"` only to switch sockets off, which types into every lead. Nothing is typed into a socket session after a failed, unconfirmed, held or duplicate post, a watcher restart, a redelivery or forwarded stranded mail: it stays queued or in flight, and a posted batch not consumed in 30 minutes is dead-lettered as `consumption_expired`. The ten-minute Herdr fallback for a lead whose delivery was unconfirmed is removed. A parked session (`parkedJobId`, for example after `/resume`) is neither posted to nor typed into; typing there reached the conversation its pane showed. Herdr types into a Claude Code lead only when its own live record names no socket, no socket file exists and it started over 60 s ago; every doubtful case waits. A hook of a socket session registers it and leaves its mail to the watcher. `agent-msg doctor` counts leads `with a problem` instead of `using herdr`. Install `agent-msg` and `relay-watcher` together and restart the watcher.
+
+- Count hook activity updates that were dropped. A drop for want of `spool/activity.json`'s lock appends one byte to `spool/activity.lockskips`, and any other failed update to `spool/activity.writefails`, without taking the lock; each stops at 1,048,576 and then reads "at least". `relay-watcher` exports them as `ix.relay.hook.activity_skipped{reason="lock"|"write_failed"}` plus `ix.relay.hook.activity_skip_saturated`. `agent-msg doctor` warns `activity_lock_skipped`, `activity_write_failed`, `activity_skips_unreadable` and `activity_spool_unwritable`, for counts that grew in the last 24 hours; delete a sidecar to reset its count.
+
+## 0.4.2
+
+- Replace the Python scripts with Rust binaries in the new `relay-tools` crate: `check-test-matrix` (behind `make check-matrix`), `archive-relay-namespace`, `codex-herdr-launcher` and `capture-codex-session-start`. Each keeps the Python tool's behaviour and flags, with these differences. `archive-relay-namespace` and `capture-codex-session-start` write equivalent JSON, but with different key order and separators. `archive-relay-namespace` resolves its Redis URL like `agent-msg` (`IX_RELAY_URL`, then `url` in the file named by `IX_RELAY_CONFIG` or `~/.ix/relay/config.toml`, then the default), so its `--config` flag is gone: set `IX_RELAY_CONFIG`. It refuses `rediss://` URLs, because no relay build carries a TLS library. The SessionStart capture hook command is now the binary path, with no `python3`. `scripts/latency-bench.py`, a one-off harness no gate or doc called, is removed. Launchers already installed as `codex` are copies of the old script and keep working until replaced by `codex-herdr-launcher`.
+
+- `relay-watcher` exports the FR-072 `host_registry_stale` defect as `ix.fleet.probe_ok{host,source="host_registry_stale"}`: 0 for a host whose stale lanes an assignment write named, until that host publishes its lane list again, then 1. `agent-msg doctor` keeps warning `assignment_host_registry_stale`. The series is exported by every watcher for the stale host, for one hour after the host recovers; aggregate it with `min by (host, source)`. A failed read of the stored defects keeps the last known ones and sets `probe_ok{source="redis"}` to 0.
+
+## 0.4.1
+
+- Move the host readers (CPU busy ratio, memory, temperature, compiler processes, per-source read budgets and error classes) into the `host-probe` crate and add Linux pressure stall information: `ix.fleet.host.pressure{resource,kind}` from `/proc/pressure/{cpu,io,memory}` and a `pressure` collector source, reported as `probe_unavailable` on macOS and on kernels without PSI. Add `pressure` to `expected_sources` on a host that should report it off the default.
+- Add the ordered per-lane assignment list (FR-072). `agent-msg assign set|append|remove|reorder` writes a lane's list of up to 50 tickets (each with a text reference), an optional `--order-id` is stored in the transition record, and `assign show` and `assign history` read the lists and the bounded history without a role. Writes need `[assign] orchestrator = true` in `config.toml`, are refused for a lane's own list, an unknown lane and a lane of a host with an expired registry lease (`host_registry_stale`, which records the host's probe defect until it refreshes), and a lane's list follows it when its tab is renamed or its pane relinked. A list that cannot follow (the new address already holds one, or the store fails) stays put, records a `move_failed` transition and a defect, and `agent-msg doctor` warns `assignment_move_failed` and `assignment_host_registry_stale` until they are settled. An emptied list leaves the lane limit, and lists of lanes no registry lists are dropped after seven days when the limit is reached.
+- Add `agent-msg orders expired [--json]` and `Relay::expired_orders()`: one read-only request for the orders whose `AckExpired` the relay recorded and that were not `Acted`, with recipient lane, expected ticket, enqueue time, deadline, whether `Delivered` came before expiry, last receipt state and escalation state; at most 500 orders, with `truncated`, `skipped` and `indexed_since_ms`. The relay indexes expiries from this version on: upgrade `relay-watcher` on every host first, because an older watcher records `AckExpired` without indexing it, and orders that expired earlier are not listed.
+
+## 0.4.0
+
+- Add the host collector to `relay-watcher`: measured CPU busy ratio, memory and temperature, a per-lane state, last-activity and blocked reason from pane-tail classification, the leased per-host lane list in Redis, `ix.fleet.probe_ok` per collector source, and the `[fleet]` host profile. `agent-msg doctor` warns `collector_source_failed` and `fleet_lanes_dropped` from the heartbeat. Upgrade `agent-msg` and the hook before adding `[fleet]` to a machine's `config.toml`.
+- Add `Acted` receipts and order ack deadlines. `Acted` records the first prompt or tool event of the recipient session after delivery. `agent-msg send --order [--ack-deadline AGE] [--expect-ticket ID]` (and `[send] ack_deadline`) gives a message to one lane address an ack deadline; when it passes without `Acted`, `relay-watcher` records `AckExpired` and files one escalation of kind `order`, and exports `ix.relay.orders.unacted`, `ix.relay.orders.escalation_failed` and `ix.relay.order.act_latency`. The first activity write after a Redis restart takes two round trips (script by SHA, then by body). Upgrade order: escalations of kind `order` have no ticket, so upgrade `agent-msg`, `relay-tui` and `ix-board` on every machine before any `relay-watcher` runs this version; an older build cannot read a ticketless escalation and lists it as unreadable.
+- Add hook activity events: Claude and Codex hooks record `pre_tool`, `post_tool`, `prompt`, `blocked`, `idle`, `stop`, `session_start` and `session_end` per lane address in Redis, with a 300 ms PreToolUse budget and backoff during a Redis outage (`spool/activity.json` counts skips, drops and unregistered lanes).
+- Derive lane state in `relay-watcher` from hook events (working, idle, blocked, stuck, ended), with `ix.fleet.lane.no_events`, `hook_events` health, compiler-to-lane attribution (`ix.fleet.lane.compile_seconds`), `ix.fleet.lane.focus_info`, `ix.fleet.config` and `ix.relay.hook.activity_skipped`.
+- Record work transition history (`agent-msg work events`).
+- Publish `x86_64-unknown-linux-gnu` binaries for `agent-msg` and `relay-watcher` on each release tag, built on Ubuntu 22.04 (glibc 2.35).
+- Add `agent-msg focuses` with `create`, `list`, `show`, `update`, `archive`, `claim` and `transfer`: named focus definitions with immutable revisions, one owner session per definition and typed errors with `--json`. `agent-msg focus` and `agent-msg work focus` are unchanged.
 
 ## 0.3.4
 
@@ -45,6 +59,8 @@
 ## 0.3.0
 
 - Replace lead aliases with verified Herdr location identities (`server:workspace:tab`).
+- Move the bus to the `ixr:v3:` key namespace. Archive the earlier namespace without deleting its keys using `scripts/archive-relay-namespace.py --prefix ixr: --output <file>`, then stage matching binaries, launcher and plugin guidance on every machine before changing the configured prefix. Earlier aliases are never imported.
+- Run relay-redis as its own Redis on the hub, reached over WireGuard with one Redis user per machine. `scripts/relay-admin migrate` copies `ixr:v3:*` keys from the earlier shared Redis and keeps any key relay-redis already has.
 - Reject stale interactive identities that have no matching live session, and diagnose stale Codex caller context with limited SessionStart capture.
 - Resolve cold remote leads through exact saved Herdr profiles.
 - Bound hook session probing to one Redis reply, and measure the drip-input deadline at hook exit.

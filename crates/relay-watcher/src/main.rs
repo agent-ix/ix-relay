@@ -1,11 +1,13 @@
-//! `relay-watcher`: one process per machine that wakes idle team leads.
+//! `relay-watcher`: one process per machine that gets queued mail to team leads.
 //!
-//! `agent-msg`'s hooks deliver messages mid-turn (`PostToolUse`) or at turn
-//! end (`Stop`), but a lead that is simply sitting idle between turns never
-//! runs a hook, so nothing wakes it up. This watches the leads registered on
-//! this machine (see [`relay_core::config`], AGE-2017) and, for any that are
-//! idle or done with a non-empty inbox in herdr mode, types the queued messages
-//! in through a [`deliver::Deliverer`] (`herdr agent prompt`).
+//! This watches the leads registered on this machine (see [`relay_core::config`],
+//! AGE-2017) that have a non-empty inbox, and hands each batch to one of two
+//! transports (see [`deliver::Route`]). A Claude Code session that has an inbox
+//! socket receives it only through that socket, whatever its pane is doing, and
+//! its hooks leave the mail to this watcher (FR-044). A lead with no socket at
+//! all is typed into through `herdr agent prompt` while it is idle or done,
+//! because a lead sitting idle between turns runs no hook, so nothing else wakes
+//! it.
 //!
 //! # Waking
 //!
@@ -19,12 +21,6 @@
 //! costs seconds, not a message. A new connection reads the log's tail *before*
 //! its first sweep, so a send in between still wakes the next wait.
 //!
-//! In socket mode, Claude leads receive through their inbox socket independently
-//! of pane activity and without a herdr state read, and Claude hooks leave their
-//! mail for this watcher. Herdr fallback after a confirmed socket failure checks
-//! the session identity, not pane activity. See [`watch::try_deliver`] for the
-//! per-lead decision.
-//!
 //! The process never exits because Redis is unhealthy: [`supervise`] retries
 //! forever with capped backoff. The only exits are a command-line error and a
 //! configuration error at startup (and `--once`, which is for manual checks), and a
@@ -33,6 +29,7 @@
 
 mod deliver;
 mod episodes;
+mod fleet;
 mod herdr;
 mod herdr_gate;
 mod last_seen;
@@ -161,6 +158,8 @@ fn per_lead(err: relay_core::Error, context: impl std::fmt::Display) -> relay_co
 /// keeps only leads it saw ([`Episodes::retain_present`]) and only records
 /// still reported.
 struct WatcherState {
+    /// Whether a failed order-deadline scan is already reported for the current episode.
+    order_scan_failed: bool,
     /// Ticks so far, for the fair rotation of the order leads are looked at in.
     rotation: usize,
     /// The condition each local lead is currently in, if any.
@@ -230,6 +229,8 @@ struct WatcherState {
     live: Liveness,
     /// The OTLP metrics push (FR-045); disabled when no endpoint is configured.
     otlp: otlp::Publisher,
+    /// The host collector (FR-069); `None` for `--once`.
+    fleet: Option<fleet::Collector>,
 }
 
 impl WatcherState {
@@ -237,6 +238,7 @@ impl WatcherState {
     /// sweeps every `sweep_every`.
     fn new(retry_every: Duration, sweep_every: Duration) -> Self {
         Self {
+            order_scan_failed: false,
             episodes: Episodes::default(),
             skipped_reported: HashSet::new(),
             dropped_reported: false,
@@ -263,6 +265,7 @@ impl WatcherState {
             reap_trouble: HashSet::new(),
             live: Liveness::default(),
             otlp: otlp::Publisher::disabled(),
+            fleet: None,
         }
     }
 
@@ -365,6 +368,86 @@ const PRUNE_RECHECK_EVERY: Duration = Duration::from_secs(10 * 60);
 /// two of a person noticing, not on every tick.
 const PLACE_REFRESH_EVERY: Duration = Duration::from_secs(30);
 
+/// Publishes this host's lane list under its lease and reads its entered capacity (FR-069,
+/// FR-070). A store failure here is recorded as the `redis` source failing and never ends
+/// the refresh: the rest of the tick meets the same error where it must.
+fn refresh_fleet(
+    relay: &mut Relay,
+    collector: &mut fleet::Collector,
+    view: &relay_ops::find::MachineView,
+    regs: &[relay_core::Registration],
+    machine: &MachineName,
+    log: &mut impl FnMut(String),
+) {
+    let lanes = fleet::lanes::lanes_of(machine, view, regs);
+    let addresses: Vec<String> = lanes.iter().map(|l| l.address.clone()).collect();
+    collector.set_lanes(Instant::now(), lanes);
+    let published = relay.publish_lane_list(machine, &addresses);
+    let (capacity, read) = match relay.server_capacities() {
+        Ok(all) => (
+            all.iter()
+                .find(|c| c.machine == *machine)
+                .and_then(|c| c.max_agents)
+                .map_or(fleet::CapacityRead::NotEntered, fleet::CapacityRead::Slots),
+            true,
+        ),
+        Err(_) => (
+            fleet::CapacityRead::Failed(host_probe::ErrorClass::Unreadable),
+            false,
+        ),
+    };
+    collector.set_capacity(capacity, log);
+    // The newest event of each lane's hooks (FR-068): one pipelined read under one source
+    // budget, aged against the relay's clock that stamped the lane list in this refresh.
+    let activity = match &published {
+        Ok(list) => {
+            let lanes: Vec<(String, relay_core::Address)> = addresses
+                .iter()
+                .filter_map(|a| Some((a.clone(), a.parse().ok()?)))
+                .collect();
+            let keys: Vec<relay_core::Address> = lanes.iter().map(|(_, k)| k.clone()).collect();
+            relay
+                .activity_last_many(&keys, host_probe::bound::SOURCE_BUDGET)
+                .map(|records| {
+                    lanes
+                        .into_iter()
+                        .map(|(address, _)| address)
+                        .zip(records)
+                        .collect::<Vec<_>>()
+                })
+                .map(|records| (list.refreshed_ms, records))
+                .map_err(|e| {
+                    if e.is_timeout() {
+                        host_probe::ErrorClass::Timeout
+                    } else {
+                        host_probe::ErrorClass::Unreadable
+                    }
+                })
+        }
+        Err(_) => Err(host_probe::ErrorClass::Unreadable),
+    };
+    let activity_ok = activity.is_ok();
+    collector.set_activity(Instant::now(), activity, log);
+    let defects_ok =
+        apply_stale_defects(collector, Instant::now(), relay.assignment_probe_defects());
+    collector.set_refresh_redis(published.is_ok() && read && activity_ok && defects_ok, log);
+}
+
+/// Feeds the stored FR-072 stale-host defects to the collector; true when the read worked.
+/// A failed read keeps the last known defects and is reported through the `redis` source.
+fn apply_stale_defects<E>(
+    collector: &mut fleet::Collector,
+    now: Instant,
+    read: Result<Vec<relay_core::assignment::ProbeDefect>, E>,
+) -> bool {
+    let Ok(defects) = read else {
+        return false;
+    };
+    let hosts: Vec<String> = defects.into_iter().map(|d| d.host).collect();
+    collector.set_stale_hosts(now, &hosts);
+    true
+}
+
 /// The least time between two rename events of one lead. A label that flaps is
 /// followed (the address stays true) but recorded once per gap, so one workspace
 /// cannot fill the shared, capped moves stream.
@@ -401,12 +484,21 @@ fn refresh_places(
     };
     let layout = match herdr.layout(machine) {
         Ok(layout) => {
+            if let Some(collector) = &mut state.fleet {
+                collector.set_herdr(fleet::health::Outcome::Ok, log);
+            }
             if std::mem::take(&mut state.layout_failed_reported) {
                 log("herdr's layout is readable again".to_owned());
             }
             layout
         }
         Err(e) => {
+            if let Some(collector) = &mut state.fleet {
+                collector.set_herdr(
+                    fleet::health::Outcome::Failed(host_probe::ErrorClass::Unreadable),
+                    log,
+                );
+            }
             // Nothing is relinked or renamed on an answer that did not come: one
             // line per episode, the addresses stay as registered.
             if !std::mem::replace(&mut state.layout_failed_reported, true) {
@@ -481,6 +573,9 @@ fn refresh_places(
     // metrics cost no herdr call of their own (FR-045).
     if let Some(view) = &layout.view {
         state.otlp.set_panes(Instant::now(), view, regs);
+        if let Some(collector) = &mut state.fleet {
+            refresh_fleet(relay, collector, view, regs, machine, log);
+        }
     }
     // Before the loop below drops the place of a registration whose session left:
     // the address its queued mail was written to (FR-053).
@@ -619,6 +714,39 @@ fn main() -> ExitCode {
         env!("CARGO_PKG_VERSION"),
         cli.once,
     );
+    // The host collector and its profile (FR-069, FR-070); a bad `[fleet]` value is a
+    // configuration error like the OTLP ones.
+    let fleet_profile = match fleet::health::Profile::from_file(&settings.fleet) {
+        Ok(profile) => profile,
+        Err(e) => {
+            eprintln!("relay-watcher: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let fleet_windows = match fleet::feed::Windows::from_file(&settings.fleet) {
+        Ok(windows) => windows,
+        Err(e) => {
+            eprintln!("relay-watcher: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let fleet_tickets = match fleet::feed::Tickets::from_file(&settings.fleet) {
+        Ok(tickets) => tickets,
+        Err(e) => {
+            eprintln!("relay-watcher: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if !cli.once {
+        state.fleet = Some(fleet::Collector::with_config(
+            machine.clone(),
+            fleet_profile,
+            fleet::Sources::native(),
+            Duration::from_secs(settings.watcher_otlp.interval_secs.value),
+            fleet_windows,
+            fleet_tickets,
+        ));
+    }
     // `--once` is a manual check: like the state file, it must not publish a
     // heartbeat that a running watcher's would be overwritten by (or hide).
     if !cli.once {
@@ -630,6 +758,11 @@ fn main() -> ExitCode {
             sweep,
             ttl: relay_core::health::heartbeat_ttl(sweep),
             otlp: state.otlp.status(),
+            fleet: state
+                .fleet
+                .as_ref()
+                .map(fleet::Collector::status)
+                .unwrap_or_default(),
         });
     }
     let herdr = delivery(settings.delivery);
@@ -680,13 +813,18 @@ fn install_signal_handlers() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
     flag
 }
 
-/// The production delivery for `mode`: herdr alone (the default), or herdr
-/// behind Claude Code's inbox socket (FR-044). A socket whose locations cannot be
-/// told is reported and leaves herdr alone.
+/// The production delivery for `mode`: Claude Code's inbox sockets for the sessions
+/// that have one and herdr for the rest (the default), or herdr alone when the
+/// operator set `delivery = "herdr"` (FR-044). A socket whose locations cannot be
+/// told is reported and leaves Claude Code leads waiting, never typed into.
 fn delivery(mode: relay_core::config::DeliveryMode) -> socket::Routed<RealHerdr> {
     use relay_core::config::DeliveryMode;
     let herdr = RealHerdr::default();
     if mode == DeliveryMode::Herdr {
+        eprintln!(
+            "relay-watcher: delivery = herdr: inbox sockets are switched off by config.toml; \
+             every lead, Claude Code included, is typed into"
+        );
         return socket::Routed::herdr_only(herdr);
     }
     match socket::deliverer::SocketConfig::from_env() {
@@ -698,19 +836,22 @@ fn delivery(mode: relay_core::config::DeliveryMode) -> socket::Routed<RealHerdr>
             match socket.reply_path() {
                 Some(path) => eprintln!(
                     "relay-watcher: delivery = socket: posting to Claude Code inbox sockets, \
-                     replies on {}; herdr is the fallback",
+                     replies on {}; herdr types only into leads that have no socket",
                     path.display()
                 ),
                 None => eprintln!(
                     "relay-watcher: delivery = socket, but the reply socket could not be bound; \
-                     every batch goes to herdr (see agent-msg doctor)"
+                     Claude Code mail waits until it is (see agent-msg doctor)"
                 ),
             }
             socket::Routed::socket_first(herdr, socket)
         }
         Err(why) => {
-            eprintln!("relay-watcher: delivery = socket is unavailable ({why}); using herdr");
-            socket::Routed::herdr_only(herdr)
+            eprintln!(
+                "relay-watcher: inbox sockets are unavailable ({why}); Claude Code mail waits, \
+                 other harnesses go through herdr"
+            );
+            socket::Routed::socket_unavailable(herdr, &why)
         }
     }
 }
@@ -773,6 +914,16 @@ impl<H: Herdr + Deliverer> Bus for RedisBus<H> {
             },
         );
         self.state.live.finish_tick(conn, wake, ticked)
+    }
+
+    /// The metrics push without the store: the collector's sources and `redis` = 0
+    /// (FR-070-AC-6).
+    fn offline(&mut self) {
+        self.state
+            .otlp
+            .publish_offline(Instant::now(), self.state.fleet.as_mut(), &mut |line| {
+                eprintln!("relay-watcher: {line}");
+            });
     }
 
     /// Blocks on the message log until a send, a due retry or the sweep, in
@@ -1002,7 +1153,9 @@ fn tick<H: Herdr + Deliverer>(
         let lost = inbox.lost.take();
         match &outcome {
             Outcome::Delivered { messages } => state.otlp.delivered(*messages),
-            Outcome::PromptRejected { requeued, .. } => state.otlp.requeued(*requeued),
+            Outcome::PromptRejected { requeued, .. } | Outcome::SocketNotSent { requeued, .. } => {
+                state.otlp.requeued(*requeued)
+            }
             _ => {}
         }
         if matches!(outcome, Outcome::Delivered { .. }) {
@@ -1032,6 +1185,7 @@ fn tick<H: Herdr + Deliverer>(
         .prune_checked
         .retain(|name, _| seen.contains(name) || state.refused.iter().any(|r| r.name == *name));
     state.live.retain_touched(&seen);
+    scan_orders(relay, state, log)?;
     for (name, kind) in state.episodes.retain_present(&seen) {
         log(format!(
             "{name}: no longer watched here; {} ended",
@@ -1041,9 +1195,59 @@ fn tick<H: Herdr + Deliverer>(
     // Last, after the deliveries, the registry cache and the prune, and answering to
     // nobody: its store reads can neither delay nor skip any of them (FR-045).
     if let Some((_, regs)) = &state.registry {
-        state
-            .otlp
-            .publish_if_due(relay, regs, Instant::now(), now_ms(), log);
+        state.otlp.publish_if_due(
+            relay,
+            regs,
+            Instant::now(),
+            now_ms(),
+            state.fleet.as_mut(),
+            log,
+        );
+    }
+    Ok(())
+}
+
+/// Attempts to file an expired order's escalation before it is given up.
+const ORDER_ESCALATION_ATTEMPTS: u32 = 3;
+
+/// Records `AckExpired` for orders past their ack deadline and files each one's escalation
+/// (FR-071): one request when nothing is due. Only a lost connection ends the tick.
+fn scan_orders(
+    relay: &mut Relay,
+    state: &mut WatcherState,
+    log: &mut impl FnMut(String),
+) -> relay_core::Result<()> {
+    let due = match relay.expire_orders(Now::Server) {
+        Ok(due) => due,
+        Err(e) if e.is_connection() => return Err(e),
+        Err(e) => {
+            if !std::mem::replace(&mut state.order_scan_failed, true) {
+                log(format!("scanning order deadlines failed: {e}"));
+            }
+            return Ok(());
+        }
+    };
+    state.order_scan_failed = false;
+    for order in &due {
+        match relay.escalate_expired_order(order, now_ms()) {
+            Ok(true) => log(format!(
+                "order {} to {} from {} reached its ack deadline without Acted; escalated",
+                order.original_id, order.recipient, order.sender
+            )),
+            Ok(false) => {}
+            Err(e) if e.is_connection() => return Err(e),
+            Err(e) => {
+                // Counted in the store; after ORDER_ESCALATION_ATTEMPTS the order is given up
+                // and no longer blocks the orders behind it.
+                let attempts = relay
+                    .order_escalation_failed(order, ORDER_ESCALATION_ATTEMPTS)
+                    .unwrap_or(0);
+                log(format!(
+                    "escalating order {} failed (attempt {attempts} of {ORDER_ESCALATION_ATTEMPTS}): {e}",
+                    order.original_id
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -1072,9 +1276,31 @@ fn apply_settlements<H: Herdr + Deliverer>(
             continue;
         };
         let result = match s.action {
-            SettleAction::Ack => relay.ack(&lead, s.batch, Popper::Watcher).map(usize::from),
+            SettleAction::Ack | SettleAction::AckUnconfirmed => {
+                let evidence = if s.action == SettleAction::Ack {
+                    relay_core::receipts::DeliveryEvidence::SocketConfirmed
+                } else {
+                    relay_core::receipts::DeliveryEvidence::SocketUnconfirmed
+                };
+                relay
+                    .observe_delivery(
+                        &lead,
+                        s.batch,
+                        Popper::Watcher,
+                        evidence,
+                        relay_core::Now::Server,
+                    )
+                    .and_then(|_| relay.ack(&lead, s.batch, Popper::Watcher))
+                    .map(usize::from)
+            }
             SettleAction::Requeue => relay.requeue_batch(&lead, s.batch, Popper::Watcher),
-            SettleAction::DeadLetter => relay.dead_letter_batch(&lead, s.batch, Popper::Watcher),
+            SettleAction::DeadLetter => relay.dead_letter_batch(
+                &lead,
+                s.batch,
+                Popper::Watcher,
+                s.dead_letter_reason
+                    .unwrap_or(relay_core::receipts::DeadLetterReason::Unknown),
+            ),
             SettleAction::Renew(lease) => relay.renew_batch(
                 &lead,
                 s.batch,
@@ -1432,7 +1658,21 @@ impl Inbox for RelayInbox<'_> {
         })
     }
 
-    fn ack(&mut self, batch: &PoppedBatch) {
+    fn ack(&mut self, batch: &PoppedBatch, evidence: relay_core::receipts::DeliveryEvidence) {
+        if let Err(error) = self.relay.observe_delivery(
+            self.lead,
+            batch.batch,
+            relay_core::Popper::Watcher,
+            evidence,
+            relay_core::Now::Server,
+        ) {
+            let text = self.record(error);
+            eprintln!(
+                "relay-watcher: {}: receipt observation failed: {text}; batch left in flight",
+                self.lead
+            );
+            return;
+        }
         self.ack_batch(batch.batch);
     }
 
@@ -1451,10 +1691,12 @@ impl Inbox for RelayInbox<'_> {
     }
 
     fn dead_letter(&mut self, batch: &PoppedBatch) {
-        if let Err(e) =
-            self.relay
-                .dead_letter_batch(self.lead, batch.batch, relay_core::Popper::Watcher)
-        {
+        if let Err(e) = self.relay.dead_letter_batch(
+            self.lead,
+            batch.batch,
+            relay_core::Popper::Watcher,
+            relay_core::receipts::DeadLetterReason::ReceiverDenied,
+        ) {
             // Still in flight: its lease returns it, and it would be shown again.
             let text = self.record(e);
             eprintln!(
@@ -1493,18 +1735,18 @@ impl RelayInbox<'_> {
 
 #[cfg(test)]
 mod tests {
+    use ix_trace_rs::trace;
     use std::collections::BTreeMap;
 
-    use relay_core::{Message, Target};
+    use relay_core::{MachineName, Message, PaneId, Target};
 
     use super::*;
     use crate::{
         deliver::DeliverError,
         episodes::EpisodeKind,
         herdr::{AgentGet, AgentStatus, ProcessError},
-        test_support::{Fault, FaultProxy, raw_command},
+        test_support::{Fault, FaultProxy, raw_command, request_groups},
     };
-    use relay_core::{MachineName, PaneId};
 
     // ---- tick ---------------------------------------------------------
 
@@ -1940,6 +2182,256 @@ mod tests {
             got.herdr_ids.is_some(),
             "the refreshed place carries Herdr proof"
         );
+    }
+
+    /// The layout refresh reads each lane's `activity-last` record from the store: a
+    /// lane whose hook wrote a recent prompt is working with its ticket, and the
+    /// `hook_events` source reads ok. Redis lane.
+    #[trace("FR-070-AC-9", "FR-045-AC-29")]
+    #[test]
+    fn tc_070_09_the_layout_refresh_feeds_the_collector_from_the_activity_records() {
+        use relay_core::activity::{ActivityEvent, ActivityKind, Harness};
+        let Some(mut relay) = test_relay("fleet-feed") else {
+            eprintln!("skipping: IX_RELAY_TEST_URL unset (run `make test-redis`)");
+            return;
+        };
+        let here: MachineName = "here".parse().unwrap();
+        let view = relay_ops::find::MachineView {
+            machine: here.clone(),
+            agents: vec![relay_ops::find::HerdrAgent {
+                kind: "claude".into(),
+                pane_id: "wM:p1".parse().unwrap(),
+                tab_id: "wM:t1".parse().unwrap(),
+                workspace_id: "wM".parse().unwrap(),
+                status: "idle".into(),
+                session_name: None,
+                session_id: None,
+            }],
+            workspaces: vec![relay_ops::find::HerdrWorkspace {
+                workspace_id: "wM".parse().unwrap(),
+                label: "EA".into(),
+                tab_count: 1,
+            }],
+            tabs: vec![relay_ops::find::HerdrTab {
+                tab_id: "wM:t1".parse().unwrap(),
+                label: "code".into(),
+            }],
+            dropped: 0,
+        };
+        let mut event = ActivityEvent::new(ActivityKind::Prompt, Harness::Claude, "s-1", 1);
+        event.cwd = "/w/ix-relay-swm-205".into();
+        event.branch = "swm-205-fleet".into();
+        assert!(
+            relay
+                .record_activity(&"here:EA:code".parse().unwrap(), &event)
+                .unwrap()
+        );
+        let mut collector = fleet::Collector::new(
+            here.clone(),
+            fleet::health::Profile::default(),
+            fleet::fixtures::sources(None),
+            fleet::fixtures::INTERVAL,
+        );
+        refresh_fleet(&mut relay, &mut collector, &view, &[], &here, &mut |_| {});
+        let mut registry = otlp::registry::Registry::new(2, 1);
+        collector.fill(&mut registry, Instant::now());
+        let has = |name: &str, attr: (&str, &str)| {
+            registry.points().iter().any(|p| {
+                p.instrument.name == name
+                    && p.attrs
+                        .pairs()
+                        .iter()
+                        .any(|(k, v)| *k == attr.0 && v == attr.1)
+            })
+        };
+        assert!(has("ix.fleet.lane.state", ("state", "working")));
+        assert!(has("ix.fleet.lane.focus_info", ("ticket", "SWM-205")));
+        assert!(has("ix.fleet.probe_ok", ("source", "hook_events")));
+        assert!(
+            !collector
+                .failed_sources()
+                .contains(&fleet::health::Source::HookEvents)
+        );
+    }
+
+    /// A refused write to a lane of a host with an expired registry lease is exported as
+    /// `probe_ok` 0 for that host's `host_registry_stale` source, and as 1 once the host
+    /// publishes its lane list again. Redis lane.
+    #[trace("FR-072-AC-9")]
+    #[test]
+    fn tc_072_09_a_stale_host_assignment_refusal_exports_probe_ok_0_until_the_host_refreshes() {
+        use relay_core::{
+            assignment::{AssignWrite, AssignWriter, AssignedTicket},
+            fleet::HostLaneList,
+        };
+        let Some(mut relay) = test_relay("stale-probe-ok") else {
+            eprintln!("skipping: IX_RELAY_TEST_URL unset (run `make test-redis`)");
+            return;
+        };
+        let url = std::env::var("IX_RELAY_TEST_URL").expect("set: test_relay returned Some");
+        let mut raw = redis::Client::open(url)
+            .and_then(|c| c.get_connection())
+            .expect("raw connection to test redis");
+        let old = HostLaneList {
+            machine: "oldhost".parse().unwrap(),
+            refreshed_ms: 1,
+            lanes: vec!["oldhost:SWM:code".into()],
+        };
+        redis::cmd("HSET")
+            .arg(format!("{}fleet-lanes", test_prefix("stale-probe-ok")))
+            .arg("oldhost")
+            .arg(serde_json::to_string(&old).unwrap())
+            .exec(&mut raw)
+            .expect("plant the expired lane list");
+        let writer = AssignWriter {
+            name: "draco:SWM:plan".into(),
+            orchestrator: true,
+            caller_lane: None,
+        };
+        let write = AssignWrite::Set(vec![AssignedTicket {
+            id: "A-1".into(),
+            reference: "https://linear.app/t/A-1".into(),
+        }]);
+        assert!(
+            relay
+                .assign(&writer, "oldhost:SWM:code", &write, None)
+                .is_err()
+        );
+        let here: MachineName = "here".parse().unwrap();
+        let view = relay_ops::find::MachineView {
+            machine: here.clone(),
+            agents: vec![],
+            workspaces: vec![],
+            tabs: vec![],
+            dropped: 0,
+        };
+        let mut collector = fleet::Collector::new(
+            here.clone(),
+            fleet::health::Profile::default(),
+            fleet::fixtures::sources(None),
+            fleet::fixtures::INTERVAL,
+        );
+        let stale_probe = |collector: &fleet::Collector| {
+            let mut registry = otlp::registry::Registry::new(2, 1);
+            collector.fill(&mut registry, Instant::now());
+            registry.points().iter().find_map(|p| {
+                let pairs = p.instrument.name == "ix.fleet.probe_ok" && {
+                    let pairs = p.attrs.pairs();
+                    pairs.iter().any(|(k, v)| *k == "host" && v == "oldhost")
+                        && pairs
+                            .iter()
+                            .any(|(k, v)| *k == "source" && v == "host_registry_stale")
+                };
+                match (&p.value, pairs) {
+                    (otlp::registry::Value::Int(v), true) => Some(*v),
+                    _ => None,
+                }
+            })
+        };
+        assert_eq!(stale_probe(&collector), None, "no defect, no series yet");
+        refresh_fleet(&mut relay, &mut collector, &view, &[], &here, &mut |_| {});
+        assert_eq!(stale_probe(&collector), Some(0));
+        relay
+            .publish_lane_list(
+                &"oldhost".parse().unwrap(),
+                &["oldhost:SWM:code".to_owned()],
+            )
+            .unwrap();
+        refresh_fleet(&mut relay, &mut collector, &view, &[], &here, &mut |_| {});
+        assert_eq!(stale_probe(&collector), Some(1));
+    }
+
+    fn stale_series(collector: &fleet::Collector, now: Instant) -> Option<i64> {
+        let mut registry = otlp::registry::Registry::new(2, 1);
+        collector.fill(&mut registry, now);
+        registry.points().iter().find_map(|p| {
+            let pairs = p.attrs.pairs();
+            let hit = p.instrument.name == "ix.fleet.probe_ok"
+                && pairs.iter().any(|(k, v)| *k == "host" && v == "oldhost")
+                && pairs
+                    .iter()
+                    .any(|(k, v)| *k == "source" && v == "host_registry_stale");
+            match (&p.value, hit) {
+                (otlp::registry::Value::Int(v), true) => Some(*v),
+                _ => None,
+            }
+        })
+    }
+
+    fn defect(host: &str) -> relay_core::assignment::ProbeDefect {
+        relay_core::assignment::ProbeDefect {
+            host: host.into(),
+            refused: 1,
+            last_ms: 1,
+        }
+    }
+
+    /// A failed defect read keeps the last known defects and fails the `redis` source,
+    /// so `probe_ok{source=redis}` reads 0 while the stale export keeps its value.
+    #[trace("FR-072-AC-9")]
+    #[test]
+    fn tc_072_10_a_failed_defect_read_keeps_the_last_defects_and_fails_the_redis_source() {
+        let here: MachineName = "here".parse().unwrap();
+        let mut collector = fleet::Collector::new(
+            here,
+            fleet::health::Profile::default(),
+            fleet::fixtures::sources(None),
+            fleet::fixtures::INTERVAL,
+        );
+        let now = Instant::now();
+        assert!(apply_stale_defects(
+            &mut collector,
+            now,
+            Ok::<_, ()>(vec![defect("oldhost")])
+        ));
+        collector.set_refresh_redis(true, &mut |_| {});
+        collector.set_push_redis(true, &mut |_| {});
+        let redis_probe = |c: &fleet::Collector| {
+            let mut registry = otlp::registry::Registry::new(2, 1);
+            c.fill(&mut registry, now);
+            registry.points().iter().find_map(|p| {
+                let hit = p.instrument.name == "ix.fleet.probe_ok"
+                    && p.attrs
+                        .pairs()
+                        .iter()
+                        .any(|(k, v)| *k == "source" && v == "redis");
+                match (&p.value, hit) {
+                    (otlp::registry::Value::Int(v), true) => Some(*v),
+                    _ => None,
+                }
+            })
+        };
+        assert_eq!(redis_probe(&collector), Some(1));
+        let ok = apply_stale_defects(&mut collector, now, Err::<Vec<_>, _>("redis down"));
+        assert!(!ok);
+        collector.set_refresh_redis(ok, &mut |_| {});
+        assert_eq!(redis_probe(&collector), Some(0));
+        assert_eq!(stale_series(&collector, now), Some(0));
+    }
+
+    /// A recovered host exports 1 for the bounded period and is then dropped.
+    #[trace("FR-072-AC-9")]
+    #[test]
+    fn tc_072_11_a_recovered_host_exports_1_for_an_hour_and_is_then_dropped() {
+        let here: MachineName = "here".parse().unwrap();
+        let mut collector = fleet::Collector::new(
+            here,
+            fleet::health::Profile::default(),
+            fleet::fixtures::sources(None),
+            fleet::fixtures::INTERVAL,
+        );
+        let t0 = Instant::now();
+        apply_stale_defects(&mut collector, t0, Ok::<_, ()>(vec![defect("oldhost")]));
+        assert_eq!(stale_series(&collector, t0), Some(0));
+        let t1 = t0 + Duration::from_secs(30);
+        apply_stale_defects(&mut collector, t1, Ok::<_, ()>(vec![]));
+        assert_eq!(stale_series(&collector, t1), Some(1));
+        let almost = t1 + fleet::STALE_RECOVERED_EXPORT - Duration::from_secs(1);
+        apply_stale_defects(&mut collector, almost, Ok::<_, ()>(vec![]));
+        assert_eq!(stale_series(&collector, almost), Some(1));
+        let gone = t1 + fleet::STALE_RECOVERED_EXPORT;
+        apply_stale_defects(&mut collector, gone, Ok::<_, ()>(vec![]));
+        assert_eq!(stale_series(&collector, gone), None);
     }
 
     fn test_relay(test: &str) -> Option<Relay> {
@@ -3715,6 +4207,84 @@ mod tests {
         }
     }
 
+    struct NoSink;
+
+    impl crate::supervise::StateSink for NoSink {
+        fn write(&mut self, _file: &crate::supervise::WatcherFile) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// With Redis unreachable the supervisor's failed step still pushes: `redis` is 0, the
+    /// host's other sources report, and no store-backed series is sent. Deleting the
+    /// `offline` hook of the failed step fails this.
+    #[trace("FR-070-AC-6")]
+    #[test]
+    fn tc_070_06_a_watcher_with_redis_down_still_pushes_redis_0_and_the_other_sources() {
+        let here: MachineName = "node-a".parse().unwrap();
+        let (publisher, rx) = recording_publisher(&here, Duration::ZERO);
+        let mut state = WatcherState::new(Duration::from_secs(1), Duration::from_secs(5));
+        state.otlp = publisher;
+        state.fleet = Some(fleet::Collector::new(
+            here.clone(),
+            fleet::health::Profile::default(),
+            fleet::fixtures::sources(None),
+            fleet::fixtures::INTERVAL,
+        ));
+        let bus = RedisBus {
+            url: "redis://127.0.0.1:1".to_owned(),
+            prefix: "ixr:test:".to_owned(),
+            machine: here,
+            herdr: StubHerdr {
+                session_id: None,
+                prompts: std::cell::RefCell::default(),
+            },
+            state,
+        };
+        let stub = StubHerdr {
+            session_id: None,
+            prompts: std::cell::RefCell::default(),
+        };
+        let mut sup = crate::supervise::Supervisor::new(
+            bus,
+            crate::supervise::SystemClock::new(),
+            stub,
+            NoSink,
+            1,
+        );
+        assert!(!sup.step().ok, "redis is unreachable");
+        let body = String::from_utf8(rx.recv_timeout(Duration::from_secs(5)).unwrap()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let probe = json["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == "ix.fleet.probe_ok")
+            .unwrap()["gauge"]["dataPoints"]
+            .clone();
+        let value = |source: &str| {
+            probe.as_array().unwrap().iter().find_map(|p| {
+                p["attributes"]
+                    .as_array()?
+                    .iter()
+                    .any(|a| a["key"] == "source" && a["value"]["stringValue"] == source)
+                    .then(|| p["asInt"].as_str().map(str::to_owned))
+                    .flatten()
+            })
+        };
+        assert_eq!(value("redis").as_deref(), Some("0"));
+        assert_eq!(value("memory").as_deref(), Some("1"));
+        assert_eq!(value("compilers").as_deref(), Some("1"));
+        assert!(
+            !body.contains("ix.relay.inbox.depth"),
+            "no store-backed series"
+        );
+        assert!(
+            !body.contains("ix.relay.registrations"),
+            "no store-backed series, not even a zero"
+        );
+    }
+
     /// A bus for `test`'s keyspace with `herdr`, on machine `node-a`, whose
     /// retry timers run every `retry_every`.
     fn bus_for<H: Herdr + Deliverer>(test: &str, herdr: H, retry_every: Duration) -> RedisBus<H> {
@@ -3827,10 +4397,12 @@ mod tests {
     /// Tracing: TC-038-05
     /// ACs: FR-038-AC-5
     ///
-    /// A tick with every inbox empty costs two requests however many leads are
-    /// local, and no herdr call: one registry read, one pipelined length check.
+    /// A tick with every inbox empty costs three requests however many leads are
+    /// local, and no herdr call: one registry read, one pipelined length check and the
+    /// order-deadline scan (FR-071-AC-9), none of them a key scan.
+    #[trace("FR-038-AC-5", "FR-071-AC-9")]
     #[test]
-    fn an_idle_tick_is_two_requests_and_no_herdr_call() {
+    fn an_idle_tick_is_three_requests_and_no_herdr_call() {
         let Some(url) = test_url() else {
             eprintln!("skipping: IX_RELAY_TEST_URL unset (run `make test-redis`)");
             return;
@@ -3848,6 +4420,7 @@ mod tests {
         }
         let proxy = FaultProxy::start(&url, |_| Fault::Forward);
         let mut via = relay_via(&proxy, "idle-tick");
+        let requests = via.observe_requests();
         let herdr = CountingHerdr::new(AgentStatus::Idle, "s1");
         tick(
             &mut via,
@@ -3858,25 +4431,164 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            *proxy.requests.lock().unwrap(),
+            request_groups(&requests),
             [
                 vec!["HGETALL"],
                 // A sweep (a tick's default wake) returns every lead's expired
                 // in-flight batches first (one EVAL), in the same request as the
                 // lengths.
-                vec!["EVAL", "LLEN", "LLEN", "LLEN"]
+                vec!["EVAL", "LLEN", "LLEN", "LLEN"],
+                // The order-deadline scan (FR-071): one EVAL, no key scan.
+                vec!["EVAL"],
             ],
         );
         assert_eq!(herdr.gets.get(), 0);
+    }
+
+    /// Tracing: TC-071-03
+    /// ACs: FR-071-AC-3, FR-071-AC-4, FR-071-AC-7
+    ///
+    /// An order to a pane that never acts and is never delivered to expires on a tick after
+    /// its deadline: one `AckExpired` receipt and one escalation, and a second tick (a
+    /// restarted watcher scans the same state) adds neither.
+    #[test]
+    fn tc_071_03_a_tick_expires_an_order_to_a_dead_pane_once_and_escalates_it_once() {
+        let Some(url) = test_url() else {
+            eprintln!("skipping: IX_RELAY_TEST_URL unset (run `make test-redis`)");
+            return;
+        };
+        let mut relay = test_relay("order-tick").unwrap();
+        let machine: MachineName = "node-a".parse().unwrap();
+        let session: relay_core::SessionId = "s1".parse().unwrap();
+        let elsewhere: MachineName = "node-b".parse().unwrap();
+        let dead = AgentName::for_session(&elsewhere, &session);
+        relay
+            .register(&relay_core::Registration {
+                name: dead.clone(),
+                machine: elsewhere.clone(),
+                kind: "claude".into(),
+                session_id: Some(session.clone()),
+                cwd: None,
+                herdr_pane: Some("w1:p1".parse().unwrap()),
+                place: Some(relay_core::Place {
+                    workspace: "SWM".into(),
+                    tab: "dead".into(),
+                    herdr_ids: Some(relay_core::HerdrPlaceIds {
+                        workspace: "w1".parse().unwrap(),
+                        tab: "w1:t1".parse().unwrap(),
+                        pane: "w1:p1".parse().unwrap(),
+                        session_id: session,
+                        verified_at_ms: 1,
+                    }),
+                }),
+                last_seen_ms: now_ms(),
+            })
+            .unwrap();
+        let order = relay_core::receipts::OrderSpec::new(10_000, Some("SWM-207".into())).unwrap();
+        relay
+            .send_as(
+                &Message {
+                    from: "sender".parse().unwrap(),
+                    to: Target::Agent(dead),
+                    text: "SECRET".into(),
+                    sent_at_ms: 0,
+                    forwarded: false,
+                },
+                Some(&order),
+            )
+            .unwrap();
+        let herdr = idle_herdr("s1");
+        let mut state = WatcherState::default();
+        tick(&mut relay, &herdr, &machine, &mut state, &mut |_| {}).unwrap();
+        let expired = |relay: &mut Relay| {
+            let now = now_ms() + 3_600_000;
+            relay
+                .receipt_export(&relay_core::receipts::ReceiptRequest {
+                    since_ms: now - 7_200_000,
+                    until_ms: now,
+                    now_ms: now,
+                    page_size: 1_000,
+                    after: None,
+                })
+                .unwrap()
+                .events
+                .iter()
+                .filter(|e| e.event.outcome == relay_core::receipts::ReceiptOutcome::AckExpired)
+                .count()
+        };
+        assert_eq!(expired(&mut relay), 0, "inside the deadline");
+        // The deadline passes: move the order's due time into the past.
+        let mut raw = redis::Client::open(url.as_str())
+            .unwrap()
+            .get_connection()
+            .unwrap();
+        redis::cmd("ZADD")
+            .arg(format!(
+                "{}receipt-meta:orders-due",
+                test_prefix("order-tick")
+            ))
+            .arg(1)
+            .arg(
+                relay
+                    .receipt_export(&relay_core::receipts::ReceiptRequest {
+                        since_ms: now_ms() - 60_000,
+                        until_ms: now_ms(),
+                        now_ms: now_ms(),
+                        page_size: 10,
+                        after: None,
+                    })
+                    .unwrap()
+                    .events[0]
+                    .event
+                    .original_id
+                    .clone(),
+            )
+            .exec(&mut raw)
+            .unwrap();
+        let mut lines = Vec::new();
+        tick(&mut relay, &herdr, &machine, &mut state, &mut |l| {
+            lines.push(l)
+        })
+        .unwrap();
+        tick(
+            &mut relay,
+            &herdr,
+            &machine,
+            &mut WatcherState::default(),
+            &mut |l| lines.push(l),
+        )
+        .unwrap();
+        assert_eq!(expired(&mut relay), 1);
+        let escalations = relay.list(None).unwrap().escalations;
+        assert_eq!(escalations.len(), 1);
+        assert_eq!(escalations[0].filing.ticket_text(), "-");
+        assert_eq!(escalations[0].filing.kind, "order");
+        assert!(escalations[0].filing.context.contains("SWM-207"));
+        assert!(!escalations[0].filing.context.contains("SECRET"));
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("ack deadline")).count(),
+            1
+        );
+        redis::cmd("DEL")
+            .arg(raw_keys(&mut raw, &test_prefix("order-tick")))
+            .exec(&mut raw)
+            .unwrap();
+    }
+
+    fn raw_keys(raw: &mut redis::Connection, prefix: &str) -> Vec<String> {
+        redis::cmd("KEYS")
+            .arg(format!("{prefix}*"))
+            .query(raw)
+            .unwrap()
     }
 
     /// Tracing: TC-045-22
     /// ACs: FR-045-AC-22, FR-038-AC-5
     ///
     /// With OTLP on, the tick that pushes adds exactly the two pipelined requests
-    /// FR-045 pins (the local leads' queues, the newest hook failures) and no key
-    /// scan; the next tick, inside the interval, is the two requests of an idle
-    /// tick again. The tick with OTLP off stays at two (the test above).
+    /// FR-045 pins (the local leads' queues, the newest hook failures with the order metrics)
+    /// and no key scan; the next tick, inside the interval, is the three requests of an idle
+    /// tick again. The tick with OTLP off stays at three (the test above).
     #[test]
     fn tc_045_22_a_push_tick_adds_two_pipelined_requests_and_the_next_tick_none() {
         let Some(url) = test_url() else {
@@ -3896,6 +4608,7 @@ mod tests {
         }
         let proxy = FaultProxy::start(&url, |_| Fault::Forward);
         let mut via = relay_via(&proxy, "push-tick");
+        let requests = via.observe_requests();
         let herdr = CountingHerdr::new(AgentStatus::Idle, "s1");
         let node_a: MachineName = "node-a".parse().unwrap();
         let (publisher, bodies) = recording_publisher(&node_a, Duration::from_secs(30));
@@ -3904,29 +4617,31 @@ mod tests {
             ..WatcherState::default()
         };
         tick(&mut via, &herdr, &node_a, &mut state, &mut |_| {}).unwrap();
-        let first = proxy.requests.lock().unwrap().clone();
+        let first = request_groups(&requests);
         assert_eq!(
             first,
             [
                 vec!["HGETALL"],
                 vec!["EVAL", "LLEN", "LLEN", "LLEN"],
+                vec!["EVAL"],
                 // One pipeline over the three local leads: inbox length, oldest
                 // message, in-flight length and dead-letter length each.
                 ["LLEN", "LINDEX", "LLEN", "LLEN"].repeat(3),
-                vec!["XREVRANGE"],
+                // The newest hook failures with the order metrics of this machine.
+                vec!["XREVRANGE", "HGETALL", "HGETALL", "ZCARD"],
             ],
-            "2 + otlp::PUSH_REQUESTS requests, and no SCAN"
+            "3 + otlp::PUSH_REQUESTS requests, and no SCAN"
         );
-        assert_eq!(first.len(), 2 + otlp::PUSH_REQUESTS);
+        assert_eq!(first.len(), 3 + otlp::PUSH_REQUESTS);
         assert!(
             bodies.recv().is_ok(),
             "and the push was handed to the exporter"
         );
-        proxy.requests.lock().unwrap().clear();
+        requests.clear();
         tick(&mut via, &herdr, &node_a, &mut state, &mut |_| {}).unwrap();
         assert_eq!(
-            proxy.requests.lock().unwrap().len(),
-            2,
+            request_groups(&requests).len(),
+            3,
             "inside the interval: no push"
         );
     }
@@ -4249,7 +4964,7 @@ mod tests {
             .iter()
             .filter(|c| *c == "HGETALL")
             .count();
-        assert_eq!(hgetall, 1, "{:?}", proxy.requests.lock().unwrap());
+        assert_eq!(hgetall, 1, "{:?}", proxy.seen.lock().unwrap());
     }
 
     /// Tracing: TC-038-08

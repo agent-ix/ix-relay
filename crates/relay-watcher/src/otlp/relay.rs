@@ -21,7 +21,8 @@ use super::{
     registry::{Attrs, HistogramData, Registry, label_value},
     series::{
         DEADLETTER_ENTRIES, HEALTH_SNAPSHOT_READ_FAILURES, HOOK_FAILURES, INBOX_DEPTH,
-        INBOX_OLDEST_AGE, INFLIGHT_ENTRIES, MESSAGES, REGISTRATIONS, TICK_BOUNDS, TICK_DURATION,
+        INBOX_OLDEST_AGE, INFLIGHT_ENTRIES, MESSAGES, ORDER_ACT_LATENCY, ORDER_LATENCY_BOUNDS,
+        ORDERS_ESCALATION_FAILED, ORDERS_UNACTED, REGISTRATIONS, TICK_BOUNDS, TICK_DURATION,
     },
 };
 
@@ -112,6 +113,12 @@ pub struct Health {
     /// `(stage, error_kind)`.
     hook_failures: BTreeMap<(String, String), u64>,
     registrations: u64,
+    /// When the newest `activity`-stage hook failure of this machine since the
+    /// watcher started happened, Unix milliseconds.
+    activity_failure_ms: Option<i64>,
+    /// This machine's orders awaiting `Acted` and their act latency, from the store; `None`
+    /// when that read failed, so no order series is exported rather than a healthy zero.
+    orders: Option<relay_core::receipts::OrderStats>,
 }
 
 /// Failed reads of each source used to build one health snapshot.
@@ -201,8 +208,10 @@ pub(super) fn read(
             failed = Some(e);
         }
     }
-    match relay.hook_health_newest(HOOK_ENTRIES) {
-        Ok(stream) => {
+    // The order metrics of this machine ride in the hook health request.
+    match relay.hook_health_and_order_stats(HOOK_ENTRIES, machine) {
+        Ok((stream, orders)) => {
+            health.orders = Some(orders);
             // A record id is counted once, however many stream entries carry it (FR-030).
             for entry in stream
                 .distinct()
@@ -214,6 +223,9 @@ pub(super) fn read(
                 };
                 if at_ms < started_ms {
                     continue;
+                }
+                if stage == "activity" {
+                    health.activity_failure_ms = health.activity_failure_ms.max(Some(at_ms));
                 }
                 let key = if health
                     .hook_failures
@@ -236,6 +248,13 @@ pub(super) fn read(
 }
 
 impl Health {
+    /// When the newest `activity` hook failure of this machine happened since the
+    /// watcher started, Unix milliseconds.
+    #[must_use]
+    pub fn activity_failure_ms(&self) -> Option<i64> {
+        self.activity_failure_ms
+    }
+
     /// Adds these to `registry`: per-lead gauges (folding leads past
     /// [`MAX_LEADS`] into `lead=other`), the hook failure counts and the
     /// registration gauge for `machine`.
@@ -264,10 +283,65 @@ impl Health {
                 i64::try_from(*n).unwrap_or(i64::MAX),
             );
         }
+        self.fill_orders(registry);
         registry.gauge(
             &REGISTRATIONS,
             Attrs::new().with("machine", machine.as_str()),
             i64::try_from(self.registrations).unwrap_or(i64::MAX),
+        );
+    }
+}
+
+impl Health {
+    /// The order series: unacted orders by recipient lane (folding recipients past
+    /// [`MAX_LEADS`] into `recipient=other`) and the act-latency histogram.
+    fn fill_orders(&self, registry: &mut Registry) {
+        // A failed read leaves the order series out, never a healthy-looking zero; the
+        // failure is counted in `health_snapshot.read_failures` (`hook_health_newest`,
+        // the request the order metrics ride) and logged once per episode.
+        let Some(orders) = &self.orders else {
+            return;
+        };
+        let gauge = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+        let mut other = 0u64;
+        let mut folded = 0u64;
+        for (index, (recipient, count)) in orders.unacted.iter().enumerate() {
+            if index < MAX_LEADS {
+                registry.gauge(
+                    &ORDERS_UNACTED,
+                    Attrs::new().with("recipient", recipient),
+                    gauge(*count),
+                );
+            } else {
+                folded += 1;
+                other = other.saturating_add(*count);
+            }
+        }
+        if folded > 0 {
+            registry.gauge(
+                &ORDERS_UNACTED,
+                Attrs::new().with("recipient", "other"),
+                gauge(other),
+            );
+            registry.note_dropped(folded);
+        }
+        registry.gauge(
+            &ORDERS_ESCALATION_FAILED,
+            Attrs::new(),
+            gauge(orders.escalation_failed),
+        );
+        let latency = &orders.latency;
+        #[expect(clippy::cast_precision_loss, reason = "a sum of milliseconds")]
+        let sum_secs = latency.sum_ms as f64 / 1000.0;
+        registry.histogram(
+            &ORDER_ACT_LATENCY,
+            Attrs::new(),
+            &HistogramData::from_counts(
+                ORDER_LATENCY_BOUNDS,
+                &latency.buckets,
+                latency.count,
+                sum_secs,
+            ),
         );
     }
 }
@@ -283,6 +357,19 @@ fn emit_lead(registry: &mut Registry, lead: &str, row: &LeadRow) {
 
 #[cfg(test)]
 impl Health {
+    /// This reading with its order read succeeded and `orders` awaiting `Acted`, one
+    /// `(recipient, count)` each.
+    pub(crate) fn with_orders(mut self, orders: &[(&str, u64)]) -> Self {
+        self.orders = Some(relay_core::receipts::OrderStats {
+            unacted: orders
+                .iter()
+                .map(|(recipient, count)| ((*recipient).to_owned(), *count))
+                .collect(),
+            ..relay_core::receipts::OrderStats::default()
+        });
+        self
+    }
+
     /// A health reading for a test: one row per `(lead, depth, oldest_age_secs,
     /// batches, dead)`.
     pub(crate) fn for_test(
@@ -309,6 +396,8 @@ impl Health {
                 .map(|((s, k), n)| (((*s).to_owned(), (*k).to_owned()), *n))
                 .collect(),
             registrations: rows.len() as u64,
+            activity_failure_ms: None,
+            orders: None,
         }
     }
 }
@@ -331,6 +420,83 @@ mod tests {
                 _ => None,
             })?
         })
+    }
+
+    /// Tracing: TC-045-35
+    /// ACs: FR-045-AC-35
+    #[ix_trace_rs::trace("FR-045-AC-35")]
+    #[test]
+    fn tc_045_35_a_failed_order_read_leaves_every_order_series_out_not_at_zero() {
+        // No successful read of the order metrics: nothing is claimed about orders.
+        let health = Health::for_test(&[("a-lead", 1, 2, 3, 4)], &[]);
+        let mut r = Registry::new(2, 1);
+        health.fill(&mut r, &hub());
+        assert!(
+            r.points()
+                .iter()
+                .all(|p| { !p.instrument.name.starts_with("ix.relay.order") })
+        );
+        assert!(
+            r.points()
+                .iter()
+                .any(|p| p.instrument.name == "ix.relay.inbox.depth"),
+            "the other relay series are still there"
+        );
+    }
+
+    /// Tracing: TC-045-34
+    /// ACs: FR-045-AC-34
+    #[test]
+    fn tc_045_34_given_up_escalations_are_a_gauge_that_is_zero_when_there_are_none() {
+        let gauge_of = |health: &Health| {
+            let mut r = Registry::new(2, 1);
+            health.fill(&mut r, &hub());
+            r.points().iter().find_map(|p: &Point| {
+                (p.instrument.name == "ix.relay.orders.escalation_failed").then_some(
+                    match p.value {
+                        Value::Int(v) => Some(v),
+                        _ => None,
+                    },
+                )?
+            })
+        };
+        let mut health = Health::for_test(&[], &[]).with_orders(&[]);
+        assert_eq!(gauge_of(&health), Some(0));
+        health.orders.as_mut().unwrap().escalation_failed = 2;
+        assert_eq!(gauge_of(&health), Some(2));
+    }
+
+    /// Tracing: TC-071-08
+    /// ACs: FR-071-AC-8
+    #[test]
+    fn tc_071_08_unacted_orders_are_labelled_by_recipient_and_the_latency_is_a_histogram() {
+        let mut health = Health::for_test(&[], &[]).with_orders(&[("a:W:t", 2), ("b:W:t", 1)]);
+        let latency = &mut health.orders.as_mut().unwrap().latency;
+        latency.buckets[1] = 3;
+        latency.count = 3;
+        latency.sum_ms = 9_000;
+        let mut r = Registry::new(2, 1);
+        health.fill(&mut r, &hub());
+        assert_eq!(
+            value_of(&r, "ix.relay.orders.unacted", "recipient", "a:W:t"),
+            Some(2)
+        );
+        assert_eq!(
+            value_of(&r, "ix.relay.orders.unacted", "recipient", "b:W:t"),
+            Some(1)
+        );
+        let histogram = r
+            .points()
+            .iter()
+            .find_map(|p| match &p.value {
+                Value::Histogram(h) if p.instrument.name == "ix.relay.order.act_latency" => {
+                    Some(h.clone())
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!((histogram.count(), histogram.sum()), (3, 9.0));
+        assert_eq!(histogram.buckets()[1], 3);
     }
 
     /// Tracing: TC-045-12

@@ -5,7 +5,7 @@ mod support;
 
 use std::{fs, os::unix::fs::PermissionsExt};
 
-/// Trace: FR-049-AC-1
+/// Trace: FR-049-AC-1, FR-061-AC-22
 #[test]
 fn work_show_prints_the_existing_compact_report_and_one_newline() {
     let Ok(url) = std::env::var("IX_RELAY_TEST_URL") else {

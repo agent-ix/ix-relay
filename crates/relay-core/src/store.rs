@@ -15,6 +15,8 @@
 //! | `<prefix>health:moves` | stream, capped | one [`crate::moves::MoveEvent`] per relink or rename, written by the script that changes the registration: fields `machine`, `lead`, `rec` (FR-043) |
 //! | `<prefix>health:replaced:<lead>` | string, expiring | one lead's [`crate::moves::PaneReplaced`] JSON: the lead's pane now hosts another session (FR-032) |
 //! | `<prefix>health:hooks` | stream, capped | hook failure records flushed from each machine's local spool: fields `machine`, `lead`, `rec` (see [`Relay::push_hook_health`]) |
+//! | `<prefix>focus:def:<id>` | hash, no expiry | one named focus definition: `meta`, `owner`, `rev:<n>` per kept revision, `pin:<incarnation>` per adopter (FR-061, see [`crate::named_focus`]) |
+//! | `<prefix>focus:index`, `<prefix>focus:names` | hash, no expiry | definitions by focus ID, and non-archived names by team and folded name, written in the same atomic operation as the record they describe |
 
 use std::{cell::Cell, collections::HashMap, num::NonZeroUsize, time::Duration};
 
@@ -56,16 +58,22 @@ const SESSION_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 /// This never stops session verification or enrollment.
 pub const HERDR_FAILED_TTL_SECS: u64 = 300;
 
+mod activity;
+mod assignment;
 mod commit;
 mod directory;
+mod fleet;
 mod health;
 mod inflight;
 #[cfg(test)]
 mod inflight_fault_tests;
 mod keys;
 mod moves;
+mod named_focus;
+mod named_focus_scripts;
 #[cfg(test)]
 mod pop_budget_tests;
+pub(crate) mod receipts;
 mod scan;
 mod status;
 mod stranded;
@@ -78,6 +86,7 @@ use status::StatusStore;
 
 pub use commit::{CommitOutcome, IdentityCommit};
 pub use directory::{DIRECTORY_LEASE, DirectoryRead, DirectoryRecipient};
+pub use fleet::LaneLists;
 pub use health::{
     Heartbeats, InboxOverview, LeadOverview, LeaseState, MAX_HEARTBEAT_KEYS, RecipientProbe,
 };
@@ -97,9 +106,14 @@ pub use stranded::Buried;
 /// whole, never split mid-text.
 pub const MAX_MESSAGE_BYTES: usize = 4 * 1024;
 
+#[cfg(not(feature = "test-support"))]
+type Connection = redis::Connection;
+#[cfg(feature = "test-support")]
+type Connection = crate::test_support::ObservedConnection;
+
 /// A connection to the bus.
 pub struct Relay {
-    conn: redis::Connection,
+    conn: Connection,
     keys: Keys,
     /// The read/write timeout currently armed on `conn`, so a blocking call
     /// can widen it and put it back.
@@ -125,12 +139,21 @@ impl Relay {
         let conn = redis::Client::open(info)?.get_connection_with_timeout(timeout)?;
         conn.set_read_timeout(Some(timeout))?;
         conn.set_write_timeout(Some(timeout))?;
+        #[cfg(feature = "test-support")]
+        let conn = Connection::new(conn);
         Ok(Self {
             conn,
             keys: Keys::new(DEFAULT_PREFIX),
             timeout: Cell::new(timeout),
             scan_deadline: Cell::new(None),
         })
+    }
+
+    /// Starts recording packed requests at the client call boundary for test assertions.
+    /// Available only with the opt-in `test-support` feature; transport behavior is delegated.
+    #[cfg(feature = "test-support")]
+    pub fn observe_requests(&mut self) -> crate::test_support::RequestLog {
+        self.conn.observe_requests()
     }
 
     /// Checks that `url` is a well-formed Redis URL without connecting, so a
@@ -434,18 +457,26 @@ if type(cached) == 'table' and cached.err then cached = false end
 local suppressed = redis.call('EXISTS', KEYS[1])
 redis.call('EXPIRE', KEYS[1], ARGV[1])
 redis.call('EXPIRE', KEYS[2], ARGV[1])
-return {suppressed, cached}
+local registration = false
+if cached then
+  registration = redis.pcall('HGET', KEYS[3], cached)
+  if type(registration) == 'table' then registration = false end
+end
+return {suppressed, cached, registration}
 "#;
-        let (suppressed, name): (bool, Option<String>) = redis::cmd("EVAL")
-            .arg(SCRIPT)
-            .arg(2)
-            .arg(self.keys.suppressed_key(session_id))
-            .arg(self.keys.session_key(session_id))
-            .arg(SESSION_TTL_SECS)
-            .query(&mut self.conn)?;
+        let (suppressed, name, registration): (bool, Option<String>, Option<String>) =
+            redis::cmd("EVAL")
+                .arg(SCRIPT)
+                .arg(3)
+                .arg(self.keys.suppressed_key(session_id))
+                .arg(self.keys.session_key(session_id))
+                .arg(self.keys.agents_key())
+                .arg(SESSION_TTL_SECS)
+                .query(&mut self.conn)?;
         Ok(SessionProbe {
             suppressed,
             name: name.and_then(|s| s.parse().ok()),
+            registration: registration.and_then(|json| serde_json::from_str(&json).ok()),
         })
     }
 
@@ -581,6 +612,15 @@ return added
     /// [`crate::text::is_unsafe_char`] rejects, also checked before anything
     /// is queued.
     pub fn send(&mut self, msg: &Message) -> Result<Vec<AgentName>> {
+        self.send_as(msg, None)
+    }
+
+    /// [`Relay::send`], as an order (FR-071) when `order` is given.
+    pub fn send_as(
+        &mut self,
+        msg: &Message,
+        order: Option<&crate::receipts::OrderSpec>,
+    ) -> Result<Vec<AgentName>> {
         if msg.text.len() > MAX_MESSAGE_BYTES {
             return Err(Error::MessageTooLarge {
                 len: msg.text.len(),
@@ -633,22 +673,15 @@ return added
         {
             stored.to = Target::Agent(address.to_string().parse()?);
         }
-        let json = encode(&stored);
-        let mut pipe = redis::pipe();
-        pipe.atomic();
-        for name in &recipients {
-            pipe.rpush(self.keys.inbox_key(name), &json).ignore();
+        // An order's unacted count and exporting host are kept by lane address.
+        if order.is_some()
+            && !matches!(&stored.to, Target::Agent(to) if to.as_str().parse::<crate::Address>().is_ok())
+        {
+            return Err(Error::InvalidName {
+                name: "an order goes to a lane address server:workspace:tab".into(),
+            });
         }
-        pipe.cmd("XADD")
-            .arg(self.keys.log_key())
-            .arg("MAXLEN")
-            .arg("~")
-            .arg(LOG_CAP)
-            .arg("*")
-            .arg("msg")
-            .arg(&json)
-            .ignore();
-        let () = pipe.query(&mut self.conn)?;
+        self.enqueue_receipted(&stored, &recipients, &[], order)?;
         Ok(recipients)
     }
 
@@ -740,28 +773,33 @@ return added
     /// Also appends a wake entry (field `requeued`, no `msg`) to the message log
     /// in the same transaction, so a watcher blocked on the log looks at the
     /// inbox now instead of at its next sweep; [`Relay::log`] skips it.
-    pub fn requeue_front(&mut self, agent: &AgentName, messages: &[Message]) -> Result<()> {
+    pub fn requeue_front(
+        &mut self,
+        agent: &AgentName,
+        messages: &[crate::receipts::InboxEntry],
+    ) -> Result<()> {
         if messages.is_empty() {
             return Ok(());
         }
-        let key = self.keys.inbox_key(agent);
-        // LPUSH pushes each argument onto the head in turn, so the last
-        // argument ends up first; pushing in reverse restores the original
-        // front-to-back order.
-        let jsons: Vec<String> = messages.iter().rev().map(encode).collect();
-        let mut pipe = redis::pipe();
-        pipe.atomic();
-        pipe.lpush(key, jsons).ignore();
-        pipe.cmd("XADD")
+        let body = inflight::script(
+            include_str!("store/lua/common.lua"),
+            include_str!("store/lua/receipt_front.lua"),
+        );
+        let mut command = redis::cmd("EVAL");
+        command
+            .arg(body)
+            .arg(2)
+            .arg(self.keys.inbox_key(agent))
             .arg(self.keys.log_key())
-            .arg("MAXLEN")
-            .arg("~")
-            .arg(LOG_CAP)
-            .arg("*")
-            .arg("requeued")
             .arg(agent.as_str())
-            .ignore();
-        let () = pipe.query(&mut self.conn)?;
+            .arg(LOG_CAP);
+        for entry in messages {
+            command.arg(&entry.stored);
+        }
+        let _: i64 = command
+            .arg(self.keys.receipt_stream_key())
+            .arg(self.keys.receipt_meta_key())
+            .query(&mut self.conn)?;
         Ok(())
     }
 
@@ -781,8 +819,19 @@ return added
         // Bytes, not `String`: the server has already removed the batch when
         // the reply is converted, so an entry that is not UTF-8 must be
         // reported as rejected, not fail the pop and lose its neighbours.
-        let raw: Option<Vec<Vec<u8>>> = self.conn.lpop(&key, Some(max))?;
-        let (messages, rejected) = decode_entries(&key, raw.unwrap_or_default());
+        let body = inflight::script(
+            include_str!("store/lua/common.lua"),
+            include_str!("store/lua/receipt_plain_pop.lua"),
+        );
+        let raw: Vec<Vec<u8>> = redis::cmd("EVAL")
+            .arg(body)
+            .arg(1)
+            .arg(&key)
+            .arg(max.get())
+            .arg(self.keys.receipt_stream_key())
+            .arg(self.keys.receipt_meta_key())
+            .query(&mut self.conn)?;
+        let (messages, rejected) = decode_entries(&key, raw);
         Ok(PopResult { messages, rejected })
     }
 
@@ -842,12 +891,7 @@ return added
     /// for why). Checked before anything is written: a rejected escalation
     /// is never partially stored.
     pub fn escalate(&mut self, new: EscalationFiling) -> Result<Escalation> {
-        crate::escalation::validate_session_id(new.session_id.as_str())?;
-        crate::escalation::validate_safe_text("context", &new.context)?;
-        for option in &new.options {
-            crate::escalation::validate_safe_text("option", option)?;
-        }
-        crate::escalation::validate_safe_text("recommendation", &new.recommendation)?;
+        new.validate()?;
 
         let n: u64 = self.conn.incr(self.keys.esc_seq_key(), 1)?;
         let id = EscalationId::from_counter(n);
@@ -1261,7 +1305,7 @@ pub struct HookHealthEntry {
 #[derive(Debug, Default)]
 pub struct PopResult {
     /// Messages ready for the caller, oldest first. Already removed from Redis.
-    pub messages: Vec<Message>,
+    pub messages: Vec<crate::receipts::InboxEntry>,
     /// Entries popped alongside `messages` that failed to decode. Also already
     /// removed from Redis; the caller decides how to surface them.
     pub rejected: Vec<Error>,
@@ -1275,6 +1319,10 @@ pub struct SessionProbe {
     pub suppressed: bool,
     /// The bus name remembered for the session, if any.
     pub name: Option<AgentName>,
+    /// The remembered name's registration, read in the same request, when it
+    /// is there and decodes. The hook takes the lane address of its activity
+    /// event from it.
+    pub registration: Option<Registration>,
 }
 
 /// The usable entries of a hook health stream reply, in reply order, and how many
@@ -1376,11 +1424,11 @@ pub struct BudgetPopResult {
 /// Decodes popped inbox entries: the messages that decode, in order, and an
 /// error for each entry that does not (not JSON, an unknown member, or not
 /// UTF-8).
-fn decode_entries(key: &str, raw: Vec<Vec<u8>>) -> (Vec<Message>, Vec<Error>) {
+fn decode_entries(key: &str, raw: Vec<Vec<u8>>) -> (Vec<crate::receipts::InboxEntry>, Vec<Error>) {
     let mut messages = Vec::new();
     let mut rejected = Vec::new();
     for entry in raw {
-        match serde_json::from_slice(&entry) {
+        match crate::receipts::InboxEntry::try_from(entry.as_slice()) {
             Ok(m) => messages.push(m),
             Err(source) => rejected.push(Error::Decode {
                 key: key.to_owned(),

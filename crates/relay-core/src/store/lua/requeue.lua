@@ -4,14 +4,17 @@
 -- original order, entries (and so redelivery counts) as they were, and wakes a
 -- watcher on the log. Returns how many it moved, or -1 when a key is of the wrong
 -- type (nothing is changed then).
-if not (readable(KEYS[1], 'list') and readable(KEYS[2], 'list') and readable(KEYS[3], 'stream')) then
+if not (readable(KEYS[1], 'list') and readable(KEYS[2], 'list') and readable(KEYS[3], 'stream')) or not receipt_ready() then
     return -1
 end
 local target = tonumber(ARGV[1])
+local now = now_ms('')
 local back, rows = {}, {}
 for _, row in ipairs(redis.call('LRANGE', KEYS[1], 0, -1)) do
     local id, who, deadline, entry = parse(row)
     if id == target and who == ARGV[4] then
+        receipt_append(entry, 'requeued', now, nil, 'definitely_not_sent')
+        receipt_finish(entry, now, false)
         back[#back + 1] = entry
         rows[#rows + 1] = row
     end

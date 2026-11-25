@@ -26,6 +26,7 @@ use std::{
     thread,
 };
 
+use ix_trace_rs::trace;
 use relay_core::{
     AgentName, HerdrPlaceIds, IdentityCommit, Message, Place, Registration, Relay, SessionId,
     Target,
@@ -244,13 +245,19 @@ fn seeded(url: &str, prefix: &str, queued: usize) -> Relay {
 
 /// Runs one hook of `event` through `proxy` as a lead in [`PANE`], explicitly
 /// named or derived from its session cache; returns stdout and stderr.
-fn hook(proxy: &CountingProxy, prefix: &str, event: &str, explicit: bool) -> (String, String) {
+fn hook(
+    proxy: &CountingProxy,
+    prefix: &str,
+    (event, extra): (&str, &str),
+    explicit: bool,
+) -> (String, String) {
     let mut cmd = base_cmd(&["hook", "claude"], explicit.then_some("receiver"));
     cmd.env("IX_RELAY_URL", proxy.url());
     cmd.env("IX_RELAY_PREFIX", prefix);
     cmd.env("IX_RELAY_MACHINE", "hub");
     cmd.env("HERDR_PANE_ID", PANE);
-    let stdin = format!(r#"{{"hook_event_name":"{event}","session_id":"s1","cwd":"/work"}}"#);
+    let stdin =
+        format!(r#"{{"hook_event_name":"{event}","session_id":"s1","cwd":"/work"{extra}}}"#);
     let _topology = support::transport_topology(&mut cmd);
     let r = run(cmd, &stdin);
     assert_eq!(r.status, 0, "stderr: {}", r.stderr);
@@ -261,6 +268,16 @@ fn hook(proxy: &CountingProxy, prefix: &str, event: &str, explicit: bool) -> (St
 fn measure(
     name: &str,
     event: &str,
+    explicit: bool,
+    queued: usize,
+) -> Option<(usize, usize, String)> {
+    measure_with(name, (event, ""), explicit, queued)
+}
+
+/// [`measure`] for a payload with extra fields.
+fn measure_with(
+    name: &str,
+    event: (&str, &str),
     explicit: bool,
     queued: usize,
 ) -> Option<(usize, usize, String)> {
@@ -330,8 +347,8 @@ fn tc_018_06_a_derived_name_user_prompt_submit_reaches_the_pop_in_three_requests
     assert!(stdout.contains("message 0"), "stdout: {stdout}");
     assert_eq!(before, 1, "cached genuine session lookup before the pop");
     assert_eq!(
-        total, 4,
-        "requests in all: the pop, the address book and (AGE-2032) the acknowledgement follow"
+        total, 5,
+        "requests in all: the pop, the address book, (AGE-2032) the acknowledgement and (FR-068) the one activity write follow"
     );
 }
 
@@ -348,8 +365,8 @@ fn tc_018_06_an_explicit_name_user_prompt_submit_reaches_the_pop_in_two_requests
     assert!(stdout.contains("message 0"), "stdout: {stdout}");
     assert_eq!(before, 1, "cached genuine session lookup before the pop");
     assert_eq!(
-        total, 4,
-        "requests in all: the pop, the address book and (AGE-2032) the acknowledgement follow"
+        total, 5,
+        "requests in all: the pop, the address book, (AGE-2032) the acknowledgement and (FR-068) the one activity write follow"
     );
 }
 
@@ -370,7 +387,41 @@ fn tc_018_07_post_tool_use_costs_one_read_then_the_pop() {
     };
     assert_eq!(
         (before, total),
-        (1, 2),
-        "environment metadata does not bypass session lookup"
+        (1, 3),
+        "environment metadata does not bypass session lookup; the pop and the one activity write follow"
     );
+}
+
+/// `PreToolUse`, `Notification` and `SessionEnd` add exactly one request to the
+/// session read: the activity write (FR-068). No mail is popped.
+#[trace("FR-068-AC-12")]
+#[test]
+fn activity_only_events_cost_the_session_read_and_one_write() {
+    // The write goes by SHA; a server that has never seen the script takes the body once
+    // (three requests), so one call primes the server cache before the measured ones.
+    let _ = measure_with(
+        "activity-prime",
+        ("PreToolUse", r#","tool_name":"Bash""#),
+        false,
+        0,
+    );
+    for (event, extra) in [
+        ("PreToolUse", r#","tool_name":"Bash""#),
+        (
+            "Notification",
+            r#","notification_type":"permission_prompt""#,
+        ),
+        ("SessionEnd", ""),
+    ] {
+        let Some((_, total, stdout)) =
+            measure_with(&format!("activity-{event}"), (event, extra), false, 0)
+        else {
+            return;
+        };
+        assert_eq!(stdout, "", "{event}");
+        assert_eq!(
+            total, 2,
+            "{event}: the session read, then one activity write"
+        );
+    }
 }

@@ -10,7 +10,7 @@ relationships:
 
 ## Description
 
-Where `[watcher] delivery` is `"socket"` ([FR-044](./FR-044-watcher-delivers-through-claude-codes-inbox-socket.md)),
+Where `[watcher] delivery` is `"socket"`, the default ([FR-044](./FR-044-watcher-delivers-through-claude-codes-inbox-socket.md)),
 `relay-watcher` shall try Claude Code's inbox socket only for a lead whose registration
 `kind` is `claude`, and shall deliver every other lead's mail through herdr without
 recording a note about the socket and without `agent-msg doctor` warning about it.
@@ -33,10 +33,10 @@ warning that matters: a Claude Code lead with no record, which is a real problem
 - The watcher shall create no status-file lead entry or note for a lead that does not try
   the socket, and shall not count its deliveries as socket deliveries.
 - If a lead whose `kind` is `claude` has a session id and no Claude Code session record
-  names it, then the watcher shall go on recording the note and delivering through herdr,
-  as before.
-- `agent-msg doctor` shall not warn about, list as using herdr, or count a lead that does
-  not try the socket, and shall keep warning about a `claude` lead using herdr with the
+  names it, then the watcher shall record the note and leave its mail queued: it cannot
+  tell that the session has no socket, so it types nothing.
+- `agent-msg doctor` shall not warn about, list as waiting, or count a lead that does
+  not try the socket, and shall keep warning about a waiting `claude` lead with the
   reason the watcher recorded.
 - A lead whose registration changes `kind` is judged by the kind of the registration the
   tick read.
@@ -46,8 +46,8 @@ warning that matters: a Claude Code lead with no record, which is a real problem
 | ID | Criteria | Verification |
 |----|----------|--------------|
 | FR-054-AC-1 | Given delivery = `"socket"` and a `codex` lead and an `opencode` lead each with a session id and no Claude Code record, each batch is typed through herdr, the status file holds no note and no lead entry for either, and Claude Code's registry is not read for them. | Test |
-| FR-054-AC-2 | Given the same and a `claude` lead with a session id and no record, the batch goes through herdr and the status file holds the `no Claude Code session record names this session` note. | Test |
-| FR-054-AC-3 | Given the status files of AC-1, `agent-msg doctor` has no warning, no using-herdr count and no note for the two leads; given AC-2's, it warns for the `claude` lead only. | Test |
+| FR-054-AC-2 | Given the same and a `claude` lead with a session id and no record, nothing is typed or posted, its mail stays queued and the status file holds the `no Claude Code session record names this session` note. | Test |
+| FR-054-AC-3 | Given the status files of AC-1, `agent-msg doctor` has no warning, no problem count and no note for the two leads; given AC-2's, it warns for the `claude` lead only. | Test |
 | FR-054-AC-4 | Given a lead with kind `claude` that has a live record, delivery is as in FR-044; given an empty or unknown kind it is typed through herdr with no note. | Test |
 
 ## Dependencies

@@ -17,10 +17,10 @@ relationships:
 ## Context
 
 A lead may be mid-turn, idle, starting, or waiting on an approval dialog. Its
-harness runs hooks around tool calls and at the end of a turn; an idle lead can
-only be reached by typing into its pane. Text arriving this way reads as if the
-user typed it, so it must be unmistakably signed and unable to impersonate
-another sender.
+harness runs hooks around tool calls and at the end of a turn. An idle Claude Code
+session is reached through its inbox socket; a lead with no socket can only be
+reached by typing into its pane, and typed text reads as if the user typed it. Every
+delivery must be unmistakably signed and unable to impersonate another sender.
 
 ## Acceptance Examples (Illustrative)
 

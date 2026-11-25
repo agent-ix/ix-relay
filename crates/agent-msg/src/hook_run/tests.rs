@@ -15,6 +15,7 @@ use std::{
     time::Duration,
 };
 
+use ix_trace_rs::trace;
 use proptest::prelude::*;
 use relay_core::{Place, Target};
 
@@ -33,6 +34,7 @@ enum Op {
     Book,
     Requeue,
     Push,
+    Activity,
 }
 
 /// Shared state behind a [`FakeBus`], so a test can look inside afterwards.
@@ -84,6 +86,10 @@ struct World {
     herdr_marked: BTreeSet<String>,
     /// The place `registered_place` answers.
     registered: Option<Place>,
+    /// Every activity event written, with the lead it was written for.
+    activity: Vec<(relay_core::Address, ActivityEvent)>,
+    /// The registration the session probe answers with.
+    probe_registration: Option<relay_core::Registration>,
 }
 
 type Shared = Rc<RefCell<World>>;
@@ -114,7 +120,34 @@ fn new_world(clock: &Rc<FakeClock>) -> Shared {
         herdr_failed: None,
         herdr_marked: BTreeSet::new(),
         registered: None,
+        activity: Vec::new(),
+        probe_registration: Some(lane_registration()),
     }))
+}
+
+/// The lead `receiver`'s registration with a verified place: lane `hub:EA:code`.
+fn lane_registration() -> relay_core::Registration {
+    let session: SessionId = "s1".parse().unwrap();
+    relay_core::Registration {
+        name: name("receiver"),
+        machine: "hub".parse().unwrap(),
+        kind: "claude".into(),
+        session_id: Some(session.clone()),
+        cwd: None,
+        herdr_pane: Some("w1:p1".parse().unwrap()),
+        place: Some(Place {
+            workspace: "EA".into(),
+            tab: "code".into(),
+            herdr_ids: Some(relay_core::HerdrPlaceIds {
+                workspace: "w1".parse().unwrap(),
+                tab: "w1:t1".parse().unwrap(),
+                pane: "w1:p1".parse().unwrap(),
+                session_id: session,
+                verified_at_ms: 1,
+            }),
+        }),
+        last_seen_ms: 1,
+    }
 }
 
 fn name(s: &str) -> AgentName {
@@ -183,8 +216,12 @@ impl Bus for FakeBus {
     }
 
     fn probe_session(&mut self, _session_id: &SessionId) -> relay_core::Result<SessionProbe> {
-        self.0.borrow_mut().spend(Op::Probe)?;
-        Ok(SessionProbe::default())
+        let mut w = self.0.borrow_mut();
+        w.spend(Op::Probe)?;
+        Ok(SessionProbe {
+            registration: w.probe_registration.clone(),
+            ..SessionProbe::default()
+        })
     }
 
     fn derive(
@@ -300,6 +337,17 @@ impl Bus for FakeBus {
         w.health.extend(entries.iter().cloned());
         Ok(())
     }
+
+    fn record_activity(
+        &mut self,
+        lane: &relay_core::Address,
+        event: &ActivityEvent,
+    ) -> relay_core::Result<bool> {
+        let mut w = self.0.borrow_mut();
+        w.spend(Op::Activity)?;
+        w.activity.push((lane.clone(), event.clone()));
+        Ok(true)
+    }
 }
 
 /// A writer that can be told to fail, or to panic like `eprintln!` on a closed
@@ -360,6 +408,8 @@ struct Harness {
     world: Shared,
     dir: tempfile::TempDir,
     spool: Spool,
+    state: crate::activity_state::ActivityState,
+    kind: relay_core::Harness,
 }
 
 impl Harness {
@@ -371,6 +421,10 @@ impl Harness {
         Self {
             clock,
             world,
+            state: crate::activity_state::ActivityState::at(
+                dir.path().join("spool").join("activity.json"),
+            ),
+            kind: relay_core::Harness::Claude,
             dir,
             spool,
         }
@@ -433,7 +487,9 @@ impl Harness {
     ) {
         let cx = HookCtx {
             machine: &"Hub.local".parse().unwrap(),
-            socket_delivery: false,
+            harness: self.kind,
+            activity: Some(&self.state),
+            claude_inbox: None,
         };
         run(
             &cx,
@@ -499,41 +555,53 @@ fn budget_of(event: &str) -> Duration {
 
 const EVENTS: [&str; 4] = ["SessionStart", "PostToolUse", "UserPromptSubmit", "Stop"];
 
-/// Socket-mode Claude hooks maintain enrollment without taking watcher-owned mail.
+/// A Claude hook of a session with an inbox socket maintains enrollment and activity
+/// without taking the watcher's mail; a session with none keeps hook delivery.
 /// Tracing: TC-044-17
 /// ACs: FR-044-AC-17
 #[test]
 fn socket_hooks_register_but_never_pop_or_ack() {
     for event in EVENTS {
-        let h = Harness::new().with_inbox(&["socket mail"]);
-        let cx = HookCtx {
-            machine: &"hub".parse().unwrap(),
-            socket_delivery: true,
-        };
-        let mut stdout = Sink::default();
-        run(
-            &cx,
-            &*h.clock,
-            Some(&h.spool),
-            (
-                &mut input(event).as_bytes(),
-                &mut stdout,
-                &mut Sink::default(),
-            ),
-            &mut |timeout| connect(&h.world, timeout),
-        );
-        let world = h.world.borrow();
-        assert!(
-            world.calls.contains(&Op::Derive),
-            "{event}: identity still checked"
-        );
-        assert!(
-            !world.calls.contains(&Op::Pop),
-            "{event}: inbox belongs to watcher"
-        );
-        assert!(!world.calls.contains(&Op::Ack));
-        assert_eq!(world.inbox.len(), 1);
-        assert!(stdout.written.is_empty());
+        for has_socket in [true, false] {
+            let h = Harness::new().with_inbox(&["socket mail"]);
+            let inbox = ClaudeInbox {
+                env_socket: has_socket,
+                sessions_dir: None,
+            };
+            let cx = HookCtx {
+                machine: &"hub".parse().unwrap(),
+                harness: relay_core::Harness::Claude,
+                activity: None,
+                claude_inbox: Some(&inbox),
+            };
+            let mut stdout = Sink::default();
+            run(
+                &cx,
+                &*h.clock,
+                Some(&h.spool),
+                (
+                    &mut input(event).as_bytes(),
+                    &mut stdout,
+                    &mut Sink::default(),
+                ),
+                &mut |timeout| connect(&h.world, timeout),
+            );
+            let world = h.world.borrow();
+            assert!(
+                world.calls.contains(&Op::Derive),
+                "{event}: identity still checked"
+            );
+            assert_eq!(
+                world.calls.contains(&Op::Pop),
+                !has_socket,
+                "{event}: a socket session's inbox belongs to the watcher"
+            );
+            if has_socket {
+                assert!(!world.calls.contains(&Op::Ack));
+                assert_eq!(world.inbox.len(), 1);
+                assert!(stdout.written.is_empty());
+            }
+        }
     }
 }
 
@@ -879,7 +947,9 @@ fn tc_n001_m_05_a_stdin_that_never_closes_records_one_timeout_and_pops_nothing()
     let mut stdout = Sink::default();
     let cx = HookCtx {
         machine: &"Hub.local".parse().unwrap(),
-        socket_delivery: false,
+        harness: relay_core::Harness::Claude,
+        activity: None,
+        claude_inbox: None,
     };
     run(
         &cx,
@@ -1117,7 +1187,9 @@ fn tc_030_01_a_complete_non_hook_object_on_an_open_pipe_is_malformed_not_a_timeo
     let clock = crate::budget::testing::TickingClock::new(ms(10));
     let cx = HookCtx {
         machine: &"Hub.local".parse().unwrap(),
-        socket_delivery: false,
+        harness: relay_core::Harness::Claude,
+        activity: None,
+        claude_inbox: None,
     };
     run(
         &cx,
@@ -1346,7 +1418,9 @@ fn tc_030_08_every_stage_records_exactly_once_with_a_closed_stderr() {
     let ticking = crate::budget::testing::TickingClock::new(ms(100));
     let cx = HookCtx {
         machine: &"Hub.local".parse().unwrap(),
-        socket_delivery: false,
+        harness: relay_core::Harness::Claude,
+        activity: None,
+        claude_inbox: None,
     };
     run(
         &cx,
@@ -1686,7 +1760,7 @@ fn tc_020_15_the_acknowledgement_follows_the_write_directly() {
     h.run(true, &mut input("Stop").as_bytes(), false);
     let calls = h.world.borrow().calls.clone();
     let pop = calls.iter().position(|c| *c == Op::Pop).unwrap();
-    assert_eq!(&calls[pop..], [Op::Pop, Op::Book, Op::Ack]);
+    assert_eq!(&calls[pop..], [Op::Pop, Op::Book, Op::Ack, Op::Activity]);
 }
 
 /// Tracing: TC-020-14
@@ -1776,7 +1850,8 @@ fn identity_is_written_once_after_the_reads_and_before_the_pop() {
             Op::Commit,
             Op::Pop,
             Op::Book,
-            Op::Ack
+            Op::Ack,
+            Op::Activity
         ]
     );
     assert_eq!(w.commits.len(), 1);
@@ -1843,10 +1918,19 @@ fn a_suppressed_session_is_committed_alone() {
         fn push_hook_health(&mut self, e: &[HookHealthEntry]) -> relay_core::Result<()> {
             self.0.push_hook_health(e)
         }
+        fn record_activity(
+            &mut self,
+            lane: &relay_core::Address,
+            event: &ActivityEvent,
+        ) -> relay_core::Result<bool> {
+            self.0.record_activity(lane, event)
+        }
     }
     let cx = HookCtx {
         machine: &"hub".parse().unwrap(),
-        socket_delivery: false,
+        harness: relay_core::Harness::Claude,
+        activity: None,
+        claude_inbox: None,
     };
     run(
         &cx,
@@ -2010,20 +2094,24 @@ fn tc_030_04_a_flush_that_runs_out_of_budget_keeps_the_unshipped_rest() {
     h.world.borrow_mut().latency.insert(Op::Push, vec![ms(400)]);
     h.run_event("Stop");
     assert_eq!(h.world.borrow().health.len(), 400);
-    assert_eq!(h.records().len(), 50, "the rest is still spooled");
+    let left = h.records();
+    // The flush spent the budget, so the activity write recorded its own drop.
+    assert_eq!(left.len(), 51, "the rest is still spooled, plus the drop");
+    assert_eq!(
+        left.iter().filter(|r| r.stage == Stage::Activity).count(),
+        1
+    );
     // The next hook ships the remainder, once.
     h.world.borrow_mut().latency.clear();
     h.h_next();
     let w = h.world.borrow();
-    assert_eq!(w.health.len(), 450);
+    assert_eq!(w.health.len(), 451);
     let mut times: Vec<i64> = w
         .health
         .iter()
-        .map(|e| {
-            serde_json::from_str::<SpoolRecord>(&e.record)
-                .unwrap()
-                .at_ms
-        })
+        .map(|e| serde_json::from_str::<SpoolRecord>(&e.record).unwrap())
+        .filter(|r| r.stage != Stage::Activity)
+        .map(|r| r.at_ms)
         .collect();
     times.sort_unstable();
     assert_eq!(times, (0..450).collect::<Vec<i64>>());
@@ -2037,7 +2125,9 @@ impl Harness {
         world.borrow_mut().clock = Rc::clone(&fresh);
         let cx = HookCtx {
             machine: &"hub".parse().unwrap(),
-            socket_delivery: false,
+            harness: relay_core::Harness::Claude,
+            activity: None,
+            claude_inbox: None,
         };
         run(
             &cx,
@@ -2261,7 +2351,12 @@ proptest! {
                             w.faults.insert(Op::Requeue);
                         }
                     }
-                    let cx = HookCtx { machine: &"hub".parse().unwrap(), socket_delivery: false };
+                    let cx = HookCtx {
+            machine: &"hub".parse().unwrap(),
+            harness: relay_core::Harness::Claude,
+            activity: None,
+            claude_inbox: None,
+        };
                     let mut out = Sink { fail: !matches!(output, OutputFault::Fine), ..Sink::default() };
                     run(&cx, &*clock, Some(&spool),
                         (&mut input("UserPromptSubmit").as_bytes(), &mut out, &mut Sink::default()),
@@ -2388,6 +2483,7 @@ fn flush_through(url: &str, prefix: &str, spool: &Spool) {
         clock: &clock,
         subject: crate::spool::Subject::on("hub".parse().unwrap()),
         err: &mut err,
+        recorded: 0,
     };
     let mut bus = RelayBus::connect(url, prefix, &"hub".parse().unwrap(), Duration::from_secs(5))
         .expect("connect to the test redis");
@@ -2521,4 +2617,306 @@ fn tc_030_12_a_crash_after_shipping_and_before_removing_ships_nothing_twice() {
         "nothing added a second time"
     );
     assert!(!spool.has_records(), "and the spool is clear");
+}
+
+// ---- Activity events (FR-068) ----------------------------------------------
+
+fn payload(event: &str, extra: &str) -> String {
+    format!(r#"{{"hook_event_name":"{event}","session_id":"s1","cwd":"/work"{extra}}}"#)
+}
+
+fn events(h: &Harness) -> Vec<serde_json::Value> {
+    h.world
+        .borrow()
+        .activity
+        .iter()
+        .map(|(_, e)| serde_json::from_str(&e.encode()).unwrap())
+        .collect()
+}
+
+fn activity_calls(h: &Harness) -> usize {
+    h.world
+        .borrow()
+        .calls
+        .iter()
+        .filter(|op| **op == Op::Activity)
+        .count()
+}
+
+#[trace("FR-068-AC-1", "FR-068-AC-2")]
+#[test]
+fn both_harnesses_write_one_event_of_the_same_schema_without_tool_data() {
+    let mut shapes = Vec::new();
+    for kind in [relay_core::Harness::Claude, relay_core::Harness::Codex] {
+        let mut h = Harness::new();
+        h.kind = kind;
+        let extra =
+            r#","tool_name":"Bash","tool_input":{"command":"SECRET"},"tool_response":"SECRET""#;
+        h.run(true, &mut payload("PostToolUse", extra).as_bytes(), false);
+        let evs = events(&h);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(h.world.borrow().activity[0].0.to_string(), "hub:EA:code");
+        assert_eq!(evs[0]["kind"], "post_tool");
+        assert_eq!(evs[0]["tool"], "Bash");
+        assert_eq!(evs[0]["session"], "s1");
+        assert_eq!(evs[0]["cwd"], "/work");
+        assert!(!evs[0].to_string().contains("SECRET"));
+        let mut e = evs[0].clone();
+        let harness = e["harness"].take();
+        e["ts"] = 0.into();
+        shapes.push((harness, e));
+    }
+    assert_eq!(shapes[0].0, "claude");
+    assert_eq!(shapes[1].0, "codex");
+    assert_eq!(shapes[0].1, shapes[1].1);
+}
+
+#[trace("FR-067-AC-9", "FR-067-AC-10")]
+#[test]
+fn the_event_of_a_call_that_delivered_mail_is_marked_so_it_never_records_acted() {
+    let delivering = Harness::new().with_inbox(&["queued"]);
+    delivering.run(
+        true,
+        &mut payload("PostToolUse", r#","tool_name":"Bash""#).as_bytes(),
+        false,
+    );
+    assert!(
+        delivering.world.borrow().inbox.is_empty(),
+        "the mail was delivered"
+    );
+    assert!(delivering.world.borrow().activity[0].1.delivered_mail);
+    // The next call of the session has nothing to deliver: its event may record Acted.
+    let later = Harness::new();
+    later.run(
+        true,
+        &mut payload("PreToolUse", r#","tool_name":"Bash""#).as_bytes(),
+        false,
+    );
+    assert!(!later.world.borrow().activity[0].1.delivered_mail);
+}
+
+#[trace("FR-068-AC-12", "FR-017-AC-8")]
+#[test]
+fn pre_tool_notification_and_session_end_print_nothing_and_leave_mail_queued() {
+    for (event, extra) in [
+        ("PreToolUse", r#","tool_name":"Bash""#),
+        (
+            "Notification",
+            r#","notification_type":"permission_prompt""#,
+        ),
+        ("SessionEnd", ""),
+    ] {
+        let h = Harness::new().with_inbox(&["queued"]);
+        let out = h.run(true, &mut payload(event, extra).as_bytes(), false);
+        assert_eq!(out.stdout, "", "{event}");
+        let w = h.world.borrow();
+        assert_eq!(w.inbox.len(), 1, "{event}: mail is not popped");
+        assert!(!w.calls.contains(&Op::Pop), "{event}");
+        assert_eq!(w.activity.len(), 1, "{event}");
+    }
+}
+
+#[trace("FR-068-AC-3")]
+#[test]
+fn an_unrelated_notification_connects_to_nothing_and_writes_no_event() {
+    let h = Harness::new();
+    let extra = r#","notification_type":"auth_success""#;
+    h.run(true, &mut payload("Notification", extra).as_bytes(), false);
+    assert!(h.world.borrow().calls.is_empty());
+}
+
+#[trace("FR-068-AC-9")]
+#[test]
+fn a_subagent_and_a_non_lead_write_no_event() {
+    let h = Harness::new();
+    h.run(
+        true,
+        &mut payload("PostToolUse", r#","agent_id":"a1","tool_name":"Bash""#).as_bytes(),
+        false,
+    );
+    assert!(h.world.borrow().activity.is_empty());
+    let h = Harness::new();
+    h.world.borrow_mut().identity = None;
+    h.run(true, &mut payload("PostToolUse", "").as_bytes(), false);
+    assert!(h.world.borrow().activity.is_empty());
+}
+
+/// A lead with no verified lane address writes nothing, is counted as
+/// unregistered, and leaves a running backoff alone.
+#[trace("FR-068-AC-9", "FR-068-AC-11")]
+#[test]
+fn a_lead_with_no_verified_lane_address_is_counted_and_never_ends_a_backoff() {
+    let h = Harness::new();
+    h.world.borrow_mut().probe_registration = None;
+    h.state.failed(h.clock.now_ms());
+    h.clock.advance(ms(6_000));
+    h.run(true, &mut payload("PostToolUse", "").as_bytes(), false);
+    assert_eq!(activity_calls(&h), 0);
+    let c = h.state.counts();
+    assert_eq!(c.unregistered, 1);
+    assert_eq!(c.backoff_ms, 5_000, "the backoff is not ended");
+    assert!(h.all_records().is_empty());
+}
+
+#[trace("FR-068-AC-12")]
+#[test]
+fn every_event_kind_writes_after_the_mail_and_the_spool_flush() {
+    for event in ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"] {
+        let h = Harness::new().with_inbox(&["m1"]);
+        let subject = crate::spool::Subject::on("hub".parse().unwrap());
+        h.spool
+            .record(&SpoolRecord::new(
+                1,
+                &subject,
+                Stage::Pop,
+                ErrorKind::Timeout,
+            ))
+            .unwrap();
+        h.run(true, &mut payload(event, "").as_bytes(), false);
+        let w = h.world.borrow();
+        assert_eq!(w.activity.len(), 1, "{event}");
+        let at = |op| w.calls.iter().position(|c| *c == op).unwrap();
+        assert!(at(Op::Ack) < at(Op::Push), "{event}: mail, then the flush");
+        assert!(at(Op::Push) < at(Op::Activity), "{event}: then telemetry");
+    }
+}
+
+/// A write that never answers is dropped within each event's budget with one
+/// `activity` record, starts the backoff, and is never replayed.
+#[trace("FR-068-AC-8")]
+#[test]
+fn a_write_that_never_answers_is_dropped_within_budget_recorded_and_never_replayed() {
+    for (event, budget) in [
+        ("PreToolUse", 300),
+        ("Notification", 900),
+        ("SessionEnd", 900),
+        ("PostToolUse", 900),
+        ("Stop", 900),
+        ("UserPromptSubmit", 300),
+    ] {
+        let extra = r#","notification_type":"idle_prompt""#;
+        let h = Harness::new().with_latency(Op::Activity, 60_000);
+        h.run(true, &mut payload(event, extra).as_bytes(), false);
+        assert!(
+            h.clock.elapsed() <= ms(budget),
+            "{event}: {:?}",
+            h.clock.elapsed()
+        );
+        let records = h.all_records();
+        assert_eq!(records.len(), 1, "{event}: {records:?}");
+        assert_eq!(records[0].stage, Stage::Activity);
+        let c = h.state.counts();
+        assert_eq!((c.dropped, c.backoff_ms), (1, 5_000), "{event}");
+        // A later healthy hook ships the failure record; no event is replayed.
+        h.world.borrow_mut().latency.clear();
+        h.clock.advance(ms(10_000));
+        h.run(true, &mut payload("UserPromptSubmit", "").as_bytes(), false);
+        let w = h.world.borrow();
+        assert_eq!(w.activity.len(), 1, "only the new call's own event");
+        assert_eq!(w.health.len(), 1, "the failure shipped once");
+    }
+}
+
+/// Inside the backoff an activity-only call never touches the network, and
+/// whatever fails on the bus starts it: connect, probe and derive, not just the
+/// write.
+#[trace("FR-068-AC-11")]
+#[test]
+fn a_bus_failure_starts_the_backoff_and_activity_only_calls_then_skip_the_network() {
+    for op in [Op::Connect, Op::Probe, Op::Derive, Op::Activity] {
+        let h = Harness::new().with_fault(op);
+        h.run(true, &mut payload("PreToolUse", "").as_bytes(), false);
+        assert_eq!(h.state.counts().backoff_ms, 5_000, "{op:?}");
+        assert_eq!(h.state.counts().dropped, 1, "{op:?}");
+        let calls = h.world.borrow().calls.len();
+        for _ in 0..3 {
+            h.clock.advance(ms(1_000));
+            let before = h.clock.elapsed();
+            h.run(true, &mut payload("PreToolUse", "").as_bytes(), false);
+            assert_eq!(h.clock.elapsed(), before, "{op:?}: no time spent");
+        }
+        assert_eq!(h.world.borrow().calls.len(), calls, "{op:?}: no network");
+        let c = h.state.counts();
+        assert_eq!((c.skipped, c.dropped), (3, 1), "{op:?}");
+    }
+}
+
+/// The backoff doubles to its cap, a success ends it, and a mail event inside
+/// it still delivers its mail while the skipped write is counted.
+#[trace("FR-068-AC-11")]
+#[test]
+fn the_backoff_doubles_ends_on_success_and_never_blocks_mail() {
+    let h = Harness::new().with_fault(Op::Activity);
+    let call = |h: &Harness| {
+        h.run(true, &mut payload("PostToolUse", "").as_bytes(), false);
+    };
+    call(&h);
+    assert_eq!(h.state.counts().backoff_ms, 5_000);
+    h.world.borrow_mut().inbox.push(message("mail"));
+    h.clock.advance(ms(1_000));
+    let out = h.run(true, &mut payload("PostToolUse", "").as_bytes(), false);
+    assert!(out.stdout.contains("mail"), "mail still delivered");
+    assert_eq!(activity_calls(&h), 1, "no write inside the backoff");
+    assert_eq!(h.state.counts().skipped, 1);
+    h.clock.advance(ms(5_000));
+    call(&h);
+    assert_eq!(activity_calls(&h), 2);
+    assert_eq!(h.state.counts().backoff_ms, 10_000, "doubled");
+    h.world.borrow_mut().faults.clear();
+    h.clock.advance(ms(11_000));
+    call(&h);
+    assert_eq!(h.state.counts().backoff_ms, 0, "a success ends it");
+}
+
+/// A failing mail call leaves exactly one failure record, and its event is
+/// counted as dropped rather than recorded a second time.
+#[trace("FR-068-AC-8")]
+#[test]
+fn a_failing_mail_call_leaves_one_record_and_counts_its_event_as_dropped() {
+    let h = Harness::new().with_fault(Op::Pop).with_inbox(&["m"]);
+    h.run(true, &mut payload("PostToolUse", "").as_bytes(), false);
+    let records = h.all_records();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].stage, Stage::Pop);
+    assert_eq!(h.state.counts().dropped, 1);
+    assert_eq!(activity_calls(&h), 0);
+    // A failure that is not the bus's (the output write) counts a drop only.
+    let h = Harness::new().with_inbox(&["m"]);
+    h.run(true, &mut payload("PostToolUse", "").as_bytes(), true);
+    let c = h.state.counts();
+    assert_eq!((c.dropped, c.backoff_ms), (1, 0));
+    assert_eq!(h.all_records().len(), 1);
+}
+
+#[trace("FR-068-AC-5")]
+#[test]
+fn a_session_start_event_carries_a_role_and_skill_versions() {
+    let h = Harness::new();
+    h.run(true, &mut payload("SessionStart", "").as_bytes(), false);
+    let evs = events(&h);
+    assert_eq!(evs[0]["kind"], "session_start");
+    assert!(evs[0]["role"].is_string());
+    assert!(evs[0]["skill_versions"].is_object());
+}
+
+/// A herdr failure or a spent budget drops the event but says nothing about the
+/// bus, so it must not start the host-wide backoff: the next call still tries.
+#[trace("FR-068-AC-11")]
+#[test]
+fn a_herdr_failure_or_spent_budget_counts_a_drop_and_starts_no_backoff() {
+    for budget_spent in [false, true] {
+        let h = Harness::new();
+        h.world.borrow_mut().herdr_failed = Some(budget_spent);
+        h.run(true, &mut payload("PreToolUse", "").as_bytes(), false);
+        let c = h.state.counts();
+        assert_eq!((c.dropped, c.backoff_ms), (1, 0), "{budget_spent}");
+        let calls = h.world.borrow().calls.len();
+        h.clock.advance(ms(1_000));
+        h.run(true, &mut payload("PreToolUse", "").as_bytes(), false);
+        assert!(
+            h.world.borrow().calls.len() > calls,
+            "{budget_spent}: not skipped"
+        );
+        assert_eq!(h.state.counts().skipped, 0, "{budget_spent}");
+    }
 }

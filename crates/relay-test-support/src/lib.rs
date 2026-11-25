@@ -144,3 +144,36 @@ pub const HERDR_LIST_ONE_CLAUDE_PANE_WITHOUT_A_SESSION: &str = r#"{"id":"cli:age
      "foreground_cwd":"/w","pane_id":"w1:p2","revision":3,"state_change_seq":11,
      "tab_id":"w1:t2","terminal_id":"term_2","terminal_title":"lead-a",
      "terminal_title_stripped":"lead-a","workspace_id":"w1"}],"type":"agent_list"}}"#;
+
+/// An image of one key's value for tests that assert a read left a key unchanged.
+///
+/// `DUMP` serialises a hash or set in its table's iteration order, which changes while
+/// Redis rehashes incrementally, so two dumps of an untouched key can differ with timing
+/// alone. Those two types are read as sorted fields or members; every other type, and
+/// any type this does not know, keeps `DUMP`, which also carries what a read-only view
+/// would miss (a stream's last id and pending entries, say).
+///
+/// # Panics
+///
+/// When a command fails, which the test treats as its own failure.
+#[must_use]
+pub fn canonical_dump(con: &mut redis::Connection, key: &str) -> Vec<u8> {
+    let kind: String = redis::cmd("TYPE").arg(key).query(con).expect("TYPE");
+    match kind.as_str() {
+        "hash" => {
+            let mut fields: Vec<(Vec<u8>, Vec<u8>)> =
+                redis::cmd("HGETALL").arg(key).query(con).expect("HGETALL");
+            fields.sort();
+            format!("hash\n{fields:?}").into_bytes()
+        }
+        "set" => {
+            let mut members: Vec<Vec<u8>> = redis::cmd("SMEMBERS")
+                .arg(key)
+                .query(con)
+                .expect("SMEMBERS");
+            members.sort();
+            format!("set\n{members:?}").into_bytes()
+        }
+        _ => redis::cmd("DUMP").arg(key).query(con).expect("DUMP"),
+    }
+}

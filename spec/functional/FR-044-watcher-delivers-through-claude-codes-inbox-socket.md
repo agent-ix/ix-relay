@@ -1,29 +1,40 @@
 ---
 id: FR-044
-title: "The watcher can deliver through Claude Code's inbox socket"
+title: "The watcher delivers to Claude Code sessions through their inbox socket"
 type: FR
 relationships:
   - target: "ix://agent-ix/ix-relay/US-002"
     type: "implements"
 ---
-# FR-044: The watcher can deliver through Claude Code's inbox socket
+# FR-044: The watcher delivers to Claude Code sessions through their inbox socket
 
 ## Description
 
-Where `[watcher] delivery` is `"socket"`, `relay-watcher` shall post a popped batch
-to the inbox socket Claude Code binds for the lead's session, so the message arrives
-as Claude Code's own cross-session message instead of typed text. If the socket
-certainly did not take a batch, then `relay-watcher` shall fall back to `herdr agent
-prompt` after confirming the registered session across two reads, regardless of
-whether that session is busy or idle.
-Where the setting is absent or `"herdr"`, `relay-watcher` shall
-deliver exactly as before.
+`relay-watcher` shall post a popped batch to the inbox socket Claude Code binds for
+the lead's session, so the message arrives as Claude Code's own cross-session message
+instead of typed text. This is the default: it needs no setting.
+
+**A Claude Code session that has an inbox socket receives relay mail only through that
+socket.** Whether it is working, idle or blocked, and whatever happens to a post
+(certain non-delivery, an unknown outcome, an approval hold, a duplicate body, a
+watcher restart, a redelivery, mail forwarded from a prior session of the address),
+the watcher shall never type that mail into its terminal and its hooks shall not
+consume it. Mail that is not delivered stays queued or in flight, and is retried or
+dead-lettered with a reason `doctor` or the watcher's log shows.
+
+herdr types mail only into a lead that has no socket at all: another harness, or a
+Claude Code session whose own registry record shows it has none (below).
+
+`[watcher] delivery = "herdr"` is the one exception, and only an operator sets it: it
+switches inbox sockets off for the whole machine, so every batch, for Claude Code
+sessions with a socket too, is typed through herdr and their hooks deliver mail.
 
 **The wire format is not documented by Claude Code.** It was measured on Claude
 Code 2.1.283 (AGE-2030) and can change in any release. That is why a session is
-used only when its registry record reports a known `peerProtocol` and version, and
-why herdr stays behind the socket. The formats are typed in the `claude-wire` crate, and
-what does not parse is counted as drift, not dropped
+used only when its registry record reports a known `peerProtocol` and version.
+A session whose socket cannot be used waits; it is not typed into. The formats are
+typed in the `claude-wire` crate, and what does not parse is counted as drift, not
+dropped
 ([FR-046](./FR-046-claude-code-formats-are-typed-and-drift-is-detected.md)).
 
 A receiver in bypass mode holds every peer message behind an approval prompt unless
@@ -33,22 +44,49 @@ operator's decision; this requirement only makes the watcher notice.
 
 ## Behavior
 
-- When socket delivery is enabled, the watcher shall attempt Claude socket delivery
-  for the registered session without first reading herdr's pane state.
-- While a Claude lead is working, idle, done or blocked, the watcher shall not
-  gate its socket attempt on pane activity.
-- When socket delivery is enabled, Claude hooks shall maintain enrollment without
-  popping or acknowledging inbox messages; a stopped watcher leaves mail queued.
-- When the socket certainly did not take a batch, the watcher shall require two
-  reads naming the registered session before herdr fallback.
-- When the registered session is confirmed, the watcher shall use herdr fallback
-  regardless of pane activity and state-change sequence.
-- When the registered session cannot be confirmed, the watcher shall requeue the
-  unposted batch.
-- The watcher shall use the socket only when `[watcher] delivery` is `"socket"`.
-  Otherwise it shall not read Claude Code's registry, bind a socket or write a status
-  file, and every batch goes through herdr as before. An unknown value is a
+### Which transport carries a lead's mail
+
+- Where `[watcher] delivery` is absent or `"socket"`, the watcher shall use the inbox
+  socket of every Claude Code session that has one.
+- Where `[watcher] delivery` is `"herdr"`, the watcher shall type every batch through
+  herdr, shall not read Claude Code's registry, bind a socket or write a status file,
+  and shall say at start that sockets are switched off. An unknown value is a
   configuration error ([FR-027](./FR-027-malformed-configuration-per-command.md)).
+- Before popping anything for a `claude` lead the watcher shall decide, from the
+  registry, one of three routes for its registered session: the socket, the terminal,
+  or waiting.
+- The watcher shall choose the socket when the session resolves to a usable socket and
+  the reply socket is bound.
+- The watcher shall choose the terminal for a `claude` lead only when every live,
+  unparked record of the session names no `messagingSocketPath`, no `<pid>.sock` of
+  those processes exists in a socket directory, and each process started at least 60 s
+  ago (Claude Code writes the record before it publishes the socket into it).
+- In every other case the watcher shall make the lead wait: nothing is popped, nothing
+  is typed, the reason is logged once per stretch and kept in the status file. These
+  cases are: no session id, no record, no live record, several live processes, an
+  unknown protocol or version, a socket path that is unusable, a record that is not
+  old enough to prove it has no socket, a parked session, an unbound reply socket, an
+  unreadable registry and socket locations that cannot be told on this host.
+- A record with `parkedJobId` belongs to a process that handed its terminal to a
+  background job: it still listens and queues what is posted but consumes none of it,
+  and its pane shows another conversation. The watcher shall skip such a record, and
+  shall make a session with no other live record wait.
+- The watcher shall not read herdr's pane state before posting to a socket, and shall
+  not gate a post on pane activity.
+- The watcher shall type through herdr only after the checks of
+  [FR-014](./FR-014-watcher-types-only-into-the-registered-session.md), and shall ask
+  for the route again immediately before typing; if the lead is no longer on the
+  terminal, the batch goes back unmarked and nothing is typed.
+- Where sockets are used, a Claude Code hook shall register the lead and record its
+  activity without popping or acknowledging inbox messages when its session has a
+  socket (`CLAUDE_CODE_MESSAGING_SOCKET` in its environment, or a registry record of
+  the session that names one). A hook of a session with no socket delivers as before.
+  While the watcher is stopped, a socket session's mail stays queued.
+- If the socket certainly did not take a batch, then the watcher shall put it back and
+  post it again on a later tick. It shall not type it.
+
+### The socket
+
 - For each batch, the watcher shall look up the target by the lead's registered
   session id in Claude Code's session registry (`~/.claude/sessions/*.json`, read
   only), every time, because `/clear` changes the session id of a record and a
@@ -87,8 +125,8 @@ operator's decision; this requirement only makes the watcher notice.
   pid has no process, or the process there started at another time than the status
   records (a reused pid).
 - If the reply socket cannot be bound (the directory may not exist at login), then the
-  watcher shall send every batch through herdr, say so once per episode, show
-  `reply socket not bound` in `doctor`, and try again with a growing wait. It shall not
+  watcher shall post nothing and type nothing for a socket session, say so once per episode,
+  show `reply socket not bound` in `doctor`, and try again with a growing wait. It shall not
   remove a `<pid>.sock` that a live listener answers on, or that is not a socket.
 - While Claude Code holds a message, the watcher shall extend the lease of that batch
   on each tick (`Relay::renew_batch`, which touches only the named batch, never shortens a
@@ -143,7 +181,7 @@ operator's decision; this requirement only makes the watcher notice.
   hook), so an id that the other consumer holds is left alone. A Redis counter that
   was reset can make a stale id collide with another batch the watcher itself popped: that is
   not detectable, and the maximum hold bounds it.
-- The watcher shall keep, per lead, the reason (`denied`, `hold_expired`) and batch id of every
+- The watcher shall keep, per lead, the reason (`denied`, `hold_expired`, `consumption_expired`) and batch id of every
   batch it dead-lettered on its own account in the status file for 24 hours, where a later note
   does not overwrite it, and `doctor` shall show them. A dead-letter entry is a bare message
   with no reason and no batch id, so `agent-msg inbox --dead` cannot show which entry it was: the
@@ -171,16 +209,19 @@ operator's decision; this requirement only makes the watcher notice.
 - The watcher shall count against the tick's budget the time it spends resolving targets,
   connecting, writing, waiting and checking transcripts in that tick.
 - If the budget does not cover a post, then the watcher shall put the batch back unposted and
-  unmarked, with no notification, no episode and no herdr, and shall try it on the next tick.
+  unmarked, with no notification and no episode, and shall try it on the next tick.
+- If 256 posts are already open, then the watcher shall post nothing more and put the batch
+  back unmarked until one is settled.
 - Each tick the watcher shall look at the leads in a rotating order, so that a lead with mail is
   reached within as many ticks as there are leads.
 - If the ack wait ends without a transcript record, the posted batch shall remain
-  pending with its lease renewed. Delayed consumption shall not disable sockets for
-  subsequent batches. Pending consumption shall survive watcher restart without
-  becoming an approval hold, and expire after 30 minutes as `consumption_expired`
-  without reposting. A partially written batch shall retain the same ownership.
+  pending with its lease renewed. Delayed consumption shall not stop later batches from
+  being posted. Pending consumption shall survive watcher restart without becoming an
+  approval hold, and shall be dead-lettered after 30 minutes as `consumption_expired`,
+  with one notification, without being posted again and without being typed. A partially
+  written batch shall retain the same ownership.
 - If a transcript line names a message's id without a structured `origin.msg_id`, then the batch is
-  not ambiguous: it is acknowledged as received but unconfirmed, the lead is not sent to herdr, and
+  not ambiguous: it is acknowledged as received but unconfirmed, and
   nothing is redelivered ([FR-046](./FR-046-claude-code-formats-are-typed-and-drift-is-detected.md)).
 - When a batch is ambiguous, `doctor` shall name the possible causes (a transcript under another
   `CLAUDE_CONFIG_DIR`, a socket that wants authentication, a cleared or busy session, a changed
@@ -188,19 +229,19 @@ operator's decision; this requirement only makes the watcher notice.
 - The watcher shall act on a receipt (`type` `control`, `action` `peer_message_status`)
   by its exact `status` and `status_detail`, never by substring.
 - When a `held` receipt arrives, the watcher shall leave the batch in flight, raise one
-  notification per episode naming the lead and the two ways out (set `crossSessionInbound` to
-  accept, or set `delivery = "herdr"`), and pop nothing for that lead, and post nothing to it,
+  notification per episode naming the lead and the way out (set `crossSessionInbound` to
+  accept in that session's settings), and pop nothing for that lead, and post nothing to it,
   for ten minutes, so mail sent meanwhile stays in the inbox instead of expiring in flight.
 - When a `refused` receipt (or `expired` with detail `refused`) or a `dropped` receipt (which
-  names its messages in `dropped_msg_ids`) arrives, the watcher shall send the batch through
-  herdr, or put it back unmarked when the receipt is late.
+  names its messages in `dropped_msg_ids`) arrives, the watcher shall put the batch back
+  unmarked, to be posted again, and shall not type it.
 - When an `expired` receipt with detail `hold_timeout` arrives, the watcher shall put the batch
   back unmarked.
 - When a receipt has any other status, or reports a duplicate, the watcher shall treat the batch
-  as ambiguous and leave a note.
+  as ambiguous, leave a note and keep it with the socket as it keeps an unconfirmed post.
 - Mail can be delivered out of order after the quiet period: the watcher can post again
   behind the same prompt while the held batch stays renewed, so a later approval can
-  deliver older mail after newer. Socket-mode Claude hooks do not consume newer mail.
+  deliver older mail after newer. A socket session's hooks do not consume newer mail.
 - The watcher shall not post the same body to the same session twice within 35 s (Claude Code
   drops an identical body from one sender within 30 s). A redelivered batch carries the
   `(redelivered)` marker, so its body differs.
@@ -223,7 +264,7 @@ operator's decision; this requirement only makes the watcher notice.
   ([FR-055](./FR-055-socket-status-keeps-only-live-leads.md)).
 - The watcher shall write `state/socket/socket-<watcher pid>.json` (its pid and start time, its
   reply socket, the sockets it resolved, the leads held, the held batches, the dead-letter reasons
-  and why a lead's batches went to herdr) after each socket delivery, so two watchers on one
+  and why a lead's mail waits) after each socket delivery or change of reason, so two watchers on one
   machine do not overwrite each other.
 - `agent-msg doctor` shall report each live watcher's file as `ok`, `warn` or `unknown`, never as
   `fail`, and `unknown` when `config.toml` did not load.
@@ -232,15 +273,15 @@ operator's decision; this requirement only makes the watcher notice.
 
 | ID | Criteria | Verification |
 |----|----------|--------------|
-| FR-044-AC-1 | Given `[watcher] delivery` absent or `"herdr"`, the mode is herdr and every batch passes straight to herdr; given `"socket"` it is the socket; given any other value the configuration is refused by the watcher only. | Test |
+| FR-044-AC-1 | Given `[watcher] delivery` absent or `"socket"`, the mode is socket; given `"herdr"` it is herdr and every batch passes to herdr; given any other value the configuration is refused by the watcher only. | Test |
 | FR-044-AC-2 | Given a registry with a live record, a dead pid, a reused pid, another or unknown pid domain, two live processes on one session, a session whose id `/clear` changed, an unknown `peerProtocol` or version, and a socket that is a symlink, in another directory, of another owner, open to others or not the process's own, only the live, known-good, single (interactive-preferred) record with a proper socket resolves. | Test |
 | FR-044-AC-3 | The line posted is exactly the measured one (golden), carries a UUID `msg_id`, the target session and the reply socket (mode 0600), asserts no `from-mode`, cannot be made to close or forge its wrapper, has a plain bounded `from-name`, and is not posted over 1 MiB; the exact receipt statuses parse to their outcomes (only `held` and `refused` were captured live from Claude Code 2.1.283; the others were read from the installed program's text and are fixtures only), a status that only contains a known word does not, and junk parses to none. | Test |
 | FR-044-AC-4 | A batch is acknowledged only when its `msg_id` is the `origin.msg_id` of a transcript line; an absent transcript or one without the id leaves it ambiguous, and the id in a line without a structured `origin.msg_id` is acknowledged as received but unconfirmed (FR-046-AC-5); a receiver that records the message at once into an existing transcript, with 0, 20 or 200 project directories to search, is never missed in 200 rounds; a transcript that grows past a read window between looks still yields the acknowledgement; a message that outlived its wait is acknowledged by a later tick. | Test |
 | FR-044-AC-5 | A `held` receipt leaves the batch in flight, pops nothing more for the lead, notifies once and dead-letters no mail sent meanwhile across 12 lease expiries; the held batch's lease is renewed each tick so that a reap past its old deadline and the lead's own hook find it in flight; an approval after the lease would have run out acknowledges once with one post in all; a denial after it dead-letters exactly once and never re-prompts; a prompt nobody answers is posted once and dead-lettered as `hold_expired` at the maximum hold with one notification; a batch held across a restart is restored and still renewed. | Test |
-| FR-044-AC-6 | In socket mode, Claude batches are never typed through Herdr, including after certain non-delivery or an ambiguous outcome. Certain non-delivery leaves the batch queued for a later socket attempt; ambiguous delivery remains in flight until settled and is never reposted through Herdr. Non-Claude harnesses continue through Herdr. | Test |
+| FR-044-AC-6 | In socket mode a batch for a session with a socket is never typed: after certain non-delivery (no record, a refused connection, an unbound reply socket, a `refused` or `dropped` receipt, a duplicate body) it is queued for a later socket attempt, and after an unknown or unconfirmed outcome it stays in flight with the socket. Non-Claude harnesses are typed through herdr. | Test |
 | FR-044-AC-7 | The same body is not posted to a session twice inside the window and is once the window has passed; a redelivered body differs from the original. | Test |
 | FR-044-AC-8 | A delivery changes no file of the registry or the projects; a live listener on the watcher's socket name, a non-socket file and a dead socket there are left, left and replaced; a previous watcher's dead socket and status file are removed (a reused pid counts as dead), and a live watcher's, another process's name or a path outside the socket directory are not; the reply socket and status file are removed on SIGTERM (the file kept only while a held batch or an owed decision must survive), and the interrupted wait of that stop is not recorded as a failure. | Test |
-| FR-044-AC-9 | Each live watcher's status has its own doctor check that is `ok`, `warn` (held, leads using herdr, a reply socket not bound, dead letters made) or `unknown` (missing, unreadable, dead watcher, config failed), never `fail`, a held lead is named with the setting that clears it, a batch dead-lettered as `denied` or `hold_expired` is shown with its reason for 24 hours, and an untrusted status directory is named plainly. | Test |
+| FR-044-AC-9 | Each live watcher's status has its own doctor check that is `ok`, `warn` (held, leads waiting for a socket, a reply socket not bound, dead letters made) or `unknown` (missing, unreadable, dead watcher, config failed), never `fail`, a held lead is named with the setting that clears it, a batch dead-lettered as `denied`, `hold_expired` or `consumption_expired` is shown with its reason for 24 hours, and an untrusted status directory is named plainly. | Test |
 | FR-044-AC-10 | A late drop names its messages and puts exactly those back, a hold timeout or late refusal puts the batch back unmarked, an unknown or ambiguous status settles nothing and leaves a note, and a receipt for a message nothing waits on changes nothing. | Test |
 | FR-044-AC-11 | A failed dead-letter, acknowledge or in-wait denial write is retried after a growing wait and never becomes a second post; after five failures one alert is raised, the decision stays pending and the batch is renewed; a dead-letter write that fails for twenty ticks leaves the message posted once; the `settlement_failed` note survives a later note for the lead and is cleared only by its own batch's write; owed decisions survive a restart (an owed denial stays `denied`, an owed acknowledgement is not lost). | Test |
 | FR-044-AC-12 | An approved message whose transcript line never shows is acknowledged after the grace with a `delivered_unconfirmed` note, never dead-lettered as `hold_expired`, also when the watcher restarted inside the grace; a `delivered` receipt alone does not acknowledge before the grace ends. | Test |
@@ -248,9 +289,10 @@ operator's decision; this requirement only makes the watcher notice.
 | FR-044-AC-14 | A batch that does not fit the tick's remaining budget (the worst case of a post) is put back unposted with no notification and no episode, so a following bypass-mode hold is still notified once; at the production timings a healthy lead after a wedged one is postponed and then delivered, a healthy lead behind twenty wedged ones is served within one round of ticks, a postponement leaves a held episode and its notification record untouched (held, postponed, held gives one notification and no "ended" line), and a write to a receiver that reads slowly gives up at the 2 s deadline as unconfirmed. | Test |
 | FR-044-AC-15 | The status files are in a directory of their own created 0700 in one step; an existing directory that is open (0755, 0777), a symlink or of another user is neither written, read nor repaired (a forged file planted while it was open is never adopted, before or after a later start); a symlinked or foreign status file is not read; files are created 0600; when the directory is not trusted delivery goes on and one alert says held batches and owed decisions will not survive a restart. | Test |
 | FR-044-AC-16 | A reply socket whose directory appears later is bound on a later delivery, not more often than its backoff; a connect that never returns is abandoned and costs one helper thread in all; a probe of a wedged listener at the watcher's own socket name keeps one flag across retries. | Test |
-
-| FR-044-AC-17 | Working, blocked, idle and done Claude leads receive queued mail through a real Unix socket without a prerequisite herdr state read. A socket failure falls back to herdr for the same registered session regardless of pane activity. Claude hooks maintain identity for all four events without popping or acknowledging socket-owned messages. | Test |
-| FR-044-AC-18 | Pending socket consumption persists across watcher restart, renews its lease without an approval hold, acknowledges a later transcript match once and expires without reposting as consumption_expired. | Test |
+| FR-044-AC-17 | Working, blocked, idle and done Claude leads receive queued mail through a real Unix socket without a herdr state read. Whatever the post answers, nothing is typed. A Claude hook of a session with a socket registers the lead for all four events without popping or acknowledging mail; a hook of a session without one delivers it. | Test |
+| FR-044-AC-18 | Pending socket consumption persists across watcher restart, renews its lease without an approval hold, acknowledges a later transcript match once and is dead-lettered without a second post as `consumption_expired`. | Test |
+| FR-044-AC-19 | The route is the terminal only for a live, unparked session record that names no socket, with no socket file for its process, older than the publish grace (and for another harness, or `delivery = "herdr"`); it is a wait, with nothing popped or typed, for no session id, no or a stale record, several processes, an unsupported or unusable record, a record younger than the grace, a socket file the record does not name, an unbound reply socket and unavailable socket locations; typing asks the route again and types nothing when it changed. | Test |
+| FR-044-AC-20 | A session whose only live record is parked, listening on its socket and consuming nothing, in a pane herdr reports idle with that session, is neither posted to nor typed into, its forwarded and redelivered mail stays queued with the reason shown, and mail is posted once the record is no longer parked. | Test |
 
 ## Dependencies
 
@@ -264,5 +306,4 @@ operator's decision; this requirement only makes the watcher notice.
   with no redelivery), [FR-029](./FR-029-doctor-reports-relay-health.md).
 - Related: [FR-046](./FR-046-claude-code-formats-are-typed-and-drift-is-detected.md) (the
   typed formats and their drift signals).
-- Delivered by AGE-2030. Off by default because the bypass-mode setting is an
-  owner decision that has not been made.
+- Delivered by AGE-2030; made the default by SWM-121, SWM-122, SWM-123 and SWM-124.

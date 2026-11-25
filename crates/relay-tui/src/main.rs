@@ -200,7 +200,7 @@ fn drain_ui_events(workers: &Workers, app: &mut App) {
                     for e in new_arrivals {
                         let _ = workers.actions.send(app::Action::Notify {
                             id: e.id,
-                            ticket: e.filing.ticket.to_string(),
+                            ticket: e.filing.ticket_text(),
                             lead: e.filing.lead.to_string(),
                         });
                     }

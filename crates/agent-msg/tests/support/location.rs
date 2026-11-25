@@ -11,27 +11,36 @@ impl Fixture {
     pub fn new(test: &str) -> Option<Self> {
         let url = std::env::var("IX_RELAY_TEST_URL").ok()?;
         let dir = Scratch::new("ix-relay-location-");
-        let script = r#"#!/usr/bin/env python3
-import json, os, sys
-state=json.load(open(os.environ['TEST_HERDR_STATE']))
-args=sys.argv[1:]
-if '--session' in args:
- i=args.index('--session'); del args[i:i+2]
-machine=os.environ.get('TEST_LOCAL_MACHINE','draco')
-if '--machine' in args:
- i=args.index('--machine'); machine=args[i+1]; del args[i:i+2]
-key={'agent':'agents','workspace':'workspaces','tab':'tabs','machine':'machines'}[args[0]]
-data=state['profiles'] if key=='machines' else state[machine][key]
-print(json.dumps(data if key=='machines' else {'result':{key:data}}))
+        let script = r#"#!/bin/sh
+dir=$(dirname "$TEST_HERDR_STATE")
+machine=${TEST_LOCAL_MACHINE:-draco}
+key=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session) [ $# -ge 2 ] || exit 1; shift 2 ;;
+    --machine) [ $# -ge 2 ] || exit 1; machine=$2; shift 2 ;;
+    *) [ -z "$key" ] && key=$1; shift ;;
+  esac
+done
+if [ "$key" = machine ]; then
+  exec cat "$dir/machines.json"
+fi
+exec cat "$dir/$machine.$key.json"
 "#;
         fs::write(dir.join("herdr"), script).unwrap();
         fs::set_permissions(dir.join("herdr"), fs::Permissions::from_mode(0o755)).unwrap();
-        fs::write(dir.join("ssh"), r#"#!/usr/bin/env python3
-import os,sys,shlex,subprocess
-args=shlex.split(sys.argv[-1]);i=args.index('herdr');args=args[i+1:]
-env=dict(os.environ,TEST_LOCAL_MACHINE='terra')
-raise SystemExit(subprocess.run([os.path.join(os.path.dirname(__file__),'herdr'),*args],env=env).returncode)
-"#).unwrap();
+        fs::write(
+            dir.join("ssh"),
+            r#"#!/bin/sh
+for last; do :; done
+eval "set -- $last"
+while [ $# -gt 0 ] && [ "$1" != herdr ]; do shift; done
+[ $# -gt 0 ] || exit 1
+shift
+TEST_LOCAL_MACHINE=terra exec "$(dirname "$0")/herdr" "$@"
+"#,
+        )
+        .unwrap();
         fs::set_permissions(dir.join("ssh"), fs::Permissions::from_mode(0o755)).unwrap();
         let fixture = Self {
             dir,
@@ -52,7 +61,40 @@ raise SystemExit(subprocess.run([os.path.join(os.path.dirname(__file__),'herdr')
         }
         let local = serde_json::json!({"agents":agents,"workspaces":[{"workspace_id":"w1","label":"misc"}],"tabs":[{"tab_id":"w1:t1","label":"agent-skills"},{"tab_id":"w1:t2","label":"code"}]});
         let remote = serde_json::json!({"agents":[agent("terra-session","w1:p1","w1:t1")],"workspaces":[{"workspace_id":"w1","label":"laya"}],"tabs":[{"tab_id":"w1:t1","label":"code"}]});
-        fs::write(self.dir.join("state.json"),serde_json::to_vec(&serde_json::json!({"draco":local,"terra":remote,"profiles":[{"label":"terra","enabled":true,"target":"fixture-terra","session":"default"}]})).unwrap()).unwrap();
+        let profiles = serde_json::json!([{"label":"terra","enabled":true,"target":"fixture-terra","session":"default"}]);
+        self.write_state(
+            &serde_json::json!({"draco": local, "terra": remote, "profiles": profiles}),
+        );
+    }
+
+    /// Installs `state` as the topology the `herdr` and `ssh` stubs answer from. The stubs
+    /// are shell scripts reading one prepared file per answer: they run inside a hook's
+    /// time budget, which an interpreter start on a loaded host can eat.
+    pub fn write_state(&self, state: &serde_json::Value) {
+        for machine in ["draco", "terra"] {
+            for (key, field) in [
+                ("agent", "agents"),
+                ("workspace", "workspaces"),
+                ("tab", "tabs"),
+            ] {
+                let body = serde_json::json!({"result": {field: state[machine][field]}});
+                fs::write(
+                    self.dir.join(format!("{machine}.{key}.json")),
+                    serde_json::to_vec(&body).unwrap(),
+                )
+                .unwrap();
+            }
+        }
+        fs::write(
+            self.dir.join("machines.json"),
+            serde_json::to_vec(&state["profiles"]).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            self.dir.join("state.json"),
+            serde_json::to_vec(state).unwrap(),
+        )
+        .unwrap();
     }
     /// Simulate the destination watcher publishing its own complete topology.
     pub fn publish(&self, machine: &str) {

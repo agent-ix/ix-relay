@@ -6,7 +6,7 @@
 use relay_core::{BatchId, Message, PaneId, SessionId};
 
 use crate::{
-    deliver::{BatchTarget, DeliverError, Deliverer},
+    deliver::{BatchTarget, DeliverError, Deliverer, Route},
     episodes::{EpisodeKind, Notice},
     herdr::{AgentStatus, Herdr, ProcessError},
 };
@@ -56,7 +56,7 @@ pub trait Inbox {
     /// Acknowledges `batch`: the transport reported success, so its in-flight
     /// record is dropped. Never called for a failed or ambiguous delivery, whose
     /// batch stays in flight and is redelivered when its lease expires.
-    fn ack(&mut self, batch: &PoppedBatch);
+    fn ack(&mut self, batch: &PoppedBatch, _evidence: relay_core::receipts::DeliveryEvidence);
     /// Puts `batch` back at the front of the inbox. Called only when the
     /// transport is certain no input was sent for it.
     fn requeue(&mut self, batch: &PoppedBatch);
@@ -105,13 +105,37 @@ pub enum Outcome {
     /// approval prompt) and asked for none to be popped: the mail waits in the
     /// inbox. Part of the held episode, so it is logged once.
     SocketHeldQuiet,
-    /// The socket accepted the batch and its lease is renewed pending consumption.
+    /// The lead has, or may have, an inbox socket that cannot take mail now (FR-044):
+    /// nothing is popped and nothing is typed.
+    SocketWaiting {
+        /// Why it waits.
+        why: String,
+    },
+    /// The socket certainly did not take the batch: it was put back, to be posted
+    /// again. It is never typed.
+    SocketNotSent {
+        /// How many messages were put back.
+        requeued: usize,
+        /// Why it was not sent.
+        why: String,
+    },
+    /// The socket took the batch and consumption is not confirmed yet: it stays in
+    /// flight with its lease renewed.
     SocketPending(String),
+    /// A socket post whose outcome is uncertain: it stays with the socket, never typed.
+    SocketAmbiguous {
+        /// Why the delivery might have failed.
+        error: DeliverError,
+        /// Whether `herdr notification show` succeeded.
+        notified: bool,
+    },
     /// The transport chose not to try the batch now: it was put back at the front
     /// of the inbox unmarked.
     SocketDeferred {
         /// How many messages were put back.
         requeued: usize,
+        /// Why it was not tried.
+        why: String,
     },
     /// The transport did not post the batch because its time on sockets this tick is spent:
     /// it was put back unmarked. Says nothing about the lead: no episode, no notification.
@@ -178,13 +202,16 @@ impl Outcome {
             Self::NoAgent => Some(EpisodeKind::NoAgent),
             Self::GetFailed(_) => Some(EpisodeKind::GetFailed),
             Self::NotifyFailed(_) | Self::NotifyPending => Some(EpisodeKind::NotifyFailed),
-            Self::SocketHeld { .. }
-            | Self::SocketHeldQuiet
-            | Self::SocketDeferred { .. }
-            | Self::SocketDenied { .. } => Some(EpisodeKind::SocketHeld),
+            Self::SocketHeld { .. } | Self::SocketHeldQuiet | Self::SocketDenied { .. } => {
+                Some(EpisodeKind::SocketHeld)
+            }
+            Self::SocketWaiting { .. }
+            | Self::SocketNotSent { .. }
+            | Self::SocketDeferred { .. } => Some(EpisodeKind::SocketWaiting),
             Self::InflightFull => Some(EpisodeKind::InflightFull),
             Self::SocketPostponed { .. }
             | Self::SocketPending(_)
+            | Self::SocketAmbiguous { .. }
             | Self::Delivered { .. }
             | Self::SkippedWorking
             | Self::SkippedUnknown
@@ -226,10 +253,27 @@ impl Outcome {
             Self::SocketHeldQuiet => format!(
                 "{lead} ({pane}): Claude Code holds relay mail for approval; new mail waits in the inbox"
             ),
-            Self::SocketPending(why) => format!("{lead} ({pane}): {why}"),
-            Self::SocketDeferred { requeued } => format!(
-                "{lead} ({pane}): delivery deferred; put {requeued} message(s) back unmarked"
+            Self::SocketWaiting { why } => format!(
+                "{lead} ({pane}): mail waits for the inbox socket ({why}); nothing popped, \
+                 nothing typed"
             ),
+            Self::SocketNotSent { requeued, why } => format!(
+                "{lead} ({pane}): the inbox socket did not take the batch ({why}); put \
+                 {requeued} message(s) back to post again; nothing typed"
+            ),
+            Self::SocketPending(why) => format!("{lead} ({pane}): {why}"),
+            Self::SocketAmbiguous { error, notified } => format!(
+                "{lead} ({pane}): socket delivery may have failed ({error}); left in flight with \
+                 the socket, nothing typed; the operator {}",
+                if *notified {
+                    "notified"
+                } else {
+                    "notification also failed"
+                }
+            ),
+            Self::SocketDeferred { requeued, why } => {
+                format!("{lead} ({pane}): {why}; put {requeued} message(s) back unmarked")
+            }
             Self::SocketHeld { why, notified } => format!(
                 "{lead} ({pane}): Claude Code holds relay mail for approval ({why}); left in \
                  flight; the operator {}",
@@ -277,13 +321,19 @@ pub(crate) fn session_matches(registered: Option<&SessionId>, live: Option<&Sess
 /// checks `Relay::inbox_len` before calling this, so an idle lead with
 /// nothing queued never costs a `herdr agent get`).
 ///
-/// In herdr mode, get and recheck the session before popping. In socket mode,
-/// the socket resolver validates the registered session itself; pane state does
-/// not gate a socket attempt.
+/// The transport is asked for the lead's [`Route`] first, and nothing is popped
+/// for a lead on neither.
+///
+/// - [`Route::Socket`]: posted to the session's inbox socket whatever its pane is
+///   doing, with no pane read, and never typed.
+/// - [`Route::Terminal`]: typed, in this order: get, check the session id and
+///   readiness, recheck `state_change_seq`, only then `pop`, only then `prompt`, so
+///   a lead that starts a turn (or gets replaced) between the check and the prompt
+///   never gets typed into.
 ///
 /// `inbox` performs the actual pop (a Redis call in production), the
 /// acknowledgement when the [`Deliverer`] reports success, and, if it is certain
-/// no input was sent ([`DeliverError::NotSent`]), the requeue. An ambiguous
+/// nothing was delivered ([`DeliverError::NotSent`]), the requeue. An ambiguous
 /// failure does neither: the batch stays in flight (FR-020).
 pub fn try_deliver<H: Herdr + Deliverer>(
     herdr: &H,
@@ -294,112 +344,169 @@ pub fn try_deliver<H: Herdr + Deliverer>(
     notice: Notice,
     inbox: &mut impl Inbox,
 ) -> Outcome {
-    let socket = herdr.prefers_socket(kind);
-    if !socket {
-        let first = match herdr.get(pane) {
-            Ok(Some(info)) => info,
-            Ok(None) => return Outcome::NoAgent,
-            Err(e) => return Outcome::GetFailed(e),
-        };
-        if !session_matches(registered_session_id, first.session_id.as_ref()) {
-            return Outcome::StaleRegistration;
-        }
-        match first.status {
-            AgentStatus::Working => return Outcome::SkippedWorking,
-            AgentStatus::Unknown => return Outcome::SkippedUnknown,
-            AgentStatus::Blocked => {
-                match notice {
-                    Notice::Done => return Outcome::SkippedBlocked,
-                    Notice::RetryLater => return Outcome::NotifyPending,
-                    Notice::Needed => {}
-                }
-                let title = format!("ix-relay: {lead} is blocked");
-                let body =
-                    "A queued message is waiting; approve or dismiss the dialog to receive it.";
-                return match herdr.notify(&title, body) {
-                    Ok(()) => Outcome::SkippedBlocked,
-                    Err(e) => Outcome::NotifyFailed(e),
-                };
+    let via = match herdr.route(lead, kind, registered_session_id) {
+        Route::Wait(why) => return Outcome::SocketWaiting { why },
+        Route::Socket => {
+            if herdr.holds(lead, registered_session_id) {
+                return Outcome::SocketHeldQuiet;
             }
-            AgentStatus::Idle | AgentStatus::Done => {}
+            Via::Socket
         }
-        let recheck = match herdr.get(pane) {
-            Ok(Some(info)) => info,
-            Ok(None) => return Outcome::NoAgent,
-            Err(e) => return Outcome::GetFailed(e),
-        };
-        if !session_matches(registered_session_id, recheck.session_id.as_ref()) {
-            return Outcome::StaleRegistration;
+        Route::Terminal => {
+            if let Some(skip) = pane_not_ready(herdr, lead, pane, registered_session_id, notice) {
+                return skip;
+            }
+            Via::Terminal
         }
-        if recheck.state_change_seq != first.state_change_seq {
-            return Outcome::SkippedSeqChanged;
-        }
+    };
+    let batch = match inbox.pop() {
+        PopOutcome::Empty => return Outcome::RaceEmptied,
+        PopOutcome::AtCap => return Outcome::InflightFull,
+        PopOutcome::Failed(e) => return Outcome::PopFailed(e),
+        PopOutcome::Popped(batch) => batch,
+    };
+    let target = BatchTarget {
+        lead,
+        kind,
+        session: registered_session_id,
+        batch: batch.batch,
+        senders: &batch.senders,
+    };
+    let result = match via {
+        Via::Socket => herdr.post(&target, &batch.rendered),
+        Via::Terminal => herdr.deliver_to(&target, pane, &batch.rendered),
+    };
+    conclude(herdr, lead, (via, notice), inbox, &batch, result)
+}
+
+/// The transport a popped batch was handed to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Via {
+    Socket,
+    Terminal,
+}
+
+/// The readiness checks of a lead that is about to be typed into: why nothing may
+/// be typed now, or `None` when it may.
+fn pane_not_ready<H: Herdr>(
+    herdr: &H,
+    lead: &str,
+    pane: &PaneId,
+    registered_session_id: Option<&SessionId>,
+    notice: Notice,
+) -> Option<Outcome> {
+    let first = match herdr.get(pane) {
+        Ok(Some(info)) => info,
+        Ok(None) => return Some(Outcome::NoAgent),
+        Err(e) => return Some(Outcome::GetFailed(e)),
+    };
+    if !session_matches(registered_session_id, first.session_id.as_ref()) {
+        return Some(Outcome::StaleRegistration);
     }
-    if relay_core::tries_socket(kind) && herdr.holds(lead, registered_session_id) {
-        return Outcome::SocketHeldQuiet;
+    match first.status {
+        AgentStatus::Working => return Some(Outcome::SkippedWorking),
+        AgentStatus::Unknown => return Some(Outcome::SkippedUnknown),
+        AgentStatus::Blocked => {
+            match notice {
+                Notice::Done => return Some(Outcome::SkippedBlocked),
+                Notice::RetryLater => return Some(Outcome::NotifyPending),
+                Notice::Needed => {}
+            }
+            let title = format!("ix-relay: {lead} is blocked");
+            let body = "A queued message is waiting; approve or dismiss the dialog to receive it.";
+            return Some(match herdr.notify(&title, body) {
+                Ok(()) => Outcome::SkippedBlocked,
+                Err(e) => Outcome::NotifyFailed(e),
+            });
+        }
+        AgentStatus::Idle | AgentStatus::Done => {}
     }
-    match inbox.pop() {
-        PopOutcome::Empty => Outcome::RaceEmptied,
-        PopOutcome::AtCap => Outcome::InflightFull,
-        PopOutcome::Failed(e) => Outcome::PopFailed(e),
-        PopOutcome::Popped(batch) => match herdr.deliver_to(
-            &BatchTarget {
-                lead,
-                kind,
-                session: registered_session_id,
-                batch: batch.batch,
-                senders: &batch.senders,
-            },
-            pane,
-            &batch.rendered,
-        ) {
-            Ok(()) => {
-                inbox.ack(&batch);
-                Outcome::Delivered {
-                    messages: batch.messages.len(),
-                }
+    let recheck = match herdr.get(pane) {
+        Ok(Some(info)) => info,
+        Ok(None) => return Some(Outcome::NoAgent),
+        Err(e) => return Some(Outcome::GetFailed(e)),
+    };
+    if !session_matches(registered_session_id, recheck.session_id.as_ref()) {
+        return Some(Outcome::StaleRegistration);
+    }
+    (recheck.state_change_seq != first.state_change_seq).then_some(Outcome::SkippedSeqChanged)
+}
+
+/// Settles a popped batch by what its transport reported.
+fn conclude<H: Herdr>(
+    herdr: &H,
+    lead: &str,
+    (via, notice): (Via, Notice),
+    inbox: &mut impl Inbox,
+    batch: &PoppedBatch,
+    result: Result<relay_core::receipts::DeliveryEvidence, DeliverError>,
+) -> Outcome {
+    let messages = batch.messages.len();
+    let error = match result {
+        Ok(evidence) => {
+            inbox.ack(batch, evidence);
+            return Outcome::Delivered { messages };
+        }
+        Err(error) => error,
+    };
+    match error {
+        DeliverError::NotSent(_) => {
+            inbox.requeue(batch);
+            match via {
+                Via::Socket => Outcome::SocketNotSent {
+                    requeued: messages,
+                    why: error.to_string(),
+                },
+                Via::Terminal => Outcome::PromptRejected {
+                    requeued: messages,
+                    error,
+                },
             }
-            Err(error @ DeliverError::NotSent(_)) => {
-                let requeued = batch.messages.len();
-                inbox.requeue(&batch);
-                Outcome::PromptRejected { requeued, error }
+        }
+        DeliverError::Denied(_) => {
+            inbox.dead_letter(batch);
+            Outcome::SocketDenied { dead: messages }
+        }
+        DeliverError::Postponed(_) => {
+            inbox.requeue(batch);
+            Outcome::SocketPostponed { requeued: messages }
+        }
+        DeliverError::Deferred(why) => {
+            inbox.requeue(batch);
+            Outcome::SocketDeferred {
+                requeued: messages,
+                why,
             }
-            Err(DeliverError::Denied(_)) => {
-                let dead = batch.messages.len();
-                inbox.dead_letter(&batch);
-                Outcome::SocketDenied { dead }
+        }
+        DeliverError::Held(why) => {
+            let notified = notice == Notice::Needed && {
+                let title = format!("ix-relay: {lead} is in bypass mode");
+                let body = "Claude Code holds relay mail behind an approval prompt: set \
+                            crossSessionInbound to accept in that session's settings.";
+                herdr.notify(&title, body).is_ok()
+            };
+            Outcome::SocketHeld { why, notified }
+        }
+        DeliverError::Pending(why) => Outcome::SocketPending(why),
+        DeliverError::Ambiguous(_) => {
+            let title = format!("ix-relay: delivery to {lead} may have failed");
+            let body = match via {
+                Via::Socket => format!(
+                    "{error}. The batch stays with the inbox socket and is never typed; it is \
+                     acknowledged when the transcript shows it, or dead-lettered if it never \
+                     does (agent-msg inbox --dead)."
+                ),
+                Via::Terminal => format!(
+                    "{error}. The batch stays in flight and is redelivered, marked, if its \
+                     lease expires; see `agent-msg inbox --dead` if it never is."
+                ),
+            };
+            let notified = herdr.notify(&title, &body).is_ok();
+            match via {
+                Via::Socket => Outcome::SocketAmbiguous { error, notified },
+                Via::Terminal => Outcome::PromptAmbiguous { error, notified },
             }
-            Err(DeliverError::Postponed(_)) => {
-                let requeued = batch.messages.len();
-                inbox.requeue(&batch);
-                Outcome::SocketPostponed { requeued }
-            }
-            Err(DeliverError::Deferred(_)) => {
-                let requeued = batch.messages.len();
-                inbox.requeue(&batch);
-                Outcome::SocketDeferred { requeued }
-            }
-            Err(DeliverError::Held(why)) => {
-                let notified = notice == Notice::Needed && {
-                    let title = format!("ix-relay: {lead} is in bypass mode");
-                    let body = "Claude Code holds relay mail behind an approval prompt: set \
-                                crossSessionInbound to accept in its settings, or set delivery = \
-                                herdr in ~/.ix/relay/config.toml.";
-                    herdr.notify(&title, body).is_ok()
-                };
-                Outcome::SocketHeld { why, notified }
-            }
-            Err(DeliverError::Pending(why)) => Outcome::SocketPending(why),
-            Err(e @ DeliverError::Ambiguous(_)) => {
-                let title = format!("ix-relay: prompt to {lead} may have failed");
-                let body = format!(
-                    "{e}. The batch stays in flight and is redelivered, marked, \
-                             if its lease expires; see `agent-msg inbox --dead` if it never is."
-                );
-                let notified = herdr.notify(&title, &body).is_ok();
-                Outcome::PromptAmbiguous { error: e, notified }
-            }
-        },
+        }
     }
 }
 
@@ -410,10 +517,10 @@ mod evidence;
 mod tests {
     use std::{cell::RefCell, collections::VecDeque};
 
-    use crate::herdr::AgentGet;
+    use relay_core::PaneId;
 
     use super::*;
-    use relay_core::PaneId;
+    use crate::herdr::AgentGet;
 
     /// A scripted [`Herdr`] and [`Deliverer`]: each call to `get` returns the
     /// next queued response; `deliver`/`notify` record their calls and return
@@ -425,6 +532,12 @@ mod tests {
         notify_result: Result<(), ProcessError>,
         prompts: RefCell<Vec<(String, String)>>,
         notifies: RefCell<Vec<(String, String)>>,
+        /// The route the transport puts the lead on.
+        route: Route,
+        /// What a socket post answers when no other answer is scripted.
+        post_result: Option<DeliverError>,
+        /// The text of every socket post.
+        posts: RefCell<Vec<String>>,
         /// When set, the transport reports the batch held for approval.
         held: Option<String>,
         /// When set, the transport is holding mail for the lead.
@@ -445,6 +558,9 @@ mod tests {
                 notify_result: Ok(()),
                 prompts: RefCell::default(),
                 notifies: RefCell::default(),
+                route: Route::Terminal,
+                post_result: None,
+                posts: RefCell::default(),
                 held: None,
                 holds: false,
                 deferred: false,
@@ -471,6 +587,36 @@ mod tests {
     }
 
     impl Deliverer for FakeHerdr {
+        fn route(&self, _lead: &str, _kind: &str, _session: Option<&SessionId>) -> Route {
+            self.route.clone()
+        }
+
+        fn post(
+            &self,
+            target: &BatchTarget<'_>,
+            text: &str,
+        ) -> Result<relay_core::receipts::DeliveryEvidence, DeliverError> {
+            self.targets.borrow_mut().push((
+                target.lead.to_owned(),
+                target.session.map(ToString::to_string),
+                target.senders.to_owned(),
+            ));
+            self.posts.borrow_mut().push(text.to_owned());
+            if self.postponed {
+                return Err(DeliverError::Postponed("spent".into()));
+            }
+            if self.deferred {
+                return Err(DeliverError::Deferred("held".into()));
+            }
+            if let Some(why) = &self.held {
+                return Err(DeliverError::Held(why.clone()));
+            }
+            match &self.post_result {
+                Some(error) => Err(error.clone()),
+                None => Ok(relay_core::receipts::DeliveryEvidence::SocketConfirmed),
+            }
+        }
+
         fn deliver(&self, pane: &PaneId, text: &str) -> Result<(), DeliverError> {
             self.prompts
                 .borrow_mut()
@@ -483,27 +629,85 @@ mod tests {
             target: &BatchTarget<'_>,
             pane: &PaneId,
             text: &str,
-        ) -> Result<(), DeliverError> {
+        ) -> Result<relay_core::receipts::DeliveryEvidence, DeliverError> {
             self.targets.borrow_mut().push((
                 target.lead.to_owned(),
                 target.session.map(ToString::to_string),
                 target.senders.to_owned(),
             ));
-            if self.postponed {
-                return Err(DeliverError::Postponed("spent".into()));
-            }
-            if self.deferred {
-                return Err(DeliverError::Deferred("held".into()));
-            }
-            match &self.held {
-                Some(why) => Err(DeliverError::Held(why.clone())),
-                None => self.deliver(pane, text),
-            }
+            self.deliver(pane, text)
+                .map(|()| relay_core::receipts::DeliveryEvidence::HerdrPrompt)
         }
 
         fn holds(&self, _lead: &str, _session: Option<&SessionId>) -> bool {
             self.holds
         }
+    }
+
+    /// Tracing: TC-044-17
+    /// ACs: FR-044-AC-17
+    ///
+    /// A lead on the socket is posted to without one pane read (`gets` is empty, so any
+    /// read panics) and nothing is ever typed, whatever the socket answers: delivered,
+    /// certainly not sent, pending, ambiguous, held, deferred, postponed or denied.
+    #[test]
+    fn tc_044_17_a_socket_lead_is_never_read_or_typed_into_whatever_the_socket_answers() {
+        let why = || "why".to_owned();
+        for answer in [
+            None,
+            Some(DeliverError::NotSent(why())),
+            Some(DeliverError::Pending(why())),
+            Some(DeliverError::Ambiguous(why())),
+            Some(DeliverError::Held(why())),
+            Some(DeliverError::Deferred(why())),
+            Some(DeliverError::Postponed(why())),
+            Some(DeliverError::Denied(why())),
+        ] {
+            let mut herdr = FakeHerdr::with_gets(Vec::new());
+            herdr.route = Route::Socket;
+            herdr.post_result = answer.clone();
+            let mut inbox = FakeInbox::once(PopOutcome::Popped(batch("hi")));
+            let outcome = deliver(&herdr, Notice::Needed, &mut inbox);
+            assert!(herdr.prompts.borrow().is_empty(), "{answer:?}: typed");
+            assert_eq!(herdr.posts.borrow().len(), 1, "{answer:?}");
+            // Acknowledged only when delivered; requeued only when certainly not sent or
+            // never tried; kept in flight when it may have arrived.
+            let (acked, requeued, dead) = match answer {
+                None => (1, 0, 0),
+                Some(
+                    DeliverError::NotSent(_)
+                    | DeliverError::Deferred(_)
+                    | DeliverError::Postponed(_),
+                ) => (0, 1, 0),
+                Some(DeliverError::Denied(_)) => (0, 0, 1),
+                Some(
+                    DeliverError::Pending(_) | DeliverError::Ambiguous(_) | DeliverError::Held(_),
+                ) => (0, 0, 0),
+            };
+            assert_eq!(
+                (inbox.acked.len(), inbox.requeued.len(), inbox.dead.len()),
+                (acked, requeued, dead),
+                "{outcome:?}"
+            );
+        }
+    }
+
+    /// Tracing: TC-044-17
+    /// ACs: FR-044-AC-17
+    #[test]
+    fn tc_044_17_a_waiting_lead_has_nothing_popped_read_or_typed() {
+        let mut herdr = FakeHerdr::with_gets(Vec::new());
+        herdr.route = Route::Wait("parked".into());
+        // `none()` panics on a pop.
+        let outcome = deliver(&herdr, Notice::Needed, &mut FakeInbox::none());
+        assert_eq!(
+            outcome,
+            Outcome::SocketWaiting {
+                why: "parked".into()
+            }
+        );
+        assert_eq!(outcome.episode(), Some(EpisodeKind::SocketWaiting));
+        assert!(herdr.prompts.borrow().is_empty() && herdr.posts.borrow().is_empty());
     }
 
     const SID: &str = "sess-1";
@@ -573,7 +777,7 @@ mod tests {
                 .expect("try_deliver popped more times than the test scripted")
         }
 
-        fn ack(&mut self, batch: &PoppedBatch) {
+        fn ack(&mut self, batch: &PoppedBatch, _evidence: relay_core::receipts::DeliveryEvidence) {
             self.acked.push(batch.batch);
         }
 
@@ -630,6 +834,7 @@ mod tests {
                 ready(AgentStatus::Idle, 10),
                 ready(AgentStatus::Idle, 10),
             ]);
+            herdr.route = Route::Socket;
             herdr.held = Some("bypass".into());
             let mut inbox = FakeInbox::once(PopOutcome::Popped(batch("hi")));
             let outcome = deliver(&herdr, notice, &mut inbox);
@@ -675,6 +880,7 @@ mod tests {
             ready(AgentStatus::Idle, 10),
             ready(AgentStatus::Idle, 10),
         ]);
+        herdr.route = Route::Socket;
         herdr.holds = true;
         // `none()` panics on a pop: any pop fails the test.
         let outcome = deliver(&herdr, Notice::Needed, &mut FakeInbox::none());
@@ -694,10 +900,17 @@ mod tests {
             ready(AgentStatus::Idle, 10),
             ready(AgentStatus::Idle, 10),
         ]);
+        herdr.route = Route::Socket;
         herdr.deferred = true;
         let mut inbox = FakeInbox::once(PopOutcome::Popped(batch("hi")));
         let outcome = deliver(&herdr, Notice::Needed, &mut inbox);
-        assert_eq!(outcome, Outcome::SocketDeferred { requeued: 1 });
+        assert_eq!(
+            outcome,
+            Outcome::SocketDeferred {
+                requeued: 1,
+                why: "held".into()
+            }
+        );
         assert_eq!(inbox.requeued.len(), 1);
         assert!(inbox.acked.is_empty());
         assert!(herdr.prompts.borrow().is_empty() && herdr.notifies.borrow().is_empty());
@@ -718,6 +931,7 @@ mod tests {
             ready(AgentStatus::Idle, 10),
             ready(AgentStatus::Idle, 10),
         ]);
+        herdr.route = Route::Socket;
         herdr.postponed = true;
         let mut inbox = FakeInbox::once(PopOutcome::Popped(batch("hi")));
         let first = deliver(&herdr, episodes.notice(&name, now), &mut inbox);
@@ -737,6 +951,7 @@ mod tests {
             ready(AgentStatus::Idle, 10),
             ready(AgentStatus::Idle, 10),
         ]);
+        herdr.route = Route::Socket;
         herdr.held = Some("bypass".into());
         let mut inbox = FakeInbox::once(PopOutcome::Popped(batch("hi")));
         let second = deliver(&herdr, episodes.notice(&name, now), &mut inbox);
@@ -789,19 +1004,6 @@ mod tests {
         let herdr = FakeHerdr::with_gets(vec![ready(AgentStatus::Working, 5)]);
         let outcome = deliver(&herdr, Notice::Needed, &mut FakeInbox::none());
         assert_eq!(outcome, Outcome::SkippedWorking);
-    }
-
-    #[test]
-    fn replacing_the_session_between_checks_never_pops_its_mail() {
-        let herdr = FakeHerdr::with_gets(vec![
-            ready(AgentStatus::Idle, 10),
-            ready_with_session(AgentStatus::Idle, 10, Some("another-session")),
-        ]);
-        assert_eq!(
-            deliver(&herdr, Notice::Needed, &mut FakeInbox::none()),
-            Outcome::StaleRegistration
-        );
-        assert!(herdr.prompts.borrow().is_empty());
     }
 
     #[test]

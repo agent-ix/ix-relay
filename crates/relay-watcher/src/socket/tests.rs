@@ -16,7 +16,12 @@ use std::{
     time::Duration,
 };
 
-use relay_core::{BatchId, PaneId, SessionId, socket_status::SocketStatus};
+use claude_wire::{
+    ControlLine, DriftReason, Ignored, TranscriptMatch, Verdict, parse_control_line,
+};
+use relay_core::{
+    BatchId, PaneId, SessionId, receipts::DeliveryEvidence, socket_status::SocketStatus,
+};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -26,10 +31,7 @@ use super::{
     session::{self, Procs, Unresolved},
     transcript,
 };
-use crate::deliver::{BatchTarget, DeliverError, Deliverer, SettleAction};
-use claude_wire::{
-    ControlLine, DriftReason, Ignored, TranscriptMatch, Verdict, parse_control_line,
-};
+use crate::deliver::{BatchTarget, DeliverError, Deliverer, Route, SettleAction};
 
 const SESSION: &str = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
 const DOMAIN: &str = "linux:machine:pid:[1]";
@@ -284,16 +286,18 @@ impl Rig {
     }
 
     fn send(&self, text: &str) -> Result<(), SocketError> {
-        self.deliverer.deliver(
-            &BatchTarget {
-                kind: "claude",
-                batch: BatchId::new(1),
-                lead: "ea",
-                session: Some(&self.session),
-                senders: "hub:EA:1",
-            },
-            text,
-        )
+        self.deliverer
+            .deliver(
+                &BatchTarget {
+                    kind: "claude",
+                    batch: BatchId::new(1),
+                    lead: "ea",
+                    session: Some(&self.session),
+                    senders: "hub:EA:1",
+                },
+                text,
+            )
+            .map(drop)
     }
 }
 
@@ -857,9 +861,9 @@ fn tc_044_10_a_receipt_for_another_message_and_a_silent_connection_are_ignored()
     assert!(matches!(rig.send("m"), Err(SocketError::Pending(_))));
 }
 
-// ---- FR-044-AC-6: falling back to herdr ---------------------------------------
+// ---- FR-044-AC-6: nothing is typed into a session with a socket ---------------
 
-/// A herdr that types text in, for the fallback.
+/// A herdr that records what it is asked to type.
 #[derive(Clone, Default)]
 struct FakeHerdr {
     typed: Arc<Mutex<Vec<String>>>,
@@ -888,11 +892,18 @@ impl Deliverer for FakeHerdr {
     }
 }
 
+/// Posts one batch for a Claude lead and then asks for it to be typed, as a caller that
+/// ignored the socket's answer would.
 fn routed_send(
     rig: Rig,
     herdr: &FakeHerdr,
     text: &str,
-) -> (Result<(), DeliverError>, FakeClaude, TempDir) {
+) -> (
+    Result<(), DeliverError>,
+    Result<(), DeliverError>,
+    FakeClaude,
+    TempDir,
+) {
     let Rig {
         home,
         claude,
@@ -901,39 +912,33 @@ fn routed_send(
     } = rig;
     let routed = Routed::socket_first(herdr.clone(), deliverer);
     let pane: PaneId = "w1:p1".parse().unwrap();
-    let result = routed.deliver_to(
-        &BatchTarget {
-            kind: "claude",
-            batch: BatchId::new(1),
-            lead: "ea",
-            session: Some(&session),
-            senders: "hub:EA:1",
-        },
-        &pane,
-        text,
-    );
-    (result, claude, home.dir)
+    let target = BatchTarget {
+        kind: "claude",
+        batch: BatchId::new(1),
+        lead: "ea",
+        session: Some(&session),
+        senders: "hub:EA:1",
+    };
+    let posted = routed.post(&target, text);
+    let typed = routed.deliver_to(&target, &pane, text);
+    (posted.map(drop), typed.map(drop), claude, home.dir)
 }
 
 /// Tracing: TC-044-06
 /// ACs: FR-044-AC-6
 #[test]
-fn tc_044_06_herdr_types_the_batch_only_when_the_socket_certainly_did_not() {
-    for (act, typed, expect) in [
-        (Act::Consume, 0, Ok(())),
-        (Act::Receipt("expired", Some("refused")), 1, Ok(())),
-        (Act::Receipt("dropped", Some("queue_full")), 1, Ok(())),
-        (Act::Receipt("held", None), 0, Err("held")),
-        (
-            Act::Receipt("expired", Some("timeout")),
-            0,
-            Err("ambiguous"),
-        ),
-        (Act::Silent, 0, Err("pending")),
+fn tc_044_06_nothing_is_typed_whatever_the_socket_answers() {
+    for (act, expect) in [
+        (Act::Consume, Ok(())),
+        (Act::Receipt("expired", Some("refused")), Err("not sent")),
+        (Act::Receipt("dropped", Some("queue_full")), Err("not sent")),
+        (Act::Receipt("held", None), Err("held")),
+        (Act::Receipt("expired", Some("timeout")), Err("ambiguous")),
+        (Act::Silent, Err("pending")),
     ] {
         let herdr = FakeHerdr::default();
-        let (result, _claude, _dir) = routed_send(Rig::new(act), &herdr, "batch text");
-        let kind = result.as_ref().err().map(|e| match e {
+        let (posted, typed, _claude, _dir) = routed_send(Rig::new(act), &herdr, "batch text");
+        let kind = posted.as_ref().err().map(|e| match e {
             DeliverError::Held(_) => "held",
             DeliverError::Deferred(_) => "deferred",
             DeliverError::Postponed(_) => "postponed",
@@ -942,15 +947,16 @@ fn tc_044_06_herdr_types_the_batch_only_when_the_socket_certainly_did_not() {
             DeliverError::Pending(_) => "pending",
             DeliverError::NotSent(_) => "not sent",
         });
-        assert_eq!(kind, expect.err(), "{result:?}");
-        assert_eq!(herdr.typed.lock().unwrap().len(), typed, "{result:?}");
+        assert_eq!(kind, expect.err(), "{posted:?}");
+        assert!(matches!(typed, Err(DeliverError::Deferred(_))), "{typed:?}");
+        assert!(herdr.typed.lock().unwrap().is_empty(), "{posted:?}");
     }
 }
 
 /// Tracing: TC-044-06
 /// ACs: FR-044-AC-6
 #[test]
-fn tc_044_06_a_missing_session_a_refused_connection_and_no_registry_go_to_herdr() {
+fn tc_044_06_a_missing_session_a_refused_connection_and_no_record_type_nothing() {
     let herdr = FakeHerdr::default();
     let pane: PaneId = "w1:p1".parse().unwrap();
     let home = Home::new();
@@ -967,27 +973,192 @@ fn tc_044_06_a_missing_session_a_refused_connection_and_no_registry_go_to_herdr(
         session,
         senders: "s",
     };
-    assert_eq!(
-        routed.deliver_to(&target(Some(&session)), &pane, "a"),
-        Ok(())
-    );
-    // A lead that registered no session id.
+    assert_eq!(routed.route("ea", "claude", Some(&session)), Route::Socket);
     assert!(matches!(
-        routed.deliver_to(&target(None), &pane, "b"),
-        Err(DeliverError::Deferred(_))
+        routed.post(&target(Some(&session)), "a"),
+        Err(DeliverError::NotSent(_))
     ));
-    // A session no record names.
-    let other: SessionId = "cccccccc-3333-4333-8333-cccccccccccc".parse().unwrap();
-    assert!(matches!(
-        routed.deliver_to(&target(Some(&other)), &pane, "c"),
-        Err(DeliverError::Deferred(_))
-    ));
-    assert_eq!(*herdr.typed.lock().unwrap(), ["a"]);
     let status = SocketStatus::read(&home.status()).unwrap();
     assert!(
         status.notes.iter().any(|n| n.starts_with("ea: ")),
         "{status:?}"
     );
+    // A lead that registered no session id, and a session no record names.
+    let other: SessionId = "cccccccc-3333-4333-8333-cccccccccccc".parse().unwrap();
+    for session in [Some(&session), None, Some(&other)] {
+        assert!(matches!(
+            routed.deliver_to(&target(session), &pane, "typed?"),
+            Err(DeliverError::Deferred(_))
+        ));
+    }
+    for session in [None, Some(&other)] {
+        assert!(matches!(
+            routed.route("ea", "claude", session),
+            Route::Wait(_)
+        ));
+    }
+    // Nor can a bare pane be typed into while sockets are in use.
+    assert!(matches!(
+        routed.deliver(&pane, "bare"),
+        Err(DeliverError::NotSent(_))
+    ));
+    assert!(herdr.typed.lock().unwrap().is_empty());
+}
+
+// ---- FR-044-AC-19: the route ---------------------------------------------------
+
+/// A record of a session that published no socket, started `age` ago.
+fn without_socket(age: Duration) -> impl FnOnce(&mut Value) {
+    move |record| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        record
+            .as_object_mut()
+            .unwrap()
+            .remove("messagingSocketPath");
+        record["startedAt"] = json!(u64::try_from((now - age).as_millis()).unwrap());
+    }
+}
+
+const OLD: Duration = Duration::from_secs(3600);
+
+/// The route of a Claude lead over `home`, with processes `pids` alive.
+fn route_of(home: &Home, pids: &[u32]) -> Route {
+    let deliverer = SocketDeliverer::start(home.config(), Box::new(FakeProcs::with(pids)));
+    deliverer.route("ea", Some(&SESSION.parse().unwrap()))
+}
+
+/// Tracing: TC-044-19
+/// ACs: FR-044-AC-19
+#[test]
+fn tc_044_19_only_a_session_that_provably_has_no_socket_is_put_on_the_terminal() {
+    // Its own live record names no socket, long enough after it started.
+    let home = Home::new();
+    home.record(4242, SESSION, without_socket(OLD));
+    assert_eq!(route_of(&home, &[4242]), Route::Terminal);
+    // An old Claude Code with neither protocol nor socket.
+    home.record(4242, SESSION, |r| {
+        without_socket(OLD)(r);
+        r.as_object_mut().unwrap().remove("peerProtocol");
+        r["version"] = json!("2.1.100");
+    });
+    assert_eq!(route_of(&home, &[4242]), Route::Terminal);
+
+    let waits = |home: &Home, pids: &[u32], needle: &str| match route_of(home, pids) {
+        Route::Wait(why) => assert!(why.contains(needle), "{needle}: {why}"),
+        other => panic!("{needle}: {other:?}"),
+    };
+    // Just started: the socket may not be published yet.
+    home.record(4242, SESSION, without_socket(Duration::from_secs(1)));
+    waits(&home, &[4242], "not published yet");
+    // No start time proves nothing.
+    home.record(4242, SESSION, |r| {
+        r.as_object_mut().unwrap().remove("messagingSocketPath");
+    });
+    waits(&home, &[4242], "not published yet");
+    // A socket of the process exists although the record names none.
+    home.record(4242, SESSION, without_socket(OLD));
+    let unnamed = listen(home.socket(4242)).unwrap();
+    waits(&home, &[4242], "a socket of this process exists");
+    drop(unnamed);
+    fs::remove_file(home.socket(4242)).unwrap();
+    // No live record, an unsupported version with a socket, a named socket that is
+    // absent, and no record at all.
+    waits(&home, &[], "none is a live process");
+    home.record(4242, SESSION, |r| r["peerProtocol"] = json!(2));
+    waits(&home, &[4242], "not a known-good inbox socket");
+    home.record(4242, SESSION, |_| {});
+    waits(&home, &[4242], "no usable socket");
+    fs::remove_file(home.sessions().join("4242.json")).unwrap();
+    waits(&home, &[4242], "no Claude Code session record");
+    // Parked: it listens, and consumes nothing.
+    home.record(4242, SESSION, |r| r["parkedJobId"] = json!("ee3da999"));
+    let _listening = listen(home.socket(4242)).unwrap();
+    waits(&home, &[4242], "parked");
+}
+
+/// Tracing: TC-044-19
+/// ACs: FR-044-AC-19
+#[test]
+fn tc_044_19_a_parked_record_is_passed_over_for_a_live_one() {
+    let home = Home::new();
+    home.record(4242, SESSION, |r| r["parkedJobId"] = json!("ee3da999"));
+    home.record(4343, SESSION, |r| r["kind"] = json!("bg"));
+    let _parked = listen(home.socket(4242)).unwrap();
+    let _live = listen(home.socket(4343)).unwrap();
+    assert_eq!(route_of(&home, &[4242, 4343]), Route::Socket);
+}
+
+/// Tracing: TC-044-19
+/// ACs: FR-044-AC-19
+#[test]
+fn tc_044_19_switched_off_or_unavailable_sockets_and_other_harnesses() {
+    let session: SessionId = SESSION.parse().unwrap();
+    let off = Routed::herdr_only(FakeHerdr::default());
+    assert_eq!(off.route("ea", "claude", Some(&session)), Route::Terminal);
+    let herdr = FakeHerdr::default();
+    let unavailable = Routed::socket_unavailable(herdr.clone(), "XDG_RUNTIME_DIR is not set");
+    assert!(matches!(
+        unavailable.route("ea", "claude", Some(&session)),
+        Route::Wait(_)
+    ));
+    assert_eq!(
+        unavailable.route("ea", "codex", Some(&session)),
+        Route::Terminal
+    );
+    let target = |kind| BatchTarget {
+        kind,
+        batch: BatchId::new(1),
+        lead: "ea",
+        session: Some(&session),
+        senders: "s",
+    };
+    let pane: PaneId = "w1:p1".parse().unwrap();
+    assert!(matches!(
+        unavailable.deliver_to(&target("claude"), &pane, "claude"),
+        Err(DeliverError::Deferred(_))
+    ));
+    assert!(
+        unavailable
+            .deliver_to(&target("codex"), &pane, "codex")
+            .is_ok()
+    );
+    assert_eq!(*herdr.typed.lock().unwrap(), ["codex"]);
+}
+
+/// Tracing: TC-044-19
+/// ACs: FR-044-AC-19
+///
+/// The route is asked again immediately before typing: a socket published since the
+/// readiness checks stops it.
+#[test]
+fn tc_044_19_a_socket_that_appears_before_typing_stops_it() {
+    let home = Home::new();
+    home.record(4242, SESSION, without_socket(OLD));
+    let deliverer = SocketDeliverer::start(home.config(), Box::new(FakeProcs::with(&[4242])));
+    let herdr = FakeHerdr::default();
+    let routed = Routed::socket_first(herdr.clone(), deliverer);
+    let session: SessionId = SESSION.parse().unwrap();
+    assert_eq!(
+        routed.route("ea", "claude", Some(&session)),
+        Route::Terminal
+    );
+    home.record(4242, SESSION, |_| {});
+    let _listening = listen(home.socket(4242)).unwrap();
+    let got = routed.deliver_to(
+        &BatchTarget {
+            kind: "claude",
+            batch: BatchId::new(1),
+            lead: "ea",
+            session: Some(&session),
+            senders: "s",
+        },
+        &"w1:p1".parse().unwrap(),
+        "late",
+    );
+    assert!(matches!(got, Err(DeliverError::Deferred(_))), "{got:?}");
+    assert!(herdr.typed.lock().unwrap().is_empty());
 }
 
 /// Tracing: TC-044-16
@@ -1205,7 +1376,7 @@ fn tc_044_01_herdr_alone_passes_every_batch_straight_through() {
         &pane,
         "typed",
     );
-    assert_eq!(got, Ok(()));
+    assert_eq!(got, Ok(DeliveryEvidence::HerdrPrompt));
     assert_eq!(*herdr.typed.lock().unwrap(), ["typed"]);
 }
 
@@ -1463,7 +1634,6 @@ fn tc_044_06_pending_consumption_does_not_switch_to_herdr() {
     } = rig;
     let herdr = FakeHerdr::default();
     let routed = Routed::socket_first(herdr.clone(), deliverer);
-    let pane: PaneId = "w1:p1".parse().unwrap();
     let target = BatchTarget {
         kind: "claude",
         batch: BatchId::new(2),
@@ -1472,7 +1642,7 @@ fn tc_044_06_pending_consumption_does_not_switch_to_herdr() {
         senders: "s",
     };
     assert!(matches!(
-        routed.deliver_to(&target, &pane, "two"),
+        routed.post(&target, "two"),
         Err(DeliverError::Pending(_))
     ));
     assert!(herdr.typed.lock().unwrap().is_empty());
@@ -1529,7 +1699,10 @@ fn tc_044_16_the_reply_socket_is_bound_later_when_its_directory_appears() {
     // The directory appears, with a session in it.
     fs::create_dir(&sockets).unwrap();
     let claude = FakeClaude::start(&home.socket(4242), home.transcript(SESSION), Act::Consume);
-    assert_eq!(deliverer.deliver(&target, "two"), Ok(()));
+    assert_eq!(
+        deliverer.deliver(&target, "two"),
+        Ok(DeliveryEvidence::SocketConfirmed)
+    );
     assert!(deliverer.reply_path().is_some());
     assert_eq!(claude.received().len(), 1);
     assert!(
@@ -2099,14 +2272,14 @@ fn tc_044_17_socket_delivery_does_not_require_a_herdr_get() {
 /// Tracing: TC-044-17
 /// ACs: FR-044-AC-17
 #[test]
-fn tc_044_17_herdr_fallback_ignores_pane_activity_after_socket_failure() {
+fn tc_044_17_a_session_with_no_usable_socket_waits_and_nothing_is_typed() {
     for status in [
         crate::herdr::AgentStatus::Working,
         crate::herdr::AgentStatus::Blocked,
         crate::herdr::AgentStatus::Idle,
         crate::herdr::AgentStatus::Done,
     ] {
-        let Some(mut w) = Watching::new(&format!("socket-fallback-{status:?}")) else {
+        let Some(mut w) = Watching::new(&format!("socket-waits-{status:?}")) else {
             return;
         };
         let home = Home::new();
@@ -2117,11 +2290,89 @@ fn tc_044_17_herdr_fallback_ignores_pane_activity_after_socket_failure() {
             ..IdleHerdr::default()
         };
         let routed = routed(d, &herdr);
-        w.send("fallback after socket failure");
-        w.tick(&routed);
-        assert_eq!((w.inbox(), w.in_flight()), (0, 0));
-        assert_eq!(herdr.typed.lock().unwrap().len(), 1, "{status:?}");
+        w.send("waits for its socket");
+        let before = w.log_entries();
+        for _ in 0..3 {
+            w.tick(&routed);
+        }
+        assert_eq!((w.inbox(), w.in_flight()), (1, 0));
+        assert_eq!(w.log_entries(), before, "{status:?}: nothing popped");
+        assert!(herdr.typed.lock().unwrap().is_empty(), "{status:?}");
+        assert_eq!(
+            w.log
+                .iter()
+                .filter(|l| l.contains("waits for the inbox socket"))
+                .count(),
+            1,
+            "{:?}",
+            w.log
+        );
     }
+}
+
+/// Tracing: TC-044-19
+/// ACs: FR-044-AC-19
+///
+/// The one Claude Code lead that is typed into: its session has no socket at all.
+#[test]
+fn tc_044_19_an_idle_session_with_no_socket_is_typed_into_by_the_watcher() {
+    let Some(mut w) = Watching::new("no-socket-typed") else {
+        return;
+    };
+    let home = Home::new();
+    home.record(4242, SESSION, without_socket(OLD));
+    let d = SocketDeliverer::start(home.config(), Box::new(FakeProcs::with(&[4242])));
+    let herdr = IdleHerdr::default();
+    let routed = routed(d, &herdr);
+    w.send("typed");
+    w.tick(&routed);
+    assert_eq!((w.inbox(), w.in_flight()), (0, 0));
+    assert_eq!(herdr.typed.lock().unwrap().len(), 1);
+}
+
+/// Tracing: TC-044-20
+/// ACs: FR-044-AC-20
+///
+/// The 2026-11-24 incident. A Claude Code process ran `/resume` and now shows a
+/// background job: its record is parked, it still takes lines on its socket and consumes
+/// none, and herdr reports its pane idle with its session id. Status requests forwarded
+/// from prior sessions of the address were typed into that pane, which is the other
+/// conversation's prompt. Nothing may be typed or posted; the mail waits, and is posted
+/// once the session is no longer parked.
+#[test]
+fn tc_044_20_mail_for_a_parked_session_is_never_typed_into_the_conversation_its_pane_shows() {
+    let Some(mut w) = Watching::new("parked-session") else {
+        return;
+    };
+    let home = Home::new();
+    home.record(4242, SESSION, |r| r["parkedJobId"] = json!("ee3da999"));
+    let claude = FakeClaude::start(&home.socket(4242), home.transcript(SESSION), Act::Silent);
+    let d = SocketDeliverer::start(home.config(), Box::new(FakeProcs::with(&[4242])));
+    let herdr = IdleHerdr::default();
+    let routed = routed(d, &herdr);
+    w.send("Program review status request status-1795585440185-9");
+    w.tick(&routed);
+    w.send("Program review status request status-1795587226498-10");
+    for _ in 0..3 {
+        w.tick(&routed);
+    }
+    assert!(
+        herdr.typed.lock().unwrap().is_empty(),
+        "typed into the prompt: {:?}",
+        herdr.typed.lock().unwrap()
+    );
+    assert!(claude.received().is_empty(), "posted to a parked session");
+    assert_eq!((w.inbox(), w.in_flight()), (2, 0));
+    let notes = SocketStatus::read(&home.status()).unwrap().notes;
+    assert!(
+        notes.iter().any(|n| n.contains("parked")),
+        "the reason is shown: {notes:?}"
+    );
+    // Resumed: the record is no longer parked.
+    home.record(4242, SESSION, |_| {});
+    w.tick(&routed);
+    assert_eq!(claude.received().len(), 1);
+    assert!(herdr.typed.lock().unwrap().is_empty());
 }
 
 /// Tracing: TC-044-18
@@ -2743,8 +2994,8 @@ fn tc_044_14_the_default_ack_wait_fits_in_the_default_tick_budget() {
 /// ACs: FR-044-AC-6
 ///
 /// With the production timings, a receiver that takes the line and never confirms
-/// gets exactly one socket post: the unconfirmed wait marks the lead suspect, so the
-/// next batch (another body, as a redelivery's marker makes it) goes through herdr.
+/// keeps the batch with the socket: it is not typed, and the next batch (another body,
+/// as a redelivery's marker makes it) is posted too.
 #[test]
 fn tc_044_06_pending_batches_keep_socket_ownership_at_production_timings() {
     let home = Home::new();
@@ -2754,7 +3005,6 @@ fn tc_044_06_pending_batches_keep_socket_ownership_at_production_timings() {
     let session: SessionId = SESSION.parse().unwrap();
     let herdr = FakeHerdr::default();
     let routed = Routed::socket_first(herdr.clone(), deliverer);
-    let pane: PaneId = "w1:p1".parse().unwrap();
     let target = |n: u64| BatchTarget {
         kind: "claude",
         batch: BatchId::new(n),
@@ -2763,7 +3013,7 @@ fn tc_044_06_pending_batches_keep_socket_ownership_at_production_timings() {
         senders: "s",
     };
     let _ = routed.settle();
-    let first = routed.deliver_to(&target(1), &pane, "one");
+    let first = routed.post(&target(1), "one");
     assert!(matches!(first, Err(DeliverError::Pending(_))), "{first:?}");
     assert!(
         routed
@@ -2772,7 +3022,7 @@ fn tc_044_06_pending_batches_keep_socket_ownership_at_production_timings() {
             .any(|s| matches!(s.action, SettleAction::Renew(_)))
     );
     assert!(matches!(
-        routed.deliver_to(&target(2), &pane, "two"),
+        routed.post(&target(2), "two"),
         Err(DeliverError::Pending(_))
     ));
     assert_eq!(claude.received().len(), 2);
@@ -2783,7 +3033,7 @@ fn tc_044_06_pending_batches_keep_socket_ownership_at_production_timings() {
 /// ACs: FR-044-AC-14
 ///
 /// At production timings a healthy lead that comes second after a wedged one is
-/// deferred, unposted and not flagged (it is not made suspect and nobody is told it
+/// deferred, unposted and not flagged (nobody is told it
 /// failed), and is delivered on the next tick.
 #[test]
 fn tc_044_14_a_healthy_lead_after_a_wedged_one_is_deferred_not_flagged() {
@@ -2829,9 +3079,12 @@ fn tc_044_14_a_healthy_lead_after_a_wedged_one_is_deferred_not_flagged() {
         started.elapsed()
     );
     assert!(h.received().is_empty(), "not posted");
-    // Next tick: a fresh budget, and the healthy lead is not suspect.
+    // Next tick: a fresh budget.
     let _ = deliverer.settle();
-    assert_eq!(send("healthy", &healthy, 2), Ok(()));
+    assert_eq!(
+        send("healthy", &healthy, 2),
+        Ok(DeliveryEvidence::SocketConfirmed)
+    );
     assert_eq!(h.received().len(), 1);
 }
 
@@ -2840,7 +3093,7 @@ fn tc_044_14_a_healthy_lead_after_a_wedged_one_is_deferred_not_flagged() {
 ///
 /// Twenty leads that accept the line and never answer, at production timings: the
 /// first tick stays inside its budget, only one is posted to, the rest are deferred,
-/// and each later tick makes progress (the lead tried becomes suspect), so none starves.
+/// and each later tick makes progress, so none starves.
 #[test]
 fn tc_044_14_twenty_wedged_leads_cannot_hold_a_tick_past_its_budget() {
     use super::deliverer::TICK_BUDGET;
@@ -3361,7 +3614,7 @@ fn tc_044_12_a_delivered_message_with_no_transcript_line_is_acked_after_the_grac
         thread::sleep(Duration::from_millis(10));
     }
     let s = acked.expect("acknowledged after the grace");
-    assert_eq!(s.action, SettleAction::Ack, "{s:?}");
+    assert_eq!(s.action, SettleAction::AckUnconfirmed, "{s:?}");
     assert!(s.why.contains("delivered_unconfirmed"), "{s:?}");
     assert!(s.notice.is_none(), "not a 'never approved' notice");
     let notes = SocketStatus::read(&rig.home.status())
@@ -3654,7 +3907,7 @@ fn tc_044_12_an_approved_batch_adopted_after_a_restart_continues_its_grace() {
                 SettleAction::DeadLetter,
                 "an approved message is never dead-lettered as never approved: {s:?}"
             );
-            if s.action == SettleAction::Ack {
+            if s.action == SettleAction::AckUnconfirmed {
                 acked = Some(s);
             }
         }
@@ -3870,7 +4123,7 @@ impl Drop for SlowReader {
 ///
 /// The write bound is one deadline for the whole line, not per `write` call: a 900 KiB
 /// batch to a receiver that reads 128 KiB every 1.8 s (each read well inside 2 s) gives up
-/// at the 2 s deadline, unconfirmed, and the lead then goes through herdr.
+/// at the 2 s deadline, unconfirmed, and the batch stays with the socket.
 #[test]
 fn tc_044_14_a_slow_reader_cannot_stretch_the_write_past_its_deadline() {
     let home = Home::new();
@@ -4188,6 +4441,7 @@ fn tc_044_11_a_settlement_failed_note_is_cleared_only_by_its_own_batch() {
         action: SettleAction::Ack,
         why: "x".into(),
         notice: None,
+        dead_letter_reason: None,
     };
     rig.deliverer.applied(&other, &Ok(1));
     let _ = rig.deliverer.settle();
@@ -4233,7 +4487,11 @@ fn tc_044_15_an_untrusted_status_directory_is_alerted_once_and_delivery_goes_on(
             },
             &format!("m{n}"),
         );
-        assert_eq!(got, Ok(()), "delivery goes on");
+        assert_eq!(
+            got,
+            Ok(DeliveryEvidence::SocketConfirmed),
+            "delivery goes on"
+        );
     }
     // A successful socket write can precede the receiver thread parsing it.
     // Observe all three arrivals rather than racing an immediate snapshot.
@@ -4344,14 +4602,14 @@ fn tc_046_04_an_unknown_receipt_status_is_ambiguous_and_counted() {
 ///
 /// A transcript line that names the id without a structured `origin.msg_id` is evidence the
 /// message was received: the delivery is acknowledged (not ambiguous), the drift is counted,
-/// and the lead is not marked suspect, so the next batch still goes to the socket, not herdr.
+/// and the next batch goes to the socket.
 #[test]
 fn tc_046_05_a_renamed_transcript_origin_is_acked_counted_and_never_falls_back() {
     let rig = Rig::new(Act::RenamedOrigin);
     assert_eq!(rig.send("one"), Ok(()));
     let status = SocketStatus::read(&rig.home.status()).unwrap();
     assert_eq!(drift_of(&status).transcript_shape_unrecognised, 1);
-    // Not suspect: the socket is tried again (a suspect lead would be NotSent, to herdr).
+    // The socket is used again.
     assert_eq!(rig.send("two"), Ok(()));
     assert_eq!(rig.claude.received().len(), 2, "still posted to the socket");
     // A silent socket retains its batches without disabling later socket sends.
@@ -4386,7 +4644,7 @@ fn tc_046_12_settle_acks_an_unrecognised_shape_with_a_note() {
     let settlements = rig.deliverer.settle();
     let acks: Vec<_> = settlements
         .iter()
-        .filter(|s| matches!(s.action, SettleAction::Ack))
+        .filter(|s| matches!(s.action, SettleAction::AckUnconfirmed))
         .collect();
     assert_eq!(acks.len(), 1);
     assert!(
@@ -4571,21 +4829,29 @@ fn both_delivery_routes_preserve_local_directory_observation_authority() {
 
 // ---- FR-054: the socket is tried only for Claude Code leads ------------------
 
-/// Delivers one batch for a lead of harness `kind` through `routed`.
-fn route_as(routed: &Routed<FakeHerdr>, kind: &str, session: &SessionId, text: &str) {
+/// Delivers one batch for a lead of harness `kind` through `routed`, on the transport
+/// the route names; `Err` is why it waits.
+fn route_as(
+    routed: &Routed<FakeHerdr>,
+    kind: &str,
+    session: &SessionId,
+    text: &str,
+) -> Result<(), String> {
     let pane: PaneId = "w1:p1".parse().unwrap();
-    let got = routed.deliver_to(
-        &BatchTarget {
-            kind,
-            batch: BatchId::new(1),
-            lead: "ea",
-            session: Some(session),
-            senders: "s",
-        },
-        &pane,
-        text,
-    );
-    assert_eq!(got, Ok(()), "{kind}");
+    let target = BatchTarget {
+        kind,
+        batch: BatchId::new(1),
+        lead: "ea",
+        session: Some(session),
+        senders: "s",
+    };
+    let got = match routed.route("ea", kind, Some(session)) {
+        Route::Socket => routed.post(&target, text),
+        Route::Terminal => routed.deliver_to(&target, &pane, text),
+        Route::Wait(why) => return Err(why),
+    };
+    assert!(got.is_ok(), "{kind}: {got:?}");
+    Ok(())
 }
 
 /// Tracing: TC-054-01
@@ -4607,7 +4873,7 @@ fn tc_054_01_codex_and_opencode_leads_go_straight_to_herdr_with_no_status_entry(
     let herdr = FakeHerdr::default();
     let routed = Routed::socket_first(herdr.clone(), deliverer);
     for kind in ["codex", "opencode"] {
-        route_as(&routed, kind, &session, kind);
+        route_as(&routed, kind, &session, kind).unwrap();
     }
     assert_eq!(*herdr.typed.lock().unwrap(), ["codex", "opencode"]);
     assert!(
@@ -4622,14 +4888,15 @@ fn tc_054_01_codex_and_opencode_leads_go_straight_to_herdr_with_no_status_entry(
 /// Tracing: TC-054-02
 /// ACs: FR-054-AC-2
 #[test]
-fn tc_054_02_a_claude_lead_with_no_record_still_goes_to_herdr_with_the_note() {
+fn tc_054_02_a_claude_lead_with_no_record_waits_with_the_note_and_nothing_is_typed() {
     let home = Home::new();
     let deliverer = SocketDeliverer::start(home.config(), Box::new(FakeProcs::with(&[])));
     let herdr = FakeHerdr::default();
     let routed = Routed::socket_first(herdr.clone(), deliverer);
     let session: SessionId = SESSION.parse().unwrap();
-    route_as(&routed, "claude", &session, "typed");
-    assert_eq!(*herdr.typed.lock().unwrap(), ["typed"]);
+    let waited = route_as(&routed, "claude", &session, "typed");
+    assert!(waited.is_err(), "{waited:?}");
+    assert!(herdr.typed.lock().unwrap().is_empty());
     let status = SocketStatus::read(&home.status()).unwrap();
     assert_eq!(status.notes.len(), 1, "{:?}", status.notes);
     assert!(
@@ -4652,11 +4919,11 @@ fn tc_054_04_a_claude_lead_with_a_record_is_delivered_by_socket_and_an_unknown_k
     } = rig;
     let herdr = FakeHerdr::default();
     let routed = Routed::socket_first(herdr.clone(), deliverer);
-    route_as(&routed, "claude", &session, "by socket");
+    route_as(&routed, "claude", &session, "by socket").unwrap();
     assert_eq!(claude.received().len(), 1);
     assert!(herdr.typed.lock().unwrap().is_empty());
     for kind in ["", "Claude", "claude-code", "unknown"] {
-        route_as(&routed, kind, &session, kind);
+        route_as(&routed, kind, &session, kind).unwrap();
     }
     assert_eq!(
         *herdr.typed.lock().unwrap(),
@@ -4683,9 +4950,9 @@ fn tc_054_01_a_lead_that_stopped_being_claude_loses_its_status_entry() {
     } = rig;
     let herdr = FakeHerdr::default();
     let routed = Routed::socket_first(herdr.clone(), deliverer);
-    route_as(&routed, "claude", &session, "one");
+    route_as(&routed, "claude", &session, "one").unwrap();
     assert_eq!(SocketStatus::read(&home.status()).unwrap().leads.len(), 1);
-    route_as(&routed, "codex", &session, "two");
+    route_as(&routed, "codex", &session, "two").unwrap();
     assert!(SocketStatus::read(&home.status()).unwrap().leads.is_empty());
 }
 
@@ -4909,7 +5176,10 @@ fn tc_055_05_the_process_lookup_runs_unlocked_and_at_most_once_per_period() {
         session: Some(&session),
         senders: "hub:EA:1",
     };
-    assert_eq!(deliverer.deliver(&target, "one"), Ok(()));
+    assert_eq!(
+        deliverer.deliver(&target, "one"),
+        Ok(DeliveryEvidence::SocketConfirmed)
+    );
     probe.lookups.lock().unwrap().clear();
 
     for _ in 0..5 {
@@ -5220,7 +5490,11 @@ fn tc_046_19_drift_is_kept_for_at_most_sixteen_versions_without_affecting_delive
             },
             &format!("message {n}"),
         );
-        assert_eq!(sent, Ok(()), "delivery {n} proceeds as without drift");
+        assert_eq!(
+            sent,
+            Ok(DeliveryEvidence::SocketUnconfirmed),
+            "delivery {n} proceeds as without drift"
+        );
     }
     let status = SocketStatus::read(&home.status()).unwrap();
     assert_eq!(status.versions.len(), 16);
