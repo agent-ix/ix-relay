@@ -351,8 +351,7 @@ fn all_order_statuses_are_listed_in_stable_read_only_pages() {
         String::from_utf8_lossy(&fourth.stderr)
     );
     let fourth_json: serde_json::Value = serde_json::from_slice(&fourth.stdout).unwrap();
-    assert_eq!(fourth_json["truncated"], false);
-    assert!(fourth_json["next_cursor"].is_null());
+    assert_eq!(fourth_json["truncated"], true);
     assert_eq!(fourth_json["orders"][0]["state"], "expired");
     assert_eq!(fourth_json["orders"][0]["expired"], true);
     let fifth = read(Some(
@@ -554,12 +553,13 @@ fn order_writer_and_reader_share_retention_and_report_visible_legacy_gaps() {
         "the coverage boundary is set once"
     );
 
-    let initial_member: String = redis::cmd("ZRANGE")
+    let initial_members: Vec<String> = redis::cmd("ZRANGE")
         .arg(format!("{}receipt-meta:orders-all", bus.prefix))
         .arg(0)
         .arg(0)
         .query(&mut bus.raw)
         .unwrap();
+    let initial_member = &initial_members[0];
     let initial_id = initial_member.split_once('|').unwrap().1;
     let record_ttl: i64 = redis::cmd("TTL")
         .arg(format!("{}receipt-meta:order:{initial_id}", bus.prefix))

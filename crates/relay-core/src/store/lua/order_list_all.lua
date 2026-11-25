@@ -81,6 +81,10 @@ for _, order_id in ipairs(missing) do
     end
 end
 
-if #orders == 0 then orders = cjson.empty_array end
-return cjson.encode({oldest_available_at = oldest or cjson.null, orders = orders,
-    complete = complete, incomplete_reason = incomplete_reason, skipped = skipped})
+local page = {oldest_available_at = oldest or cjson.null, orders = orders,
+    complete = complete, incomplete_reason = incomplete_reason, skipped = skipped}
+if #orders == 0 then
+    page.orders = nil
+    return string.sub(cjson.encode(page), 1, -2) .. ',"orders":[]}'
+end
+return cjson.encode(page)
