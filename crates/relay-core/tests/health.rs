@@ -241,7 +241,7 @@ fn tc_029_05_the_health_reads_change_no_inbox() {
         let mut state: Vec<(String, Vec<u8>, i64)> = keys
             .into_iter()
             .map(|k| {
-                let dump: Vec<u8> = redis::cmd("DUMP").arg(&k).query(raw).unwrap();
+                let dump: Vec<u8> = relay_test_support::canonical_dump(raw, &k);
                 let ttl: i64 = redis::cmd("PTTL").arg(&k).query(raw).unwrap();
                 (k, dump, ttl)
             })

@@ -393,10 +393,8 @@ return ids
     )
     .invoke(&mut bus.raw)
     .unwrap();
-    let before: Vec<u8> = redis::cmd("DUMP")
-        .arg(bus.key("work-events"))
-        .query(&mut bus.raw)
-        .unwrap();
+    let key = bus.key("work-events");
+    let before: Vec<u8> = relay_test_support::canonical_dump(&mut bus.raw, &key);
     let first = bus.relay.work_events(&seeded[0], 1).unwrap();
     assert!(first.truncated);
     assert!(first.has_more);
@@ -419,10 +417,8 @@ return ids
     assert!(end.events.is_empty());
     assert!(!end.has_more);
     assert_eq!(end.next_cursor, second.next_cursor);
-    let after: Vec<u8> = redis::cmd("DUMP")
-        .arg(bus.key("work-events"))
-        .query(&mut bus.raw)
-        .unwrap();
+    let key = bus.key("work-events");
+    let after: Vec<u8> = relay_test_support::canonical_dump(&mut bus.raw, &key);
     assert_eq!(
         before, after,
         "history reads do not trim or acknowledge entries"

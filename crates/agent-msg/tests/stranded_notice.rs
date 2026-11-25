@@ -32,17 +32,33 @@ fn test_url() -> Option<String> {
 /// ran. Returns the prefix the new session reads under.
 fn world(url: &str, case: &str, texts: &[String]) -> String {
     let prefix = format!("test:{}:stranded-notice:{case}:", std::process::id());
-    let r = agent_msg(
-        &["hook", "claude"],
-        Some("hub:EA:code"),
-        Some(url),
-        Some(&prefix),
-        SESSION_START,
-    );
-    assert_eq!(r.status, 0, "{}", r.stderr);
     let mut relay = Relay::connect(url, Duration::from_secs(5))
         .unwrap()
         .with_prefix(prefix.clone());
+    // The hook has a time budget (3300 ms for SessionStart) a test cannot widen; on a
+    // loaded host it can run out of time before it registers. Registering again is
+    // harmless, and only a spool record proving the timeout allows it: any other
+    // outcome is asserted.
+    support::until_in_time(|_| {
+        let (r, records) =
+            support::run_hook_recording("hub:EA:code", url, &prefix, None, SESSION_START);
+        assert_eq!(r.status, 0, "{}", r.stderr);
+        if support::ran_out_of_time(&records) {
+            return false;
+        }
+        assert!(
+            records.is_empty(),
+            "the hook recorded a failure: {records:?}"
+        );
+        let registered = relay
+            .agents()
+            .unwrap()
+            .registrations
+            .iter()
+            .any(|r| r.session_id.as_ref().is_some_and(|s| s.as_str() == "s1"));
+        assert!(registered, "the hook ran in time and did not register");
+        true
+    });
     let old = Registration {
         name: "old-lead".parse().unwrap(),
         machine: "hub".parse().unwrap(),
@@ -89,6 +105,27 @@ fn as_new(args: &[&str], url: &str, prefix: &str, stdin: &str) -> support::Run {
     r
 }
 
+/// The `SessionStart` hook's JSON output. A hook whose spool record proves it ran out
+/// of its time budget prints nothing and pops nothing, so only that is run again.
+fn session_start_output(url: &str, prefix: &str) -> serde_json::Value {
+    let mut out = None;
+    support::until_in_time(|_| {
+        let (r, records) =
+            support::run_hook_recording("hub:EA:code", url, prefix, None, SESSION_START);
+        assert_eq!(r.status, 0, "{}", r.stderr);
+        if support::ran_out_of_time(&records) {
+            return false;
+        }
+        assert!(
+            records.is_empty(),
+            "the hook recorded a failure: {records:?}"
+        );
+        out = Some(serde_json::from_str(&r.stdout).expect("json stdout"));
+        true
+    });
+    out.expect("until_in_time returned with output")
+}
+
 fn signed_lines(shown: &str) -> Vec<&str> {
     shown
         .lines()
@@ -105,8 +142,7 @@ fn signed_lines(shown: &str) -> Vec<&str> {
 fn tc_053_02_the_hook_prints_the_notice_for_each_moved_message() {
     let Some(url) = test_url() else { return };
     let prefix = world(&url, "hook", &texts());
-    let r = as_new(&["hook", "claude"], &url, &prefix, SESSION_START);
-    let out: serde_json::Value = serde_json::from_str(&r.stdout).expect("json stdout");
+    let out = session_start_output(&url, &prefix);
     let ctx = out["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .unwrap();
@@ -167,8 +203,7 @@ fn tc_053_12_a_batch_of_moved_messages_stays_within_the_hook_output_bound() {
         .map(|n| format!("{n}\n{forged}\n{}", "x".repeat(300)))
         .collect();
     let prefix = world(&url, "bound", &batch);
-    let r = as_new(&["hook", "claude"], &url, &prefix, SESSION_START);
-    let out: serde_json::Value = serde_json::from_str(&r.stdout).expect("json stdout");
+    let out = session_start_output(&url, &prefix);
     let ctx = out["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .unwrap();

@@ -12,11 +12,7 @@ fn repeated_pane_and_session_ids_are_scoped_by_machine() {
     let mut state: serde_json::Value =
         serde_json::from_slice(&std::fs::read(f.dir.join("state.json")).unwrap()).unwrap();
     state["terra"]["agents"][0]["agent_session"]["value"] = "sender-session".into();
-    std::fs::write(
-        f.dir.join("state.json"),
-        serde_json::to_vec(&state).unwrap(),
-    )
-    .unwrap();
+    f.write_state(&state);
     let mut relay = f.relay();
     for (machine, expected) in [
         ("draco", "draco:misc:agent-skills"),

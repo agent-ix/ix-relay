@@ -280,7 +280,14 @@ fn tc_029_03_with_redis_down_doctor_fails_fast_and_still_reports_herdr() {
         .iter()
         .find(|c| c["check"] == "herdr")
         .expect("the herdr check is reported without Redis");
-    assert_eq!(herdr["status"], "ok");
+    // FR-029-AC-3 asks only that the check is reported. Under load a stub spawn can
+    // outlast the probe deadline, which doctor reports as unknown, never as a fault;
+    // the `ok` answer is pinned deterministically in `relay_ops::herdr_check`.
+    let status = herdr["status"].as_str().unwrap();
+    assert!(matches!(status, "ok" | "unknown"), "{herdr}");
+    if status == "unknown" {
+        assert_eq!(herdr["code"], "herdr_unchecked", "{herdr}");
+    }
 }
 
 /// Tracing: TC-029-04
@@ -356,7 +363,7 @@ fn tc_029_05_doctor_changes_nothing() {
         let mut state: Vec<(String, Vec<u8>, bool)> = keys
             .into_iter()
             .map(|k| {
-                let dump: Vec<u8> = redis::cmd("DUMP").arg(&k).query(raw).unwrap();
+                let dump: Vec<u8> = relay_test_support::canonical_dump(raw, &k);
                 let ttl: i64 = redis::cmd("PTTL").arg(&k).query(raw).unwrap();
                 (k, dump, ttl >= 0)
             })

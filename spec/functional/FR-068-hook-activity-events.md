@@ -100,6 +100,10 @@ agent's turn, and it never changes a tool permission.
   and `relay-watcher` SHALL export the counts as `ix.relay.hook.activity_skipped`
   ([FR-045](./FR-045-watcher-pushes-metrics-over-otlp.md)), so an outage is a visible
   defect.
+- Updates to that local state SHALL take a file lock and SHALL wait for it at most 50
+  milliseconds. An update that cannot get the lock in that time SHALL be dropped and
+  not counted, so that a held lock never delays the agent, and no update that was
+  applied SHALL be lost. Making a dropped update visible is tracked in SWM-293.
 - The hook handler SHALL attempt the event write after mail delivery work, within the
   event's budget in [NFR-001](../non-functional/NFR-001-hook-time-budget.md), so that
   telemetry never consumes the window mail needs.
@@ -131,6 +135,7 @@ agent's turn, and it never changes a tool permission.
 | FR-068-AC-11 | With Redis blackholed, after one failed write the next 5 seconds of tool-call hooks add no write time and are counted as skipped; the backoff doubles to the 5-minute cap on repeated failures; a successful write ends it; `ix.relay.hook.activity_skipped` reports the skips and drops. | Test |
 | FR-068-AC-12 | A `PreToolUse`, `Notification` and `SessionEnd` call writes its event and prints nothing on stdout, including for a tool that the harness would otherwise ask about; no output contains an approve, deny, ask or block decision. | Test |
 | FR-068-AC-13 | The Claude and Codex plugin registrations are parsed by a test that fails unless every supported event of the input list maps to a registered hook with a timeout of at least its budget plus 1 second. | Test |
+| FR-068-AC-14 | Given several hooks updating the activity state file at once, and separately a hook that finds the file's lock held, the file holds exactly the updates that took the lock, none of them lost, and an update that finds the lock held is dropped without being counted and returns within the 50 millisecond lock bound plus a margin for scheduling, without waiting for the holder. | Test |
 
 ## Dependencies
 

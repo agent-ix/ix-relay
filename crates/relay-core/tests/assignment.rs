@@ -294,7 +294,7 @@ fn reads_change_nothing_and_pop_no_inbox() {
         keys.sort();
         keys.into_iter()
             .map(|key| {
-                let dump: Vec<u8> = redis::cmd("DUMP").arg(&key).query(&mut bus.raw).unwrap();
+                let dump: Vec<u8> = relay_test_support::canonical_dump(&mut bus.raw, &key);
                 (key, dump)
             })
             .collect()

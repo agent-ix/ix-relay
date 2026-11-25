@@ -645,7 +645,7 @@ fn dump_all(bus: &mut Bus) -> std::collections::BTreeMap<String, Vec<u8>> {
     keys.sort();
     keys.into_iter()
         .map(|key| {
-            let bytes: Vec<u8> = redis::cmd("DUMP").arg(&key).query(&mut bus.raw).unwrap();
+            let bytes: Vec<u8> = relay_test_support::canonical_dump(&mut bus.raw, &key);
             (key, bytes)
         })
         .collect()
