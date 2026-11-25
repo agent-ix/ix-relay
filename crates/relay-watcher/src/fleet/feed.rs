@@ -347,6 +347,10 @@ pub struct HookCounts {
     /// Events not written for want of a verified lane.
     #[serde(default)]
     pub unregistered: u64,
+    /// Updates a hook could not apply because the state file lock was held, counted in the
+    /// sibling `activity.lockskips` file, not in the JSON.
+    #[serde(skip)]
+    pub lock_skipped: u64,
 }
 
 /// The counts in the file at `path`. A missing file means no hook has ever written
@@ -356,13 +360,24 @@ pub struct HookCounts {
 ///
 /// [`ErrorClass::Unreadable`] or [`ErrorClass::Parse`].
 pub fn read_hook_counts(path: &Path) -> Result<Option<HookCounts>, ErrorClass> {
-    match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|_| ErrorClass::Parse),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(ErrorClass::Unreadable),
-    }
+    let lock_skipped = match fs::metadata(path.with_extension("lockskips")) {
+        Ok(m) => m.len(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => 0,
+        Err(_) => return Err(ErrorClass::Unreadable),
+    };
+    let counts: Option<HookCounts> = match fs::read(path) {
+        Ok(bytes) => Some(serde_json::from_slice(&bytes).map_err(|_| ErrorClass::Parse)?),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(_) => return Err(ErrorClass::Unreadable),
+    };
+    // Every update may have been dropped, so skips with no state file still report.
+    Ok(match (counts, lock_skipped) {
+        (None, 0) => None,
+        (counts, n) => Some(HookCounts {
+            lock_skipped: n,
+            ..counts.unwrap_or_default()
+        }),
+    })
 }
 
 #[cfg(test)]
@@ -465,10 +480,27 @@ mod tests {
             Ok(Some(HookCounts {
                 skipped: 3,
                 dropped: 2,
-                unregistered: 1
+                unregistered: 1,
+                lock_skipped: 0
             }))
         );
         fs::write(&path, "{").unwrap();
         assert_eq!(read_hook_counts(&path), Err(ErrorClass::Parse));
+    }
+
+    #[trace("FR-068-AC-15")]
+    #[test]
+    fn lock_skips_are_read_from_the_sidecar_with_or_without_the_state_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("activity.json");
+        fs::write(dir.path().join("activity.lockskips"), "111").unwrap();
+        let only_skips = read_hook_counts(&path).unwrap().unwrap();
+        assert_eq!(
+            only_skips.lock_skipped, 3,
+            "every update was skipped, still reported"
+        );
+        fs::write(&path, r#"{"skipped":3,"dropped":2}"#).unwrap();
+        let both = read_hook_counts(&path).unwrap().unwrap();
+        assert_eq!((both.skipped, both.dropped, both.lock_skipped), (3, 2, 3));
     }
 }

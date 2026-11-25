@@ -92,6 +92,8 @@ pub(crate) struct Env {
     pub state_file: Option<PathBuf>,
     /// `spool/hook.jsonl`, when a config location is known.
     pub spool_file: Option<PathBuf>,
+    /// `spool/activity.lockskips`, the one-byte-per-dropped-update file beside the activity state.
+    pub activity_skips_file: Option<PathBuf>,
     /// The time the Redis section may take.
     pub redis_budget: Duration,
     /// `[watcher] delivery` from `config.toml`, or why the watcher would refuse it.
@@ -321,6 +323,8 @@ pub(crate) struct Facts {
     pub watcher_file: FileState,
     /// The local spool.
     pub spool: SpoolState,
+    /// Activity updates a hook dropped because the state file lock was held (FR-068).
+    pub activity_lock_skips: u64,
     /// The herdr check.
     pub herdr: HerdrCheck,
     /// herdr's panes.
@@ -392,6 +396,12 @@ pub(crate) fn gather(
         redis,
         watcher_file: read_watcher_file(env.state_file.as_deref()),
         spool: read_spool(env.spool_file.as_deref()),
+        activity_lock_skips: env
+            .activity_skips_file
+            .as_deref()
+            .and_then(|p| std::fs::symlink_metadata(p).ok())
+            .filter(|m| m.file_type().is_file())
+            .map_or(0, |m| m.len()),
         herdr,
         panes,
         service,

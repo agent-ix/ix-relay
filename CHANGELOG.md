@@ -1,5 +1,9 @@
 # Release notes
 
+## Unreleased
+
+- Count hook activity updates that were dropped because `spool/activity.json`'s lock was held. Each drop appends one byte to `spool/activity.lockskips` without taking the lock; `relay-watcher` exports the count as `ix.relay.hook.activity_skipped{reason="lock"}` and `agent-msg doctor` warns `activity_lock_skipped` while it is non-zero.
+
 ## 0.4.2
 
 - Replace the Python scripts with Rust binaries in the new `relay-tools` crate: `check-test-matrix` (behind `make check-matrix`), `archive-relay-namespace`, `codex-herdr-launcher` and `capture-codex-session-start`. Each keeps the Python tool's behaviour and flags, with these differences. `archive-relay-namespace` and `capture-codex-session-start` write equivalent JSON, but with different key order and separators. `archive-relay-namespace` resolves its Redis URL like `agent-msg` (`IX_RELAY_URL`, then `url` in the file named by `IX_RELAY_CONFIG` or `~/.ix/relay/config.toml`, then the default), so its `--config` flag is gone: set `IX_RELAY_CONFIG`. It refuses `rediss://` URLs, because no relay build carries a TLS library. The SessionStart capture hook command is now the binary path, with no `python3`. `scripts/latency-bench.py`, a one-off harness no gate or doc called, is removed. Launchers already installed as `codex` are copies of the old script and keep working until replaced by `codex-herdr-launcher`.

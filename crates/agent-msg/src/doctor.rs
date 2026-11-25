@@ -81,6 +81,8 @@ fn env_from(machine: relay_core::MachineName, url: String, prefix: String) -> En
         prefix,
         state_file: config::state_dir().map(|d| d.join(relay_core::health::WATCHER_FILE_NAME)),
         spool_file: Spool::in_config_dir().map(|s| s.path().to_path_buf()),
+        activity_skips_file: crate::activity_state::ActivityState::in_config_dir()
+            .map(|s| s.skips_file()),
         redis_budget: facts::REDIS_BUDGET,
         // A config that does not load is reported as such; the mode is then the
         // default, which reads no socket status.

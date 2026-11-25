@@ -135,6 +135,7 @@ pub(crate) fn evaluate(f: &Facts) -> Vec<Check> {
     }
     watcher_file(f, up, &mut checks);
     spool(f, &mut checks);
+    activity_lock_skips(f, &mut checks);
     if let Some(up) = up {
         bus_failures(f, up, &mut checks);
         recent_moves(f, up, &mut checks);
@@ -1248,6 +1249,25 @@ fn any_recent(f: &Facts, records: &[&SpoolRecord]) -> bool {
         .any(|r| f.now_ms.saturating_sub(r.at_ms) < RECENT_FAILURE_MS)
 }
 
+/// Hook activity updates dropped for want of the state file lock are counted, so a
+/// non-zero count is a defect to look at, not silence.
+fn activity_lock_skips(f: &Facts, checks: &mut Vec<Check>) {
+    if f.activity_lock_skips == 0 {
+        return;
+    }
+    checks.push(Check::warn(
+        Family::HookSpool,
+        Code::ActivityLockSkipped,
+        Some("hook activity state"),
+        format!(
+            "{} hook activity update(s) were dropped because the state file lock was held",
+            f.activity_lock_skips
+        ),
+        "concurrent hooks held spool/activity.json's lock past the 50 ms bound, so those events were not counted in it",
+        "the count in spool/activity.lockskips is cumulative; look for a stuck hook process holding spool/activity.lock",
+    ));
+}
+
 fn spool(f: &Facts, checks: &mut Vec<Check>) {
     let subject = Some("hook spool");
     match &f.spool {
@@ -2196,6 +2216,7 @@ mod tests {
                 pid_alive: Some(true),
             },
             spool: SpoolState::Empty,
+            activity_lock_skips: 0,
             herdr: HerdrCheck::Ok {
                 version: MIN_HERDR_VERSION,
                 shape_verified: true,
@@ -2752,6 +2773,9 @@ mod tests {
                     )],
                     undecodable: 0,
                 };
+            }),
+            (Code::ActivityLockSkipped, Warn, |f| {
+                f.activity_lock_skips = 2
             }),
             (Code::HookSpoolUnlocated, Unknown, |f| {
                 f.spool = SpoolState::NoPath

@@ -504,14 +504,19 @@ fn tc_045_29_focus_info_carries_the_ticket_of_the_branch_and_is_empty_without_on
     );
 }
 
-#[trace("FR-068-AC-11")]
+#[trace("FR-068-AC-11", "FR-068-AC-15")]
 #[test]
 fn tc_068_11_the_hook_counts_are_exported_by_reason_and_left_out_when_unreadable() {
     let mut c = Collector::new(host(), Profile::default(), sources(None), INTERVAL);
     let t0 = Instant::now();
     c.sample(t0, &mut |_| {});
     let r = registry_of(&c, t0);
-    for (reason, n) in [("backoff", 3), ("failed", 2), ("unregistered", 1)] {
+    for (reason, n) in [
+        ("backoff", 3),
+        ("failed", 2),
+        ("unregistered", 1),
+        ("lock", 4),
+    ] {
         assert_eq!(
             value(&r, "ix.relay.hook.activity_skipped", &[("reason", reason)]),
             Some(n)

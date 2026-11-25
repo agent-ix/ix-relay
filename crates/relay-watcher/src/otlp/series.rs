@@ -115,7 +115,7 @@ pub static FLEET_LANE_COMPILE_SECONDS: Instrument = Instrument {
 pub static HOOK_ACTIVITY_SKIPPED: Instrument = Instrument {
     name: "ix.relay.hook.activity_skipped",
     unit: "{event}",
-    description: "Activity events a hook did not write, by reason (backoff, failed, unregistered), cumulative on this host.",
+    description: "Activity events a hook did not write, by reason (backoff, failed, unregistered, lock), cumulative on this host.",
     kind: Kind::Sum,
 };
 

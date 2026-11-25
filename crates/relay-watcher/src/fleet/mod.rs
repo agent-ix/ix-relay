@@ -861,6 +861,7 @@ impl Collector {
                 ("backoff", counts.skipped),
                 ("failed", counts.dropped),
                 ("unregistered", counts.unregistered),
+                ("lock", counts.lock_skipped),
             ] {
                 registry.sum(
                     &HOOK_ACTIVITY_SKIPPED,
@@ -950,6 +951,7 @@ pub(crate) mod fixtures {
                         skipped: 3,
                         dropped: 2,
                         unregistered: 1,
+                        lock_skipped: 4,
                     })),
                     Err,
                 )
