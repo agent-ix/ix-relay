@@ -470,7 +470,7 @@ fn empty_pages_and_aged_out_cursors_are_json_arrays_with_coverage_metadata() {
     assert!(empty_json["oldest_available_at"].is_null());
     let confirmed_at = bus.relay.confirm_orders_complete_since().unwrap();
     assert!(confirmed_at >= at);
-    let before_coverage = read(0, confirmed_at, None);
+    let before_coverage = read(at, confirmed_at, None);
     assert!(before_coverage.status.success());
     let before_json: serde_json::Value = serde_json::from_slice(&before_coverage.stdout).unwrap();
     assert_eq!(before_json["orders"].as_array().unwrap().len(), 1);
@@ -759,12 +759,13 @@ fn closing_an_unindexed_order_clears_the_confirmed_coverage_boundary() {
     );
 
     assert_eq!(bus.send(&["--order"], None).status, 0);
-    let member: String = redis::cmd("ZREVRANGE")
+    let members: Vec<String> = redis::cmd("ZREVRANGE")
         .arg(format!("{}receipt-meta:orders-all", bus.prefix))
         .arg(0)
         .arg(0)
         .query(&mut bus.raw)
         .unwrap();
+    let member = &members[0];
     let order_id = member.split_once('|').unwrap().1.to_owned();
     let confirmed_at = bus.relay.confirm_orders_complete_since().unwrap();
     assert_eq!(
