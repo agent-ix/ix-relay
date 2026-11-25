@@ -36,3 +36,28 @@ Gates, run in the one worktree against an isolated Redis 8.10.2 with isolated HO
 | FND-005 | low | A registration whose kind is not exactly `claude` is typed into even when its session has a socket. The kind comes from Herdr's `agent` member and becomes `unknown` when Herdr omits it, while the Claude hook (which knows it is Claude) leaves the mail to the watcher, so every message would be typed. FR-054 specifies this; the owner's requirement does not allow it. Waiting when a live Claude record names the session would close it. Not observed with Herdr 0.9.1. | crates/relay-watcher/src/socket.rs:135-140; crates/relay-ops/src/find.rs:631 |
 | FND-006 | low | `delivery = "herdr"` still types into every lead and doctor reports it as `ok`. Main's sample config in docs/configuration.md carried the line uncommented, so a machine set up from it keeps typing after the upgrade with nothing flagging it. Report it as `warn`, and check each machine's config at install. | crates/agent-msg/src/doctor/checks.rs:161-167 |
 | FND-007 | low | Doc comments and the README contradict the new behavior: `SocketStatus.reply_socket` says every batch then goes to Herdr, `notes` says these batches go to Herdr, `DeadLetterNote.reason` omits `consumption_expired`, and the README opening says the watcher types queued messages into idle leads. | crates/relay-core/src/socket_status.rs:180; crates/relay-core/src/socket_status.rs:528-529; crates/relay-core/src/socket_status.rs:550-551; README.md:5 |
+
+## New findings (disposition pass 1)
+
+| ID | Severity | Summary | Refs |
+| --- | --- | --- | --- |
+| FND-008 | low | A kept post has no end while its process lives. `gone` compares only pid and start time, and `/clear` changes the session id inside the same process, so a batch posted to the old session (or one whose write failed with nothing sent) stays in flight, is never re-sent or dead-lettered and holds one of 16 in-flight slots. The operator is told once per batch (up to 16 notifications per lead, repeated after a watcher restart) and doctor warns. | `crates/relay-watcher/src/socket/session.rs:50`; `crates/relay-watcher/src/socket/deliverer.rs:1796` |
+| FND-009 | low | Several batches of one exited receiver are requeued in random order. Settlements are collected by iterating the `pending` HashMap and each requeue pushes to the front of the inbox, so later mail can be delivered before earlier mail. | `crates/relay-watcher/src/socket/deliverer.rs:1827`; `crates/relay-core/src/store/lua/requeue.lua` |
+| FND-010 | low | A `receiver_gone` requeue uses the path meant for mail that was certainly not sent: the receipt records `definitely_not_sent` and the batch is not marked `(redelivered)`, although a post whose transcript cannot be found or read may have been consumed. | `crates/relay-watcher/src/socket/deliverer.rs:1764`; `crates/relay-core/src/store/lua/requeue.lua:16` |
+| FND-011 | low | On one failed herdr layout read the new publication replaces the machine snapshot with only the live socket sessions, so addresses of leads herdr types into stop resolving at once instead of lasting out the 90 s lease. Senders get a loud error and the next good refresh restores them. FR-036 specifies this behavior. | `crates/relay-watcher/src/main.rs:558` |
+
+## Dispositions
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | One notification after 5 minutes of waiting, nothing typed. |
+| FND-002 | fixed | The shape block now applies to the terminal route only. |
+| FND-003 | fixed | A post to a gone process is requeued unless the transcript shows it; a live receiver keeps it. Approval-held expiry is a tracked follow-up. |
+| FND-004 | fixed | The post offset is persisted and entries up to 30 days are adopted. |
+| FND-005 | fixed | The route is decided from the session record for every kind. |
+| FND-006 | fixed | Doctor warns `socket_disabled`. |
+| FND-007 | fixed | Comments and README corrected; `consumption_expired` removed. |
+| FND-008 | still-open | new in this round, no fix yet; requeue when the process record no longer names the session, and notify once per lead. Not judged merge-blocking. |
+| FND-009 | still-open | new in this round, no fix yet; apply requeues in descending batch order. Not judged merge-blocking. |
+| FND-010 | still-open | new in this round, no fix yet; record an unknown outcome and mark the redelivery. Not judged merge-blocking. |
+| FND-011 | still-open | new in this round; specified behavior, needs a fix or an accepted decision. Not judged merge-blocking. |

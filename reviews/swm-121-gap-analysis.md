@@ -36,3 +36,12 @@ Ticket: SWM-121. PR agent-ix/ix-relay#30 at `f2cbcc8e48953c5d7d5c41b515534c1642b
 `quire matrix` computes every criterion in the repository as untagged because the module set does not bind the repository's `Tracing:`/`ACs:` comment form (`trace-id-outside-marker`); this predates the PR, so a grep index was used. Every criterion of FR-044 (1 to 20), FR-046 (1 to 19) and FR-054 (1 to 4) has at least one tagged test. FR-014-AC-2 to AC-4 and FR-018-AC-1 to AC-3 have none by this index; their text did not change and they are outside this review.
 
 Semantic review: limited to the changed tests. Plan completion: not assessed
+
+## Dispositions
+
+| FND | outcome | reason |
+| --- | --- | --- |
+| FND-001 | fixed | Unavailable sockets write a status file and doctor warns with the reason. |
+| FND-002 | fixed | Doctor warns for old or untraceable posts and names the causes. |
+| FND-003 | fixed | Tests retagged to AC-9 and AC-24 and listed in spec/tests.md. |
+| FND-004 | fixed | The test now covers forwarded and redelivered mail. |
