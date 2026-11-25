@@ -34,21 +34,38 @@ pub fn render(frame: &mut Frame, app: &mut App, now: Instant) {
     let now_epoch = SystemClock.now_epoch_seconds();
     let unbound = app.binding.is_none();
     let report = app.report.value.as_ref().and_then(Option::as_ref);
+    let whole_team = report.and_then(|r| r.scope.as_ref()).is_none_or(|scope| {
+        scope.initiatives.is_empty() && scope.projects.is_empty() && scope.tickets.is_empty()
+    });
     let team = app.team.clone().or_else(|| {
-        app.binding.as_ref().and_then(|binding| {
+        let workspace = app.binding.as_ref().and_then(|binding| {
             binding
                 .address
                 .parse::<relay_core::Address>()
                 .ok()
                 .map(|address| address.workspace().to_ascii_uppercase())
-        })
-    });
-    let whole_team = report.and_then(|r| r.scope.as_ref()).is_none_or(|scope| {
-        scope.initiatives.is_empty() && scope.projects.is_empty() && scope.tickets.is_empty()
+        })?;
+        if whole_team {
+            return Some(workspace);
+        }
+        let snapshot = app.tracker.value.as_ref()?;
+        let is_linear_team = snapshot
+            .issues
+            .iter()
+            .any(|issue| issue.team_key.0 == workspace)
+            || snapshot
+                .projects
+                .iter()
+                .any(|project| project.team_keys.iter().any(|key| key.0 == workspace));
+        is_linear_team.then_some(workspace)
     });
     let team_label = format!(
         "{}{}",
-        team.as_deref().unwrap_or("unknown team"),
+        team.as_deref().unwrap_or(if whole_team {
+            "unknown team"
+        } else {
+            "selected scope"
+        }),
         if whole_team { " team" } else { "" }
     );
     app.scope.refresh(
@@ -1979,6 +1996,17 @@ pub(crate) mod tests {
         let focused = summarize(snapshot, Some(report), "SWM").unwrap();
         assert_eq!(focused.scope.leaf_ids.len(), 2);
         assert!(focused.initiatives.is_empty());
+        // Herdr workspace labels need not be Linear team keys. An explicit project
+        // scope must still render when the lead is bound to a differently named tab.
+        let workspace_labeled =
+            crate::monitor_tracker::summarize_report_scope(snapshot, Some(report)).unwrap();
+        assert_eq!(workspace_labeled.scope.leaf_ids.len(), 3);
+        assert!(
+            workspace_labeled
+                .tickets
+                .iter()
+                .any(|ticket| ticket.identifier == "AGE-1" && ticket.in_scope)
+        );
         assert!(
             !focused
                 .tickets
@@ -2021,6 +2049,15 @@ pub(crate) mod tests {
         let waiting = screen(&mut app, 90, 15);
         assert!(waiting.contains("Scope: SWM team · waiting for Linear"));
         assert!(!waiting.contains("Scope: not reported"));
+    }
+
+    #[test]
+    fn project_scoped_lead_ignores_herdr_workspace_as_a_linear_team() {
+        let mut app = app();
+        app.binding.as_mut().unwrap().address = "terra:quoin:code".into();
+        let rendered = screen(&mut app, 90, 15);
+        assert!(!rendered.contains("Scope failed"), "{rendered}");
+        assert!(rendered.contains("Tasks: 1/2 done"), "{rendered}");
     }
 
     #[trace("FR-065-AC-5")]

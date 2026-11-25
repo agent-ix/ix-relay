@@ -51,7 +51,7 @@ pub(crate) struct FocusesArgs {
     /// Writes: the caller's Herdr address; omitted means the calling pane.
     #[arg(long, global = true)]
     lead: Option<String>,
-    /// Writes: the expected native session ID; refuse a different occupant.
+    /// Writes: select this native session within a shared tab and refuse a replacement occupant.
     #[arg(long, global = true)]
     session: Option<SessionId>,
     #[command(subcommand)]

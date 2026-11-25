@@ -107,10 +107,26 @@ pub fn summarize(
     report: Option<&WorkReport>,
     team: &str,
 ) -> Result<DashboardView, ix_board::Error> {
+    summarize_with_team(snapshot, report, Some(team))
+}
+
+/// Summarize a lead's explicit scope without interpreting its Herdr workspace as a Linear team.
+pub fn summarize_report_scope(
+    snapshot: &TrackerState,
+    report: Option<&WorkReport>,
+) -> Result<DashboardView, ix_board::Error> {
+    summarize_with_team(snapshot, report, None)
+}
+
+fn summarize_with_team(
+    snapshot: &TrackerState,
+    report: Option<&WorkReport>,
+    team: Option<&str>,
+) -> Result<DashboardView, ix_board::Error> {
     let whole_team = WorkScope::default();
     let assignment = report.and_then(|r| r.scope.as_ref()).unwrap_or(&whole_team);
     let agents = report.map_or(&[][..], |r| r.agents.as_slice());
-    summarize_inputs(snapshot, assignment, agents, Some(team))
+    summarize_inputs(snapshot, assignment, agents, team)
 }
 
 /// Resolves explicit department selectors through the same authoritative scope path.
