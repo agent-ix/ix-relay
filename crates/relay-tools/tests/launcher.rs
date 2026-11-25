@@ -4,6 +4,7 @@
     reason = "test code: a failed unwrap is the failure signal"
 )]
 
+use ix_trace_rs::trace;
 use std::{os::unix::fs::PermissionsExt, process::Command};
 
 fn run(herdr: Option<&str>, args: &[&str]) -> (String, bool) {
@@ -28,6 +29,7 @@ fn run(herdr: Option<&str>, args: &[&str]) -> (String, bool) {
 }
 
 #[test]
+#[trace("FR-006-AC-3")]
 fn interactive_herdr_start_runs_the_stub_with_no_daemon_and_the_same_environment() {
     let (out, ok) = run(Some("1"), &["resume", "session-id"]);
     assert!(ok);
@@ -38,6 +40,7 @@ fn interactive_herdr_start_runs_the_stub_with_no_daemon_and_the_same_environment
 }
 
 #[test]
+#[trace("FR-006-AC-3")]
 fn outside_herdr_the_arguments_are_untouched() {
     let (out, ok) = run(None, &["resume", "session-id"]);
     assert!(ok);
@@ -45,6 +48,7 @@ fn outside_herdr_the_arguments_are_untouched() {
 }
 
 #[test]
+#[trace("FR-006-AC-3")]
 fn missing_codex_is_a_failure() {
     let out = Command::new(env!("CARGO_BIN_EXE_codex-herdr-launcher"))
         .env("PATH", "/nonexistent")

@@ -45,11 +45,15 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-005 | FR-005-AC-2 | TC-005-02 | ✅ written (`two_leads_sharing_an_address_are_shown_by_name_not_by_a_shared_address`; 0.3.0 location contract) |
 | FR-006 | FR-006-AC-1 | TC-006-01 | ✅ written (`genuine_startup_ignores_stale_pane_and_explicit_alias_then_caches_session`; 0.3.0 location contract) |
 | FR-006 | FR-006-AC-2 | TC-006-02 | ✅ written (`post_tool_stop_and_subagent_hooks_preserve_delivery_semantics`; 0.3.0 location contract) |
-| FR-006 | FR-006-AC-3 | TC-006-03 | ✅ written (`test_interactive_context_and_existing_environment`; 0.3.0 location contract) |
+| FR-006 | FR-006-AC-3 | TC-006-03 | ✅ written (`launcher::tests::interactive_starts_resumes_and_forks_gain_no_daemon`, `noninteractive_and_outside_herdr_pass_through`, `a_non_utf8_argument_keeps_its_position_and_passes_through_unchanged` and `relay-tools/tests/launcher.rs`; 0.3.0 location contract) |
 | FR-021 | FR-021-AC-1 | TC-021-01 | ✅ written (`moving_labels_changes_address_but_not_queue_identity`; 0.3.0 location contract) |
 | FR-021 | FR-021-AC-2 | TC-021-02 | ✅ written (`verified_caller_ignores_a_newer_stale_record_for_the_inherited_pane`; 0.3.0 location contract) |
 | FR-022 | FR-022-AC-1 | TC-022-01 | ✅ written (`concurrent_cold_sends_share_one_session_registration_without_duplicate_messages`; 0.3.0 location contract) |
 | FR-022 | FR-022-AC-2 | TC-022-02 | ✅ written (`unverified_or_different_session_cannot_adopt_a_live_pane`; 0.3.0 location contract) |
+| FR-073 | FR-073-AC-1 | TC-073-01 | ✅ written (`relay-tools` `matrix::tests`) |
+| FR-073 | FR-073-AC-2 | TC-073-02 | ✅ written (`relay-tools/tests/archive.rs`) |
+| FR-073 | FR-073-AC-3 | TC-073-03 | ✅ written (`relay-tools/tests/archive_cli.rs`) |
+| FR-073 | FR-073-AC-4 | TC-073-04 | ✅ written (`relay-tools` `session_start::tests`) |
 
 | FR-007 | FR-007-AC-1 | TC-007-01 | 🚧 pending |
 | FR-007 | FR-007-AC-2 | TC-007-02 | 🚧 pending |
@@ -783,17 +787,21 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-005-02 | FR-005-AC-2 | Unit | Ambiguous and unplaced records cannot provide a signed public identity. | ✅ written (`two_leads_sharing_an_address_are_shown_by_name_not_by_a_shared_address`) |
 | TC-006-01 | FR-006-AC-1 | Integration | Genuine startup ignores stale pane variables and stale alias metadata. | ✅ written (`genuine_startup_ignores_stale_pane_and_explicit_alias_then_caches_session`) |
 | TC-006-02 | FR-006-AC-2 | Integration | Prompt, tool and stop hooks deliver through the genuine session queue; subagent hooks do not enroll or consume lead mail. | ✅ written (`post_tool_stop_and_subagent_hooks_preserve_delivery_semantics`) |
-| TC-006-03 | FR-006-AC-3 | Unit | Launcher tests verify isolation for interactive starts/resumes and passthrough for CLI commands. | ✅ written (`test_interactive_context_and_existing_environment`) |
+| TC-006-03 | FR-006-AC-3 | Unit | Launcher tests verify isolation for interactive starts/resumes and passthrough for CLI commands. | ✅ written (`launcher::tests::interactive_starts_resumes_and_forks_gain_no_daemon`, `noninteractive_and_outside_herdr_pass_through`, `a_non_utf8_argument_keeps_its_position_and_passes_through_unchanged` and `relay-tools/tests/launcher.rs`) |
 | TC-021-01 | FR-021-AC-1 | Unit | Location moves preserve the session queue identity. | ✅ written (`moving_labels_changes_address_but_not_queue_identity`; 0.3.0 location contract) |
 | TC-021-02 | FR-021-AC-2 | Integration | A newer stale registry record cannot win over genuine session proof. | ✅ written (`verified_caller_ignores_a_newer_stale_record_for_the_inherited_pane`) |
 | TC-022-01 | FR-022-AC-1 | Integration | Concurrent cold sends share one recipient registration while preserving every distinct message. | ✅ written (`concurrent_cold_sends_share_one_session_registration_without_duplicate_messages`; 0.3.0 location contract) |
 | TC-022-02 | FR-022-AC-2 | Integration | Unverified or different sessions cannot register or send through a live pane. | ✅ written (`unverified_or_different_session_cannot_adopt_a_live_pane`) |
+| TC-073-01 | FR-073-AC-1 | Unit | `check-test-matrix` prints each matrix problem and exits 1, and prints the recount and exits 0 for a consistent matrix. | ✅ written (`a_test_case_row_after_any_python_line_break_is_still_refused`, `an_oversized_total_is_a_mismatch_not_a_skipped_row`, `every_problem_is_reported_sorted`) |
+| TC-073-02 | FR-073-AC-2 | Integration | `archive-relay-namespace` archives binary keys with TTL, leaves the source, writes 0600, refuses overwrite, the new namespace and `rediss://`, and times out. | ✅ written (`binary_dump_ttl_source_preservation_and_exclusive_output`, `rediss_is_refused_with_a_message_naming_why`, `a_server_that_never_replies_fails_within_the_timeout`) |
+| TC-073-03 | FR-073-AC-3 | Integration | `archive-relay-namespace` resolves its URL from `IX_RELAY_URL`, then `IX_RELAY_CONFIG`, without `HOME`. | ✅ written (`the_url_comes_from_the_file_named_by_ix_relay_config_without_home`, `ix_relay_url_wins_over_the_file_and_needs_no_home`) |
+| TC-073-04 | FR-073-AC-4 | Unit | `capture-codex-session-start` records only allowlisted `SessionStart` fields, 0600, and never follows a symlink. | ✅ written (`session_start_is_recorded_with_allowlisted_context_only`, `a_symlinked_capture_file_is_not_followed`) |
 
 ## Coverage Gaps
 
 | Gap ID | Description | Risk Level | Mitigation |
 |--------|-------------|------------|------------|
-| GAP-001 | 275 of 373 rows have a written test; changed 0.3.0 obligations have replacement evidence above. Retired alias tests are not evidence for the new contract. Remaining pending/partial rows require their stated evidence. | High | Complete remaining evidence without claiming full coverage. |
+| GAP-001 | 279 of 377 rows have a written test; changed 0.3.0 obligations have replacement evidence above. Retired alias tests are not evidence for the new contract. Remaining pending/partial rows require their stated evidence. | High | Complete remaining evidence without claiming full coverage. |
 | GAP-002 | 15 rows still say `red on main`: obligations of requirements `main` does not yet meet, red when written (FR-031, FR-033-AC-2, FR-034-AC-4, FR-035, FR-037). The rest of FR-032..FR-034 are written or partial since the relink work (FR-043). | High | AGE-2033 (AGE-2032 landed; the NFR-001 stdin row landed under AGE-2033). |
 | GAP-003 | No `herdr` stub or blackholed-Redis harness exists yet for the fault-injection and benchmark rows. | Medium | Build with the NFR-001..003 suites. |
 
@@ -804,10 +812,10 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | Benchmark | 8 | 5 | 0 | 0 | 0 | 0 | 62% |
 | Fuzz | 3 | 0 | 3 | 0 | 0 | 0 | 0% |
 | Inspection | 3 | 0 | 0 | 0 | 0 | 0 | 0% |
-| Integration | 200 | 140 | 0 | 12 | 0 | 0 | 70% |
+| Integration | 202 | 142 | 0 | 12 | 0 | 0 | 70% |
 | Property | 38 | 29 | 0 | 5 | 0 | 0 | 76% |
 | Static | 2 | 0 | 2 | 0 | 0 | 0 | 0% |
-| Unit | 119 | 91 | 0 | 3 | 0 | 0 | 76% |
+| Unit | 121 | 93 | 0 | 3 | 0 | 0 | 76% |
 
 "Written, named method" counts rows whose status names a written test that uses the method the row names. It records that the test exists, not a run: the last recorded run is the `make ci` output in the PR comment for the head commit, and Redis-backed tests skip without `IX_RELAY_TEST_URL`. Fuzz and Static rows are counted separately: the Fuzz rows are property-based fuzz lanes (see `fuzz/README.md`), not recorded `cargo-fuzz` campaigns, and the Static rows are exhaustive checks over a bound, not Kani proofs. Rows marked red (`#[ignore]` with a ticket) are not counted.
 

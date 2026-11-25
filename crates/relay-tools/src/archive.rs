@@ -7,7 +7,7 @@ use std::{
     io::{BufWriter, Write},
     os::unix::fs::OpenOptionsExt,
     path::Path,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -16,30 +16,29 @@ use serde::Serialize;
 /// The namespace an archive must not be taken of.
 const NEW_NAMESPACE: &str = "ixr:v3:";
 
-/// Why an archive failed. Callers print one fixed line; the detail is for
-/// tests.
-#[derive(Debug)]
+/// How long a connect, read or write may take before the archive fails.
+pub const IO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Why an archive failed.
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// The prefix is empty or the new namespace.
+    #[error("choose the explicit prior namespace, not the new v3 namespace")]
     Prefix,
-    /// The URL is not a `redis://` or `rediss://` URL.
+    /// The URL is not a `redis://` URL.
+    #[error("the Redis URL must start with redis://")]
     Url,
+    /// The URL asks for TLS, which no ix-relay build carries.
+    #[error(
+        "rediss:// is not supported: ix-relay builds carry no TLS library and the relay is reached over WireGuard; use a redis:// URL"
+    )]
+    Tls,
     /// A Redis command or connection failed.
-    Redis(redis::RedisError),
+    #[error("Redis rejected the archive read: {0}")]
+    Redis(#[from] redis::RedisError),
     /// The output file could not be created (it may already exist) or written.
-    Io(std::io::Error),
-}
-
-impl From<redis::RedisError> for Error {
-    fn from(err: redis::RedisError) -> Self {
-        Self::Redis(err)
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(err: std::io::Error) -> Self {
-        Self::Io(err)
-    }
+    #[error("cannot write the archive: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 #[derive(Serialize)]
@@ -70,18 +69,33 @@ fn line(out: &mut impl Write, value: &impl Serialize) -> Result<(), Error> {
     Ok(())
 }
 
+/// [`archive_within`] with [`IO_TIMEOUT`].
+pub fn archive(url: &str, prefix: &str, output: &Path) -> Result<usize, Error> {
+    archive_within(url, prefix, output, IO_TIMEOUT)
+}
+
 /// Dumps every key under `prefix` (except the new namespace) to the new file
 /// `output` as JSON lines and returns the number of keys written. The output
 /// is created exclusively with mode 0600, so an existing archive is never
-/// overwritten.
-pub fn archive(url: &str, prefix: &str, output: &Path) -> Result<usize, Error> {
+/// overwritten. Connecting, reading and writing each fail after `timeout`.
+pub fn archive_within(
+    url: &str,
+    prefix: &str,
+    output: &Path,
+    timeout: Duration,
+) -> Result<usize, Error> {
     if prefix.is_empty() || prefix == NEW_NAMESPACE {
         return Err(Error::Prefix);
     }
-    if !(url.starts_with("redis://") || url.starts_with("rediss://")) {
+    if url.starts_with("rediss://") {
+        return Err(Error::Tls);
+    }
+    if !url.starts_with("redis://") {
         return Err(Error::Url);
     }
-    let mut connection = redis::Client::open(url)?.get_connection()?;
+    let mut connection = redis::Client::open(url)?.get_connection_with_timeout(timeout)?;
+    connection.set_read_timeout(Some(timeout))?;
+    connection.set_write_timeout(Some(timeout))?;
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)

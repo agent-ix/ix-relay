@@ -1,9 +1,12 @@
 //! Archive against the test Redis (`IX_RELAY_TEST_URL`); skipped without one.
 
-use relay_tools::archive::{Error, archive};
+use ix_trace_rs::trace;
+use relay_tools::archive::{Error, archive, archive_within};
 use std::os::unix::fs::PermissionsExt;
+use std::time::{Duration, Instant};
 
 #[test]
+#[trace("FR-073-AC-2")]
 fn binary_dump_ttl_source_preservation_and_exclusive_output() {
     let Ok(url) = std::env::var("IX_RELAY_TEST_URL") else {
         eprintln!("skipping: IX_RELAY_TEST_URL unset");
@@ -49,6 +52,7 @@ fn binary_dump_ttl_source_preservation_and_exclusive_output() {
 }
 
 #[test]
+#[trace("FR-073-AC-2")]
 fn refuses_the_new_namespace_and_a_non_redis_url_before_connecting() {
     let out = std::path::Path::new("/nonexistent/never-created");
     assert!(matches!(
@@ -60,4 +64,36 @@ fn refuses_the_new_namespace_and_a_non_redis_url_before_connecting() {
         Err(Error::Prefix)
     ));
     assert!(matches!(archive("http://x", "old:", out), Err(Error::Url)));
+}
+
+#[test]
+#[trace("FR-073-AC-2")]
+fn rediss_is_refused_with_a_message_naming_why() {
+    let out = std::path::Path::new("/nonexistent/never-created");
+    let err = archive("rediss://127.0.0.1:1", "old:", out).unwrap_err();
+    assert!(matches!(err, Error::Tls));
+    assert!(err.to_string().contains("no TLS library"));
+}
+
+#[test]
+#[trace("FR-073-AC-2")]
+fn a_server_that_never_replies_fails_within_the_timeout() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("redis://{}", listener.local_addr().unwrap());
+    let holder = std::thread::spawn(move || {
+        let held = listener.accept();
+        std::thread::sleep(Duration::from_secs(3));
+        drop(held);
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let started = Instant::now();
+    let result = archive_within(
+        &url,
+        "old:",
+        &dir.path().join("a.jsonl"),
+        Duration::from_millis(300),
+    );
+    assert!(matches!(result, Err(Error::Redis(_))), "{result:?}");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    holder.join().unwrap();
 }

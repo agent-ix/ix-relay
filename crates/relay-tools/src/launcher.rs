@@ -51,7 +51,9 @@ const VALUE_OPTIONS: &[&str] = &[
 /// The arguments to hand the real Codex. Only interactive starts, resumes and
 /// forks inside Herdr (`in_herdr`, that is `HERDR_ENV=1`) gain `--no-daemon`.
 pub fn arguments(args: &[OsString], in_herdr: bool) -> Vec<OsString> {
-    let text = |arg: &OsString| arg.to_str().map(str::to_owned);
+    // Lossy only for the scan: a non-UTF-8 argument keeps its position and
+    // matches nothing, and the arguments passed on are never altered.
+    let text = |arg: &OsString| Some(arg.to_string_lossy().into_owned());
     let mut first: Option<String> = None;
     let mut skip_value = false;
     // Skip option values before deciding whether the first positional token is
@@ -90,6 +92,8 @@ pub fn arguments(args: &[OsString], in_herdr: bool) -> Vec<OsString> {
 
 #[cfg(test)]
 mod tests {
+    use ix_trace_rs::trace;
+
     use super::*;
 
     fn os(args: &[&str]) -> Vec<OsString> {
@@ -97,6 +101,7 @@ mod tests {
     }
 
     #[test]
+    #[trace("FR-006-AC-3")]
     fn interactive_starts_resumes_and_forks_gain_no_daemon() {
         for args in [
             vec![],
@@ -113,6 +118,7 @@ mod tests {
     }
 
     #[test]
+    #[trace("FR-006-AC-3")]
     fn noninteractive_and_outside_herdr_pass_through() {
         for args in [
             vec!["--model", "gpt-6", "exec", "prompt"],
@@ -127,5 +133,23 @@ mod tests {
             arguments(&os(&["resume", "session"]), false),
             os(&["resume", "session"])
         );
+    }
+
+    #[test]
+    #[trace("FR-006-AC-3")]
+    fn a_non_utf8_argument_keeps_its_position_and_passes_through_unchanged() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let bad = OsString::from_vec(vec![0xff]);
+        let value = vec![
+            OsString::from("--model"),
+            bad.clone(),
+            OsString::from("exec"),
+        ];
+        assert_eq!(arguments(&value, true), value);
+        let interactive = vec![OsString::from("--model"), bad.clone()];
+        let mut want = vec![OsString::from("--no-daemon")];
+        want.extend(interactive.clone());
+        assert_eq!(arguments(&interactive, true), want);
     }
 }

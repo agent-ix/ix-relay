@@ -105,6 +105,8 @@ pub fn run(input: impl Read, codex_home: &Path, env: impl Fn(&str) -> Option<Str
 
 #[cfg(test)]
 mod tests {
+    use ix_trace_rs::trace;
+
     use super::*;
 
     fn env(key: &str) -> Option<String> {
@@ -112,6 +114,7 @@ mod tests {
     }
 
     #[test]
+    #[trace("FR-073-AC-4")]
     fn session_start_is_recorded_with_allowlisted_context_only() {
         let payload = json!({"hook_event_name": "SessionStart", "session_id": "s", "transcript_path": "/t", "secret": "x"});
         let rec = record(&payload, env).unwrap();
@@ -122,6 +125,7 @@ mod tests {
     }
 
     #[test]
+    #[trace("FR-073-AC-4")]
     fn other_events_and_subagents_are_skipped() {
         assert!(record(&json!({"hook_event_name": "Stop"}), env).is_none());
         let sub = json!({"hook_event_name": "SessionStart", "agent_id": "a"});
@@ -132,6 +136,7 @@ mod tests {
     }
 
     #[test]
+    #[trace("FR-073-AC-4")]
     fn run_appends_a_private_line_and_swallows_bad_input() {
         let home = tempfile::tempdir().unwrap();
         let line = br#"{"hook_event_name":"SessionStart","session_id":"s"}"#;
@@ -148,6 +153,7 @@ mod tests {
     }
 
     #[test]
+    #[trace("FR-073-AC-4")]
     fn a_symlinked_capture_file_is_not_followed() {
         let home = tempfile::tempdir().unwrap();
         let out = output_path(home.path());

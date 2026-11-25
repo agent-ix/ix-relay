@@ -1,22 +1,19 @@
-//! `archive-relay-namespace --prefix <old prefix> --output <file> [--config <toml>]`
+//! `archive-relay-namespace --prefix <old prefix> --output <file>`
 //!
 //! Archives the keys of a prior relay namespace without modifying them. The
-//! Redis URL is `IX_RELAY_URL`, else `url` in the config file
-//! (default `~/.ix/relay/config.toml`).
+//! Redis URL resolves as in `agent-msg`: `IX_RELAY_URL`, else `url` in the
+//! config file (`IX_RELAY_CONFIG`, default `~/.ix/relay/config.toml`), else
+//! the default local URL.
 
 use std::{path::PathBuf, process::ExitCode};
+
+use relay_core::config::{CoreFlags, load_core};
 
 const FAILED: &str =
     "archive failed; source keys unchanged; inspect any partial output before retrying";
 
-struct Args {
-    prefix: String,
-    output: PathBuf,
-    config: PathBuf,
-}
-
-fn parse() -> Option<Args> {
-    let (mut prefix, mut output, mut config) = (None, None, None);
+fn parse() -> Option<(String, PathBuf)> {
+    let (mut prefix, mut output) = (None, None);
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let (name, inline) = match flag.split_once('=') {
@@ -27,46 +24,32 @@ fn parse() -> Option<Args> {
         match name.as_str() {
             "--prefix" => prefix = Some(value),
             "--output" => output = Some(PathBuf::from(value)),
-            "--config" => config = Some(PathBuf::from(value)),
             _ => return None,
         }
     }
-    let config = config.or_else(|| {
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".ix/relay/config.toml"))
-    })?;
-    Some(Args {
-        prefix: prefix?,
-        output: output?,
-        config,
-    })
-}
-
-fn url(config: &std::path::Path) -> Option<String> {
-    match std::env::var("IX_RELAY_URL") {
-        Ok(url) if !url.is_empty() => Some(url),
-        _ => {
-            let table: toml::Table = std::fs::read_to_string(config).ok()?.parse().ok()?;
-            table.get("url")?.as_str().map(str::to_owned)
-        }
-    }
+    Some((prefix?, output?))
 }
 
 fn main() -> ExitCode {
-    let Some(args) = parse() else {
-        eprintln!(
-            "usage: archive-relay-namespace --prefix <prefix> --output <file> [--config <file>]"
-        );
+    let Some((prefix, output)) = parse() else {
+        eprintln!("usage: archive-relay-namespace --prefix <prefix> --output <file>");
         return ExitCode::from(2);
     };
-    let archived = url(&args.config).ok_or(()).and_then(|url| {
-        relay_tools::archive::archive(&url, &args.prefix, &args.output).map_err(|_| ())
-    });
-    match archived {
+    let settings = match load_core(CoreFlags::default()) {
+        Ok(settings) => settings,
+        Err(err) => {
+            eprintln!("{err}");
+            eprintln!("{FAILED}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match relay_tools::archive::archive(&settings.url.value, &prefix, &output) {
         Ok(count) => {
             println!("archived {count} keys; source keys unchanged");
             ExitCode::SUCCESS
         }
-        Err(()) => {
+        Err(err) => {
+            eprintln!("{err}");
             eprintln!("{FAILED}");
             ExitCode::FAILURE
         }
