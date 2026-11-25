@@ -28,6 +28,7 @@ dependencies = [
  "relay-core",
  "relay-ops",
  "relay-test-support",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

@@ -647,12 +647,14 @@ fn skip_series(state: Option<&Path>, reason: Reason) -> SkipSeries {
     }
 }
 
-/// Whether the spool directory beside `state` exists and has no write permission.
+/// Whether the spool directory beside `state` exists and the kernel says this process cannot
+/// write it (owner, group, root, ACLs and a read-only mount all count). Creates nothing.
 fn spool_unwritable(state: Option<&Path>) -> bool {
+    use rustix::fs::{Access, access};
     state
         .and_then(Path::parent)
-        .and_then(|dir| fs::metadata(dir).ok())
-        .is_some_and(|m| m.is_dir() && m.permissions().readonly())
+        .filter(|dir| fs::metadata(dir).is_ok_and(|m| m.is_dir()))
+        .is_some_and(|dir| access(dir, Access::WRITE_OK).is_err())
 }
 
 /// Reads the spool without following a symlink and without holding its lock: a
@@ -787,6 +789,7 @@ mod tests {
     use std::collections::HashMap;
 
     use herdr_cli::{Output, ProcessError};
+    use ix_trace_rs::trace;
 
     use super::*;
 
@@ -881,6 +884,39 @@ mod tests {
         assert_eq!(scrub("no secret", "redis://127.0.0.1:6379"), "no secret");
     }
 
+    /// The spool directory check asks the kernel and creates nothing. Running as root cannot
+    /// make a directory unwritable, so the read-only half is skipped there.
+    #[trace("FR-068-AC-15")]
+    #[test]
+    fn a_read_only_spool_directory_is_unwritable_and_a_writable_one_is_not() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("spool");
+        fs::create_dir(&spool).unwrap();
+        let state = spool.join("activity.json");
+        assert!(!spool_unwritable(Some(&state)), "a writable directory");
+        assert!(!spool_unwritable(None));
+        assert!(
+            !spool_unwritable(Some(&dir.path().join("absent/activity.json"))),
+            "a spool not created yet is not a fault"
+        );
+        fs::set_permissions(&spool, fs::Permissions::from_mode(0o555)).unwrap();
+        let root = fs::write(spool.join("probe"), "").is_ok();
+        let unwritable = spool_unwritable(Some(&state));
+        fs::set_permissions(&spool, fs::Permissions::from_mode(0o755)).unwrap();
+        if root {
+            eprintln!(
+                "skipping the read-only half: running as root, a 0555 directory stays writable"
+            );
+            return;
+        }
+        assert!(unwritable, "a 0555 directory");
+        assert_eq!(
+            fs::read_dir(&spool).unwrap().count(),
+            0,
+            "nothing was created"
+        );
+    }
     #[test]
     fn the_spool_is_read_without_being_changed_and_a_symlink_is_refused() {
         let dir = tempfile::tempdir().unwrap();

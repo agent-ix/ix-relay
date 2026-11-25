@@ -1305,15 +1305,21 @@ fn activity_skips(f: &Facts, checks: &mut Vec<Check>) {
         } else {
             count.to_string()
         };
-        let recent = series
-            .last_ms
-            .is_none_or(|t| f.now_ms.saturating_sub(t) < DAY_MS);
+        // A full sidecar stops growing, so its age says nothing about recency: it stays a warning.
+        let recent = hook_skips::saturated(count)
+            || series
+                .last_ms
+                .is_none_or(|t| f.now_ms.saturating_sub(t) < DAY_MS);
         if recent {
             checks.push(Check::warn(
                 Family::HookSpool,
                 drop_code,
                 subject,
-                format!("{shown} hook activity update(s) {what}, the latest within 24 hours"),
+                if hook_skips::saturated(count) {
+                    format!("{shown} hook activity update(s) {what}, and the count has stopped so recent drops cannot be seen")
+                } else {
+                    format!("{shown} hook activity update(s) {what}, the latest within 24 hours")
+                },
                 cause,
                 &format!(
                     "{fix}; the count is cumulative, deleting {file} beside config.toml resets it"
@@ -3347,6 +3353,27 @@ mod tests {
     }
 
     /// A lock-skip count warns only while it grew in the last 24 hours and then reads as
+    /// A count at the cap has stopped growing, so its age proves nothing and it warns however old.
+    #[trace("FR-068-AC-15")]
+    #[test]
+    fn a_full_skip_count_warns_whatever_its_age() {
+        let mut f = healthy();
+        f.activity_lock_skips = SkipSeries {
+            count: Ok(hook_skips::MAX_SKIPS),
+            last_ms: Some(NOW - 30 * DAY_MS),
+        };
+        let check = evaluate(&f)
+            .into_iter()
+            .find(|c| c.code == Code::ActivityLockSkipped)
+            .expect("a full count warns");
+        assert!(
+            check.message.starts_with("at least 1048576 (cap reached)")
+                && check.message.contains("stopped"),
+            "{}",
+            check.message
+        );
+    }
+
     /// information; a count at the cap reads "at least", and each reason has its own fix.
     #[trace("FR-068-AC-15")]
     #[test]

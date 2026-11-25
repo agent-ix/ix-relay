@@ -18,6 +18,7 @@ ix-board.workspace = true
 claude-wire.workspace = true
 relay-core.workspace = true
 relay-ops.workspace = true
+rustix.workspace = true
 herdr-cli.workspace = true
 clap.workspace = true
 serde.workspace = true

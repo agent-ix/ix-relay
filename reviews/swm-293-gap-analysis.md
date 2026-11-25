@@ -47,3 +47,20 @@ The brief asked for a judgement of intent against code for AC-15, so a targeted 
 - Stubs: none found in the diff.
 - Semantic review: targeted to FR-068-AC-15 only.
 - Plan completion: not assessed
+
+## New findings (disposition pass 1)
+
+Head `7a3f2260ebc6f5e6cf5b7ae7e39b1ec05d4a3a7c`, fix commit reviewed as `git diff 710dc22..7a3f226`.
+
+| ID      | Severity | Summary | Refs |
+| ------- | -------- | ------- | ---- |
+| FND-005 | low | The amended FR-068-AC-15 includes "reports an unwritable spool directory", but the only test is the `every_code_fires_…` row that sets `activity_spool_unwritable = true` on the facts. The `spool_unwritable` reader in `gather` has no test against a real directory, which is why its permission-bit logic (SR-6125 FND-005) passes the suite. | crates/agent-msg/src/doctor/facts.rs:651-656; crates/agent-msg/src/doctor/checks.rs:2861-2863; spec/functional/FR-068-hook-activity-events.md:159 |
+
+## Dispositions
+
+| FND | outcome | reason |
+| --- | ------- | ------ |
+| FND-001 | fixed | FR-029's catalogue now has the "hook activity drops" rows for `activity_lock_skipped`, `activity_write_failed`, `activity_skips_unreadable` and `activity_spool_unwritable`, with severities, the 24 h rule, "at least" at the cap and the reset. |
+| FND-002 | fixed | `every_code_fires_with_its_documented_severity_a_cause_and_a_fix` now carries `#[trace("FR-068-AC-15")]`, and `tc_068_15_doctor_reads_the_skip_sidecars_and_warns_only_on_recent_growth` runs the real doctor with real sidecar files through `gather`. |
+| FND-003 | fixed | FR-068 now states the 1,048,576 bound, "at least" reporting, the saturated gauge, reset by deletion, the 24 h warning window and the unwritable-spool report. |
+| FND-004 | fixed | `separate_hook_processes_count_lock_skips_and_write_failures_apart` in `tests/hook_activity.rs` spawns real hook processes against a held lock; the in-process test is renamed `two_handles_on_one_state_file_share_the_lock_skip_count`. |
