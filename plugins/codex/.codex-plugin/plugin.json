@@ -1,0 +1,12 @@
+{
+  "name": "ix-relay",
+  "version": "0.1.0",
+  "description": "Connects a team lead's Codex session to the ix-relay message bus.",
+  "author": {
+    "name": "Agent IX",
+    "url": "https://github.com/agent-ix"
+  },
+  "homepage": "https://github.com/agent-ix/ix-relay",
+  "repository": "https://github.com/agent-ix/ix-relay",
+  "license": "AGPL-3.0-or-later"
+}
