@@ -712,7 +712,7 @@ fn tc_043_07_doctor_lists_recorded_moves_without_failing() {
 }
 
 /// Real sidecar files reach doctor through `gather`: a recent lock-skip count warns and a full
-/// write-failure count reads "at least"; the same counts a day old read as information; a
+/// write-failure count reads "at least"; two days on, the lock count reads as information but the full one still warns; a
 /// sidecar that is not a regular file is reported unreadable; deleting a sidecar clears it.
 #[trace("FR-068-AC-15")]
 #[test]
@@ -760,7 +760,14 @@ fn tc_068_15_doctor_reads_the_skip_sidecars_and_warns_only_on_recent_growth() {
             .unwrap();
     }
     let (warn, checks) = warns(&world);
-    assert!(warn.iter().all(|c| !c.starts_with("activity_")), "{warn:?}");
+    assert!(
+        !warn.contains(&"activity_lock_skipped".to_owned()),
+        "an old count is information: {warn:?}"
+    );
+    assert!(
+        warn.contains(&"activity_write_failed".to_owned()),
+        "a full count warns whatever its age: {warn:?}"
+    );
     assert!(
         checks
             .iter()
