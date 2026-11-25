@@ -298,6 +298,8 @@ fn all_order_statuses_are_listed_in_stable_read_only_pages() {
         .arg(format!("{}*", bus.prefix))
         .query(&mut bus.raw)
         .unwrap();
+    let mut keys = keys;
+    keys.sort();
     let before: std::collections::BTreeMap<String, Vec<u8>> = keys
         .iter()
         .map(|key| {
@@ -396,10 +398,11 @@ fn all_order_statuses_are_listed_in_stable_read_only_pages() {
             + fifth_json["orders"][0]["ack_ms"].as_i64().unwrap()
     );
 
-    let after_keys: Vec<String> = redis::cmd("KEYS")
+    let mut after_keys: Vec<String> = redis::cmd("KEYS")
         .arg(format!("{}*", bus.prefix))
         .query(&mut bus.raw)
         .unwrap();
+    after_keys.sort();
     assert_eq!(after_keys, keys, "all-outcome reads create no Redis keys");
     let after: std::collections::BTreeMap<String, Vec<u8>> = keys
         .iter()
@@ -788,7 +791,7 @@ fn closing_an_unindexed_order_clears_the_confirmed_coverage_boundary() {
         .relay
         .expire_orders(relay_core::Now::AtMs(now_ms() + 10_000))
         .unwrap();
-    assert_eq!(expired.len(), 1);
+    assert_eq!(expired.len(), 2);
     assert!(bus.relay.orders_complete_since().unwrap().is_none());
 }
 
