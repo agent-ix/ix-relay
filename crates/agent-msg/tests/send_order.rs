@@ -210,7 +210,7 @@ fn all_order_statuses_are_listed_in_stable_read_only_pages() {
             .arg(member)
             .exec(&mut bus.raw)
             .unwrap();
-        let enqueued_at = if position == 4 { at - 1 } else { at };
+        let enqueued_at = at;
         redis::cmd("ZADD")
             .arg(&index)
             .arg(0)
@@ -255,6 +255,8 @@ fn all_order_statuses_are_listed_in_stable_read_only_pages() {
         .arg(format!("{}receipt-meta", bus.prefix))
         .arg("orders_all_since_ms")
         .arg(at)
+        .arg("orders_all_senders_upgraded")
+        .arg(1)
         .exec(&mut bus.raw)
         .unwrap();
 
@@ -298,6 +300,8 @@ fn all_order_statuses_are_listed_in_stable_read_only_pages() {
     assert_eq!(first_json["window"]["filter"], "enqueued_at");
     assert_eq!(first_json["window"]["order"], "newest_first");
     assert_eq!(first_json["oldest_available_at"], at);
+    assert_eq!(first_json["complete"], true);
+    assert_eq!(first_json["incomplete_reason"], serde_json::Value::Null);
     let cursor = first_json["next_cursor"].clone();
     assert_eq!(cursor["enqueued_at"], at);
     let first_order = &first_json["orders"][0];
@@ -308,7 +312,8 @@ fn all_order_statuses_are_listed_in_stable_read_only_pages() {
             .unwrap()
             .starts_with("session/")
     );
-    assert_eq!(first_order["state"], "cancelled");
+    assert_eq!(first_order["state"], "open");
+    assert_eq!(first_order["expired"], false);
     assert_eq!(
         first_order["deadline_at"],
         first_order["enqueued_at"].as_i64().unwrap() + first_order["ack_ms"].as_i64().unwrap()
@@ -324,7 +329,8 @@ fn all_order_statuses_are_listed_in_stable_read_only_pages() {
     );
     let second_json: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
     assert_eq!(second_json["truncated"], true);
-    assert_eq!(second_json["orders"][0]["state"], "evicted");
+    assert_eq!(second_json["orders"][0]["state"], "cancelled");
+    assert_eq!(second_json["orders"][0]["expired"], false);
     let third = read(Some(
         serde_json::to_string(&second_json["next_cursor"].clone()).unwrap(),
     ));
@@ -335,7 +341,7 @@ fn all_order_statuses_are_listed_in_stable_read_only_pages() {
     );
     let third_json: serde_json::Value = serde_json::from_slice(&third.stdout).unwrap();
     assert_eq!(third_json["truncated"], true);
-    assert_eq!(third_json["orders"][0]["state"], "expired");
+    assert_eq!(third_json["orders"][0]["state"], "evicted");
     let fourth = read(Some(
         serde_json::to_string(&third_json["next_cursor"].clone()).unwrap(),
     ));
@@ -347,15 +353,34 @@ fn all_order_statuses_are_listed_in_stable_read_only_pages() {
     let fourth_json: serde_json::Value = serde_json::from_slice(&fourth.stdout).unwrap();
     assert_eq!(fourth_json["truncated"], false);
     assert!(fourth_json["next_cursor"].is_null());
-    assert_eq!(fourth_json["orders"][0]["state"], "acted");
-    assert_eq!(fourth_json["orders"][0]["acted_at"], at - 100);
-    assert_eq!(fourth_json["orders"][0]["expect_ticket"], "SWM-309");
+    assert_eq!(fourth_json["orders"][0]["state"], "expired");
+    assert_eq!(fourth_json["orders"][0]["expired"], true);
+    let fifth = read(Some(
+        serde_json::to_string(&fourth_json["next_cursor"].clone()).unwrap(),
+    ));
+    assert!(
+        fifth.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fifth.stderr)
+    );
+    let fifth_json: serde_json::Value = serde_json::from_slice(&fifth.stdout).unwrap();
+    assert_eq!(fifth_json["truncated"], false);
+    assert!(fifth_json["next_cursor"].is_null());
+    assert_eq!(fifth_json["orders"][0]["state"], "acted");
+    assert_eq!(fifth_json["orders"][0]["expired"], false);
+    assert_eq!(fifth_json["orders"][0]["acted_at"], at - 100);
+    assert_eq!(fifth_json["orders"][0]["expect_ticket"], "SWM-309");
     assert_eq!(
-        fourth_json["orders"][0]["deadline_at"],
-        fourth_json["orders"][0]["delivered_at"].as_i64().unwrap()
-            + fourth_json["orders"][0]["ack_ms"].as_i64().unwrap()
+        fifth_json["orders"][0]["deadline_at"],
+        fifth_json["orders"][0]["delivered_at"].as_i64().unwrap()
+            + fifth_json["orders"][0]["ack_ms"].as_i64().unwrap()
     );
 
+    let after_keys: Vec<String> = redis::cmd("KEYS")
+        .arg(format!("{}*", bus.prefix))
+        .query(&mut bus.raw)
+        .unwrap();
+    assert_eq!(after_keys, keys, "all-outcome reads create no Redis keys");
     let after: std::collections::BTreeMap<String, Vec<u8>> = keys
         .iter()
         .map(|key| {
@@ -366,6 +391,335 @@ fn all_order_statuses_are_listed_in_stable_read_only_pages() {
         })
         .collect();
     assert_eq!(after, before, "all-outcome reads leave Redis unchanged");
+}
+
+#[trace("FR-071-AC-12")]
+#[test]
+fn empty_pages_and_aged_out_cursors_are_json_arrays_with_coverage_metadata() {
+    let Some(mut bus) = Bus::new("empty-pages") else {
+        return;
+    };
+    let url = bus.url.clone();
+    let prefix = bus.prefix.clone();
+    let read = |since: i64, until: i64, cursor: Option<String>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_agent-msg"));
+        command
+            .args(["--url", &url, "--prefix", &prefix, "orders"])
+            .args([
+                "--since",
+                &since.to_string(),
+                "--until",
+                &until.to_string(),
+                "--json",
+            ]);
+        if let Some(cursor) = cursor {
+            command.args(["--cursor", &cursor]);
+        }
+        command.output().unwrap()
+    };
+
+    let now = now_ms();
+    let never_indexed = read(0, now, None);
+    assert!(
+        never_indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&never_indexed.stderr)
+    );
+    let never_json: serde_json::Value = serde_json::from_slice(&never_indexed.stdout).unwrap();
+    assert_eq!(never_json["orders"].as_array().unwrap().len(), 0);
+    assert_eq!(never_json["oldest_available_at"], serde_json::Value::Null);
+    assert_eq!(never_json["complete"], false);
+    assert_eq!(never_json["incomplete_reason"], "index_not_started");
+
+    assert_eq!(bus.send(&["--order"], None).status, 0);
+    let at: i64 = redis::cmd("HGET")
+        .arg(format!("{}receipt-meta", bus.prefix))
+        .arg("orders_all_since_ms")
+        .query(&mut bus.raw)
+        .unwrap();
+    let empty_window = read(at + 1, at + 100, None);
+    assert!(
+        empty_window.status.success(),
+        "{}",
+        String::from_utf8_lossy(&empty_window.stderr)
+    );
+    let empty_json: serde_json::Value = serde_json::from_slice(&empty_window.stdout).unwrap();
+    assert_eq!(empty_json["orders"].as_array().unwrap().len(), 0);
+    assert_eq!(empty_json["complete"], false);
+    assert_eq!(empty_json["incomplete_reason"], "sender_upgrade_required");
+    redis::cmd("HSET")
+        .arg(format!("{}receipt-meta", bus.prefix))
+        .arg("orders_all_senders_upgraded")
+        .arg(1)
+        .exec(&mut bus.raw)
+        .unwrap();
+    let complete_window = read(at + 1, at + 100, None);
+    assert!(complete_window.status.success());
+    let complete_json: serde_json::Value = serde_json::from_slice(&complete_window.stdout).unwrap();
+    assert_eq!(complete_json["complete"], true);
+
+    let aged_cursor = serde_json::json!({
+        "enqueued_at": at - relay_core::receipts::ORDER_RETENTION_MS - 1,
+        "order_id": "expired-cursor"
+    });
+    let aged = read(0, at, Some(aged_cursor.to_string()));
+    assert!(
+        aged.status.success(),
+        "{}",
+        String::from_utf8_lossy(&aged.stderr)
+    );
+    let aged_json: serde_json::Value = serde_json::from_slice(&aged.stdout).unwrap();
+    assert_eq!(aged_json["orders"].as_array().unwrap().len(), 0);
+    assert_eq!(aged_json["truncated"], false);
+    assert_eq!(aged_json["next_cursor"], serde_json::Value::Null);
+    assert_eq!(aged_json["complete"], false);
+
+    let later = now_ms();
+    let retention = relay_core::receipts::ORDER_RETENTION_MS;
+    let old_since = later - retention - 1_000;
+    let expired_at = later - retention - 500;
+    let order_id = "aged-index-fixture";
+    let order_key = format!("{}receipt-meta:order:{order_id}", bus.prefix);
+    redis::cmd("HSET")
+        .arg(&order_key)
+        .arg("from")
+        .arg("node-a:EA:sender")
+        .arg("to")
+        .arg("hub:EA:code")
+        .arg("recipient")
+        .arg("session/687562/7331")
+        .arg("ack_ms")
+        .arg(60_000)
+        .arg("enqueued_at")
+        .arg(expired_at)
+        .arg("status")
+        .arg("acted")
+        .arg("state")
+        .arg("acted")
+        .exec(&mut bus.raw)
+        .unwrap();
+    redis::cmd("ZADD")
+        .arg(format!("{}receipt-meta:orders-all", bus.prefix))
+        .arg(0)
+        .arg(format!("{expired_at:013}|{order_id}"))
+        .exec(&mut bus.raw)
+        .unwrap();
+    redis::cmd("HSET")
+        .arg(format!("{}receipt-meta", bus.prefix))
+        .arg("orders_all_since_ms")
+        .arg(old_since)
+        .arg("orders_all_senders_upgraded")
+        .arg(1)
+        .exec(&mut bus.raw)
+        .unwrap();
+    let retention_page = bus
+        .relay
+        .orders(&relay_core::receipts::OrderListRequest::new(0, later, 10, None).unwrap())
+        .unwrap();
+    assert!(!retention_page.complete);
+    assert_eq!(
+        retention_page.incomplete_reason.as_deref(),
+        Some("outside_retention")
+    );
+    assert!(
+        !retention_page
+            .orders
+            .iter()
+            .any(|order| order.order_id == order_id)
+    );
+    assert!(retention_page.oldest_available_at.unwrap() >= later - retention);
+    assert!(retention_page.oldest_available_at.unwrap() <= later - retention + 2_000);
+}
+
+#[trace("FR-071-AC-12")]
+#[test]
+fn order_writer_and_reader_share_retention_and_report_visible_legacy_gaps() {
+    let Some(mut bus) = Bus::new("retention-coverage") else {
+        return;
+    };
+    assert_eq!(bus.send(&["--order"], None).status, 0);
+    let boundary: i64 = redis::cmd("HGET")
+        .arg(format!("{}receipt-meta", bus.prefix))
+        .arg("orders_all_since_ms")
+        .query(&mut bus.raw)
+        .unwrap();
+    assert_eq!(bus.send(&["--order"], None).status, 0);
+    let after_boundary: i64 = redis::cmd("HGET")
+        .arg(format!("{}receipt-meta", bus.prefix))
+        .arg("orders_all_since_ms")
+        .query(&mut bus.raw)
+        .unwrap();
+    assert_eq!(
+        after_boundary, boundary,
+        "the coverage boundary is set once"
+    );
+
+    let initial_member: String = redis::cmd("ZRANGE")
+        .arg(format!("{}receipt-meta:orders-all", bus.prefix))
+        .arg(0)
+        .arg(0)
+        .query(&mut bus.raw)
+        .unwrap();
+    let initial_id = initial_member.split_once('|').unwrap().1;
+    let record_ttl: i64 = redis::cmd("TTL")
+        .arg(format!("{}receipt-meta:order:{initial_id}", bus.prefix))
+        .query(&mut bus.raw)
+        .unwrap();
+    let index_ttl: i64 = redis::cmd("TTL")
+        .arg(format!("{}receipt-meta:orders-all", bus.prefix))
+        .query(&mut bus.raw)
+        .unwrap();
+    assert!((1..=691_200).contains(&record_ttl));
+    assert!((1..=691_200).contains(&index_ttl));
+
+    let index = format!("{}receipt-meta:orders-all", bus.prefix);
+    let stale_time = boundary - relay_core::receipts::ORDER_RETENTION_MS - 1;
+    let stale_member = format!("{stale_time:013}|trim-marker");
+    redis::cmd("ZADD")
+        .arg(&index)
+        .arg(0)
+        .arg(&stale_member)
+        .exec(&mut bus.raw)
+        .unwrap();
+    assert_eq!(bus.send(&["--order"], None).status, 0);
+    let stale_score: Option<f64> = redis::cmd("ZSCORE")
+        .arg(&index)
+        .arg(&stale_member)
+        .query(&mut bus.raw)
+        .unwrap();
+    assert!(
+        stale_score.is_none(),
+        "the shared retention removes old index rows"
+    );
+
+    let members: Vec<String> = redis::cmd("ZRANGE")
+        .arg(&index)
+        .arg(0)
+        .arg(0)
+        .query(&mut bus.raw)
+        .unwrap();
+    let first_id = members[0].split_once('|').unwrap().1;
+    redis::cmd("ZREM")
+        .arg(&index)
+        .arg(&members[0])
+        .exec(&mut bus.raw)
+        .unwrap();
+    let id = first_id.to_owned();
+    let request = relay_core::receipts::OrderListRequest::new(0, now_ms(), 10, None).unwrap();
+    let page = bus.relay.orders(&request).unwrap();
+    assert!(!page.complete);
+    assert_eq!(
+        page.incomplete_reason.as_deref(),
+        Some("unindexed_open_orders")
+    );
+    assert_eq!(page.oldest_available_at, Some(boundary));
+    assert!(!page.orders.iter().any(|order| order.order_id == id));
+}
+
+#[trace("FR-071-AC-12")]
+#[test]
+fn unreadable_index_rows_are_skipped_and_make_coverage_incomplete() {
+    let Some(mut bus) = Bus::new("unreadable-row") else {
+        return;
+    };
+    assert_eq!(bus.send(&["--order"], None).status, 0);
+    let at = now_ms();
+    let index = format!("{}receipt-meta:orders-all", bus.prefix);
+    let corrupt = format!("{at:013}|missing-record");
+    redis::cmd("ZADD")
+        .arg(&index)
+        .arg(0)
+        .arg(&corrupt)
+        .exec(&mut bus.raw)
+        .unwrap();
+    let request = relay_core::receipts::OrderListRequest::new(0, at, 10, None).unwrap();
+    let page = bus.relay.orders(&request).unwrap();
+    assert_eq!(page.skipped, 1);
+    assert!(!page.complete);
+    assert_eq!(
+        page.incomplete_reason.as_deref(),
+        Some("unreadable_order_records")
+    );
+}
+
+#[trace("FR-071-AC-12")]
+#[test]
+fn order_send_refuses_wrong_typed_history_index_before_writing() {
+    let Some(mut bus) = Bus::new("wrong-index-type") else {
+        return;
+    };
+    let index = format!("{}receipt-meta:orders-all", bus.prefix);
+    redis::cmd("SET")
+        .arg(&index)
+        .arg("wrong-type")
+        .exec(&mut bus.raw)
+        .unwrap();
+    let log = format!("{}log", bus.prefix);
+    let before: i64 = redis::cmd("XLEN").arg(&log).query(&mut bus.raw).unwrap();
+    let out = bus.send(&["--order"], None);
+    assert_ne!(out.status, 0);
+    let after: i64 = redis::cmd("XLEN").arg(&log).query(&mut bus.raw).unwrap();
+    assert_eq!(
+        after, before,
+        "refused sends leave the message log unchanged"
+    );
+}
+
+#[trace("FR-071-AC-12")]
+#[test]
+fn order_listing_reports_each_wrong_type_error_without_writing() {
+    for (test, key_kind) in [
+        ("wrong-stream-type", "stream"),
+        ("wrong-index-type", "index"),
+        ("wrong-due-type", "due"),
+    ] {
+        let Some(mut bus) = Bus::new(test) else {
+            return;
+        };
+        let key = match key_kind {
+            "stream" => format!("{}receipts", bus.prefix),
+            "index" => format!("{}receipt-meta:orders-all", bus.prefix),
+            _ => format!("{}receipt-meta:orders-due", bus.prefix),
+        };
+        redis::cmd("SET")
+            .arg(&key)
+            .arg("wrong-type")
+            .exec(&mut bus.raw)
+            .unwrap();
+        let request = relay_core::receipts::OrderListRequest::new(0, now_ms(), 10, None).unwrap();
+        assert!(bus.relay.orders(&request).is_err(), "{key_kind}");
+    }
+}
+
+#[trace("FR-071-AC-12")]
+#[test]
+fn order_listing_rejects_bounds_that_break_the_padded_lexical_index() {
+    assert!(relay_core::receipts::OrderListRequest::new(0, 9_999_999_999_999, 10, None).is_err());
+    assert!(
+        relay_core::receipts::OrderListRequest::new(
+            10_000_000_000_000,
+            10_000_000_000_000,
+            10,
+            None
+        )
+        .is_err()
+    );
+    assert!(
+        relay_core::receipts::OrderListRequest::new(9_999_999_999_998, 9_999_999_999_998, 10, None)
+            .is_ok()
+    );
+}
+
+#[trace("FR-071-AC-12")]
+#[test]
+fn order_listing_options_cannot_be_silently_ignored_by_expired_subcommand() {
+    for args in [
+        vec!["orders", "--since", "0", "--until", "5", "expired"],
+        vec!["orders", "--json", "expired"],
+    ] {
+        let output = run(base_cmd(&args, None), "");
+        assert_ne!(output.status, 0, "{args:?}");
+    }
 }
 
 #[trace("FR-071-AC-1")]

@@ -83,18 +83,29 @@ as an order: explicitly with `agent-msg send --order`, or by the orchestrator's
   `limit` SHALL be between 1 and 500. Results SHALL be newest first by the stable tuple
   `(enqueued_at, order_id)`, descending.
 - Each row SHALL contain `order_id`, `sender`, `recipient` (the stored lane address),
-  `receipt_target` (the stored message target), `expect_ticket`, `ack_ms`, `deadline_at`,
-  `enqueued_at`, `delivered_at`, `acted_at`, and `state`. `deadline_at` SHALL be computed
+  `receipt_target` (the stored receipt event target queue identity), `expect_ticket`, `ack_ms`, `deadline_at`,
+  `enqueued_at`, `delivered_at`, `acted_at`, `expired`, and `state`. `deadline_at` SHALL be computed
   by the relay as `delivered_at + ack_ms` when delivered, otherwise `enqueued_at + ack_ms`;
   absent optional values SHALL be JSON `null`. `state` SHALL be the explicit stored order
   status, including `open`, `acted`, `expired`, `evicted`, or any other status value, with
-  unknown values preserved verbatim. Rows SHALL contain no message body or credentials.
-- The response SHALL contain `orders`, `truncated`, `next_cursor`, `window`, `limit`, and
-  `oldest_available_at`. `window` SHALL identify both inclusive enqueue-time bounds and the
+  unknown values preserved verbatim. `expired` SHALL be true exactly when the relay
+  recorded `AckExpired`, and SHALL remain true if an order was acted after expiry; it SHALL
+  be false for open orders even when their deadline has passed but expiry was not recorded.
+  Rows SHALL contain no message body or credentials.
+- The response SHALL contain `orders`, `truncated`, `next_cursor`, `window`, `limit`,
+  `oldest_available_at`, `complete`, `incomplete_reason`, and `skipped`. `window` SHALL identify both inclusive enqueue-time bounds and the
   descending order. `oldest_available_at` SHALL identify the oldest enqueue time for which
   this index can provide complete data, accounting for the index start and the eight-day
-  order-record retention; it SHALL be `null` until the first order is indexed. An order's
-  absence before that time is outside retained coverage.
+  order-record retention; it SHALL be `null` until the first order is indexed. `complete`
+  SHALL be false with an `incomplete_reason` when the index has not started, the requested
+  window predates indexed retention, a visible unindexed open order falls in the window,
+  an indexed row cannot be read, or the receipt metadata field
+  `orders_all_senders_upgraded` is not `1`. `skipped` SHALL count unreadable indexed rows. An
+  order's absence before `oldest_available_at` is outside retained coverage. Full coverage
+  requires upgrading `agent-msg` on every host that can send orders before consumers rely
+  on complete results; older senders do not populate this index. After that fleet upgrade,
+  the operator SHALL set `orders_all_senders_upgraded=1` on the receipt metadata hash to
+  enable `complete=true` responses.
 - `next_cursor`, when non-null, SHALL be the JSON tuple `{"enqueued_at": <Unix ms>,
   "order_id": <id>}` for the last returned order. A continuation SHALL return only tuples
   strictly older than that tuple, including all rows at the same millisecond through the
@@ -102,7 +113,8 @@ as an order: explicitly with `agent-msg send --order`, or by the orchestrator's
   available and SHALL then have a usable `next_cursor`; otherwise it SHALL be false and
   `next_cursor` SHALL be null.
 - The order index SHALL cover the same eight-day lifetime as the order records and SHALL be
-  populated when each order is enqueued. Reads SHALL use a bounded, single read-only Redis
+  populated when each order is enqueued. The writer and reader SHALL use the same retention
+  value. Reads SHALL use a bounded, single read-only Redis
   script, SHALL NOT scan keys, and SHALL change nothing on the bus.
 
 ### Order acceptance is confirmed by the consumer

@@ -131,14 +131,15 @@ enum Cmd {
         #[arg(long, value_name = "ID", requires = "order")]
         expect_ticket: Option<String>,
     },
-    /// Read order state. Changes nothing.
+    /// Read all retained order outcomes in a bounded enqueue-time window.
+    #[command(args_conflicts_with_subcommands = true)]
     Orders {
         #[command(subcommand)]
         command: Option<OrdersCommand>,
-        /// Inclusive lower enqueue time in Unix milliseconds (all-outcome listing).
+        /// Inclusive lower enqueue time in Unix milliseconds (required without `expired`).
         #[arg(long, requires = "until")]
         since: Option<i64>,
-        /// Inclusive upper enqueue time in Unix milliseconds (all-outcome listing).
+        /// Inclusive upper enqueue time in Unix milliseconds (required without `expired`).
         #[arg(long, requires = "since")]
         until: Option<i64>,
         /// Maximum rows to return (1 to 500).
@@ -620,11 +621,22 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 for order in &page.orders {
                     writeln!(
                         out,
-                        "{} {} state={} deadline_at={}",
-                        order.order_id, order.recipient, order.state, order.deadline_at
+                        "{} {} state={} expired={} deadline_at={}",
+                        order.order_id,
+                        order.recipient,
+                        order.state,
+                        order.expired,
+                        order.deadline_at
                     )?;
                 }
                 writeln!(out, "oldest_available_at: {:?}", page.oldest_available_at)?;
+                writeln!(out, "complete: {}", page.complete)?;
+                if let Some(reason) = &page.incomplete_reason {
+                    writeln!(out, "incomplete_reason: {reason}")?;
+                }
+                if page.skipped > 0 {
+                    writeln!(out, "skipped: {} unreadable indexed rows", page.skipped)?;
+                }
                 if let Some(cursor) = &page.next_cursor {
                     writeln!(
                         out,

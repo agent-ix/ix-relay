@@ -56,6 +56,7 @@ struct RawOrderState {
     delivered_at: Option<i64>,
     acted_at: Option<i64>,
     state: String,
+    expired: bool,
 }
 
 #[derive(Deserialize)]
@@ -63,6 +64,9 @@ struct RawOrderState {
 struct RawOrderPage {
     orders: Vec<RawOrderState>,
     oldest_available_at: Option<i64>,
+    complete: bool,
+    incomplete_reason: Option<String>,
+    skipped: usize,
 }
 
 /// The stored envelope is distinct from the public message/history shape.
@@ -152,6 +156,7 @@ impl Relay {
             command.arg(recipient.as_str());
         }
         Ok(command
+            .arg(ORDER_RETENTION_MS)
             .arg(self.keys.receipt_stream_key())
             .arg(self.keys.receipt_meta_key())
             .query(&mut self.conn)?)
@@ -489,8 +494,8 @@ impl Relay {
     /// This is a read-only single Redis script; message content is never read.
     ///
     /// # Errors
-    /// Fails when Redis is unavailable, an order-history key has the wrong type, or a
-    /// stored index/order record is inconsistent.
+    /// Fails when Redis is unavailable or a required history key has the wrong type.
+    /// Unreadable indexed rows are counted in `skipped` and make coverage incomplete.
     #[implements("FR-071-AC-12")]
     pub fn orders(&mut self, request: &OrderListRequest) -> Result<OrderPage> {
         let cursor = request.cursor.as_ref();
@@ -532,6 +537,7 @@ impl Relay {
                     delivered_at_ms: order.delivered_at,
                     acted_at_ms: order.acted_at,
                     state: order.state,
+                    expired: order.expired,
                 }
             })
             .collect();
@@ -561,6 +567,9 @@ impl Relay {
             },
             limit: request.limit,
             oldest_available_at: raw.oldest_available_at,
+            complete: raw.complete,
+            incomplete_reason: raw.incomplete_reason,
+            skipped: raw.skipped,
         })
     }
 

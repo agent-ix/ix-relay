@@ -165,7 +165,7 @@ end
 
 -- Implements FR-071-AC-12: index each order by its stable enqueue-time cursor tuple.
 -- `order_ms` is the ack deadline of an order, or nil for a plain message.
-receipt_enqueue = function(entry, original, now, recipient, order_ms, expect)
+receipt_enqueue = function(entry, original, now, recipient, order_ms, expect, retention_ms)
     local meta = {original = original, recipient = recipient}
     if order_ms then
         meta.order = order_ms
@@ -179,14 +179,14 @@ receipt_enqueue = function(entry, original, now, recipient, order_ms, expect)
         redis.call('HSET', okey, 'from', message.from, 'to', message.to,
             'recipient', recipient, 'ack_ms', order_ms, 'enqueued_at', now,
             'state', 'queued', 'status', 'open', 'expect', meta.expect or '')
-        redis.call('EXPIRE', okey, 691200)
+        redis.call('EXPIRE', okey, math.floor(retention_ms / 1000))
         local all = receipt_meta .. ':orders-all'
         local member = string.format('%013d|%s', now, original)
         redis.call('HSETNX', receipt_meta, 'orders_all_since_ms', now)
         redis.call('ZADD', all, 0, member)
         redis.call('ZREMRANGEBYLEX', all, '-', '(' .. string.format('%013d|',
-            now - 691200000))
-        redis.call('EXPIRE', all, 691200)
+            now - retention_ms))
+        redis.call('EXPIRE', all, math.floor(retention_ms / 1000))
         local due = receipt_meta .. ':orders-due'
         redis.call('ZADD', due, now + order_ms, original)
         redis.call('HINCRBY', receipt_meta .. ':orders-unacted', message.to, 1)

@@ -65,18 +65,31 @@ Options:
 ### agent-msg orders
 
 ```text
+Read all retained order outcomes in a bounded enqueue-time window
+
 Usage: agent-msg orders --since <UNIX-MS> --until <UNIX-MS> [--limit <N>]
-       [--cursor '{"enqueued_at": <UNIX-MS>, "order_id": "<ID>"}'] --json
+       [--cursor '{"enqueued_at": <UNIX-MS>, "order_id": "<ID>"}'] [--json]
 ```
+
+`--limit` defaults to 500; `--json` is optional.
 
 Both bounds are inclusive and apply to `enqueued_at`. Pages are newest first by
 `(enqueued_at, order_id)`. The returned `next_cursor` can be passed back as the
 `--cursor` value to continue strictly after the last row, including when several
 orders share one millisecond. `truncated` is true exactly when the response has a
-cursor. `oldest_available_at` marks the earliest time with complete indexed data
-and is `null` until the first all-outcome order is indexed; order records and the
-index are retained for eight days. Rows contain no message text or credentials.
-The read does not change Redis.
+cursor. Each row preserves the stored `state` and includes `expired`, true when
+the relay recorded `AckExpired` (including when it was later acted).
+`oldest_available_at` is the earliest indexed enqueue time, bounded by the
+eight-day order-record retention, and is `null` until indexing begins. `complete`
+and `incomplete_reason` say whether the requested window is known to be complete;
+the relay reports the index start, retention, visible unindexed open orders, and
+unreadable rows. Older `agent-msg` senders do not populate the all-outcome index.
+Upgrade `agent-msg` on every host that can send orders before consumers rely on
+complete results. Until that fleet upgrade is confirmed, `complete` remains false
+with `incomplete_reason: "sender_upgrade_required"`. Then the operator sets
+`orders_all_senders_upgraded=1` on the configured `receipt-meta` hash to enable
+complete responses. `skipped` counts unreadable indexed rows. Rows contain no
+message text or credentials. The read does not change Redis.
 
 `agent-msg orders expired --json` remains available for the older unacted-expiry
 view.

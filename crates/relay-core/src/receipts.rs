@@ -354,7 +354,8 @@ impl OrderListRequest {
     ///
     /// # Errors
     /// Returns an error when the bounds are negative or reversed, the upper bound cannot
-    /// be incremented, the limit is outside 1 through 500, or the cursor is outside the
+    /// exceeds the 13-digit lexicographic index range, the limit is outside 1 through 500,
+    /// or the cursor is outside the
     /// requested window or cannot be represented in the index.
     #[implements("FR-071-AC-12")]
     pub fn new(
@@ -363,7 +364,7 @@ impl OrderListRequest {
         limit: usize,
         cursor: Option<OrderCursor>,
     ) -> Result<Self, String> {
-        if since_ms < 0 || until_ms < since_ms || until_ms == i64::MAX {
+        if since_ms < 0 || until_ms < since_ms || until_ms > 9_999_999_999_998 {
             return Err("order window must be non-negative, ordered Unix milliseconds".into());
         }
         if !(1..=ORDERS_PAGE_CAP).contains(&limit) {
@@ -419,6 +420,8 @@ pub struct OrderState {
     pub acted_at_ms: Option<i64>,
     /// Stored order status, preserved verbatim.
     pub state: String,
+    /// Whether the relay recorded `AckExpired` for this order.
+    pub expired: bool,
 }
 
 /// Enqueue-time window metadata in the response from [`crate::Relay::orders`].
@@ -449,6 +452,12 @@ pub struct OrderPage {
     pub limit: usize,
     /// Earliest enqueue time for which this index can provide complete data.
     pub oldest_available_at: Option<i64>,
+    /// Whether the requested window is known to be fully represented.
+    pub complete: bool,
+    /// Reason the requested window cannot be confirmed complete.
+    pub incomplete_reason: Option<String>,
+    /// Count of indexed members whose order record could not be read.
+    pub skipped: usize,
 }
 
 /// Where the escalation of an expired order stands.
