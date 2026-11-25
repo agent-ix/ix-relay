@@ -93,7 +93,8 @@ as an order: explicitly with `agent-msg send --order`, or by the orchestrator's
   `oldest_available_at`. `window` SHALL identify both inclusive enqueue-time bounds and the
   descending order. `oldest_available_at` SHALL identify the oldest enqueue time for which
   this index can provide complete data, accounting for the index start and the eight-day
-  order-record retention. An order's absence before that time is outside retained coverage.
+  order-record retention; it SHALL be `null` until the first order is indexed. An order's
+  absence before that time is outside retained coverage.
 - `next_cursor`, when non-null, SHALL be the JSON tuple `{"enqueued_at": <Unix ms>,
   "order_id": <id>}` for the last returned order. A continuation SHALL return only tuples
   strictly older than that tuple, including all rows at the same millisecond through the
