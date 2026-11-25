@@ -778,7 +778,7 @@ fn closing_an_unindexed_order_clears_the_confirmed_coverage_boundary() {
 
     redis::cmd("ZREM")
         .arg(format!("{}receipt-meta:orders-all", bus.prefix))
-        .arg(&member)
+        .arg(member)
         .exec(&mut bus.raw)
         .unwrap();
     redis::cmd("ZADD")
