@@ -33,6 +33,7 @@ fn heartbeat(machine: &str, tick: i64) -> WatcherHeartbeat {
         herdr_ok: true,
         herdr_problem: None,
         herdr_blocks_delivery: false,
+        herdr_waiting_leads: Vec::new(),
         redis_ok: true,
         leads_watched: 0,
         otlp: Some(relay_core::health::OtlpStatus::Disabled),

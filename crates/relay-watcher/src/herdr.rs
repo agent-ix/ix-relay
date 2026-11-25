@@ -138,6 +138,12 @@ pub trait Herdr {
     fn layout(&self, _machine: &MachineName) -> Result<Layout, ProcessError> {
         Ok(Layout::default())
     }
+    /// Whether `session` is known, apart from anything herdr answers, to be held by a
+    /// live process that receives through its inbox socket or waits for it. Asked only
+    /// while herdr's answer cannot be relied on. The default knows of none.
+    fn session_alive(&self, _session: &relay_core::SessionId) -> bool {
+        false
+    }
     /// Whether this herdr is a version, and answers in a shape, ix-relay can
     /// work with (FR-036). The default does not look: an implementation with no
     /// real herdr behind it has nothing to check.

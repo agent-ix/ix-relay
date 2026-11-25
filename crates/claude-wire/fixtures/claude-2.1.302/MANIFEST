@@ -1,0 +1,3 @@
+# Contract fixture for Claude Code 2.1.302.
+# file <TAB> provenance <TAB> note
+consumed-mid-turn.jsonl	captured-shape	Observed on titan, 2026-10-22, during SWM-124 socket loopback acceptance. Message text, ids, pid and socket path redacted; attachment/queued_command/peer origin and field names are from the live transcript. Queue-operation enqueue/remove records alone are not consumption acknowledgements.

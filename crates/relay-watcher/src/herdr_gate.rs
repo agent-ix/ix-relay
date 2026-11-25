@@ -112,7 +112,8 @@ impl HerdrGate {
         let first = self.status.is_problem() && !self.notified;
         self.notified |= self.status.is_problem();
         let consequence = if self.status.blocks_delivery() {
-            "The watcher types into no pane until this passes; mail waits for the lead's own hook"
+            "The watcher types into no pane until this passes; mail for the leads it types into \
+             waits for their own hooks, and sessions with an inbox socket keep receiving"
         } else {
             "The watcher keeps running and hooks still deliver"
         };

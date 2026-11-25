@@ -242,6 +242,7 @@ fn run(case: Case<'_>) {
         &"w1:p1".parse().unwrap(),
         registered.map(|s| s.parse().unwrap()).as_ref(),
         notice,
+        false,
         &mut inbox,
     );
     let context = format!(

@@ -1,9 +1,13 @@
 //! Delivery through Claude Code's per-session inbox socket (FR-044, AGE-2030).
 //!
-//! Opt-in (`[watcher] delivery = "socket"`): the watcher posts a batch to the
-//! Unix socket Claude Code binds for the lead's session instead of typing it in
-//! through herdr. herdr stays the fallback for every batch the socket certainly
-//! did not take, so delivery is never worse than without it.
+//! The default (`delivery = "socket"`): a Claude Code session that has an inbox
+//! socket receives its mail only through that socket, whatever its pane is doing.
+//! Mail the socket did not certainly take stays queued or in flight and is retried
+//! or dead-lettered with a reason; it is never typed into the terminal. herdr types
+//! only into a lead that has no socket at all: another harness whose session no record
+//! names, or a session whose own registry record shows it has none. The lead's kind never
+//! overrides a socket (FR-054). `delivery = "herdr"` is the operator's explicit way to
+//! switch sockets off.
 //!
 //! **The wire format is not documented by Claude Code.** It was measured on
 //! 2.1.283 and lives in `claude-wire`; a release may change it, which is why a session
@@ -16,7 +20,7 @@
 //!   session record and the transcript origin, typed, with drift signals;
 //! - [`transcript`]: the strong acknowledgement, the message id in the
 //!   lead's transcript;
-//! - [`deliverer`]: the [`crate::deliver::Deliverer`] that ties them together.
+//! - [`deliverer`]: the [`deliverer::SocketDeliverer`] that ties them together.
 
 pub mod deliverer;
 pub mod session;
@@ -25,45 +29,147 @@ pub mod transcript;
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use deliverer::SocketDeliverer;
-use relay_core::PaneId;
+use relay_core::{
+    PaneId, SessionId,
+    receipts::DeliveryEvidence,
+    socket_status::{self, SocketStatus},
+    text::sanitise_line,
+};
 
 use crate::{
-    deliver::{BatchTarget, DeliverError, Deliverer, RegisteredLead, Settlement},
+    deliver::{BatchTarget, DeliverError, Deliverer, RegisteredLead, Route, Settlement},
     herdr::{AgentGet, CheckJob, Herdr, Layout, ProcessError},
 };
 
-/// The watcher's delivery: `herdr` alone, or the socket first with herdr behind
-/// it. With no socket (the default, `DeliveryMode::Herdr`) this is `herdr`
-/// exactly: every call is passed straight through.
+/// Which socket transport the watcher runs with.
+#[derive(Clone)]
+enum Sockets {
+    /// `delivery = "herdr"`: every lead is typed into.
+    Disabled,
+    /// Sockets are wanted but cannot be used on this host. Leads that have, or may
+    /// have, a socket wait.
+    Unavailable(Arc<Unavailable>),
+    /// The socket deliverer.
+    On(Arc<SocketDeliverer>),
+}
+
+/// Why sockets cannot be used here, and what can still be told about Claude Code.
+struct Unavailable {
+    why: String,
+    /// Claude Code's session registry, when even its location is known.
+    sessions_dir: Option<PathBuf>,
+    /// The status file that tells `doctor` why, removed when the watcher exits.
+    status: Option<PathBuf>,
+}
+
+impl Unavailable {
+    /// Writes the status file saying `why` into `status_dir`.
+    fn report(why: &str, sessions_dir: Option<PathBuf>, status_dir: Option<&Path>) -> Self {
+        let pid = std::process::id();
+        let status = status_dir.and_then(|dir| {
+            let path = socket_status::path_for(dir, pid);
+            let report = SocketStatus {
+                pid,
+                start_time: session::Procs::start_time(&session::ProcFs, pid),
+                updated_at_ms: crate::now_ms(),
+                unavailable: Some(sanitise_line(why)),
+                ..SocketStatus::default()
+            };
+            match report.write(&path) {
+                Ok(()) => Some(path),
+                Err(e) => {
+                    eprintln!("relay-watcher: cannot write {}: {e}", path.display());
+                    None
+                }
+            }
+        });
+        Self {
+            why: why.to_owned(),
+            sessions_dir,
+            status,
+        }
+    }
+
+    /// Whether `session` may have an inbox socket, whatever its lead's kind says.
+    fn may_have_socket(&self, session: &str) -> bool {
+        self.sessions_dir
+            .as_deref()
+            .is_none_or(|dir| session::advertises(dir, session))
+    }
+}
+
+impl Drop for Unavailable {
+    fn drop(&mut self) {
+        if let Some(path) = &self.status {
+            // Best effort, as for the deliverer's own status file.
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// The watcher's delivery: the socket for the leads that have one, herdr for the rest.
 #[derive(Clone)]
 pub struct Routed<H> {
     herdr: H,
-    socket: Option<Arc<SocketDeliverer>>,
+    sockets: Sockets,
 }
 
 impl<H> Routed<H> {
     /// The reply socket's path, when the socket is in use and bound.
     #[cfg(test)]
     pub(crate) fn socket_reply_path(&self) -> Option<std::path::PathBuf> {
-        self.socket.as_ref().and_then(|s| s.reply_path())
-    }
-
-    /// `herdr` alone.
-    pub fn herdr_only(herdr: H) -> Self {
-        Self {
-            herdr,
-            socket: None,
+        match &self.sockets {
+            Sockets::On(socket) => socket.reply_path(),
+            Sockets::Disabled | Sockets::Unavailable(_) => None,
         }
     }
 
-    /// `herdr` behind `socket`.
+    /// `herdr` alone: the operator switched sockets off.
+    pub fn herdr_only(herdr: H) -> Self {
+        Self {
+            herdr,
+            sockets: Sockets::Disabled,
+        }
+    }
+
+    /// Sockets through `socket`, herdr for the leads that have none.
     pub fn socket_first(herdr: H, socket: SocketDeliverer) -> Self {
         Self {
             herdr,
-            socket: Some(Arc::new(socket)),
+            sockets: Sockets::On(Arc::new(socket)),
+        }
+    }
+
+    /// Sockets cannot be used here (`why`): a Claude Code lead, and any lead whose
+    /// session a record in `sessions_dir` names with a socket, is not typed into and
+    /// its mail waits; the rest go through herdr. The reason is reported in a status
+    /// file in `status_dir`.
+    pub fn socket_unavailable(
+        herdr: H,
+        why: &str,
+        sessions_dir: Option<PathBuf>,
+        status_dir: Option<&Path>,
+    ) -> Self {
+        Self {
+            herdr,
+            sockets: Sockets::Unavailable(Arc::new(Unavailable::report(
+                why,
+                sessions_dir,
+                status_dir,
+            ))),
+        }
+    }
+
+    fn socket(&self) -> Option<&SocketDeliverer> {
+        match &self.sockets {
+            Sockets::On(socket) => Some(socket),
+            Sockets::Disabled | Sockets::Unavailable(_) => None,
         }
     }
 }
@@ -81,6 +187,9 @@ impl<H: Herdr> Herdr for Routed<H> {
     fn layout(&self, machine: &relay_core::MachineName) -> Result<Layout, ProcessError> {
         self.herdr.layout(machine)
     }
+    fn session_alive(&self, session: &SessionId) -> bool {
+        self.socket().is_some_and(|s| s.session_alive(session))
+    }
     fn check(&self) -> relay_ops::herdr_check::HerdrCheck {
         self.herdr.check()
     }
@@ -96,64 +205,91 @@ impl<H: Herdr> Herdr for Routed<H> {
 }
 
 impl<H: Deliverer> Deliverer for Routed<H> {
-    fn deliver(&self, pane: &PaneId, text: &str) -> Result<(), DeliverError> {
-        self.herdr.deliver(pane, text)
+    fn route(&self, lead: &str, kind: &str, session: Option<&SessionId>) -> Route {
+        match &self.sockets {
+            Sockets::Disabled => Route::Terminal,
+            // The socket belongs to the session, so the kind label alone never decides
+            // that a lead may be typed into (FR-054).
+            Sockets::Unavailable(u) => {
+                if relay_core::tries_socket(kind)
+                    || session.is_some_and(|id| u.may_have_socket(id.as_str()))
+                {
+                    Route::Wait(format!("inbox sockets unavailable: {}", u.why))
+                } else {
+                    Route::Terminal
+                }
+            }
+            Sockets::On(socket) => socket.route(lead, kind, session),
+        }
     }
 
+    fn post(&self, target: &BatchTarget<'_>, text: &str) -> Result<DeliveryEvidence, DeliverError> {
+        let Some(socket) = self.socket() else {
+            return Err(DeliverError::NotSent("no socket transport".to_owned()));
+        };
+        socket.deliver(target, text).map_err(DeliverError::from)
+    }
+
+    /// A bare pane names no session, so it is typed into only with sockets switched off.
+    fn deliver(&self, pane: &PaneId, text: &str) -> Result<(), DeliverError> {
+        match self.sockets {
+            Sockets::Disabled => self.herdr.deliver(pane, text),
+            Sockets::Unavailable(_) | Sockets::On(_) => Err(DeliverError::NotSent(
+                "nothing is typed without knowing whose pane it is".to_owned(),
+            )),
+        }
+    }
+
+    /// Types a batch, asking the route again immediately before: a socket that appeared
+    /// since the caller's checks stops the typing.
     fn deliver_to(
         &self,
         target: &BatchTarget<'_>,
         pane: &PaneId,
         text: &str,
-    ) -> Result<relay_core::receipts::DeliveryEvidence, DeliverError> {
-        let Some(socket) = &self.socket else {
-            return self.herdr.deliver_to(target, pane, text);
-        };
-        // The socket is Claude Code's: any other harness has no session record by design,
-        // so it goes straight to herdr, leaves no note, and Claude Code's registry is not
-        // read for it (FR-054).
-        if !relay_core::tries_socket(target.kind) {
-            socket.not_tried(target.lead);
-            return self.herdr.deliver_to(target, pane, text);
-        }
-        match socket.deliver(target, text) {
-            Ok(evidence) => Ok(evidence),
-            Err(deliverer::SocketError::NotSent(why)) => {
-                eprintln!(
-                    "relay-watcher: {}: inbox socket not used ({why}); typing it in through herdr",
-                    target.lead
-                );
-                self.herdr.deliver_to(target, pane, text)
-            }
-            Err(other) => Err(other.into()),
+    ) -> Result<DeliveryEvidence, DeliverError> {
+        match self.route(target.lead, target.kind, target.session) {
+            Route::Terminal => self.herdr.deliver_to(target, pane, text),
+            Route::Socket => Err(DeliverError::Deferred(
+                "the session has an inbox socket; nothing typed".to_owned(),
+            )),
+            Route::Wait(why) => Err(DeliverError::Deferred(why)),
         }
     }
 
     fn registry_read(&self, registered: &[RegisteredLead<'_>]) {
-        if let Some(socket) = &self.socket {
+        if let Some(socket) = self.socket() {
             socket.registry_read(registered);
         }
     }
 
-    fn holds(&self, lead: &str, session: Option<&relay_core::SessionId>) -> bool {
-        self.socket.as_ref().is_some_and(|s| s.holds(lead, session))
+    fn holds(&self, lead: &str, session: Option<&SessionId>) -> bool {
+        self.socket().is_some_and(|s| s.holds(lead, session))
     }
 
     fn rotates(&self) -> bool {
-        self.socket.is_some()
+        self.socket().is_some()
+    }
+
+    fn open(&self, lead: &str) -> bool {
+        self.socket().is_some_and(|s| s.open(lead))
     }
 
     fn alerts(&self) -> Vec<(String, String)> {
-        self.socket.as_ref().map(|s| s.alerts()).unwrap_or_default()
+        self.socket()
+            .map(SocketDeliverer::alerts)
+            .unwrap_or_default()
     }
 
     fn applied(&self, settlement: &Settlement, result: &Result<usize, String>) {
-        if let Some(s) = &self.socket {
+        if let Some(s) = self.socket() {
             s.applied(settlement, result);
         }
     }
 
     fn settle(&self) -> Vec<Settlement> {
-        self.socket.as_ref().map(|s| s.settle()).unwrap_or_default()
+        self.socket()
+            .map(SocketDeliverer::settle)
+            .unwrap_or_default()
     }
 }

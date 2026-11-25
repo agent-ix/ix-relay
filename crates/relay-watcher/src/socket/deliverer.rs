@@ -1,18 +1,19 @@
 //! [`SocketDeliverer`]: posts a batch to a lead's Claude Code inbox socket and
 //! decides, from what comes back, what the caller may do about the batch.
 //!
-//! The outcome is one of the four the watcher acts on:
+//! The watcher distinguishes definite non-delivery from socket-owned batches:
 //!
 //! - [`SocketError::NotSent`]: certain nothing was delivered (no socket, refused
-//!   connection, a receipt saying refused or dropped). The caller falls back to
-//!   herdr.
+//!   connection, a receipt saying refused or dropped). The batch goes back to the
+//!   inbox and is tried again over the socket; it is never typed.
 //! - [`SocketError::Held`]: Claude Code holds it behind an approval prompt.
 //!   Sending it again, by any transport, would duplicate it.
+//! - [`SocketError::Pending`]: the socket took the line and consumption is not
+//!   confirmed yet. The lease is renewed and retained across watcher restart.
 //! - [`SocketError::Deferred`]: not tried, because the lead's mail is held. It goes
 //!   back to the inbox unmarked.
-//! - [`SocketError::Ambiguous`]: it may have arrived. The batch stays in flight
-//!   and is redelivered, marked, when its lease expires (FR-020); that redelivery
-//!   goes through herdr, because the socket has shown it cannot say.
+//! - [`SocketError::Ambiguous`]: a partial write or unknown receipt leaves an
+//!   uncertain outcome. Retain the socket-owned batch rather than reposting it.
 //!
 //! `Ok` is returned only when the batch's `msg_id` is in the lead's transcript.
 //!
@@ -56,7 +57,7 @@ use super::{
     session::{self, Procs},
     transcript::{self, Watch},
 };
-use crate::deliver::{BatchTarget, DeliverError, RegisteredLead, SettleAction, Settlement};
+use crate::deliver::{BatchTarget, DeliverError, RegisteredLead, Route, SettleAction, Settlement};
 
 /// How long a delivery waits, after posting, for a receipt or the transcript to
 /// show the message. An idle session records it within a second or two; what it
@@ -70,10 +71,6 @@ pub const DEDUPE_WINDOW: Duration = Duration::from_secs(35);
 /// How long a lead whose mail is held is left alone before the socket is tried
 /// again: each retry would add another held message behind the same prompt.
 pub const HELD_QUIET: Duration = Duration::from_secs(10 * 60);
-
-/// How long a lead whose socket delivery was ambiguous, or was refused after the
-/// fact, goes through herdr before the socket is tried again.
-pub const SUSPECT_FOR: Duration = Duration::from_secs(10 * 60);
 
 /// How long a connect may take. A session that has stopped accepting fills its
 /// socket's backlog, and a connect to it then blocks without end.
@@ -115,11 +112,6 @@ const REBIND_START: Duration = Duration::from_secs(2);
 /// The longest wait before the reply socket is bound again.
 const REBIND_MAX: Duration = Duration::from_secs(5 * 60);
 
-/// What an unconfirmed socket delivery may be down to, for the note `doctor` shows.
-const AMBIGUOUS_CAUSES: &str = "the cause may be a transcript under another CLAUDE_CONFIG_DIR, \
-    a socket that wants authentication, a session that was cleared or busy, or a changed \
-    wire format";
-
 /// How long a held batch's lease is extended by each renewal. It must outlast the
 /// longest gap between two ticks (the sweep is every 15 s), so a batch held behind an
 /// approval prompt is never returned to the inbox, or popped by the lead's own hook,
@@ -128,7 +120,16 @@ pub const HELD_RENEW_LEASE: Duration = Duration::from_secs(120);
 
 /// The longest a batch is kept in flight for an approval that never comes. At the
 /// end of it the batch is dead-lettered (reason `hold_expired`), never posted again.
+/// A posted batch that is still not consumed after as long is reported and kept.
 pub const MAX_HOLD: Duration = Duration::from_secs(30 * 60);
+
+/// How often the process a pending batch was posted to is looked at: a look can fork
+/// `ps`.
+pub const LIVENESS_EVERY: Duration = Duration::from_secs(10);
+
+/// The oldest posted batch a restarted watcher adopts. Past it the record is taken
+/// for forged.
+pub const ADOPT_FOR: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// The most time one tick spends on sockets, across all leads: what is spent (resolving,
 /// connecting, writing and waiting, and the settlement's transcript checks) plus the worst
@@ -189,8 +190,6 @@ pub struct SocketConfig {
     pub dedupe_window: Duration,
     /// See [`HELD_QUIET`].
     pub held_quiet: Duration,
-    /// See [`SUSPECT_FOR`].
-    pub suspect_for: Duration,
     /// See [`REBIND_START`].
     pub rebind_start: Duration,
     /// See [`MAX_HOLD`].
@@ -203,6 +202,8 @@ pub struct SocketConfig {
     pub dead_note_age: Duration,
     /// How long after a failed settlement write the next try waits; doubles per failure, up to five minutes.
     pub settle_backoff: Duration,
+    /// See [`LIVENESS_EVERY`].
+    pub liveness_every: Duration,
 }
 
 impl SocketConfig {
@@ -228,13 +229,13 @@ impl SocketConfig {
             ack_wait: DEFAULT_ACK_WAIT,
             dedupe_window: DEDUPE_WINDOW,
             held_quiet: HELD_QUIET,
-            suspect_for: SUSPECT_FOR,
             rebind_start: REBIND_START,
             max_hold: MAX_HOLD,
             tick_budget: TICK_BUDGET,
             delivered_grace: DELIVERED_GRACE,
             dead_note_age: DEAD_NOTE_AGE,
             settle_backoff: SETTLE_BACKOFF,
+            liveness_every: LIVENESS_EVERY,
         }
     }
 
@@ -246,13 +247,7 @@ impl SocketConfig {
     ///
     /// Why a location cannot be told (no `HOME`, or no `XDG_RUNTIME_DIR` on Linux).
     pub fn from_env() -> Result<Self, String> {
-        let claude = match std::env::var_os("IX_RELAY_CLAUDE_DIR") {
-            Some(dir) => PathBuf::from(dir),
-            None => PathBuf::from(
-                std::env::var_os("HOME").ok_or("neither IX_RELAY_CLAUDE_DIR nor HOME is set")?,
-            )
-            .join(".claude"),
-        };
+        let claude = claude_dir().ok_or("neither IX_RELAY_CLAUDE_DIR nor HOME is set")?;
         #[cfg(target_os = "macos")]
         let socket_dir = std::env::var_os("XDG_RUNTIME_DIR")
             .map(|runtime| PathBuf::from(runtime).join("cc-socks"))
@@ -270,6 +265,14 @@ impl SocketConfig {
     }
 }
 
+/// Claude Code's configuration directory: `IX_RELAY_CLAUDE_DIR`, else `~/.claude`.
+#[must_use]
+pub fn claude_dir() -> Option<PathBuf> {
+    std::env::var_os("IX_RELAY_CLAUDE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))
+}
+
 /// Why a batch did not (certainly) arrive; see the module docs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SocketError {
@@ -283,6 +286,8 @@ pub enum SocketError {
     Postponed(String),
     /// May have been delivered.
     Ambiguous(String),
+    /// The full line was posted; the receiver has not consumed it yet.
+    Pending(String),
     /// The receiver's user denied it.
     Denied(String),
 }
@@ -295,6 +300,7 @@ impl From<SocketError> for DeliverError {
             SocketError::Deferred(why) => Self::Deferred(why),
             SocketError::Postponed(why) => Self::Postponed(why),
             SocketError::Ambiguous(why) => Self::Ambiguous(why),
+            SocketError::Pending(why) => Self::Pending(why),
             SocketError::Denied(why) => Self::Denied(why),
         }
     }
@@ -484,6 +490,8 @@ struct Pending {
     /// When Claude Code first held the message, while it is held (or approved and
     /// not yet in the transcript): the batch's lease is renewed until it is settled.
     held_since: Option<Instant>,
+    /// Posted successfully but not yet observed in the receiver's transcript.
+    awaiting_consumption: bool,
     /// When Claude Code reported the message delivered (the user approved it).
     delivered_at: Option<Instant>,
     /// The transcript poll for this message.
@@ -497,6 +505,16 @@ struct Pending {
     next_try: Option<Instant>,
     /// Whether the alert for a resolution that keeps failing has been raised.
     alerted: bool,
+    /// The process the line was posted to, with its start time, when known.
+    process: Option<(u32, String)>,
+    /// Where the transcript ended before the line was written.
+    from: Option<u64>,
+    /// When that process was last looked at.
+    looked_at: Option<Instant>,
+    /// Whether it has been reported that this post is long unconsumed.
+    told_unconsumed: bool,
+    /// Whether the last look for the session's transcript found none.
+    no_transcript: bool,
 }
 
 /// What the watcher knows of a lead's resolved Claude Code process.
@@ -514,20 +532,12 @@ struct Held {
     since: Instant,
 }
 
-/// A lead whose socket cannot be relied on for now.
-struct Suspect {
-    session: String,
-    since: Instant,
-}
-
 struct State {
     reply: ReplyState,
     /// Bodies posted, by target session, and when.
     sent: HashMap<(String, u64), Instant>,
     /// Leads whose Claude Code holds their mail.
     held: HashMap<String, Held>,
-    /// Leads that go through herdr for now.
-    suspect: HashMap<String, Suspect>,
     /// Sends whose outcome is open, by message id.
     pending: HashMap<String, Pending>,
     /// The socket each lead last resolved to, with the start time of its process then.
@@ -545,8 +555,6 @@ struct State {
     procs_checked: Option<Instant>,
     /// Where the next settlement's round of transcript checks starts.
     settle_cursor: usize,
-    /// See [`SocketConfig::max_hold`].
-    max_hold: Duration,
     /// Notifications waiting to be taken by [`SocketDeliverer::alerts`].
     alerts: Vec<(String, String)>,
     /// The `settlement_failed` note of each lead whose decision cannot be written: kept
@@ -560,10 +568,6 @@ struct State {
 }
 
 impl State {
-    fn max_hold_ms(&self) -> u128 {
-        self.max_hold.as_millis()
-    }
-
     /// Drops the dead-letter reasons older than `age` and keeps the newest cap of them.
     fn prune_dead_notes(&mut self, age: Duration) {
         let now = now_ms();
@@ -580,6 +584,21 @@ impl State {
     }
 }
 
+/// The watch of `p`'s transcript, made when the file is first found. It starts where the
+/// file ended at the post when that is known; otherwise at the file's start for a post
+/// of this watcher (the file came into being since) and at its tail for an adopted one.
+fn watch_of<'a>(projects: &Path, p: &'a mut Pending) -> Option<&'a mut Watch> {
+    if p.watch.is_none() {
+        p.watch = transcript::find(projects, &p.session).map(|f| match (p.from, p.adopted) {
+            (Some(offset), _) => Watch::from_offset(f, offset),
+            (None, true) => Watch::from_tail(f),
+            (None, false) => Watch::from_start(f),
+        });
+        p.no_transcript = p.watch.is_none() && !p.session.is_empty();
+    }
+    p.watch.as_mut()
+}
+
 /// Delivers batches through Claude Code's inbox sockets.
 pub struct SocketDeliverer {
     config: SocketConfig,
@@ -593,7 +612,7 @@ impl SocketDeliverer {
     ///
     /// Never fails: a reply socket that cannot be bound (the directory may not
     /// exist yet at login) leaves a deliverer that sends nothing (every batch is
-    /// [`SocketError::NotSent`], so it goes to herdr), says why in its status and
+    /// [`SocketError::NotSent`], so mail waits), says why in its status and
     /// binds again, with a growing wait, on a later delivery.
     pub fn start(config: SocketConfig, procs: Box<dyn Procs + Send + Sync>) -> Self {
         let adopted = remove_stale(&config, procs.as_ref());
@@ -603,7 +622,7 @@ impl SocketDeliverer {
             Ok(reply) => ReplyState::Bound(reply),
             Err(why) => {
                 eprintln!(
-                    "relay-watcher: reply socket not bound ({why}); batches go through herdr \
+                    "relay-watcher: reply socket not bound ({why}); Claude Code mail waits \
                      until it binds"
                 );
                 ReplyState::Unbound {
@@ -618,13 +637,11 @@ impl SocketDeliverer {
             reply,
             sent: HashMap::new(),
             held: HashMap::new(),
-            suspect: HashMap::new(),
             pending: HashMap::new(),
             leads: BTreeMap::new(),
             notes: BTreeMap::new(),
             connecting: HashMap::new(),
             dead_notes: adopted.dead_lettered.into(),
-            max_hold: config.max_hold,
             tick_spent: Duration::ZERO,
             procs_checked: None,
             settle_cursor: 0,
@@ -642,12 +659,14 @@ impl SocketDeliverer {
         for h in adopted.held_batches.into_iter().take(MAX_PENDING) {
             let plain = |t: &str| !t.is_empty() && t.len() <= 128 && transcript::is_plain_id(t);
             // Ages from the file, checked: a time that overflows, is in the future or is
-            // older than the maximum hold makes the entry invalid.
+            // implausibly old makes the entry invalid. An entry past the maximum hold is
+            // adopted all the same: dropping it would let its lease lapse and the batch
+            // be posted again although it may have been consumed.
             let age_of = |since_ms: i64| {
                 now.checked_sub(since_ms)
                     .filter(|a| *a >= 0)
                     .and_then(|a| u64::try_from(a).ok())
-                    .filter(|a| u128::from(*a) <= state.max_hold_ms())
+                    .filter(|a| u128::from(*a) <= ADOPT_FOR.as_millis())
             };
             let Some(age_ms) = age_of(h.since_ms) else {
                 continue;
@@ -672,13 +691,15 @@ impl SocketDeliverer {
                     .unwrap_or_else(Instant::now)
             };
             let since = ago(age_ms);
-            state.held.insert(
-                h.lead.clone(),
-                Held {
-                    session: h.session.clone(),
-                    since,
-                },
-            );
+            if !h.awaiting_consumption {
+                state.held.insert(
+                    h.lead.clone(),
+                    Held {
+                        session: h.session.clone(),
+                        since,
+                    },
+                );
+            }
             state.pending.insert(
                 h.msg_id.clone(),
                 Pending {
@@ -689,6 +710,7 @@ impl SocketDeliverer {
                     msg_id: h.msg_id,
                     at: Instant::now(),
                     held_since: Some(since),
+                    awaiting_consumption: h.awaiting_consumption,
                     delivered_at: delivered_age_ms.map(ago),
                     watch: None,
                     resolution: None,
@@ -696,6 +718,14 @@ impl SocketDeliverer {
                     adopted: true,
                     next_try: None,
                     alerted: false,
+                    process: h
+                        .pid
+                        .filter(|pid| *pid > 0)
+                        .zip(h.proc_start.filter(|s| !s.is_empty() && s.len() <= 64)),
+                    from: h.transcript_from,
+                    looked_at: None,
+                    told_unconsumed: false,
+                    no_transcript: false,
                 },
             );
         }
@@ -747,6 +777,7 @@ impl SocketDeliverer {
                     msg_id: format!("owed-{}", o.batch),
                     at: Instant::now(),
                     held_since: None,
+                    awaiting_consumption: false,
                     delivered_at: None,
                     watch: None,
                     resolution: Some(resolution),
@@ -754,6 +785,11 @@ impl SocketDeliverer {
                     adopted: true,
                     next_try: None,
                     alerted: false,
+                    process: None,
+                    from: None,
+                    looked_at: None,
+                    told_unconsumed: false,
+                    no_transcript: false,
                 },
             );
         }
@@ -853,8 +889,8 @@ impl SocketDeliverer {
     }
 
     /// Starts a tick's view of the registry: drops every resolved-lead entry whose lead has
-    /// no registration in `registered`, is registered on another machine, is not a Claude
-    /// Code lead, or whose process is gone or was replaced by one that started at another
+    /// no registration in `registered`, is registered on another machine, or whose
+    /// process is gone or was replaced by one that started at another
     /// time (FR-055). Nothing else is touched (a held batch, a pending decision, a
     /// dead-letter reason, the drift counts have their own rules). The status file is
     /// written when an entry was dropped.
@@ -868,11 +904,9 @@ impl SocketDeliverer {
         let (mut changed, to_check) = {
             let mut state = self.lock();
             let before = state.leads.len();
-            state.leads.retain(|lead, _| {
-                registered
-                    .iter()
-                    .any(|r| r.name == lead && r.here && relay_core::tries_socket(r.kind))
-            });
+            state
+                .leads
+                .retain(|lead, _| registered.iter().any(|r| r.name == lead && r.here));
             let due = state
                 .procs_checked
                 .is_none_or(|at| at.elapsed() >= crate::PLACE_REFRESH_EVERY);
@@ -912,18 +946,89 @@ impl SocketDeliverer {
         }
     }
 
-    /// Forgets what the status file said about `lead`'s socket (its resolved entry, its note
-    /// and its suspicion) because the lead does not try the socket: a lead whose
-    /// registration changed `kind` is judged by the registration the tick read (FR-054).
-    /// A held batch, a pending decision and a dead-letter reason are not touched.
-    pub fn not_tried(&self, lead: &str) {
+    /// Which transport may carry mail for a lead's `session` (FR-044, FR-054). The socket
+    /// when Claude Code's registry shows the session has one that can take mail, whatever
+    /// the lead's `kind` says; the terminal when the session's own live record shows it
+    /// has none, or when a lead of another harness has no record at all; neither when
+    /// that cannot be shown or the socket cannot take mail now. The reason for a wait is
+    /// kept in the status file.
+    pub fn route(&self, lead: &str, kind: &str, session: Option<&relay_core::SessionId>) -> Route {
+        let claude = relay_core::tries_socket(kind);
         let mut state = self.lock();
-        let had = state.leads.remove(lead).is_some()
-            | state.notes.remove(lead).is_some()
-            | state.suspect.remove(lead).is_some();
-        if had {
+        self.ensure_bound(&mut state);
+        // A lead with no usable session id can be shown to have no socket only by its
+        // harness being another one.
+        let unknowable = |why: &str| {
+            if claude {
+                Route::Wait(why.to_owned())
+            } else {
+                Route::Terminal
+            }
+        };
+        let route = match session.map(relay_core::SessionId::as_str) {
+            None => unknowable("the lead registered no session id"),
+            Some(id) if !transcript::is_plain_id(id) => {
+                unknowable("the session id is not a plain id")
+            }
+            Some(id) => match session::resolve(
+                &self.config.sessions_dir,
+                id,
+                self.procs.as_ref(),
+                &self.socket_dirs(),
+            ) {
+                Ok(_) => match &state.reply {
+                    ReplyState::Bound(_) => Route::Socket,
+                    ReplyState::Unbound { why, .. } => {
+                        Route::Wait(format!("reply socket not bound: {why}"))
+                    }
+                },
+                Err(session::Unresolved::NoInboxSocket) => Route::Terminal,
+                Err(session::Unresolved::NoRecord) if !claude => Route::Terminal,
+                Err(session::Unresolved::Stale(_))
+                    if !claude && !session::advertises(&self.config.sessions_dir, id) =>
+                {
+                    Route::Terminal
+                }
+                Err(unresolved) => Route::Wait(unresolved.to_string()),
+            },
+        };
+        let changed = match &route {
+            Route::Socket => false,
+            Route::Terminal => {
+                state.leads.remove(lead).is_some() | state.notes.remove(lead).is_some()
+            }
+            Route::Wait(why) => {
+                let note = sanitise_line(why);
+                let gone = state.leads.remove(lead).is_some();
+                let new = state.notes.get(lead) != Some(&note);
+                state.notes.insert(lead.to_owned(), note);
+                gone || new
+            }
+        };
+        if changed {
             self.publish(&mut state);
         }
+        route
+    }
+
+    /// Whether a live Claude Code process holds `session` and has, or may have, an inbox
+    /// socket: it is not one that herdr types into. Read from Claude Code's registry,
+    /// with no look at herdr.
+    pub fn session_alive(&self, session: &relay_core::SessionId) -> bool {
+        use session::Unresolved;
+        transcript::is_plain_id(session.as_str())
+            && !matches!(
+                session::resolve(
+                    &self.config.sessions_dir,
+                    session.as_str(),
+                    self.procs.as_ref(),
+                    &self.socket_dirs(),
+                ),
+                Err(Unresolved::Unreadable(_)
+                    | Unresolved::NoRecord
+                    | Unresolved::Stale(_)
+                    | Unresolved::NoInboxSocket)
+            )
     }
 
     /// Posts `text` for `target` and waits for the outcome.
@@ -941,7 +1046,6 @@ impl SocketDeliverer {
         match &result {
             Ok(_) => {
                 state.notes.remove(target.lead);
-                state.suspect.remove(target.lead);
             }
             Err(SocketError::NotSent(why)) => {
                 state.leads.remove(target.lead);
@@ -949,7 +1053,7 @@ impl SocketDeliverer {
                     .notes
                     .insert(target.lead.to_owned(), sanitise_line(why));
             }
-            Err(SocketError::Ambiguous(why)) => {
+            Err(SocketError::Ambiguous(why) | SocketError::Pending(why)) => {
                 state
                     .notes
                     .insert(target.lead.to_owned(), sanitise_line(why));
@@ -1039,15 +1143,6 @@ impl SocketDeliverer {
                 }
                 state.held.remove(lead);
             }
-            if let Some(suspect) = state.suspect.get(lead) {
-                if suspect.session == session && suspect.since.elapsed() < self.config.suspect_for {
-                    return Err(SocketError::NotSent(format!(
-                        "an earlier socket delivery to this lead could not be confirmed, so \
-                         herdr types its mail for now; {AMBIGUOUS_CAUSES}"
-                    )));
-                }
-                state.suspect.remove(lead);
-            }
             // Posted only when what is left of the tick's budget covers the worst case of
             // the post: a connect, a write and a whole ack wait (what was spent before,
             // this attempt's resolving included, is counted).
@@ -1059,12 +1154,17 @@ impl SocketDeliverer {
                         .to_owned(),
                 ));
             }
+            if state.pending.len() >= MAX_PENDING {
+                return Err(SocketError::Postponed(
+                    "socket pending capacity reached; nothing posted".to_owned(),
+                ));
+            }
             let content = self.content(&reply_path, target, text);
             let key = (session.to_owned(), hash_of(&content));
             let window = self.config.dedupe_window;
             state.sent.retain(|_, at| at.elapsed() < window);
             if state.sent.contains_key(&key) {
-                return Err(SocketError::NotSent(
+                return Err(SocketError::Deferred(
                     "an identical body was posted to this session in the last 30 s".to_owned(),
                 ));
             }
@@ -1084,32 +1184,6 @@ impl SocketDeliverer {
             let watch = transcript::find(&self.config.projects_dir, session).map(Watch::new);
             state.drift.posted(&resolved.version);
             state.sent.insert(key, Instant::now());
-            if let Err(e) = write_within(&mut stream, line.as_bytes(), WRITE_TIMEOUT) {
-                // Part of the line may have been read: unconfirmed, and a receiver that
-                // reads this slowly goes through herdr for a while.
-                state.suspect.insert(
-                    lead.to_owned(),
-                    Suspect {
-                        session: session.to_owned(),
-                        since: Instant::now(),
-                    },
-                );
-                return Err(SocketError::Ambiguous(format!(
-                    "the line was not written within {}s: {e}; this lead goes through herdr \
-                     for now",
-                    WRITE_TIMEOUT.as_secs()
-                )));
-            }
-            if state.pending.len() >= MAX_PENDING
-                && let Some(oldest) = state
-                    .pending
-                    .iter()
-                    .filter(|(_, p)| p.held_since.is_none())
-                    .min_by_key(|(_, p)| p.at)
-                    .map(|(id, _)| id.clone())
-            {
-                state.pending.remove(&oldest);
-            }
             state.pending.insert(
                 msg_id.clone(),
                 Pending {
@@ -1119,7 +1193,8 @@ impl SocketDeliverer {
                     batch: target.batch,
                     msg_id: msg_id.clone(),
                     at: Instant::now(),
-                    held_since: None,
+                    held_since: Some(Instant::now()),
+                    awaiting_consumption: true,
                     delivered_at: None,
                     watch: None,
                     resolution: None,
@@ -1127,8 +1202,24 @@ impl SocketDeliverer {
                     adopted: false,
                     next_try: None,
                     alerted: false,
+                    process: Some((resolved.pid, resolved.proc_start.clone())),
+                    from: Some(watch.as_ref().and_then(Watch::position).unwrap_or(0)),
+                    looked_at: None,
+                    told_unconsumed: false,
+                    no_transcript: false,
                 },
             );
+            if let Err(e) = write_within(&mut stream, line.as_bytes(), WRITE_TIMEOUT) {
+                // A partial write may have reached Claude. Retain ownership just
+                // like a complete post; another transport must not resend it.
+                if let Some(p) = state.pending.get_mut(&msg_id) {
+                    p.watch = watch;
+                }
+                return Err(SocketError::Ambiguous(format!(
+                    "the line was not written within {}s: {e}; retained in flight",
+                    WRITE_TIMEOUT.as_secs()
+                )));
+            }
             (shared, msg_id, watch)
         };
         Ok(posted)
@@ -1148,7 +1239,7 @@ impl SocketDeliverer {
     /// it (a batch is only posted when the tick's budget covers that). What is still
     /// open at the end stays in the pending table, and [`SocketDeliverer::settle`]
     /// finishes it. A wait that ends with neither is a receiver the socket cannot
-    /// confirm: that lead goes through herdr for a while.
+    /// confirm yet: the batch stays owned by the socket.
     fn await_outcome(
         &self,
         shared: &Shared,
@@ -1188,7 +1279,7 @@ impl SocketDeliverer {
                 }) => {
                     // Our fresh id is in the transcript, so Claude Code received the message;
                     // the shape it recorded it in is not one this build knows. Acknowledge it as
-                    // received but unconfirmed: no herdr fallback, no redelivery loop.
+                    // received but unconfirmed: no redelivery loop.
                     let mut state = self.lock();
                     if let Some(p) = state.pending.remove(msg_id) {
                         state.drift.count(
@@ -1213,13 +1304,14 @@ impl SocketDeliverer {
             if now >= deadline {
                 let mut state = self.lock();
                 let delivered = state.pending.get_mut(msg_id).is_some_and(|p| {
+                    p.no_transcript = watch.is_none();
                     p.watch = watch.take();
                     p.delivered_at.is_some()
                 });
                 if delivered {
                     // Claude Code said delivered: the transcript is waited for, on the
                     // pending entry, until the grace ends.
-                    return Err(SocketError::Ambiguous(
+                    return Err(SocketError::Pending(
                         "Claude Code reported the message delivered; its transcript does not \
                          show it yet"
                             .to_owned(),
@@ -1230,16 +1322,9 @@ impl SocketDeliverer {
                 } else {
                     "its transcript cannot be found"
                 };
-                state.suspect.insert(
-                    target.lead.to_owned(),
-                    Suspect {
-                        session: session.to_owned(),
-                        since: now,
-                    },
-                );
-                return Err(SocketError::Ambiguous(format!(
-                    "the socket took the line but sent no receipt and {seen}; {AMBIGUOUS_CAUSES}; \
-                     this lead goes through herdr for now"
+                return Err(SocketError::Pending(format!(
+                    "socket_pending: the socket took the line and {seen}; retained in flight \
+                     until consumption is confirmed"
                 )));
             }
             let guard = shared.queue();
@@ -1271,7 +1356,10 @@ impl SocketDeliverer {
                     },
                 );
                 if let Some(p) = state.pending.get_mut(msg_id) {
-                    p.held_since.get_or_insert_with(Instant::now);
+                    if p.awaiting_consumption {
+                        p.held_since = Some(Instant::now());
+                    }
+                    p.awaiting_consumption = false;
                 }
                 Some(Err(SocketError::Held(
                     "Claude Code holds the message for approval (bypass mode)".to_owned(),
@@ -1387,7 +1475,12 @@ impl SocketDeliverer {
         match result {
             Ok(moved) => {
                 if matches!(settlement.action, SettleAction::Renew(_)) {
-                    if *moved == 0 {
+                    if *moved == 0
+                        && state
+                            .pending
+                            .get(&id)
+                            .is_some_and(|p| p.resolution.is_none())
+                    {
                         // No longer in flight (acknowledged or reaped): stop renewing it.
                         state.pending.remove(&id);
                     }
@@ -1408,6 +1501,14 @@ impl SocketDeliverer {
                             reason,
                         );
                     }
+                }
+                if !state.pending.values().any(|p| p.lead == settlement.lead)
+                    && state
+                        .notes
+                        .get(&settlement.lead)
+                        .is_some_and(|n| n.starts_with("socket_pending:"))
+                {
+                    state.notes.remove(&settlement.lead);
                 }
             }
             Err(why) => {
@@ -1459,6 +1560,41 @@ impl SocketDeliverer {
         self.publish(&mut state);
     }
 
+    /// The pending posts whose receiving process no longer exists. Each is looked at
+    /// once per [`SocketConfig::liveness_every`], one look per process, with the state
+    /// unlocked: a look can fork `ps`.
+    fn gone_receivers(&self) -> HashSet<String> {
+        let every = self.config.liveness_every;
+        let due: Vec<(String, (u32, String))> = self
+            .lock()
+            .pending
+            .iter_mut()
+            .filter(|(_, p)| p.resolution.is_none() && p.delivered_at.is_none())
+            .filter_map(|(id, p)| {
+                if p.looked_at.is_some_and(|at| at.elapsed() < every) {
+                    return None;
+                }
+                let process = p.process.clone()?;
+                p.looked_at = Some(Instant::now());
+                Some((id.clone(), process))
+            })
+            .collect();
+        let mut seen: HashMap<(u32, String), bool> = HashMap::new();
+        due.into_iter()
+            .filter(|(_, process)| {
+                *seen
+                    .entry(process.clone())
+                    .or_insert_with(|| self.procs.gone(process.0, &process.1))
+            })
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// Whether any send to `lead` is still unsettled.
+    pub fn open(&self, lead: &str) -> bool {
+        self.lock().pending.values().any(|p| p.lead == lead)
+    }
+
     /// Starts a tick: routes every receipt that arrived since the last call to the
     /// batch it is about, decides what is to be done with each open send, and returns
     /// what the caller must now do. Every send with a decision is returned again on
@@ -1479,6 +1615,8 @@ impl SocketDeliverer {
         let receipts: Vec<Receipt> = shared
             .map(|s| s.queue().drain(..).collect())
             .unwrap_or_default();
+        // The posts whose receiver exited, looked at with the state unlocked.
+        let gone = self.gone_receivers();
         let mut state = self.lock();
         state.prune_dead_notes(self.config.dead_note_age);
         state.pending.retain(|_, p| {
@@ -1519,25 +1657,39 @@ impl SocketDeliverer {
         state.settle_cursor = state
             .settle_cursor
             .wrapping_add(TRANSCRIPT_CHECKS_PER_SETTLE);
+        let max_hold = self.config.max_hold;
+        // The sends a decision is about to be made on: their transcripts are read to the
+        // end first, so that silence is never decided on a part of the file.
+        let deciding: HashSet<String> = state
+            .pending
+            .iter()
+            .filter(|(id, p)| {
+                p.resolution.is_none()
+                    && (gone.contains(*id)
+                        || (p.delivered_at.is_none()
+                            && !p.awaiting_consumption
+                            && p.held_since.is_some_and(|s| s.elapsed() >= max_hold)))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut checks = picked;
+        let extra: Vec<String> = deciding
+            .iter()
+            .filter(|id| !checks.contains(id))
+            .cloned()
+            .collect();
+        checks.extend(extra);
         let projects = self.config.projects_dir.clone();
         let mut shape_seen: Vec<(String, String, Option<String>)> = Vec::new();
         let mut acked: Vec<String> = Vec::new();
-        for id in picked {
+        for id in checks {
             let Some(p) = state.pending.get_mut(&id) else {
                 continue;
             };
-            if p.watch.is_none() {
-                // Posted by this watcher, the transcript came into being since; posted
-                // before a restart, the message's place in the file is unknown.
-                p.watch = transcript::find(&projects, &p.session).map(|f| {
-                    if p.adopted {
-                        Watch::from_tail(f)
-                    } else {
-                        Watch::from_start(f)
-                    }
-                });
-            }
-            match p.watch.as_mut().map(|w| w.look(&id)) {
+            let full = deciding.contains(&id);
+            let scan =
+                watch_of(&projects, p).map(|w| if full { w.catch_up(&id) } else { w.look(&id) });
+            match scan {
                 Some(Scan {
                     found: TranscriptMatch::Acked,
                     ..
@@ -1592,16 +1744,21 @@ impl SocketDeliverer {
                     .to_owned(),
             );
         }
-        // Decisions by time: an approved message whose transcript line never shows up is
-        // acknowledged after the grace (Claude Code itself said delivered); a hold nobody
-        // answers is dead-lettered at the maximum hold.
-        let (grace, max_hold) = (self.config.delivered_grace, self.config.max_hold);
+        // Decisions by time and by the receiver: an approved message whose transcript line
+        // never shows up is acknowledged after the grace (Claude Code itself said
+        // delivered); a post whose receiver exited without recording it goes back to the
+        // inbox; a hold nobody answers is dead-lettered at the maximum hold; a post a
+        // live receiver has not consumed by then is reported and kept.
+        let grace = self.config.delivered_grace;
         let mut unconfirmed: Vec<(String, String)> = Vec::new();
-        for p in state
+        let mut requeued: Vec<(String, String)> = Vec::new();
+        let mut unconsumed: Vec<(String, u64)> = Vec::new();
+        for (id, p) in state
             .pending
-            .values_mut()
-            .filter(|p| p.resolution.is_none())
+            .iter_mut()
+            .filter(|(_, p)| p.resolution.is_none())
         {
+            let overdue = p.held_since.is_some_and(|s| s.elapsed() >= max_hold);
             if p.delivered_at.is_some_and(|at| at.elapsed() >= grace) {
                 unconfirmed.push((p.lead.clone(), p.version.clone()));
                 p.resolution = Some(Resolution {
@@ -1612,9 +1769,17 @@ impl SocketDeliverer {
                     notice: None,
                     reason: None,
                 });
-            } else if p.delivered_at.is_none()
-                && p.held_since.is_some_and(|s| s.elapsed() >= max_hold)
-            {
+            } else if p.delivered_at.is_none() && gone.contains(id) {
+                requeued.push((p.lead.clone(), p.session.clone()));
+                p.resolution = Some(Resolution {
+                    action: SettleAction::Requeue,
+                    why: "receiver_gone: the process the message was posted to exited and its \
+                          transcript does not show the message"
+                        .to_owned(),
+                    notice: None,
+                    reason: None,
+                });
+            } else if p.delivered_at.is_none() && overdue && !p.awaiting_consumption {
                 let lead = p.lead.clone();
                 p.resolution = Some(Resolution {
                     action: SettleAction::DeadLetter,
@@ -1623,12 +1788,31 @@ impl SocketDeliverer {
                         format!("ix-relay: a message to {lead} was never approved"),
                         "Claude Code held it behind an approval prompt that nobody answered; it \
                          was dead-lettered (reason hold_expired) and will not be posted again. \
-                         Set crossSessionInbound to accept, or delivery = herdr."
+                         Set crossSessionInbound to accept in that session's settings."
                             .to_owned(),
                     )),
                     reason: Some("hold_expired"),
                 });
+            } else if p.delivered_at.is_none() && overdue && !p.told_unconsumed {
+                p.told_unconsumed = true;
+                unconsumed.push((p.lead.clone(), p.batch.get()));
             }
+        }
+        for (lead, session) in requeued {
+            state.held.remove(&lead);
+            // A new process of the session never saw the body: it is not a duplicate.
+            state.sent.retain(|(to, _), _| *to != session);
+        }
+        for (lead, batch) in unconsumed {
+            state.alerts.push((
+                format!("ix-relay: {lead} has not read a message"),
+                format!(
+                    "Batch {batch} was posted to its inbox socket and its transcript still does \
+                     not show it (an open dialog, a long tool call, or another \
+                     CLAUDE_CONFIG_DIR). It is kept in flight and not posted again; if that \
+                     process exits without reading it, it is queued again."
+                ),
+            ));
         }
         for (lead, version) in unconfirmed {
             // Claude Code itself reported the message delivered.
@@ -1647,7 +1831,7 @@ impl SocketDeliverer {
                     lead: p.lead.clone(),
                     batch: p.batch,
                     action: SettleAction::Renew(HELD_RENEW_LEASE),
-                    why: "held behind an approval prompt".to_owned(),
+                    why: "socket delivery awaits consumption or approval".to_owned(),
                     notice: None,
                     dead_letter_reason: None,
                 });
@@ -1706,7 +1890,10 @@ impl SocketDeliverer {
                     },
                 );
                 if let Some(p) = state.pending.get_mut(id) {
-                    p.held_since.get_or_insert_with(Instant::now);
+                    if p.awaiting_consumption {
+                        p.held_since = Some(Instant::now());
+                    }
+                    p.awaiting_consumption = false;
                 }
             }
             Verdict::Delivered => {
@@ -1733,13 +1920,6 @@ impl SocketDeliverer {
                 );
             }
             Verdict::Refused | Verdict::Dropped => {
-                state.suspect.insert(
-                    lead,
-                    Suspect {
-                        session,
-                        since: Instant::now(),
-                    },
-                );
                 resolve(
                     state,
                     SettleAction::Requeue,
@@ -1797,11 +1977,33 @@ impl SocketDeliverer {
                     .map(|((l, _), n)| format!("{l}: {n}")),
             )
             .collect();
+        notes.extend(
+            state
+                .pending
+                .values()
+                .filter(|p| p.resolution.is_none())
+                .filter_map(|p| {
+                    let (lead, batch) = (&p.lead, p.batch.get());
+                    if p.told_unconsumed {
+                        Some(format!(
+                            "{lead}: socket_unconsumed: batch {batch} was posted long ago and its \
+                             transcript does not show it; kept in flight, not posted again"
+                        ))
+                    } else if p.no_transcript && p.awaiting_consumption {
+                        Some(format!(
+                            "{lead}: socket_no_transcript: batch {batch} was posted and the lead's \
+                             transcript cannot be found, so consumption cannot be confirmed"
+                        ))
+                    } else {
+                        None
+                    }
+                }),
+        );
         let reply_socket = match &state.reply {
             ReplyState::Bound(reply) => Some(reply.path.display().to_string()),
             ReplyState::Unbound { why, .. } => {
                 notes.push(format!(
-                    "reply socket not bound, every batch goes to herdr until it binds: {why}"
+                    "reply socket not bound, Claude Code mail waits until it binds: {why}"
                 ));
                 None
             }
@@ -1821,6 +2023,10 @@ impl SocketDeliverer {
                     session: p.session.clone(),
                     since_ms: ms_ago(now, since),
                     delivered_since_ms: p.delivered_at.map(|d| ms_ago(now, d)),
+                    awaiting_consumption: p.awaiting_consumption,
+                    pid: p.process.as_ref().map(|(pid, _)| *pid),
+                    proc_start: p.process.as_ref().map(|(_, started)| started.clone()),
+                    transcript_from: p.from,
                 })
             })
             .collect();
@@ -1856,6 +2062,7 @@ impl SocketDeliverer {
             dead_lettered: state.dead_notes.iter().cloned().collect(),
             versions: state.drift.snapshot(),
             notes,
+            unavailable: None,
         };
         match status.write(&path) {
             Ok(()) => state.status_failing = false,

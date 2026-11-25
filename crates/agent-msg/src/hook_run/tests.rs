@@ -489,6 +489,7 @@ impl Harness {
             machine: &"Hub.local".parse().unwrap(),
             harness: self.kind,
             activity: Some(&self.state),
+            claude_inbox: None,
         };
         run(
             &cx,
@@ -553,6 +554,56 @@ fn budget_of(event: &str) -> Duration {
 }
 
 const EVENTS: [&str; 4] = ["SessionStart", "PostToolUse", "UserPromptSubmit", "Stop"];
+
+/// A Claude hook of a session with an inbox socket maintains enrollment and activity
+/// without taking the watcher's mail; a session with none keeps hook delivery.
+/// Tracing: TC-044-17
+/// ACs: FR-044-AC-17
+#[test]
+fn socket_hooks_register_but_never_pop_or_ack() {
+    for event in EVENTS {
+        for has_socket in [true, false] {
+            let h = Harness::new().with_inbox(&["socket mail"]);
+            let inbox = ClaudeInbox {
+                env_socket: has_socket,
+                sessions_dir: None,
+            };
+            let cx = HookCtx {
+                machine: &"hub".parse().unwrap(),
+                harness: relay_core::Harness::Claude,
+                activity: None,
+                claude_inbox: Some(&inbox),
+            };
+            let mut stdout = Sink::default();
+            run(
+                &cx,
+                &*h.clock,
+                Some(&h.spool),
+                (
+                    &mut input(event).as_bytes(),
+                    &mut stdout,
+                    &mut Sink::default(),
+                ),
+                &mut |timeout| connect(&h.world, timeout),
+            );
+            let world = h.world.borrow();
+            assert!(
+                world.calls.contains(&Op::Derive),
+                "{event}: identity still checked"
+            );
+            assert_eq!(
+                world.calls.contains(&Op::Pop),
+                !has_socket,
+                "{event}: a socket session's inbox belongs to the watcher"
+            );
+            if has_socket {
+                assert!(!world.calls.contains(&Op::Ack));
+                assert_eq!(world.inbox.len(), 1);
+                assert!(stdout.written.is_empty());
+            }
+        }
+    }
+}
 
 // ---- budgets ---------------------------------------------------------------
 
@@ -898,6 +949,7 @@ fn tc_n001_m_05_a_stdin_that_never_closes_records_one_timeout_and_pops_nothing()
         machine: &"Hub.local".parse().unwrap(),
         harness: relay_core::Harness::Claude,
         activity: None,
+        claude_inbox: None,
     };
     run(
         &cx,
@@ -1137,6 +1189,7 @@ fn tc_030_01_a_complete_non_hook_object_on_an_open_pipe_is_malformed_not_a_timeo
         machine: &"Hub.local".parse().unwrap(),
         harness: relay_core::Harness::Claude,
         activity: None,
+        claude_inbox: None,
     };
     run(
         &cx,
@@ -1367,6 +1420,7 @@ fn tc_030_08_every_stage_records_exactly_once_with_a_closed_stderr() {
         machine: &"Hub.local".parse().unwrap(),
         harness: relay_core::Harness::Claude,
         activity: None,
+        claude_inbox: None,
     };
     run(
         &cx,
@@ -1876,6 +1930,7 @@ fn a_suppressed_session_is_committed_alone() {
         machine: &"hub".parse().unwrap(),
         harness: relay_core::Harness::Claude,
         activity: None,
+        claude_inbox: None,
     };
     run(
         &cx,
@@ -2072,6 +2127,7 @@ impl Harness {
             machine: &"hub".parse().unwrap(),
             harness: relay_core::Harness::Claude,
             activity: None,
+            claude_inbox: None,
         };
         run(
             &cx,
@@ -2299,6 +2355,7 @@ proptest! {
             machine: &"hub".parse().unwrap(),
             harness: relay_core::Harness::Claude,
             activity: None,
+            claude_inbox: None,
         };
                     let mut out = Sink { fail: !matches!(output, OutputFault::Fine), ..Sink::default() };
                     run(&cx, &*clock, Some(&spool),

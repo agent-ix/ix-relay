@@ -17,6 +17,9 @@ print them as added context for `SessionStart`, `UserPromptSubmit` and
 
 ## Behavior
 
+- Where the watcher uses inbox sockets and the Claude Code session has one
+  ([FR-044](./FR-044-watcher-delivers-through-claude-codes-inbox-socket.md)), the hook
+  handler shall pop and acknowledge nothing: that session's mail belongs to the socket.
 - The hook handler shall pop with the budgeted pop of
   [FR-012](./FR-012-inbox-pops-are-atomic-and-budgeted.md) with a count limit of
   50 and a byte budget of 6 KiB.

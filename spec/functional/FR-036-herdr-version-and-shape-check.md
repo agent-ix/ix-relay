@@ -28,6 +28,19 @@ expects.
 - If a member the watcher cannot type without fails to decode, then the watcher shall type into no pane.
 - If that member fails to decode, then the watcher shall notify the operator once per failing episode, naming the field.
 - While that member fails to decode, the watcher shall re-check every place-refresh period.
+- While that member fails to decode, a lead on the inbox socket
+  ([FR-044](./FR-044-watcher-delivers-through-claude-codes-inbox-socket.md)) shall keep
+  receiving: the block applies to typing only.
+- While that member fails to decode, or herdr's listing has entries that cannot be
+  decoded, the watcher shall keep the address of a session whose own live Claude Code
+  process vouches for it, move none of its queued mail, and publish its address as last
+  verified.
+- While herdr's listing cannot be read at all, the watcher shall publish the last verified
+  address of each live socket session, and of no other lead.
+- While that member fails to decode, the watcher shall refresh the last-seen time of a
+  live socket session from its own process, without asking herdr, and shall not prune it.
+- While that member fails to decode, the watcher shall name in its heartbeat the leads
+  with mail that waits for it, and `doctor` shall list them.
 - The watcher shall keep typing guarded per lead by the session comparison, which
   refuses a lead whose pane shows no session id.
 - A pane without a session shall cost that one lead a delivery, and no other lead
@@ -67,6 +80,7 @@ expects.
 | FR-036-AC-6 | Given a herdr whose `agent list` has a claude pane with no `agent_session` beside one that has it, the check passes and does not block delivery. | Test |
 | FR-036-AC-7 | Given that herdr, a watcher tick types the healthy lead's mail into its pane and keeps the other lead's queued; given a member the watcher cannot type without failing to decode, the same tick types into no pane; given only an advisory finding, it delivers. | Test |
 | FR-036-AC-8 | Given a check that hangs, the watcher's loop is not delayed and one check is outstanding at a time. | Test |
+| FR-036-AC-9 | While the shape check blocks, a lead on the socket receives its mail and stays registered past the prune age without herdr being asked, a lead on the terminal route is not typed into, keeps its mail and is named in the heartbeat and by `doctor`; with the listing unreadable the address of a live socket session still resolves and that of a lead herdr types into does not. | Test |
 
 ## Dependencies
 

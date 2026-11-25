@@ -13,6 +13,7 @@ mod activity;
 mod activity_state;
 mod assign;
 mod budget;
+mod claude_inbox;
 mod doctor;
 mod find;
 mod focuses;
@@ -425,6 +426,11 @@ fn main() -> ExitCode {
             }
         };
         let activity_state = activity_state::ActivityState::in_config_dir();
+        // A configuration that cannot say keeps the default, sockets.
+        let claude_inbox = (matches!(kind, HookKind::Claude)
+            && relay_core::config::watcher_delivery()
+                != Ok(relay_core::config::DeliveryMode::Herdr))
+        .then(claude_inbox::ClaudeInbox::from_env);
         let cx = HookCtx {
             machine: &settings.machine.value,
             harness: match kind {
@@ -432,6 +438,7 @@ fn main() -> ExitCode {
                 HookKind::Codex => relay_core::Harness::Codex,
             },
             activity: activity_state.as_ref(),
+            claude_inbox: claude_inbox.as_ref(),
         };
         // A panic anywhere in the hook is caught inside `run` and recorded;
         // this second net keeps even a panic in that recording from becoming a

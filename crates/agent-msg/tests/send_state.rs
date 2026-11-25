@@ -106,6 +106,7 @@ impl Bus {
             sweep_secs: 15,
             herdr_ok,
             herdr_blocks_delivery: false,
+            herdr_waiting_leads: Vec::new(),
             herdr_problem: (!herdr_ok).then(|| "broken".to_owned()),
             redis_ok: true,
             leads_watched: 1,

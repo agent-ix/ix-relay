@@ -148,11 +148,11 @@ pub(crate) enum FileState {
 /// Claude Code socket delivery, as `doctor` finds it (FR-044).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SocketFacts {
-    /// `[watcher] delivery` is herdr (the default): sockets are not used.
+    /// `[watcher] delivery` is herdr: the operator switched sockets off.
     Herdr,
     /// `config.toml` did not load, so the mode is not known.
     ConfigFailed(String),
-    /// It is `socket`: what each watcher last reported (one entry per status
+    /// It is `socket` (the default): what each watcher last reported (one entry per status
     /// file, or one entry saying there is none).
     Socket(Vec<SocketState>),
 }

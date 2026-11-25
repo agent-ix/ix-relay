@@ -124,6 +124,7 @@ fn heartbeat_full() -> WatcherHeartbeat {
         herdr_ok: false,
         herdr_problem: Some("bad".into()),
         herdr_blocks_delivery: true,
+        herdr_waiting_leads: Vec::new(),
         redis_ok: true,
         leads_watched: 3,
         otlp: Some(OtlpStatus::Failing {
@@ -156,6 +157,7 @@ fn a_heartbeat_and_the_watcher_file_are_byte_identical_to_main() {
         herdr_ok: true,
         herdr_problem: None,
         herdr_blocks_delivery: false,
+        herdr_waiting_leads: Vec::new(),
         redis_ok: false,
         leads_watched: 0,
         otlp: Some(OtlpStatus::Disabled),

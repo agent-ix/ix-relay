@@ -10,7 +10,7 @@ human = "operator"          # who escalate and resolve notify and sign as
 
 [watcher]
 interval_secs = 2
-delivery = "herdr"          # or "socket"
+# delivery = "socket"       # the default; "herdr" switches inbox sockets off
 # otlp_endpoint = "http://collector:4318"
 # otlp_headers = "Authorization=Bearer%20token"
 # otlp_interval_secs = 30
@@ -33,7 +33,7 @@ delivery = "herdr"          # or "socket"
 | `prefix` | Redis key prefix | `ixr:v3:` |
 | `human` | The human that `escalate` and `resolve` notify and sign as | `operator` |
 | `[watcher] interval_secs` | How soon the watcher retries a lead that has mail but was left for its hook or a dialog | `2` |
-| `[watcher] delivery` | `herdr` types batches in. `socket` posts to Claude Code's inbox socket for Claude leads. See [how it works](how-it-works.md#delivery-through-the-claude-code-inbox-socket). | `herdr` |
+| `[watcher] delivery` | `socket` posts to Claude Code's inbox socket for every Claude Code session that has one and types through Herdr only into leads that have none. `herdr` switches sockets off and types into every lead, Claude Code sessions included. See [how it works](how-it-works.md#delivery-through-the-claude-code-inbox-socket). | `socket` |
 | `[watcher] otlp_endpoint` | OTLP/HTTP collector base URL, `http://` only. Unset sends nothing. | unset |
 | `[watcher] otlp_headers` | Request headers, `name=value,name=value` | none |
 | `[watcher] otlp_interval_secs` | Seconds between pushes, 5 to 3600 | `30` |
