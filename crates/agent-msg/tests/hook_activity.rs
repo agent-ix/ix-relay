@@ -145,3 +145,43 @@ fn a_hung_redis_starts_the_backoff_and_the_next_call_opens_no_connection() {
         eprintln!("hung {event}: first {first:?}, second {second:?}");
     }
 }
+
+/// Real hook processes that find the state lock held drop their update and each counts it in
+/// `activity.lockskips`; a process that cannot write the state files counts under
+/// `activity.writefails`. The two reasons never share a file.
+#[trace("FR-068-AC-14", "FR-068-AC-15")]
+#[test]
+fn separate_hook_processes_count_lock_skips_and_write_failures_apart() {
+    let skips = |dir: &Path, name: &str| {
+        std::fs::metadata(dir.join("spool").join(name)).map_or(0, |m| m.len())
+    };
+
+    let dir = Scratch::new("ix-relay-activity-locked-");
+    std::fs::create_dir_all(dir.path().join("spool")).unwrap();
+    let holder = std::fs::File::create(dir.path().join("spool/activity.lock")).unwrap();
+    holder.lock().unwrap();
+    for _ in 0..3 {
+        let waited = call(REFUSED, dir.path(), "PreToolUse", r#","tool_name":"Bash""#);
+        eprintln!("held lock, one hook: {waited:?}");
+    }
+    assert!(
+        skips(dir.path(), "activity.lockskips") >= 3,
+        "each of three processes counted its dropped update"
+    );
+    assert_eq!(skips(dir.path(), "activity.writefails"), 0);
+    assert!(
+        !dir.path().join("spool/activity.json").exists(),
+        "no update was applied while the lock was held"
+    );
+    drop(holder);
+
+    let dir = Scratch::new("ix-relay-activity-unwritable-");
+    std::fs::create_dir_all(dir.path().join("spool")).unwrap();
+    let elsewhere = dir.path().join("elsewhere.json");
+    std::fs::write(&elsewhere, "{}").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, dir.path().join("spool/activity.json")).unwrap();
+    call(REFUSED, dir.path(), "PreToolUse", r#","tool_name":"Bash""#);
+    assert!(skips(dir.path(), "activity.writefails") >= 1);
+    assert_eq!(skips(dir.path(), "activity.lockskips"), 0);
+    assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "{}");
+}

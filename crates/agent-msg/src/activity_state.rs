@@ -5,9 +5,9 @@
 //! reads the counts for `ix.relay.hook.activity_skipped`. Updates are a
 //! read-modify-write under an advisory lock on a sidecar file, taken without
 //! ever waiting longer than [`LOCK_WAIT`]: a hook that cannot get the lock
-//! skips the update rather than delay the agent. A skipped update cannot be counted
-//! in the file it could not lock, so it appends one byte to a sibling file with
-//! `O_APPEND`, which needs no lock, and the count is that file's length.
+//! skips the update rather than delay the agent. An update dropped for want of the
+//! lock, or because the files could not be written, is counted in a sidecar file
+//! that needs no lock (see [`relay_core::hook_skips`]).
 
 use std::{
     fs::{self, DirBuilder, File, OpenOptions, TryLockError},
@@ -17,6 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use relay_core::hook_skips::{self, Reason};
 use serde::{Deserialize, Serialize};
 
 /// The first backoff after a failed write.
@@ -25,8 +26,6 @@ const BACKOFF_START_MS: u64 = 5_000;
 const BACKOFF_CAP_MS: u64 = 5 * 60 * 1_000;
 /// The longest an update waits for the lock.
 const LOCK_WAIT: Duration = Duration::from_millis(50);
-/// The most lock skips the sidecar file records, one byte each.
-const MAX_LOCK_SKIPS: u64 = 1 << 20;
 
 /// What the file holds.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,10 +45,14 @@ pub(crate) struct ActivityCounts {
     /// Events not written because the lead has no verified lane address.
     #[serde(default)]
     pub(crate) unregistered: u64,
-    /// Updates that could not take the lock or write the file, counted in the
-    /// sidecar file and never stored in the JSON.
+    /// Updates dropped because the lock was not free, counted in a sidecar file
+    /// and never stored in the JSON.
     #[serde(skip)]
     pub(crate) lock_skipped: u64,
+    /// Updates dropped because the files could not be written, counted in a
+    /// sidecar file and never stored in the JSON.
+    #[serde(skip)]
+    pub(crate) write_failed: u64,
 }
 
 /// The state file.
@@ -74,9 +77,9 @@ impl ActivityState {
         Self { path }
     }
 
-    /// The sidecar file whose length is the count of dropped updates.
-    pub(crate) fn skips_file(&self) -> PathBuf {
-        skips_path(&self.path)
+    /// The state file's path, which the skip sidecars sit beside.
+    pub(crate) fn state_path(&self) -> &std::path::Path {
+        &self.path
     }
 
     /// What the file holds, with the lock skips; empty when both are missing or
@@ -86,28 +89,9 @@ impl ActivityState {
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
-        counts.lock_skipped = lock_skips_at(&self.path);
+        counts.lock_skipped = hook_skips::count(&self.path, Reason::Lock).unwrap_or(0);
+        counts.write_failed = hook_skips::count(&self.path, Reason::WriteFailed).unwrap_or(0);
         counts
-    }
-
-    /// Counts one update that was dropped. It takes no lock and never waits: a
-    /// single `O_APPEND` write of one byte.
-    fn note_lock_skip(&self) {
-        let sidecar = skips_path(&self.path);
-        if fs::symlink_metadata(&sidecar).is_ok_and(|m| !m.file_type().is_file()) {
-            return;
-        }
-        if lock_skips_at(&self.path) >= MAX_LOCK_SKIPS {
-            return;
-        }
-        if let Ok(mut file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(&sidecar)
-        {
-            let _ = file.write_all(b"1");
-        }
     }
 
     /// Whether a write at `now_ms` must be skipped; counts the skip when so.
@@ -157,11 +141,17 @@ impl ActivityState {
     }
 
     /// Applies `change` to the file under the lock; when the lock is not free
-    /// within [`LOCK_WAIT`] or the file cannot be written, the update is dropped
-    /// and counted as a lock skip.
+    /// within [`LOCK_WAIT`] the update is dropped and counted as a lock skip, and
+    /// when the files cannot be written it is dropped and counted as a write
+    /// failure.
     fn update(&self, change: impl FnOnce(&mut ActivityCounts)) {
-        if self.try_update(change).is_err() {
-            self.note_lock_skip();
+        if let Err(e) = self.try_update(change) {
+            let reason = if e.kind() == io::ErrorKind::WouldBlock {
+                Reason::Lock
+            } else {
+                Reason::WriteFailed
+            };
+            hook_skips::record(&self.path, reason);
         }
     }
 
@@ -213,19 +203,6 @@ impl ActivityState {
             }
         }
     }
-}
-
-/// The sidecar file that counts dropped updates, beside the state file.
-fn skips_path(state: &std::path::Path) -> PathBuf {
-    state.with_extension("lockskips")
-}
-
-/// The lock skips recorded beside the state file at `state`: the sidecar's length.
-fn lock_skips_at(state: &std::path::Path) -> u64 {
-    fs::symlink_metadata(skips_path(state))
-        .ok()
-        .filter(|m| m.file_type().is_file())
-        .map_or(0, |m| m.len())
 }
 
 #[cfg(test)]
@@ -339,11 +316,12 @@ mod tests {
         assert_eq!(state.counts().lock_skipped, skipped + 1, "no further skip");
     }
 
-    /// Separate hook processes share the count through the sidecar file, and a
+    /// Two handles on one state file share the count through the sidecar file (the real
+    /// processes are in `tests/hook_activity.rs`), and a
     /// skipped update leaves the JSON untouched.
     #[trace("FR-068-AC-15")]
     #[test]
-    fn lock_skips_from_separate_processes_add_up_in_the_sidecar() {
+    fn two_handles_on_one_state_file_share_the_lock_skip_count() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("activity.json");
         let (a, b) = (ActivityState::at(path.clone()), ActivityState::at(path));

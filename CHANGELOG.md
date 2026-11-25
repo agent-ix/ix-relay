@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Count hook activity updates that were dropped because `spool/activity.json`'s lock was held. Each drop appends one byte to `spool/activity.lockskips` without taking the lock; `relay-watcher` exports the count as `ix.relay.hook.activity_skipped{reason="lock"}` and `agent-msg doctor` warns `activity_lock_skipped` while it is non-zero.
+- Count hook activity updates that were dropped. A drop for want of `spool/activity.json`'s lock appends one byte to `spool/activity.lockskips`, and any other failed update to `spool/activity.writefails`, without taking the lock; each stops at 1,048,576 and then reads "at least". `relay-watcher` exports them as `ix.relay.hook.activity_skipped{reason="lock"|"write_failed"}` plus `ix.relay.hook.activity_skip_saturated`. `agent-msg doctor` warns `activity_lock_skipped`, `activity_write_failed`, `activity_skips_unreadable` and `activity_spool_unwritable`, for counts that grew in the last 24 hours; delete a sidecar to reset its count.
 
 ## 0.4.2
 

@@ -23,6 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use relay_core::ScanCut;
+use relay_core::hook_skips;
 use relay_core::moves::{MoveEvent, MoveKind};
 use relay_core::{
     LinkFault, MachineName, Registration,
@@ -135,7 +136,7 @@ pub(crate) fn evaluate(f: &Facts) -> Vec<Check> {
     }
     watcher_file(f, up, &mut checks);
     spool(f, &mut checks);
-    activity_lock_skips(f, &mut checks);
+    activity_skips(f, &mut checks);
     if let Some(up) = up {
         bus_failures(f, up, &mut checks);
         recent_moves(f, up, &mut checks);
@@ -1249,23 +1250,85 @@ fn any_recent(f: &Facts, records: &[&SpoolRecord]) -> bool {
         .any(|r| f.now_ms.saturating_sub(r.at_ms) < RECENT_FAILURE_MS)
 }
 
-/// Hook activity updates dropped for want of the state file lock are counted, so a
-/// non-zero count is a defect to look at, not silence.
-fn activity_lock_skips(f: &Facts, checks: &mut Vec<Check>) {
-    if f.activity_lock_skips == 0 {
-        return;
+/// Hook activity updates that were dropped (FR-068) are counted in sidecar files; each
+/// count warns only while it grew in the last [`DAY_MS`] (the window of
+/// `hook_failures_recorded`), then reads as information. Deleting the sidecar resets it.
+fn activity_skips(f: &Facts, checks: &mut Vec<Check>) {
+    let subject = Some("hook activity state");
+    if f.activity_spool_unwritable {
+        checks.push(Check::warn(
+            Family::HookSpool,
+            Code::ActivitySpoolUnwritable,
+            subject,
+            "the spool directory cannot be written, so dropped activity updates cannot be counted",
+            "no hook can update spool/activity.json or record a drop beside it",
+            "make the spool directory beside config.toml writable by the user that runs hooks",
+        ));
     }
-    checks.push(Check::warn(
-        Family::HookSpool,
-        Code::ActivityLockSkipped,
-        Some("hook activity state"),
-        format!(
-            "{} hook activity update(s) were dropped because the state file lock was held",
-            f.activity_lock_skips
+    for (series, file, unreadable, drop_code, what, cause, fix) in [
+        (
+            &f.activity_lock_skips,
+            "spool/activity.lockskips",
+            Code::ActivitySkipsUnreadable,
+            Code::ActivityLockSkipped,
+            "dropped because the state file lock was held",
+            "concurrent hooks held spool/activity.lock past the 50 ms bound, so those updates were not applied",
+            "look for a stuck hook process holding spool/activity.lock",
         ),
-        "concurrent hooks held spool/activity.json's lock past the 50 ms bound, so those events were not counted in it",
-        "the count in spool/activity.lockskips is cumulative; look for a stuck hook process holding spool/activity.lock",
-    ));
+        (
+            &f.activity_write_failures,
+            "spool/activity.writefails",
+            Code::ActivitySkipsUnreadable,
+            Code::ActivityWriteFailed,
+            "dropped because the state files could not be written",
+            "the spool directory or spool/activity.json is unwritable, a symlink, or the disk is full",
+            "check the permissions, free space and type of spool/ and spool/activity.json",
+        ),
+    ] {
+        let count = match &series.count {
+            Ok(0) => continue,
+            Ok(n) => *n,
+            Err(error) => {
+                checks.push(Check::warn(
+                    Family::HookSpool,
+                    unreadable,
+                    subject,
+                    format!("{file} cannot be read: {error}"),
+                    "the count file is a symlink, not a regular file, or unreadable",
+                    &format!("remove {file} beside config.toml"),
+                ));
+                continue;
+            }
+        };
+        let shown = if hook_skips::saturated(count) {
+            format!("at least {count} (cap reached)")
+        } else {
+            count.to_string()
+        };
+        let recent = series
+            .last_ms
+            .is_none_or(|t| f.now_ms.saturating_sub(t) < DAY_MS);
+        if recent {
+            checks.push(Check::warn(
+                Family::HookSpool,
+                drop_code,
+                subject,
+                format!("{shown} hook activity update(s) {what}, the latest within 24 hours"),
+                cause,
+                &format!(
+                    "{fix}; the count is cumulative, deleting {file} beside config.toml resets it"
+                ),
+            ));
+        } else {
+            checks.push(Check::ok(
+                Family::HookSpool,
+                subject,
+                format!(
+                    "{shown} hook activity update(s) {what}, none in the last 24 hours (delete {file} to reset)"
+                ),
+            ));
+        }
+    }
 }
 
 fn spool(f: &Facts, checks: &mut Vec<Check>) {
@@ -2056,7 +2119,7 @@ fn service(f: &Facts, up: Option<&RedisUp>, checks: &mut Vec<Check>) {
 
 #[cfg(test)]
 mod tests {
-    use crate::doctor::facts::{AssignmentDefects, MovesRead};
+    use crate::doctor::facts::{AssignmentDefects, MovesRead, SkipSeries};
     use ix_trace_rs::trace;
     use std::{collections::HashSet, time::Duration};
 
@@ -2216,7 +2279,9 @@ mod tests {
                 pid_alive: Some(true),
             },
             spool: SpoolState::Empty,
-            activity_lock_skips: 0,
+            activity_lock_skips: SkipSeries::default(),
+            activity_write_failures: SkipSeries::default(),
+            activity_spool_unwritable: false,
             herdr: HerdrCheck::Ok {
                 version: MIN_HERDR_VERSION,
                 shape_verified: true,
@@ -2652,6 +2717,7 @@ mod tests {
     /// One row per code and severity: the facts that make it fire. A code that
     /// cannot be provoked is dead, and a severity that changes is a change to the
     /// catalogue in FR-029.
+    #[trace("FR-068-AC-15")]
     #[test]
     fn every_code_fires_with_its_documented_severity_a_cause_and_a_fix() {
         type Mutate = fn(&mut Facts);
@@ -2775,7 +2841,25 @@ mod tests {
                 };
             }),
             (Code::ActivityLockSkipped, Warn, |f| {
-                f.activity_lock_skips = 2
+                f.activity_lock_skips = SkipSeries {
+                    count: Ok(2),
+                    last_ms: Some(NOW - 1_000),
+                };
+            }),
+            (Code::ActivityWriteFailed, Warn, |f| {
+                f.activity_write_failures = SkipSeries {
+                    count: Ok(hook_skips::MAX_SKIPS),
+                    last_ms: None,
+                };
+            }),
+            (Code::ActivitySkipsUnreadable, Warn, |f| {
+                f.activity_lock_skips = SkipSeries {
+                    count: Err("not a regular file".into()),
+                    last_ms: None,
+                };
+            }),
+            (Code::ActivitySpoolUnwritable, Warn, |f| {
+                f.activity_spool_unwritable = true;
             }),
             (Code::HookSpoolUnlocated, Unknown, |f| {
                 f.spool = SpoolState::NoPath
@@ -3260,6 +3344,56 @@ mod tests {
         let moved = cause(vec![empty_inbox("a")]).unwrap();
         assert!(!moved.contains("waits"), "{moved}");
         assert!(moved.contains("nothing is queued"), "{moved}");
+    }
+
+    /// A lock-skip count warns only while it grew in the last 24 hours and then reads as
+    /// information; a count at the cap reads "at least", and each reason has its own fix.
+    #[trace("FR-068-AC-15")]
+    #[test]
+    fn a_skip_count_warns_only_on_recent_growth_and_a_full_one_reads_at_least() {
+        let mut f = healthy();
+        f.activity_lock_skips = SkipSeries {
+            count: Ok(7),
+            last_ms: Some(NOW - DAY_MS - 1),
+        };
+        let old = evaluate(&f);
+        assert!(old.iter().all(|c| c.code != Code::ActivityLockSkipped));
+        assert!(
+            old.iter()
+                .any(|c| c.message.contains("7 hook activity update(s)")
+                    && c.message.contains("none in the last 24 hours")),
+            "the cumulative count stays in the information text"
+        );
+        f.activity_lock_skips.last_ms = Some(NOW - DAY_MS + 1);
+        f.activity_write_failures = SkipSeries {
+            count: Ok(hook_skips::MAX_SKIPS),
+            last_ms: Some(NOW),
+        };
+        let checks = evaluate(&f);
+        let lock = checks
+            .iter()
+            .find(|c| c.code == Code::ActivityLockSkipped)
+            .unwrap();
+        let failed = checks
+            .iter()
+            .find(|c| c.code == Code::ActivityWriteFailed)
+            .unwrap();
+        assert!(lock.message.starts_with("7 hook"), "{}", lock.message);
+        assert!(
+            failed.message.starts_with("at least 1048576 (cap reached)"),
+            "{}",
+            failed.message
+        );
+        let (lock_cause, failed_cause) = (lock.cause.as_deref(), failed.cause.as_deref());
+        assert_ne!(lock_cause, failed_cause, "separate causes");
+        assert_ne!(lock.fix, failed.fix, "separate fixes");
+        for check in [lock, failed] {
+            assert!(
+                check.fix.as_deref().unwrap().contains("deleting"),
+                "{:?}",
+                check.fix
+            );
+        }
     }
 
     /// The spool's `dropped` count (records dropped for the bound, lines removed

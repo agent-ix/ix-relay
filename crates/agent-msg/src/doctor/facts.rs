@@ -41,7 +41,10 @@ use std::{
 use herdr_cli::{ProcessRunner, RealProcessRunner};
 use relay_core::{
     AgentName, Backlog, Heartbeats, InboxOverview, LeaseState, LinkFault, MachineName, Moves,
-    PaneId, Registration, Relay, config::DeliveryMode, health::WatcherFile,
+    PaneId, Registration, Relay,
+    config::DeliveryMode,
+    health::WatcherFile,
+    hook_skips::{self, Reason},
     socket_status::SocketStatus,
 };
 use relay_ops::herdr_check::{self, HerdrCheck};
@@ -92,8 +95,8 @@ pub(crate) struct Env {
     pub state_file: Option<PathBuf>,
     /// `spool/hook.jsonl`, when a config location is known.
     pub spool_file: Option<PathBuf>,
-    /// `spool/activity.lockskips`, the one-byte-per-dropped-update file beside the activity state.
-    pub activity_skips_file: Option<PathBuf>,
+    /// `spool/activity.json`, beside which the skip counts sit.
+    pub activity_file: Option<PathBuf>,
     /// The time the Redis section may take.
     pub redis_budget: Duration,
     /// `[watcher] delivery` from `config.toml`, or why the watcher would refuse it.
@@ -324,7 +327,11 @@ pub(crate) struct Facts {
     /// The local spool.
     pub spool: SpoolState,
     /// Activity updates a hook dropped because the state file lock was held (FR-068).
-    pub activity_lock_skips: u64,
+    pub activity_lock_skips: SkipSeries,
+    /// Activity updates a hook dropped because the state files could not be written.
+    pub activity_write_failures: SkipSeries,
+    /// The spool directory exists and cannot be written, so no drop can be counted there.
+    pub activity_spool_unwritable: bool,
     /// The herdr check.
     pub herdr: HerdrCheck,
     /// herdr's panes.
@@ -396,12 +403,9 @@ pub(crate) fn gather(
         redis,
         watcher_file: read_watcher_file(env.state_file.as_deref()),
         spool: read_spool(env.spool_file.as_deref()),
-        activity_lock_skips: env
-            .activity_skips_file
-            .as_deref()
-            .and_then(|p| std::fs::symlink_metadata(p).ok())
-            .filter(|m| m.file_type().is_file())
-            .map_or(0, |m| m.len()),
+        activity_lock_skips: skip_series(env.activity_file.as_deref(), Reason::Lock),
+        activity_write_failures: skip_series(env.activity_file.as_deref(), Reason::WriteFailed),
+        activity_spool_unwritable: spool_unwritable(env.activity_file.as_deref()),
         herdr,
         panes,
         service,
@@ -612,6 +616,43 @@ fn read_watcher_file(path: Option<&Path>) -> FileState {
         },
         Err(e) => FileState::Unreadable(e.to_string()),
     }
+}
+
+/// One skip count: how many updates were dropped for a reason, and when the count last grew.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SkipSeries {
+    /// The sidecar's length, or why it cannot be read.
+    pub count: Result<u64, String>,
+    /// When the sidecar last grew, Unix milliseconds.
+    pub last_ms: Option<i64>,
+}
+
+impl Default for SkipSeries {
+    fn default() -> Self {
+        Self {
+            count: Ok(0),
+            last_ms: None,
+        }
+    }
+}
+
+/// The skip count beside the activity state file at `state`.
+fn skip_series(state: Option<&Path>, reason: Reason) -> SkipSeries {
+    let Some(state) = state else {
+        return SkipSeries::default();
+    };
+    SkipSeries {
+        count: hook_skips::count(state, reason).map_err(|e| e.to_string()),
+        last_ms: hook_skips::last_skip_ms(state, reason),
+    }
+}
+
+/// Whether the spool directory beside `state` exists and has no write permission.
+fn spool_unwritable(state: Option<&Path>) -> bool {
+    state
+        .and_then(Path::parent)
+        .and_then(|dir| fs::metadata(dir).ok())
+        .is_some_and(|m| m.is_dir() && m.permissions().readonly())
 }
 
 /// Reads the spool without following a symlink and without holding its lock: a

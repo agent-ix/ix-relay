@@ -5,7 +5,10 @@
 
 use std::{collections::BTreeMap, fs, io, path::Path, time::Duration, time::Instant};
 
-use relay_core::config::FleetFile;
+use relay_core::{
+    config::FleetFile,
+    hook_skips::{self, Reason},
+};
 use serde::Deserialize;
 
 use host_probe::ErrorClass;
@@ -335,7 +338,8 @@ impl Tickets {
     }
 }
 
-/// The hook's local counts (`spool/activity.json`, written by `agent-msg`).
+/// The hook's local counts (`spool/activity.json`, written by `agent-msg`) and the skip counts
+/// beside it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 pub struct HookCounts {
     /// Events skipped by the backoff.
@@ -347,37 +351,42 @@ pub struct HookCounts {
     /// Events not written for want of a verified lane.
     #[serde(default)]
     pub unregistered: u64,
-    /// Updates a hook could not apply because the state file lock was held, counted in the
-    /// sibling `activity.lockskips` file, not in the JSON.
+    /// Whether the three counts above come from a state file. Without one they are unknown, not
+    /// zero.
     #[serde(skip)]
-    pub lock_skipped: u64,
+    pub has_state: bool,
+    /// Updates dropped because the state file lock was held, from `activity.lockskips`; `None`
+    /// when that file cannot be read.
+    #[serde(skip)]
+    pub lock_skipped: Option<u64>,
+    /// Updates dropped because the state files could not be written, from `activity.writefails`;
+    /// `None` when that file cannot be read.
+    #[serde(skip)]
+    pub write_failed: Option<u64>,
 }
 
-/// The counts in the file at `path`. A missing file means no hook has ever written
-/// one: `None`, never zeros. An unreadable or unparsable one is an error.
+/// The counts in the file at `path` and its skip sidecars. A missing state file and no skips
+/// mean no hook has ever dropped anything: `None`, never zeros. An unreadable or unparsable
+/// state file is an error; an unreadable sidecar leaves only its own count out.
 ///
 /// # Errors
 ///
 /// [`ErrorClass::Unreadable`] or [`ErrorClass::Parse`].
 pub fn read_hook_counts(path: &Path) -> Result<Option<HookCounts>, ErrorClass> {
-    let lock_skipped = match fs::metadata(path.with_extension("lockskips")) {
-        Ok(m) => m.len(),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => 0,
+    let mut counts = match fs::read(path) {
+        Ok(bytes) => HookCounts {
+            has_state: true,
+            ..serde_json::from_slice(&bytes).map_err(|_| ErrorClass::Parse)?
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => HookCounts::default(),
         Err(_) => return Err(ErrorClass::Unreadable),
     };
-    let counts: Option<HookCounts> = match fs::read(path) {
-        Ok(bytes) => Some(serde_json::from_slice(&bytes).map_err(|_| ErrorClass::Parse)?),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(_) => return Err(ErrorClass::Unreadable),
-    };
+    counts.lock_skipped = hook_skips::count(path, Reason::Lock).ok();
+    counts.write_failed = hook_skips::count(path, Reason::WriteFailed).ok();
     // Every update may have been dropped, so skips with no state file still report.
-    Ok(match (counts, lock_skipped) {
-        (None, 0) => None,
-        (counts, n) => Some(HookCounts {
-            lock_skipped: n,
-            ..counts.unwrap_or_default()
-        }),
-    })
+    let nothing =
+        !counts.has_state && counts.lock_skipped == Some(0) && counts.write_failed == Some(0);
+    Ok((!nothing).then_some(counts))
 }
 
 #[cfg(test)]
@@ -481,7 +490,9 @@ mod tests {
                 skipped: 3,
                 dropped: 2,
                 unregistered: 1,
-                lock_skipped: 0
+                has_state: true,
+                lock_skipped: Some(0),
+                write_failed: Some(0),
             }))
         );
         fs::write(&path, "{").unwrap();
@@ -490,17 +501,45 @@ mod tests {
 
     #[trace("FR-068-AC-15")]
     #[test]
-    fn lock_skips_are_read_from_the_sidecar_with_or_without_the_state_file() {
+    fn skips_are_read_from_the_sidecars_with_or_without_the_state_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("activity.json");
         fs::write(dir.path().join("activity.lockskips"), "111").unwrap();
-        let only_skips = read_hook_counts(&path).unwrap().unwrap();
+        fs::write(dir.path().join("activity.writefails"), "11").unwrap();
+        let only = read_hook_counts(&path).unwrap().unwrap();
         assert_eq!(
-            only_skips.lock_skipped, 3,
-            "every update was skipped, still reported"
+            (only.lock_skipped, only.write_failed, only.has_state),
+            (Some(3), Some(2), false),
+            "every update was dropped: still reported, state counts unknown"
         );
         fs::write(&path, r#"{"skipped":3,"dropped":2}"#).unwrap();
         let both = read_hook_counts(&path).unwrap().unwrap();
-        assert_eq!((both.skipped, both.dropped, both.lock_skipped), (3, 2, 3));
+        assert_eq!(
+            (
+                both.skipped,
+                both.dropped,
+                both.lock_skipped,
+                both.has_state
+            ),
+            (3, 2, Some(3), true)
+        );
+    }
+
+    /// An unreadable sidecar leaves out only its own series, never the state file's counts.
+    #[trace("FR-068-AC-15")]
+    #[test]
+    fn an_unreadable_sidecar_leaves_out_only_its_own_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("activity.json");
+        fs::write(&path, r#"{"skipped":3}"#).unwrap();
+        fs::write(dir.path().join("activity.writefails"), "1").unwrap();
+        let target = dir.path().join("elsewhere");
+        fs::write(&target, "xxxxx").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join("activity.lockskips")).unwrap();
+        let c = read_hook_counts(&path).unwrap().unwrap();
+        assert_eq!(
+            (c.skipped, c.lock_skipped, c.write_failed),
+            (3, None, Some(1))
+        );
     }
 }
