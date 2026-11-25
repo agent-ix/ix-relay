@@ -36,3 +36,19 @@ FR-006-AC-3 was also untagged on origin/main: the Python test had no `Trace:` li
 - Reverse gap: four new binaries. One (the launcher) has an owning criterion; three have none (FND-002).
 - Stubs and coverage inflation: none found in `crates/relay-tools`.
 - Semantic review (intent↔test↔code): skipped, because it was not requested in the reviewer brief. The fidelity of each port to the deleted Python was checked by differential runs and is recorded in SR-6123.
+
+## New findings (disposition pass 1)
+
+Head `c1945bdb1530cf5892b3209bff4c4bae5118f32f`. `quire matrix` now reports FR-006-AC-3 as tagged (6 binders), and FR-073-AC-1..4 as tagged (11, 4, 4 and 4 binders). FR-073 describes the tools' behaviour and the reasons for it, not the history of this change, and it validates.
+
+| ID      | Severity | Summary | Refs |
+| ------- | -------- | ------- | ---- |
+| FND-003 | low | FR-073 says `check-test-matrix` "SHALL report a total that is not an ASCII number as a problem", but the code reports only totals made entirely of numeric characters (`²`, Arabic-Indic digits, `½`). Any other non-number, such as `abc`, is skipped exactly as the Python skipped it (verified: exit 0). The statement promises more than the code does. | spec/functional/FR-073-operator-tools.md:26; crates/relay-tools/src/matrix.rs:133-142 |
+| FND-004 | low | Two FR-073 Behavior bullets end with a stray ",." ("as a row,." and "remaining TTLs,."), where a clause was cut off. | spec/functional/FR-073-operator-tools.md:25, 27 |
+
+## Dispositions
+
+| FND | outcome | reason |
+| --- | ------- | ------ |
+| FND-001 | fixed | The launcher tests carry `#[trace("FR-006-AC-3")]` (3 unit tests and 3 binary tests), and `quire matrix` reports the criterion tagged. TC-006-03 in spec/tests.md now names the Rust tests. |
+| FND-002 | fixed | The new FR-073 owns check-test-matrix, the archive and the capture hook, with AC-1..4 tagged by the relay-tools tests, rows TC-073-01..04, and updated GAP-001 and category totals (`make check-matrix`: 377 rows, consistent). |

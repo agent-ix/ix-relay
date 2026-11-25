@@ -91,9 +91,12 @@ fn a_server_that_never_replies_fails_within_the_timeout() {
         &url,
         "old:",
         &dir.path().join("a.jsonl"),
-        Duration::from_millis(300),
+        Duration::from_secs(1),
     );
     assert!(matches!(result, Err(Error::Redis(_))), "{result:?}");
-    assert!(started.elapsed() < Duration::from_secs(2));
+    let elapsed = started.elapsed();
+    // One deadline in all: a connect and a first read that each took the
+    // full timeout would measure about two seconds here.
+    assert!(elapsed < Duration::from_millis(1500), "{elapsed:?}");
     holder.join().unwrap();
 }

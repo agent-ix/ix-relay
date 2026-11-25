@@ -38,3 +38,23 @@ What is correct: the session-start capture keeps the allowlist, the subagent ski
 | FND-005 | low | The launcher drops non-UTF-8 arguments while scanning (`filter_map(to_str)`), which shifts the option-value skip. Reproduced with `HERDR_ENV=1`: `codex --model $'\xff' exec prompt` gets `--no-daemon` from Rust but passes through unchanged under the Python. Using `to_string_lossy` for the scan keeps the positions. | crates/relay-tools/src/launcher.rs:492-497 |
 | FND-006 | low | The CHANGELOG says "with the same flags and output", but capture-codex-session-start writes its keys in a different order. `json!` builds a sorted map, so the line starts `{"context":{"CODEX_THREAD_ID":…` where the Python wrote `hook_event_name, session_id, transcript_path, context`. The archive's separators differ too. Both are equivalent JSON, so the claim should be "equivalent JSON". | crates/relay-tools/src/session_start.rs:858; CHANGELOG.md:5 |
 | FND-007 | low | The released 0.3.0 CHANGELOG entry was rewritten to name the `archive-relay-namespace` binary, which did not exist in 0.3.0. Release notes should describe the release as shipped; the Unreleased entry already records the rename. | CHANGELOG.md:56 |
+
+## New findings (disposition pass 1)
+
+Head `c1945bdb1530cf5892b3209bff4c4bae5118f32f`, fix commit `c1945bd` reviewed as `git diff 2d773e9..c1945bd`.
+
+| ID      | Severity | Summary | Refs |
+| ------- | -------- | ------- | ---- |
+| FND-008 | medium | `archive-relay-namespace` gives up on an unresponsive server after about 20 s, but FR-073 says it fails within 10 seconds. `IO_TIMEOUT` is applied twice in sequence, once to the connection handshake (`get_connection_with_timeout`) and once to the first SCAN read (`set_read_timeout`), so a server that accepts and never replies costs both. Measured 20 s against a listener that accepts and stays silent. The test `a_server_that_never_replies_fails_within_the_timeout` uses 300 ms and asserts under 2 s, so it cannot catch the doubling. | crates/relay-tools/src/archive.rs:96-98; spec/functional/FR-073-operator-tools.md:30; crates/relay-tools/tests/archive.rs:80-98 |
+
+## Dispositions
+
+| FND | outcome | reason |
+| --- | ------- | ------ |
+| FND-001 | fixed | The bin now resolves the URL with `relay_core::config::load_core(CoreFlags::default())` and drops `--config`, so `IX_RELAY_CONFIG`, the file validation and the case with `HOME` unset all behave as in agent-msg. Verified by running the binary: `IX_RELAY_CONFIG` with no `HOME` archives; `--config` gives the usage error. |
+| FND-002 | fixed | The recount now splits lines like Python's `splitlines` and compares totals as exact integers. The original 29 differential cases and 10 new ones (`\v`, U+2029, leading zeros, `½`, `abc`, `+121`, `1 21`, `1_21`, a form feed inside the Test Case Summary) were run against the origin/main Python: no case exits 0 where the Python exited 1. Rust is stricter on 3 (Arabic-Indic digits ×2, `½`). |
+| FND-003 | fixed | `tls-native-tls` was removed and `rediss://` is refused with a message saying why. `cargo tree --workspace --target all -i native-tls` matches nothing, and native-tls, openssl-probe and schannel are gone from Cargo.lock. |
+| FND-004 | fixed | Connect, read and write timeouts are now set (`IO_TIMEOUT` = 10 s); the binary failed after 20 s instead of hanging. The 2× bound is FND-008. |
+| FND-005 | fixed | The scan uses `to_string_lossy`. `--model $'\xff' exec prompt` with `HERDR_ENV=1` now passes through unchanged, as the Python did. The new unit test covers it. |
+| FND-006 | fixed | The CHANGELOG now says the archive and capture tools write equivalent JSON with a different key order and separators. |
+| FND-007 | fixed | The 0.3.0 entry again names `scripts/archive-relay-namespace.py`. |

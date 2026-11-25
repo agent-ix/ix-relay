@@ -7,7 +7,7 @@ use std::{
     io::{BufWriter, Write},
     os::unix::fs::OpenOptionsExt,
     path::Path,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -69,6 +69,30 @@ fn line(out: &mut impl Write, value: &impl Serialize) -> Result<(), Error> {
     Ok(())
 }
 
+/// Connects, giving up when `timeout` has passed since `started`. The redis
+/// crate's own connect timeout applies to each round trip of its setup
+/// handshake, so a silent server would otherwise cost it several times over;
+/// the handshake runs on a thread that is abandoned at the deadline (its own
+/// per-round-trip timeouts end it shortly after).
+fn connect_within(
+    url: &str,
+    started: Instant,
+    timeout: Duration,
+) -> Result<redis::Connection, Error> {
+    let client = redis::Client::open(url)?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(client.get_connection_with_timeout(timeout));
+    });
+    match receiver.recv_timeout(timeout.saturating_sub(started.elapsed())) {
+        Ok(connected) => Ok(connected?),
+        Err(_) => Err(Error::Redis(redis::RedisError::from(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "connecting to Redis timed out",
+        )))),
+    }
+}
+
 /// [`archive_within`] with [`IO_TIMEOUT`].
 pub fn archive(url: &str, prefix: &str, output: &Path) -> Result<usize, Error> {
     archive_within(url, prefix, output, IO_TIMEOUT)
@@ -77,7 +101,8 @@ pub fn archive(url: &str, prefix: &str, output: &Path) -> Result<usize, Error> {
 /// Dumps every key under `prefix` (except the new namespace) to the new file
 /// `output` as JSON lines and returns the number of keys written. The output
 /// is created exclusively with mode 0600, so an existing archive is never
-/// overwritten. Connecting, reading and writing each fail after `timeout`.
+/// overwritten. A connect plus the first reply together fail after `timeout`, and each
+/// later read or write fails after `timeout`.
 pub fn archive_within(
     url: &str,
     prefix: &str,
@@ -93,9 +118,16 @@ pub fn archive_within(
     if !url.starts_with("redis://") {
         return Err(Error::Url);
     }
-    let mut connection = redis::Client::open(url)?.get_connection_with_timeout(timeout)?;
-    connection.set_read_timeout(Some(timeout))?;
+    // One deadline covers the connect and the first reply, so a server that
+    // accepts and never answers costs `timeout` in all, not twice that.
+    let started = Instant::now();
+    let mut connection = connect_within(url, started, timeout)?;
+    let remaining = timeout
+        .saturating_sub(started.elapsed())
+        .max(Duration::from_millis(1));
+    connection.set_read_timeout(Some(remaining))?;
     connection.set_write_timeout(Some(timeout))?;
+    let mut first_reply = true;
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -122,6 +154,9 @@ pub fn archive_within(
             .arg("COUNT")
             .arg(100)
             .query(&mut connection)?;
+        if std::mem::take(&mut first_reply) {
+            connection.set_read_timeout(Some(timeout))?;
+        }
         for key in keys {
             if key.starts_with(NEW_NAMESPACE.as_bytes()) || !seen.insert(key.clone()) {
                 continue;

@@ -22,12 +22,12 @@ their own terminal context is owned by [FR-006](./FR-006-registration-records-pl
 - `check-test-matrix` SHALL recount `spec/tests.md`: the Test Case Summary rows by type against the Test Execution Summary totals, the row count GAP-001 states, duplicate test ids, and any Test Case row inside a traceability table.
 - `check-test-matrix` SHALL print every problem, sorted, and exit 1 when there is one.
 - `check-test-matrix` SHALL print the recount and exit 0 when there is none.
-- `check-test-matrix` SHALL count a Test Case row after any Unicode line break as a row,.
-- `check-test-matrix` SHALL report a total that is not an ASCII number as a problem.
-- `archive-relay-namespace` SHALL write the keys of a named prior namespace (never the `ixr:v3:` namespace, never an empty prefix) to a new file with their binary-safe dumps and remaining TTLs,.
+- `check-test-matrix` SHALL count a Test Case row after any Unicode line break as a row.
+- `check-test-matrix` SHALL report a Test Execution Summary total made entirely of numeric characters that are not all ASCII digits (such as `²`) as a problem, and SHALL ignore a total cell that holds other text.
+- `archive-relay-namespace` SHALL write the keys of a named prior namespace (never the `ixr:v3:` namespace, never an empty prefix) to a new file with their binary-safe dumps and remaining TTLs.
 - `archive-relay-namespace` SHALL NOT write to, delete from or modify the source.
 - `archive-relay-namespace` SHALL create the output exclusively with mode 0600 so an existing archive is never overwritten.
-- `archive-relay-namespace` SHALL fail within 10 seconds of an unresponsive server.
+- `archive-relay-namespace` SHALL fail within 10 seconds in all, connecting and waiting for the first reply together, of a server that accepts and never replies.
 - `archive-relay-namespace` SHALL resolve the Redis URL as `agent-msg` does (`IX_RELAY_URL`, else `url` of the file named by `IX_RELAY_CONFIG` or `~/.ix/relay/config.toml`, else the default).
 - `archive-relay-namespace` SHALL validate the config file.
 - `archive-relay-namespace` SHALL work with `HOME` unset when the URL comes from the environment.
