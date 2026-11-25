@@ -112,6 +112,7 @@ agent-msg resolve <id> "<decision>"
 | `crates/relay-ops` | Operations shared by the binaries: enrollment, escalation, Herdr checks and Linear posting. |
 | `crates/claude-wire` | Typed Claude Code cross-session wire formats, with drift detection and no I/O. |
 | `crates/herdr-cli` | Shared Herdr process and JSON plumbing. |
+| `crates/relay-tools` | Operator tools: `check-test-matrix`, `archive-relay-namespace`, `codex-herdr-launcher` and `capture-codex-session-start`. |
 | `plugins/claude`, `plugins/codex`, `plugins/opencode` | Harness plugins and lead guidance. |
 | `helm/` | The relay-redis chart and the `agent-spend-dashboard` chart. |
 | `deploy/` | systemd and launchd units for `relay-watcher` and the Redis forwarder. |
@@ -130,7 +131,7 @@ agent-msg resolve <id> "<decision>"
 
 ## Contributing
 
-Build and test with `make test`. `make test-redis` runs every test against a throwaway `redis:7` container and needs Docker. `make ci` runs every gate: formatting, clippy, tests, `cargo deny`, the unsafe-comment audit, docs and the spec matrix check. The matrix check needs `python3`.
+Build and test with `make test`. `make test-redis` runs every test against a throwaway `redis:7` container and needs Docker. `make ci` runs every gate: formatting, clippy, tests, `cargo deny`, the unsafe-comment audit, docs and the spec matrix check.
 
 Regenerate the figures with `make figures`, and confirm they are current with `make figures-check`. Both run `ixd build docs/images/figures.json --out docs/images` (install with `cargo install --git https://github.com/agent-ix/ix-diagrams ix-diagrams`).
 

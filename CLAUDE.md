@@ -16,7 +16,7 @@ make clean          # cargo clean
 make deny           # cargo deny check licenses
 make audit-unsafe   # check that every unsafe block has a // SAFETY: comment
 make check-matrix   # recount spec/tests.md against its summary tables
-make ci             # fmt-check + lint + test-redis + deny + audit-unsafe + docs + check-matrix (python3, stdlib only, is a prerequisite)
+make ci             # fmt-check + lint + test-redis + deny + audit-unsafe + docs + check-matrix
 ```
 
 ## Safety scaffolding
@@ -37,6 +37,7 @@ crates/agent-msg/      # CLI and hook handler (bin: agent-msg)
 crates/relay-watcher/  # one process per machine, wakes idle leads via herdr (bin: relay-watcher)
 crates/claude-wire/    # Claude Code's cross-session wire formats: typed, pure parsing, drift detection (lib, no I/O)
 crates/herdr-cli/      # shared herdr process-running/JSON-envelope plumbing (lib, no bin)
+crates/relay-tools/     # operator bins: check-test-matrix, archive-relay-namespace, codex-herdr-launcher, capture-codex-session-start
 deploy/                # systemd/launchd units for relay-watcher (not installed by this repo)
 scripts/               # local tooling, incl. test-with-redis.sh
 spec/                  # requirements artifacts

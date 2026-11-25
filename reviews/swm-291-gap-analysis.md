@@ -1,0 +1,68 @@
+---
+id: SR-6124
+title: "Gap analysis — ix-relay SWM-291 relay-tools port"
+type: SpecReview
+analysis: gap-analysis
+scope: "agent-ix/ix-relay; crates/relay-tools/**, spec/functional/FR-006-registration-records-place.md, spec/spec.md, spec/tests.md (context)"
+review_set: subset
+relationships:
+  - target: "ix://agent-ix/ix-relay/FR-006"
+    type: "references"
+---
+
+# SR-6124: Gap analysis — ix-relay SWM-291 relay-tools port
+
+## Summary
+
+Ticket: SWM-291. PR agent-ix/ix-relay#65 at `2d773e9d8d9737f7c4ec475308b183674d09a6df`. This planless audit covers the criteria that own the ported tools, the computed Test Matrix (`quire matrix --scope . --format json`, quire 0.52.1), the new tests and the new source. The PR says "No FR covers any of these scripts", but FR-006-AC-3 owns the Codex launcher. Its named evidence was the deleted Python test, and the Rust replacement tests carry no trace tag.
+
+## Verdict
+
+**FAIL**: FR-006-AC-3 is an untagged criterion whose evidence this diff replaced. The skill's rule fails any untagged in-scope criterion. The fix is one `#[trace("FR-006-AC-3")]` per launcher test plus the test name in `spec/tests.md`.
+
+FR-006-AC-3 was also untagged on origin/main: the Python test had no `Trace:` line, and 431 criteria repo-wide are untagged. Only criteria the diff touches are judged here. The source has no stubs: every module holds real logic, and every test asserts behaviour that a source change would break. Nothing inflates coverage.
+
+## Findings
+
+| ID      | Severity | Summary | Refs |
+| ------- | -------- | ------- | ---- |
+| FND-001 | medium | FR-006-AC-3 ("Launcher tests verify isolation for interactive starts/resumes and passthrough for CLI commands") is owned by the ported `codex-herdr-launcher`, so the PR's statement that no FR covers these scripts is wrong. `spec/tests.md` TC-006-03 still names the deleted Python test `test_interactive_context_and_existing_environment` as its evidence. The Rust replacements are `launcher::tests::interactive_starts_resumes_and_forks_gain_no_daemon`, `noninteractive_and_outside_herdr_pass_through` and `tests/launcher.rs`, and none carries `#[trace("FR-006-AC-3")]`. `quire matrix` reports the criterion `untagged`. | spec/functional/FR-006-registration-records-place.md:22; spec/tests.md:48, 786; crates/relay-tools/src/launcher.rs:100, 116; crates/relay-tools/tests/launcher.rs:31 |
+| FND-002 | low | Reverse gap: `archive-relay-namespace`, `check-test-matrix` and `capture-codex-session-start` have no owning FR or AC. The archive rests only on the scope sentence in spec.md §2 ("Old namespaces are archived, never imported"). The gate behaviour of check-test-matrix and the capture hook's privacy contract (allowlist, 0600, no symlink) are specified nowhere. This was already true of the Python, and the port leaves it so. | spec/spec.md:46; crates/relay-tools/src/archive.rs; crates/relay-tools/src/matrix.rs; crates/relay-tools/src/session_start.rs |
+
+## Coverage
+
+- Plan completion: not assessed
+- Criteria in scope: FR-006-AC-3, untagged (the computed matrix lists no binders). FR-006-AC-1 and FR-006-AC-2 were read for context only; this diff does not touch them.
+- Reverse gap: four new binaries. One (the launcher) has an owning criterion; three have none (FND-002).
+- Stubs and coverage inflation: none found in `crates/relay-tools`.
+- Semantic review (intent↔test↔code): skipped, because it was not requested in the reviewer brief. The fidelity of each port to the deleted Python was checked by differential runs and is recorded in SR-6123.
+
+## New findings (disposition pass 1)
+
+Head `c1945bdb1530cf5892b3209bff4c4bae5118f32f`. `quire matrix` now reports FR-006-AC-3 as tagged (6 binders), and FR-073-AC-1..4 as tagged (11, 4, 4 and 4 binders). FR-073 describes the tools' behaviour and the reasons for it, not the history of this change, and it validates.
+
+| ID      | Severity | Summary | Refs |
+| ------- | -------- | ------- | ---- |
+| FND-003 | low | FR-073 says `check-test-matrix` "SHALL report a total that is not an ASCII number as a problem", but the code reports only totals made entirely of numeric characters (`²`, Arabic-Indic digits, `½`). Any other non-number, such as `abc`, is skipped exactly as the Python skipped it (verified: exit 0). The statement promises more than the code does. | spec/functional/FR-073-operator-tools.md:26; crates/relay-tools/src/matrix.rs:133-142 |
+| FND-004 | low | Two FR-073 Behavior bullets end with a stray ",." ("as a row,." and "remaining TTLs,."), where a clause was cut off. | spec/functional/FR-073-operator-tools.md:25, 27 |
+
+## Dispositions
+
+| FND | outcome | reason |
+| --- | ------- | ------ |
+| FND-001 | fixed | The launcher tests carry `#[trace("FR-006-AC-3")]` (3 unit tests and 3 binary tests), and `quire matrix` reports the criterion tagged. TC-006-03 in spec/tests.md now names the Rust tests. |
+| FND-002 | fixed | The new FR-073 owns check-test-matrix, the archive and the capture hook, with AC-1..4 tagged by the relay-tools tests, rows TC-073-01..04, and updated GAP-001 and category totals (`make check-matrix`: 377 rows, consistent). |
+| FND-003 | fixed | Round 2, head `d2ec890`. FR-073:26 now says only totals made entirely of numeric characters that are not all ASCII digits are reported, and other text is ignored, which matches matrix.rs. |
+| FND-004 | fixed | Round 2, head `d2ec890`. The stray ",." is gone from FR-073:25 and FR-073:27. |
+
+## New findings (disposition pass 2)
+
+| ID      | Severity | Summary | Refs |
+| ------- | -------- | ------- | ---- |
+| FND-005 | low | The reworded FR-073:26 bullet now holds two obligations: it SHALL report a non-ASCII numeric total, and SHALL ignore other text. `quire validate` warns `ears:non-singular`, and the warning is new in this PR because FR-073 is new. Split it into two bullets, one per `shall`. | spec/functional/FR-073-operator-tools.md:26 |
+
+## Dispositions (disposition pass 2 findings)
+
+| FND | outcome | reason |
+| --- | ------- | ------ |
+| FND-005 | fixed | Round 3, head `8429ddd6e7be336bae43c988c8274415b0fdbc8f`. FR-073:26 is split into two bullets with one `shall` each. `quire validate` on FR-073 exits 0 and reports no `ears:non-singular` warning. |

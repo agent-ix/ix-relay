@@ -19,7 +19,7 @@ help:
 	@echo "  make audit-unsafe     - Enforce // SAFETY: comments on unsafe blocks"
 	@echo "  make docs             - cargo doc, denying missing/broken doc links"
 	@echo "  make fuzz             - Property-based fuzz lanes at a raised case count (see fuzz/README.md)"
-	@echo "  make check-matrix     - Recount spec/tests.md against its summary tables (needs python3)"
+	@echo "  make check-matrix     - Recount spec/tests.md against its summary tables"
 	@echo "  make ci               - All CI gates locally (fmt-check + lint + test-redis + deny + audit-unsafe + docs + check-matrix)"
 
 # =============================================================================
@@ -99,7 +99,7 @@ docs:
 # The test matrix's summary tables must reconcile with its rows.
 .PHONY: check-matrix
 check-matrix:
-	python3 scripts/check_test_matrix.py
+	$(CARGO) run --quiet -p relay-tools --bin check-test-matrix
 
 # =============================================================================
 # Composite

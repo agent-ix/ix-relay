@@ -1,0 +1,27 @@
+[package]
+name = "relay-tools"
+description = "Operator tools for ix-relay: test-matrix recount, namespace archive, Codex launcher and SessionStart capture."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = "0.22"
+nix.workspace = true
+redis.workspace = true
+relay-core.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+ix-trace-rs = { git = "https://github.com/agent-ix/ix-trace-rs", tag = "v0.1.1" }
+tempfile.workspace = true

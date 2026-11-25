@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Replace the Python scripts with Rust binaries in the new `relay-tools` crate: `check-test-matrix` (behind `make check-matrix`), `archive-relay-namespace`, `codex-herdr-launcher` and `capture-codex-session-start`. Each keeps the Python tool's behaviour and flags, with these differences. `archive-relay-namespace` and `capture-codex-session-start` write equivalent JSON, but with different key order and separators. `archive-relay-namespace` resolves its Redis URL like `agent-msg` (`IX_RELAY_URL`, then `url` in the file named by `IX_RELAY_CONFIG` or `~/.ix/relay/config.toml`, then the default), so its `--config` flag is gone: set `IX_RELAY_CONFIG`. It refuses `rediss://` URLs, because no relay build carries a TLS library. The SessionStart capture hook command is now the binary path, with no `python3`. `scripts/latency-bench.py`, a one-off harness no gate or doc called, is removed. Launchers already installed as `codex` are copies of the old script and keep working until replaced by `codex-herdr-launcher`.
+
 - `relay-watcher` exports the FR-072 `host_registry_stale` defect as `ix.fleet.probe_ok{host,source="host_registry_stale"}`: 0 for a host whose stale lanes an assignment write named, until that host publishes its lane list again, then 1. `agent-msg doctor` keeps warning `assignment_host_registry_stale`. The series is exported by every watcher for the stale host, for one hour after the host recovers; aggregate it with `min by (host, source)`. A failed read of the stored defects keeps the last known ones and sets `probe_ok{source="redis"}` to 0.
 
 ## 0.4.1

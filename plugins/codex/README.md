@@ -50,7 +50,7 @@ Codex has no `--plugin-dir` auto-loading for hooks. It reads one `$CODEX_HOME/ho
 
    Once trust is granted, interactively or through the bypass for a headless run, each later invocation runs the hooks without prompting.
 
-5. Isolate the real terminal context. Interactive Herdr Codex leads must start with `codex --no-daemon`, so a shared daemon cannot supply another terminal's stale environment. Install `scripts/codex-herdr-launcher.py` as `codex` in a `PATH` directory before the real executable, or use the flag directly for both starts and resumes. The launcher preserves environment variables and leaves noninteractive CLI commands unchanged.
+5. Isolate the real terminal context. Interactive Herdr Codex leads must start with `codex --no-daemon`, so a shared daemon cannot supply another terminal's stale environment. Build it with `cargo build --release -p relay-tools` and install `target/release/codex-herdr-launcher` as `codex` in a `PATH` directory before the real executable, or use the flag directly for both starts and resumes. The launcher preserves environment variables and leaves noninteractive CLI commands unchanged.
 
    Herdr's SessionStart association hook must run before the relay hook. Enrollment uses the genuine payload session ID and live Herdr association. `AGENT_MSG_NAME` is preserved and does not affect identity or routing. The lead's public identity is `server:workspace:tab`. Run `agent-msg whoami` to see it.
 
@@ -82,16 +82,16 @@ Install `plugins/codex/skills/doctor/` as `$CODEX_HOME/skills/doctor/` to expose
 
 `agent-msg whoami --json` checks a registry identity against the pane's live Herdr session. If the inherited pane is missing or the session does not match, it refuses the stale identity and explains that manual registration cannot repair it. Preserve `AGENT_MSG_NAME` if set. A VS Code/API session is not necessarily a terminal lead, even when it inherits `HERDR_*` variables.
 
-To capture the next genuine terminal SessionStart, copy `scripts/capture-codex-session-start.py` to `$CODEX_HOME/ix-relay/capture-codex-session-start.py` (default `~/.codex`). Add a separate SessionStart command hook before the Herdr and relay entries:
+To capture the next genuine terminal SessionStart, copy `target/release/capture-codex-session-start` (built by `cargo build --release -p relay-tools`) to `$CODEX_HOME/ix-relay/capture-codex-session-start` (default `~/.codex`). Add a separate SessionStart command hook before the Herdr and relay entries:
 
 ```json
-{"type":"command","command":"python3 /absolute/path/to/capture-codex-session-start.py","timeout":2}
+{"type":"command","command":"/absolute/path/to/capture-codex-session-start","timeout":2}
 ```
 
 Approve the changed hook configuration through the real session's normal trust flow. At its next operator-approved restart or resume, the helper appends to `$CODEX_HOME/ix-relay/session-start.jsonl` with mode 0600. It records only `hook_event_name`, `session_id`, `transcript_path`, and the inherited Herdr context plus `CODEX_THREAD_ID`. It does not record prompts, transcript contents, credentials, or fabricated events. Compare that event's session ID with `herdr agent get <the actual terminal pane>`. Remove the diagnostic hook after capturing the event. To verify, use only the captured SessionStart and the session's own ID.
 
 ## Startup acceptance
 
-Use an owned isolated Herdr session and isolated Redis namespace. Launch an interactive Codex through `scripts/codex-herdr-launcher.py`, submit its first prompt, and capture only the genuine SessionStart event, session ID, transcript path, and Herdr context. Verify that Herdr reports that exact session ID and that the installed hook wrote the registration before invoking `whoami`. `whoami` must show `server:workspace:tab` even with a stale `AGENT_MSG_NAME`. Repeat for resume, then verify `:tab`, `:workspace:tab`, and a remote cold send without running `register` or `find` first.
+Use an owned isolated Herdr session and isolated Redis namespace. Launch an interactive Codex through `codex-herdr-launcher`, submit its first prompt, and capture only the genuine SessionStart event, session ID, transcript path, and Herdr context. Verify that Herdr reports that exact session ID and that the installed hook wrote the registration before invoking `whoami`. `whoami` must show `server:workspace:tab` even with a stale `AGENT_MSG_NAME`. Repeat for resume, then verify `:tab`, `:workspace:tab`, and a remote cold send without running `register` or `find` first.
 
 Judge startup by the registration, `whoami` and the Herdr session ID. If a check fails, fix the cause and do not register manually. Take the pane from the Herdr association.

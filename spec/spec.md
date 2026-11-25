@@ -69,6 +69,7 @@ This specification governs:
   doctor`, hook-failure spooling, dead letters, undeliverable-recipient state,
   stable-id identity across moves and renames, herdr version checks and
   escalation retention.
+- Operator tools (FR-073): the test-matrix recount, the prior-namespace archive and the Codex SessionStart capture.
 
 ### 2.2 Out of Scope
 

@@ -14,7 +14,7 @@ Enrollment is automatic:
 
 A session queue belongs to the session. Renaming or moving a tab changes the address, and the session keeps its queue. A new session in a reused pane does not inherit the previous session's mail.
 
-Interactive Codex leads in Herdr start with `codex --no-daemon`, installed through `scripts/codex-herdr-launcher.py`. The shared Codex daemon would otherwise supply the environment of the terminal that started it. Herdr's `SessionStart` helper must run before the relay hook.
+Interactive Codex leads in Herdr start with `codex --no-daemon`, installed through the `codex-herdr-launcher` binary of `relay-tools`. The shared Codex daemon would otherwise supply the environment of the terminal that started it. Herdr's `SessionStart` helper must run before the relay hook.
 
 ## Directory and address resolution
 

@@ -2652,6 +2652,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "relay-tools"
+version = "0.4.1"
+dependencies = [
+ "base64 0.22.1",
+ "ix-trace-rs",
+ "nix",
+ "redis",
+ "relay-core",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "relay-tui"
 version = "0.4.1"
 dependencies = [
