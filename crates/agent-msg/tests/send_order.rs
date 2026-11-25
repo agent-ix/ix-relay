@@ -767,6 +767,10 @@ fn closing_an_unindexed_order_clears_the_confirmed_coverage_boundary() {
         .unwrap();
     let order_id = member.split_once('|').unwrap().1.to_owned();
     let confirmed_at = bus.relay.confirm_orders_complete_since().unwrap();
+    assert_eq!(
+        Some(confirmed_at),
+        bus.relay.orders_complete_since().unwrap()
+    );
 
     redis::cmd("ZREM")
         .arg(format!("{}receipt-meta:orders-all", bus.prefix))
