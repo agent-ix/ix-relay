@@ -41,7 +41,10 @@ use std::{
 use herdr_cli::{ProcessRunner, RealProcessRunner};
 use relay_core::{
     AgentName, Backlog, Heartbeats, InboxOverview, LeaseState, LinkFault, MachineName, Moves,
-    PaneId, Registration, Relay, config::DeliveryMode, health::WatcherFile,
+    PaneId, Registration, Relay,
+    config::DeliveryMode,
+    health::WatcherFile,
+    hook_skips::{self, Reason},
     socket_status::SocketStatus,
 };
 use relay_ops::herdr_check::{self, HerdrCheck};
@@ -92,6 +95,8 @@ pub(crate) struct Env {
     pub state_file: Option<PathBuf>,
     /// `spool/hook.jsonl`, when a config location is known.
     pub spool_file: Option<PathBuf>,
+    /// `spool/activity.json`, beside which the skip counts sit.
+    pub activity_file: Option<PathBuf>,
     /// The time the Redis section may take.
     pub redis_budget: Duration,
     /// `[watcher] delivery` from `config.toml`, or why the watcher would refuse it.
@@ -321,6 +326,12 @@ pub(crate) struct Facts {
     pub watcher_file: FileState,
     /// The local spool.
     pub spool: SpoolState,
+    /// Activity updates a hook dropped because the state file lock was held (FR-068).
+    pub activity_lock_skips: SkipSeries,
+    /// Activity updates a hook dropped because the state files could not be written.
+    pub activity_write_failures: SkipSeries,
+    /// The spool directory exists and cannot be written, so no drop can be counted there.
+    pub activity_spool_unwritable: bool,
     /// The herdr check.
     pub herdr: HerdrCheck,
     /// herdr's panes.
@@ -392,6 +403,9 @@ pub(crate) fn gather(
         redis,
         watcher_file: read_watcher_file(env.state_file.as_deref()),
         spool: read_spool(env.spool_file.as_deref()),
+        activity_lock_skips: skip_series(env.activity_file.as_deref(), Reason::Lock),
+        activity_write_failures: skip_series(env.activity_file.as_deref(), Reason::WriteFailed),
+        activity_spool_unwritable: spool_unwritable(env.activity_file.as_deref()),
         herdr,
         panes,
         service,
@@ -604,6 +618,45 @@ fn read_watcher_file(path: Option<&Path>) -> FileState {
     }
 }
 
+/// One skip count: how many updates were dropped for a reason, and when the count last grew.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SkipSeries {
+    /// The sidecar's length, or why it cannot be read.
+    pub count: Result<u64, String>,
+    /// When the sidecar last grew, Unix milliseconds.
+    pub last_ms: Option<i64>,
+}
+
+impl Default for SkipSeries {
+    fn default() -> Self {
+        Self {
+            count: Ok(0),
+            last_ms: None,
+        }
+    }
+}
+
+/// The skip count beside the activity state file at `state`.
+fn skip_series(state: Option<&Path>, reason: Reason) -> SkipSeries {
+    let Some(state) = state else {
+        return SkipSeries::default();
+    };
+    SkipSeries {
+        count: hook_skips::count(state, reason).map_err(|e| e.to_string()),
+        last_ms: hook_skips::last_skip_ms(state, reason),
+    }
+}
+
+/// Whether the spool directory beside `state` exists and the kernel says this process cannot
+/// write it (owner, group, root, ACLs and a read-only mount all count). Creates nothing.
+fn spool_unwritable(state: Option<&Path>) -> bool {
+    use rustix::fs::{Access, access};
+    state
+        .and_then(Path::parent)
+        .filter(|dir| fs::metadata(dir).is_ok_and(|m| m.is_dir()))
+        .is_some_and(|dir| access(dir, Access::WRITE_OK).is_err())
+}
+
 /// Reads the spool without following a symlink and without holding its lock: a
 /// snapshot, at most [`MAX_SPOOL_READ`] bytes.
 fn read_spool(path: Option<&Path>) -> SpoolState {
@@ -736,6 +789,7 @@ mod tests {
     use std::collections::HashMap;
 
     use herdr_cli::{Output, ProcessError};
+    use ix_trace_rs::trace;
 
     use super::*;
 
@@ -830,6 +884,39 @@ mod tests {
         assert_eq!(scrub("no secret", "redis://127.0.0.1:6379"), "no secret");
     }
 
+    /// The spool directory check asks the kernel and creates nothing. Running as root cannot
+    /// make a directory unwritable, so the read-only half is skipped there.
+    #[trace("FR-068-AC-15")]
+    #[test]
+    fn a_read_only_spool_directory_is_unwritable_and_a_writable_one_is_not() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("spool");
+        fs::create_dir(&spool).unwrap();
+        let state = spool.join("activity.json");
+        assert!(!spool_unwritable(Some(&state)), "a writable directory");
+        assert!(!spool_unwritable(None));
+        assert!(
+            !spool_unwritable(Some(&dir.path().join("absent/activity.json"))),
+            "a spool not created yet is not a fault"
+        );
+        fs::set_permissions(&spool, fs::Permissions::from_mode(0o555)).unwrap();
+        let root = fs::write(spool.join("probe"), "").is_ok();
+        let unwritable = spool_unwritable(Some(&state));
+        fs::set_permissions(&spool, fs::Permissions::from_mode(0o755)).unwrap();
+        if root {
+            eprintln!(
+                "skipping the read-only half: running as root, a 0555 directory stays writable"
+            );
+            return;
+        }
+        assert!(unwritable, "a 0555 directory");
+        assert_eq!(
+            fs::read_dir(&spool).unwrap().count(),
+            0,
+            "nothing was created"
+        );
+    }
     #[test]
     fn the_spool_is_read_without_being_changed_and_a_symlink_is_refused() {
         let dir = tempfile::tempdir().unwrap();

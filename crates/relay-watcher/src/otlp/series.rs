@@ -115,8 +115,16 @@ pub static FLEET_LANE_COMPILE_SECONDS: Instrument = Instrument {
 pub static HOOK_ACTIVITY_SKIPPED: Instrument = Instrument {
     name: "ix.relay.hook.activity_skipped",
     unit: "{event}",
-    description: "Activity events a hook did not write, by reason (backoff, failed, unregistered), cumulative on this host.",
+    description: "Activity events a hook did not write, by reason (backoff, failed, unregistered, lock, write_failed), cumulative on this host.",
     kind: Kind::Sum,
+};
+
+/// `ix.relay.hook.activity_skip_saturated`: a skip count that reached its cap.
+pub static HOOK_ACTIVITY_SKIP_SATURATED: Instrument = Instrument {
+    name: "ix.relay.hook.activity_skip_saturated",
+    unit: "1",
+    description: "1 while the skip count of a reason (lock, write_failed) has reached its cap and so reads at least, else 0.",
+    kind: Kind::Gauge,
 };
 
 /// `ix.relay.orders.unacted`: orders awaiting `Acted` or `AckExpired`, by recipient lane.
@@ -287,6 +295,7 @@ pub(crate) const CATALOGUE: &[(&Instrument, &[&str])] = &[
     ),
     (&FLEET_CONFIG, &["host", "name"]),
     (&HOOK_ACTIVITY_SKIPPED, &["host", "reason"]),
+    (&HOOK_ACTIVITY_SKIP_SATURATED, &["host", "reason"]),
     (&FLEET_LANE_BLOCKED, &["host", "lane", "reason"]),
     (&FLEET_LANE_DROPPED, &["host"]),
     (&FLEET_BUSY_RATIO, &["host"]),

@@ -45,9 +45,11 @@ use crate::otlp::{
         FLEET_LANE_BLOCKED, FLEET_LANE_COMPILE_SECONDS, FLEET_LANE_DROPPED, FLEET_LANE_FOCUS_INFO,
         FLEET_LANE_LAST_ACTIVITY, FLEET_LANE_NO_EVENTS, FLEET_LANE_STATE, FLEET_MEMORY_TOTAL,
         FLEET_MEMORY_USED, FLEET_NATIVE_WINDOWS, FLEET_PRESSURE, FLEET_PROBE_OK,
-        FLEET_PROBE_UNAVAILABLE, FLEET_TEMPERATURE, HOOK_ACTIVITY_SKIPPED,
+        FLEET_PROBE_UNAVAILABLE, FLEET_TEMPERATURE, HOOK_ACTIVITY_SKIP_SATURATED,
+        HOOK_ACTIVITY_SKIPPED,
     },
 };
+use relay_core::hook_skips;
 
 /// How long a host that refreshed its lane list keeps exporting `host_registry_stale` as 1.
 pub const STALE_RECOVERED_EXPORT: Duration = Duration::from_secs(60 * 60);
@@ -857,16 +859,35 @@ impl Collector {
             );
         }
         if let Some(counts) = self.hook_counts {
-            for (reason, n) in [
+            let state = counts.has_state.then_some([
                 ("backoff", counts.skipped),
                 ("failed", counts.dropped),
                 ("unregistered", counts.unregistered),
-            ] {
+            ]);
+            let sidecars = [
+                ("lock", counts.lock_skipped),
+                ("write_failed", counts.write_failed),
+            ];
+            let known = state
+                .into_iter()
+                .flatten()
+                .chain(sidecars.into_iter().filter_map(|(r, n)| n.map(|n| (r, n))));
+            for (reason, n) in known {
                 registry.sum(
                     &HOOK_ACTIVITY_SKIPPED,
                     host_attr().with("reason", reason),
                     n,
                 );
+            }
+            // A sidecar at its cap stops counting, so the sum alone would read as a flat line.
+            for (reason, n) in sidecars {
+                if let Some(n) = n {
+                    registry.gauge(
+                        &HOOK_ACTIVITY_SKIP_SATURATED,
+                        host_attr().with("reason", reason),
+                        i64::from(hook_skips::saturated(n)),
+                    );
+                }
             }
         }
     }
@@ -950,6 +971,9 @@ pub(crate) mod fixtures {
                         skipped: 3,
                         dropped: 2,
                         unregistered: 1,
+                        has_state: true,
+                        lock_skipped: Some(4),
+                        write_failed: Some(5),
                     })),
                     Err,
                 )

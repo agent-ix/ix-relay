@@ -126,6 +126,14 @@ pub(crate) enum Code {
     HookSpoolUnlocated,
     /// The local spool is not readable.
     HookSpoolUnreadable,
+    /// Hook activity updates were dropped because the state file lock was held.
+    ActivityLockSkipped,
+    /// Hook activity updates were dropped because the state files could not be written.
+    ActivityWriteFailed,
+    /// A skip count file cannot be read.
+    ActivitySkipsUnreadable,
+    /// The spool directory cannot be written, so a dropped update cannot be counted.
+    ActivitySpoolUnwritable,
     /// Hook failures were recorded on the bus in the last 24 hours.
     HookFailuresRecorded,
     /// The recorded pane moves could not be read.
@@ -449,6 +457,10 @@ mod tests {
             Code::HookSpoolPending => "hook_spool_pending",
             Code::HookSpoolUnlocated => "hook_spool_unlocated",
             Code::HookSpoolUnreadable => "hook_spool_unreadable",
+            Code::ActivityLockSkipped => "activity_lock_skipped",
+            Code::ActivityWriteFailed => "activity_write_failed",
+            Code::ActivitySkipsUnreadable => "activity_skips_unreadable",
+            Code::ActivitySpoolUnwritable => "activity_spool_unwritable",
             Code::HookFailuresRecorded => "hook_failures_recorded",
             Code::MovesUnreadable => "moves_unreadable",
             Code::HerdrMissing => "herdr_missing",
@@ -508,6 +520,10 @@ mod tests {
             Code::HookSpoolPending,
             Code::HookSpoolUnlocated,
             Code::HookSpoolUnreadable,
+            Code::ActivityLockSkipped,
+            Code::ActivityWriteFailed,
+            Code::ActivitySkipsUnreadable,
+            Code::ActivitySpoolUnwritable,
             Code::HookFailuresRecorded,
             Code::MovesUnreadable,
             Code::HerdrMissing,

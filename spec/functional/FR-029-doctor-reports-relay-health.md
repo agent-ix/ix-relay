@@ -106,6 +106,8 @@ and shall exit 0 unless a check failed.
 | hook spool | `hook_spool_pending` | fail while the newest record (the file's last write, when none decodes) is under 15 min old, else warn |
 | | `hook_spool_unreadable` | warn |
 | | `hook_spool_unlocated` | unknown |
+| hook activity drops (FR-068; the sidecar counts beside `spool/activity.json`) | `activity_lock_skipped`, `activity_write_failed` | warn while the count grew in the last 24 h, else information; at the cap the count reads "at least"; deleting the sidecar resets it |
+| | `activity_skips_unreadable`, `activity_spool_unwritable` | warn |
 | hook failures on the bus, 24 h, by stage and error kind | `hook_failures_recorded` | fail while the recent failures reach the volume threshold or a session keeps failing (below), else warn |
 | herdr | `herdr_missing`, `herdr_shape_mismatch` | fail |
 | | `herdr_unsupported_version`, `herdr_version_unreadable` | warn |

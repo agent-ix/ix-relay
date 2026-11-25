@@ -5,7 +5,9 @@
 //! reads the counts for `ix.relay.hook.activity_skipped`. Updates are a
 //! read-modify-write under an advisory lock on a sidecar file, taken without
 //! ever waiting longer than [`LOCK_WAIT`]: a hook that cannot get the lock
-//! skips the update (an uncounted event) rather than delay the agent.
+//! skips the update rather than delay the agent. An update dropped for want of the
+//! lock, or because the files could not be written, is counted in a sidecar file
+//! that needs no lock (see [`relay_core::hook_skips`]).
 
 use std::{
     fs::{self, DirBuilder, File, OpenOptions, TryLockError},
@@ -15,6 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use relay_core::hook_skips::{self, Reason};
 use serde::{Deserialize, Serialize};
 
 /// The first backoff after a failed write.
@@ -42,6 +45,14 @@ pub(crate) struct ActivityCounts {
     /// Events not written because the lead has no verified lane address.
     #[serde(default)]
     pub(crate) unregistered: u64,
+    /// Updates dropped because the lock was not free, counted in a sidecar file
+    /// and never stored in the JSON.
+    #[serde(skip)]
+    pub(crate) lock_skipped: u64,
+    /// Updates dropped because the files could not be written, counted in a
+    /// sidecar file and never stored in the JSON.
+    #[serde(skip)]
+    pub(crate) write_failed: u64,
 }
 
 /// The state file.
@@ -66,12 +77,21 @@ impl ActivityState {
         Self { path }
     }
 
-    /// What the file holds; empty when it is missing or unreadable.
+    /// The state file's path, which the skip sidecars sit beside.
+    pub(crate) fn state_path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// What the file holds, with the lock skips; empty when both are missing or
+    /// unreadable.
     pub(crate) fn counts(&self) -> ActivityCounts {
-        fs::read(&self.path)
+        let mut counts: ActivityCounts = fs::read(&self.path)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        counts.lock_skipped = hook_skips::count(&self.path, Reason::Lock).unwrap_or(0);
+        counts.write_failed = hook_skips::count(&self.path, Reason::WriteFailed).unwrap_or(0);
+        counts
     }
 
     /// Whether a write at `now_ms` must be skipped; counts the skip when so.
@@ -120,10 +140,19 @@ impl ActivityState {
         });
     }
 
-    /// Applies `change` to the file under the lock; skipped when the lock is
-    /// not free within [`LOCK_WAIT`] or the file cannot be written.
+    /// Applies `change` to the file under the lock; when the lock is not free
+    /// within [`LOCK_WAIT`] the update is dropped and counted as a lock skip, and
+    /// when the files cannot be written it is dropped and counted as a write
+    /// failure.
     fn update(&self, change: impl FnOnce(&mut ActivityCounts)) {
-        let _ = self.try_update(change);
+        if let Err(e) = self.try_update(change) {
+            let reason = if e.kind() == io::ErrorKind::WouldBlock {
+                Reason::Lock
+            } else {
+                Reason::WriteFailed
+            };
+            hook_skips::record(&self.path, reason);
+        }
     }
 
     fn try_update(&self, change: impl FnOnce(&mut ActivityCounts)) -> io::Result<()> {
@@ -230,9 +259,9 @@ mod tests {
     }
 
     /// Concurrent hooks lose no applied update: the file holds exactly the updates that
-    /// took the lock, and an update that finds the lock held is dropped uncounted after
-    /// the 50 ms bound, not after the holder lets go.
-    #[trace("FR-068-AC-14")]
+    /// took the lock, and an update that finds the lock held is dropped after the
+    /// 50 ms bound, not after the holder lets go, and is counted as a lock skip.
+    #[trace("FR-068-AC-14", "FR-068-AC-15")]
     #[test]
     fn concurrent_updates_apply_exactly_the_counted_ones_and_a_held_lock_drops_within_the_bound() {
         let dir = tempfile::tempdir().unwrap();
@@ -257,6 +286,11 @@ mod tests {
         assert!(counted > 0, "every update skipping would pass the sum");
         assert_eq!(state.counts().unregistered, counted);
         let base = counted;
+        assert_eq!(
+            state.counts().lock_skipped,
+            skipped,
+            "each concurrent skip is counted"
+        );
         let held = state.lock().unwrap();
         let started = Instant::now();
         state.unregistered();
@@ -270,9 +304,34 @@ mod tests {
             waited < LOCK_WAIT + Duration::from_millis(450),
             "{waited:?}"
         );
-        assert_eq!(state.counts().unregistered, base, "dropped, not counted");
+        assert_eq!(state.counts().unregistered, base, "not applied");
+        assert_eq!(
+            state.counts().lock_skipped,
+            skipped + 1,
+            "counted as a skip"
+        );
         drop(held);
         state.unregistered();
         assert_eq!(state.counts().unregistered, base + 1);
+        assert_eq!(state.counts().lock_skipped, skipped + 1, "no further skip");
+    }
+
+    /// Two handles on one state file share the count through the sidecar file (the real
+    /// processes are in `tests/hook_activity.rs`), and a
+    /// skipped update leaves the JSON untouched.
+    #[trace("FR-068-AC-15")]
+    #[test]
+    fn two_handles_on_one_state_file_share_the_lock_skip_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("activity.json");
+        let (a, b) = (ActivityState::at(path.clone()), ActivityState::at(path));
+        let held = a.lock().unwrap();
+        a.unregistered();
+        b.unregistered();
+        b.dropped();
+        assert_eq!(a.counts().lock_skipped, 3);
+        assert_eq!(b.counts().lock_skipped, 3);
+        drop(held);
+        assert_eq!((a.counts().unregistered, a.counts().dropped), (0, 0));
     }
 }

@@ -16,6 +16,7 @@ mod error;
 mod escalation;
 pub mod fleet;
 pub mod health;
+pub mod hook_skips;
 mod ids;
 pub mod lane_registry;
 mod message;

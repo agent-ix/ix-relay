@@ -504,14 +504,20 @@ fn tc_045_29_focus_info_carries_the_ticket_of_the_branch_and_is_empty_without_on
     );
 }
 
-#[trace("FR-068-AC-11")]
+#[trace("FR-068-AC-11", "FR-068-AC-15")]
 #[test]
 fn tc_068_11_the_hook_counts_are_exported_by_reason_and_left_out_when_unreadable() {
     let mut c = Collector::new(host(), Profile::default(), sources(None), INTERVAL);
     let t0 = Instant::now();
     c.sample(t0, &mut |_| {});
     let r = registry_of(&c, t0);
-    for (reason, n) in [("backoff", 3), ("failed", 2), ("unregistered", 1)] {
+    for (reason, n) in [
+        ("backoff", 3),
+        ("failed", 2),
+        ("unregistered", 1),
+        ("lock", 4),
+        ("write_failed", 5),
+    ] {
         assert_eq!(
             value(&r, "ix.relay.hook.activity_skipped", &[("reason", reason)]),
             Some(n)
@@ -524,6 +530,58 @@ fn tc_068_11_the_hook_counts_are_exported_by_reason_and_left_out_when_unreadable
         r.points()
             .iter()
             .all(|p| p.instrument.name != "ix.relay.hook.activity_skipped")
+    );
+}
+
+/// A skip count at its cap is exported with a saturated gauge of 1, a count that is not is 0,
+/// and a sidecar that cannot be read leaves out only its own series.
+#[trace("FR-068-AC-15")]
+#[test]
+fn tc_068_15_a_full_skip_count_is_saturated_and_an_unreadable_one_is_left_out() {
+    let mut c = Collector::new(host(), Profile::default(), sources(None), INTERVAL);
+    let t0 = Instant::now();
+    c.sample(t0, &mut |_| {});
+    let sat = |r: &Registry, reason: &str| {
+        value(
+            r,
+            "ix.relay.hook.activity_skip_saturated",
+            &[("reason", reason)],
+        )
+    };
+    let r = registry_of(&c, t0);
+    assert_eq!(
+        (sat(&r, "lock"), sat(&r, "write_failed")),
+        (Some(0), Some(0))
+    );
+    c.sources.hook_counts = Arc::new(|| {
+        Ok(Some(HookCounts {
+            has_state: true,
+            skipped: 1,
+            lock_skipped: Some(relay_core::hook_skips::MAX_SKIPS),
+            write_failed: None,
+            ..HookCounts::default()
+        }))
+    });
+    c.sample(t0 + Duration::from_secs(30), &mut |_| {});
+    let r = registry_of(&c, t0);
+    assert_eq!(sat(&r, "lock"), Some(1));
+    assert_eq!(sat(&r, "write_failed"), None);
+    assert_eq!(
+        value(
+            &r,
+            "ix.relay.hook.activity_skipped",
+            &[("reason", "write_failed")]
+        ),
+        None
+    );
+    assert_eq!(
+        value(
+            &r,
+            "ix.relay.hook.activity_skipped",
+            &[("reason", "backoff")]
+        ),
+        Some(1),
+        "the state file's counts stay"
     );
 }
 

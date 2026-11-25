@@ -101,9 +101,30 @@ agent's turn, and it never changes a tool permission.
   ([FR-045](./FR-045-watcher-pushes-metrics-over-otlp.md)), so an outage is a visible
   defect.
 - Updates to that local state SHALL take a file lock and SHALL wait for it at most 50
-  milliseconds. An update that cannot get the lock in that time SHALL be dropped and
-  not counted, so that a held lock never delays the agent, and no update that was
-  applied SHALL be lost. Making a dropped update visible is tracked in SWM-293.
+  milliseconds. An update that cannot get the lock in that time SHALL be dropped, so that
+  a held lock never delays the agent, and no update that was applied SHALL be lost.
+- The hook handler SHALL count each update it drops, without taking the state lock or
+  waiting, by reason: `lock` when the lock was not free within the bound, and
+  `write_failed` for any other failure of the update (the state file is a symlink, a file
+  or the directory cannot be written, the disk is full). Each reason has its own sibling
+  file of the state file, and a drop appends one byte to it with a single append write; the
+  count is that file's length. A sidecar SHALL stop growing at 1,048,576 bytes, and a count
+  at that bound SHALL be reported as "at least" that number, never as an exact one.
+  Deleting a sidecar resets its count. When the spool directory itself cannot be written,
+  no sidecar can record the drop, and `agent-msg doctor` SHALL report the unwritable spool
+  directory directly.
+- `relay-watcher` SHALL export each count as `ix.relay.hook.activity_skipped` with reason
+  `lock` or `write_failed`, including when the state file itself is missing, and SHALL
+  export `ix.relay.hook.activity_skip_saturated` as 1 for a reason whose count has reached
+  the cap, so an alert still sees drops after the count stops growing. A sidecar that
+  cannot be read (a symlink or not a regular file) leaves out only its own series.
+- `agent-msg doctor` SHALL warn (`activity_lock_skipped`, `activity_write_failed`, each
+  with its own cause and fix) only while the sidecar grew in the last 24 hours, the window
+  of `hook_failures_recorded`; an older count is reported as information with its
+  cumulative number, except that a count at the cap SHALL warn whatever its age, because a
+  full sidecar stops growing and its age says nothing about recent drops, and a sidecar that cannot be read is a warning
+  (`activity_skips_unreadable`). A dropped update is thus a visible defect, never silence,
+  and a long-past one does not fail `--strict` for good.
 - The hook handler SHALL attempt the event write after mail delivery work, within the
   event's budget in [NFR-001](../non-functional/NFR-001-hook-time-budget.md), so that
   telemetry never consumes the window mail needs.
@@ -135,7 +156,8 @@ agent's turn, and it never changes a tool permission.
 | FR-068-AC-11 | With Redis blackholed, after one failed write the next 5 seconds of tool-call hooks add no write time and are counted as skipped; the backoff doubles to the 5-minute cap on repeated failures; a successful write ends it; `ix.relay.hook.activity_skipped` reports the skips and drops. | Test |
 | FR-068-AC-12 | A `PreToolUse`, `Notification` and `SessionEnd` call writes its event and prints nothing on stdout, including for a tool that the harness would otherwise ask about; no output contains an approve, deny, ask or block decision. | Test |
 | FR-068-AC-13 | The Claude and Codex plugin registrations are parsed by a test that fails unless every supported event of the input list maps to a registered hook with a timeout of at least its budget plus 1 second. | Test |
-| FR-068-AC-14 | Given several hooks updating the activity state file at once, and separately a hook that finds the file's lock held, the file holds exactly the updates that took the lock, none of them lost, and an update that finds the lock held is dropped without being counted and returns within the 50 millisecond lock bound plus a margin for scheduling, without waiting for the holder. | Test |
+| FR-068-AC-14 | Given several hooks updating the activity state file at once, and separately a hook that finds the file's lock held, the file holds exactly the updates that took the lock, none of them lost, and an update that finds the lock held is dropped and returns within the 50 millisecond lock bound plus a margin for scheduling, without waiting for the holder. | Test |
+| FR-068-AC-15 | Given hooks that cannot take the state file lock, and separately hooks that cannot write the state files, each dropped update is counted in the sidecar of its reason without the lock and without a wait, across separate hook processes; a count at the cap is exported with `ix.relay.hook.activity_skip_saturated` 1 and reads "at least" in doctor and warns whatever its age; `ix.relay.hook.activity_skipped` reports each reason, also when the state file is missing, and leaves out only a sidecar that cannot be read; and `agent-msg doctor` warns for a count that grew in the last 24 hours, reports an older one as information, and reports an unwritable spool directory. | Test |
 
 ## Dependencies
 
