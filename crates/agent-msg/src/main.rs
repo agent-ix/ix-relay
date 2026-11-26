@@ -879,6 +879,11 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
             writeln!(out, "{n}")?;
         }
         Cmd::Inbox {
+            as_address: Some(_),
+            peek: false,
+            ..
+        } => return Err("--as is only valid with --peek".into()),
+        Cmd::Inbox {
             max,
             json,
             count: false,
