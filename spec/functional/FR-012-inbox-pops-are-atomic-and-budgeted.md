@@ -14,8 +14,8 @@ When a consumer pops a lead's inbox, the store shall take and return the oldest
 pending messages in one atomic Redis operation, so that no two pops ever return
 the same message and nothing leaves the inbox that the pop does not return. What
 a pop takes is recorded as in flight in the same operation
-([FR-020](./FR-020-hook-never-loses-popped-messages.md)); only the interactive
-`agent-msg inbox` read removes messages outright.
+([FR-020](./FR-020-hook-never-loses-popped-messages.md)); the interactive
+`agent-msg inbox` read without `--peek` removes messages outright.
 
 ## Behavior
 
@@ -33,6 +33,18 @@ a pop takes is recorded as in flight in the same operation
 - If a popped entry fails to decode, then the store shall report it as rejected
   and shall still return every entry of the same pop that decoded.
 - If the pop operation fails, then the store shall leave the inbox unchanged.
+- When `agent-msg inbox --peek` is requested, the CLI shall read up to the
+  requested message limit without removing or otherwise changing any inbox
+  entry. The output shall use the same text or JSON message representation as
+  `agent-msg inbox`.
+- When `agent-msg inbox --peek --as <address>` is requested, the CLI shall
+  resolve the exact, full `server:workspace:tab` address through the verified
+  leased directory and read only that lead's inbox. An unavailable, absent, or
+  ambiguous directory result shall fail without reading an inbox.
+- When `agent-msg inbox --peek` encounters an undecodable entry, the CLI shall
+  include the entry in rejected output.
+- When `agent-msg inbox --peek` encounters an undecodable entry, the store shall
+  leave that entry in the inbox.
 
 ## Acceptance Criteria
 
@@ -43,6 +55,8 @@ a pop takes is recorded as in flight in the same operation
 | FR-012-AC-3 | Every budgeted pop over any inbox contents reports a remaining count equal to the inbox length immediately after the pop. | Test |
 | FR-012-AC-4 | Given N concurrent consumers popping one inbox of M messages until it is empty, every message is returned exactly once in total. | Test |
 | FR-012-AC-5 | Given a batch whose second entry is not valid message JSON, the pop returns the first and third messages and reports one rejected entry. | Test |
+| FR-012-AC-6 | Given an inbox with valid and undecodable entries, `agent-msg inbox --peek` and `agent-msg inbox --peek --json` report at most the requested number of oldest entries without changing the inbox, a repeated peek reports the same entries, and a following ordinary `inbox` still returns them; undecodable entries are reported and remain queued. | Test |
+| FR-012-AC-7 | Given a full address with a unique verified leased directory registration, `agent-msg inbox --peek --as <address>` reports that registration's queue; when the address is unavailable, absent, or ambiguous, the command fails without reading any queue. | Test |
 
 ## Dependencies
 
