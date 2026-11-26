@@ -1,8 +1,8 @@
-//! The JSON shape `agent-msg inbox --json` prints: a stable CLI output struct,
-//! not `relay_core::Message` itself, so a caller that parses it (the opencode
-//! plugin) is insulated from the storage type's own fields and only has to
-//! trust the one field it actually needs (`rendered`) instead of re-deriving
-//! the sender-line format itself.
+//! The JSON shape `agent-msg inbox --json` and `inbox --peek --json` print: a
+//! stable CLI output struct, not `relay_core::Message` itself, so a caller
+//! that parses it (the opencode plugin) is insulated from the storage type's
+//! own fields and only has to trust the one field it actually needs
+//! (`rendered`) instead of re-deriving the sender-line format itself.
 
 use ix_trace_rs::implements;
 use relay_core::{AddressBook, Error, Message, PeekResult, PopResult};
@@ -41,9 +41,9 @@ impl InboxMessage {
     }
 }
 
-/// What `inbox --json` prints: the messages that decoded cleanly, and a
-/// human-readable line per entry that didn't (so it's at least visible in the
-/// JSON a caller parses, not only on stderr).
+/// What `inbox --json` and `inbox --peek --json` print: the messages that
+/// decoded cleanly, and a human-readable line per entry that didn't (so it's
+/// at least visible in the JSON a caller parses, not only on stderr).
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct InboxReport {
     /// Messages returned by the inbox read, oldest first.
