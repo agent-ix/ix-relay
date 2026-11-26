@@ -812,7 +812,12 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 }
                 let book = display_book(&mut relay, &redial);
                 for message in &peeked.messages {
-                    writeln!(out, "{} {}", clock(message.sent_at_ms), book.render(message))?;
+                    writeln!(
+                        out,
+                        "{} {}",
+                        clock(message.sent_at_ms),
+                        book.render(message)
+                    )?;
                 }
                 for error in &peeked.rejected {
                     eprintln!("agent-msg: unreadable inbox entry: {error}");
@@ -1254,11 +1259,9 @@ fn inbox_peek_target(
     };
     match retry::read(relay, redial, |r| Ok(r.directory_recipient(address)?))? {
         relay_core::DirectoryRead::Unique(recipient) => Ok(recipient.registration.name),
-        relay_core::DirectoryRead::Unavailable => Err(format!(
-            "verified directory for {} is unavailable",
-            address.server()
-        )
-        .into()),
+        relay_core::DirectoryRead::Unavailable => {
+            Err(format!("verified directory for {} is unavailable", address.server()).into())
+        }
         relay_core::DirectoryRead::Absent => {
             Err(format!("no lead at verified address {address}").into())
         }

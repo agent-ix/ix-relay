@@ -202,26 +202,26 @@ fn tc_012_06_peek_lists_messages_without_consuming_them() {
         &url,
         &prefix,
     );
-    let receiver = AgentName::for_session(
-        &"hub".parse().unwrap(),
-        &"s1".parse().unwrap(),
-    );
+    let receiver = AgentName::for_session(&"hub".parse().unwrap(), &"s1".parse().unwrap());
     let mut redis = redis::Client::open(url.clone())
         .unwrap()
         .get_connection()
         .unwrap();
-    let _: () = redis::Commands::rpush(
-        &mut redis,
-        format!("{prefix}inbox:{receiver}"),
-        "not json",
-    )
-    .unwrap();
+    let _: () = redis::Commands::rpush(&mut redis, format!("{prefix}inbox:{receiver}"), "not json")
+        .unwrap();
 
     let text = agent_msg(&["inbox", "--peek"], "hub:EA:code", &url, &prefix);
-    assert!(text.find("first").unwrap() < text.find("second").unwrap(), "{text}");
+    assert!(
+        text.find("first").unwrap() < text.find("second").unwrap(),
+        "{text}"
+    );
     assert!(text.contains("unreadable inbox entry"), "{text}");
-    let first_only =
-        agent_msg(&["inbox", "--peek", "--max", "1"], "hub:EA:code", &url, &prefix);
+    let first_only = agent_msg(
+        &["inbox", "--peek", "--max", "1"],
+        "hub:EA:code",
+        &url,
+        &prefix,
+    );
     assert!(first_only.contains("first"), "{first_only}");
     assert!(!first_only.contains("second"), "{first_only}");
 
@@ -237,7 +237,12 @@ fn tc_012_06_peek_lists_messages_without_consuming_them() {
         ["first", "second"]
     );
     assert_eq!(parsed["rejected"].as_array().unwrap().len(), 1);
-    assert!(parsed["rejected"][0].as_str().unwrap().contains("corrupt record"));
+    assert!(
+        parsed["rejected"][0]
+            .as_str()
+            .unwrap()
+            .contains("corrupt record")
+    );
 
     let popped = agent_msg(&["inbox", "--json"], "hub:EA:code", &url, &prefix);
     let parsed: serde_json::Value = serde_json::from_str(popped.trim()).expect("inbox JSON");
@@ -298,18 +303,26 @@ fn tc_012_07_peek_as_resolves_only_a_unique_verified_address() {
         })
         .unwrap();
     let revision = relay.begin_directory_observation(&machine).unwrap();
-    assert!(relay
-        .publish_directory(&machine, revision, std::slice::from_ref(&first))
-        .unwrap());
+    assert!(
+        relay
+            .publish_directory(&machine, revision, std::slice::from_ref(&first))
+            .unwrap()
+    );
 
     let mut cmd = support::base_cmd(&["inbox", "--peek", "--as", "hub:EA:code"], None);
-    cmd.env("IX_RELAY_URL", &url).env("IX_RELAY_PREFIX", &prefix);
+    cmd.env("IX_RELAY_URL", &url)
+        .env("IX_RELAY_PREFIX", &prefix);
     let output = support::run(cmd, "");
     assert_eq!(output.status, 0, "{}", output.stderr);
-    assert!(output.stdout.contains("inspect this queue"), "{}", output.stdout);
+    assert!(
+        output.stdout.contains("inspect this queue"),
+        "{}",
+        output.stdout
+    );
 
     let mut cmd = support::base_cmd(&["inbox", "--peek", "--as", "hub:EA:missing"], None);
-    cmd.env("IX_RELAY_URL", &url).env("IX_RELAY_PREFIX", &prefix);
+    cmd.env("IX_RELAY_URL", &url)
+        .env("IX_RELAY_PREFIX", &prefix);
     let output = support::run(cmd, "");
     assert_eq!(output.status, 1);
     assert!(output.stdout.is_empty());
@@ -317,11 +330,14 @@ fn tc_012_07_peek_as_resolves_only_a_unique_verified_address() {
     let second = registration("s2", "w1:p2");
     relay.register(&second).unwrap();
     let revision = relay.begin_directory_observation(&machine).unwrap();
-    assert!(relay
-        .publish_directory(&machine, revision, &[first, second])
-        .unwrap());
+    assert!(
+        relay
+            .publish_directory(&machine, revision, &[first, second])
+            .unwrap()
+    );
     let mut cmd = support::base_cmd(&["inbox", "--peek", "--as", "hub:EA:code"], None);
-    cmd.env("IX_RELAY_URL", &url).env("IX_RELAY_PREFIX", &prefix);
+    cmd.env("IX_RELAY_URL", &url)
+        .env("IX_RELAY_PREFIX", &prefix);
     let output = support::run(cmd, "");
     assert_eq!(output.status, 1);
     assert!(output.stdout.is_empty());
