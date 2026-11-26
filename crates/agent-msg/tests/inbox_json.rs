@@ -336,6 +336,14 @@ fn tc_012_07_peek_as_resolves_only_a_unique_verified_address() {
     assert_eq!(output.status, 1);
     assert!(output.stdout.is_empty());
 
+    let mut cmd = support::base_cmd(&["inbox", "--peek", "--as", "elsewhere:EA:code"], None);
+    cmd.env("IX_RELAY_URL", &url)
+        .env("IX_RELAY_PREFIX", &prefix);
+    let output = support::run(cmd, "");
+    assert_eq!(output.status, 1);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.contains("unavailable"), "{}", output.stderr);
+
     let second = registration("s2", "w1:p2");
     relay.register(&second).unwrap();
     let revision = relay.begin_directory_observation(&machine).unwrap();
