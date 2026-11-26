@@ -142,10 +142,11 @@ operator's decision; this requirement only makes the watcher notice.
   on each tick (`Relay::renew_batch`, which touches only the named batch, never shortens a
   lease and matches the lead and the popper), so that neither the reaper, the lead's own
   hook nor the watcher pops or re-posts it while a copy may still be held behind the prompt.
-- When a held message has gone unanswered for 30 minutes, the watcher shall dead-letter its
-  batch as `hold_expired`.
-- When the bus write that dead-letters a batch as `hold_expired` succeeds, the watcher shall
-  show one notification and shall not post the batch again.
+- While the receiving process remains live and the batch is held for approval, the watcher
+  shall keep the batch in flight and renew its lease each tick without a time limit. It shall
+  stop renewing and settle the batch only when the receiver settles it or the receiving
+  process is verified gone. An unanswered approval prompt shall not be dead-lettered due to
+  age.
 - When a `delivered` receipt arrives, the watcher shall acknowledge the batch once the
   transcript shows the message.
 - When a `denied` receipt arrives, the watcher shall dead-letter the batch exactly once, without
@@ -300,7 +301,7 @@ operator's decision; this requirement only makes the watcher notice.
 | FR-044-AC-2 | Given a registry with a live record, a dead pid, a reused pid, another or unknown pid domain, two live processes on one session, a session whose id `/clear` changed, an unknown `peerProtocol` or version, and a socket that is a symlink, in another directory, of another owner, open to others or not the process's own, only the live, known-good, single (interactive-preferred) record with a proper socket resolves. | Test |
 | FR-044-AC-3 | The line posted is exactly the measured one (golden), carries a UUID `msg_id`, the target session and the reply socket (mode 0600), asserts no `from-mode`, cannot be made to close or forge its wrapper, has a plain bounded `from-name`, and is not posted over 1 MiB; the exact receipt statuses parse to their outcomes (only `held` and `refused` were captured live from Claude Code 2.1.283; the others were read from the installed program's text and are fixtures only), a status that only contains a known word does not, and junk parses to none. | Test |
 | FR-044-AC-4 | A batch is acknowledged only when its `msg_id` is the `origin.msg_id` of a transcript line; an absent transcript or one without the id leaves it ambiguous, and the id in a line without a structured `origin.msg_id` is acknowledged as received but unconfirmed (FR-046-AC-5); a receiver that records the message at once into an existing transcript, with 0, 20 or 200 project directories to search, is never missed in 200 rounds; a transcript that grows past a read window between looks still yields the acknowledgement; a message that outlived its wait is acknowledged by a later tick. | Test |
-| FR-044-AC-5 | A `held` receipt leaves the batch in flight, pops nothing more for the lead, notifies once and dead-letters no mail sent meanwhile across 12 lease expiries; the held batch's lease is renewed each tick so that a reap past its old deadline and the lead's own hook find it in flight; an approval after the lease would have run out acknowledges once with one post in all; a denial after it dead-letters exactly once and never re-prompts; a prompt nobody answers is posted once and dead-lettered as `hold_expired` at the maximum hold with one notification; a batch held across a restart is restored and still renewed. | Test |
+| FR-044-AC-5 | A `held` receipt leaves the batch in flight, pops nothing more for the lead, notifies once and dead-letters no mail sent meanwhile across lease expiries; the held batch's lease is renewed each tick so a reap past its old deadline and the lead's own hook find it in flight; an approval after the lease would have run out acknowledges once with one post in all; a denial after it dead-letters exactly once and never re-prompts; a prompt unanswered for more than 30 minutes remains in flight without another post or age-based dead-letter; the batch is settled only after receiver settlement or verified receiver process exit; a batch held across a restart is restored and still renewed. | Test |
 | FR-044-AC-6 | In socket mode a batch for a session with a socket is never typed: after certain non-delivery (no record, a refused connection, an unbound reply socket, a `refused` or `dropped` receipt, a duplicate body) it is queued for a later socket attempt, and after an unknown or unconfirmed outcome it stays in flight with the socket. A lead of another harness whose session no record names is typed through herdr. | Test |
 | FR-044-AC-7 | The same body is not posted to a session twice inside the window and is once the window has passed; a redelivered body differs from the original. | Test |
 | FR-044-AC-8 | A delivery changes no file of the registry or the projects; a live listener on the watcher's socket name, a non-socket file and a dead socket there are left, left and replaced; a previous watcher's dead socket and status file are removed (a reused pid counts as dead), and a live watcher's, another process's name or a path outside the socket directory are not; the reply socket and status file are removed on SIGTERM (the file kept only while a held batch or an owed decision must survive), and the interrupted wait of that stop is not recorded as a failure. | Test |
@@ -328,9 +329,8 @@ operator's decision; this requirement only makes the watcher notice.
   acknowledgement contract this transport keeps),
   [FR-038](./FR-038-watcher-wakes-when-a-message-is-sent.md) (what wakes the watcher;
   the decision to deliver is unchanged),
-  [FR-040](./FR-040-redelivery-is-marked-bounded-and-dead-lettered.md) (a held batch
-  that is never approved is dead-lettered as `hold_expired` after the maximum hold,
-  with no redelivery), [FR-029](./FR-029-doctor-reports-relay-health.md).
+  [FR-040](./FR-040-redelivery-is-marked-bounded-and-dead-lettered.md) (redelivery and
+  dead-letter behavior for receiver disappearance), [FR-029](./FR-029-doctor-reports-relay-health.md).
 - Related: [FR-046](./FR-046-claude-code-formats-are-typed-and-drift-is-detected.md) (the
   typed formats and their drift signals).
 - Delivered by AGE-2030; made the default by SWM-121, SWM-122, SWM-123 and SWM-124.
