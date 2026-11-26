@@ -166,14 +166,14 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Print and remove your pending messages.
+    /// Read pending messages; without `--peek`, remove them from the inbox.
     Inbox {
         /// Most messages to take.
         #[arg(long, default_value = "50")]
         max: NonZeroUsize,
         /// Print `{"messages": [...], "rejected": [...]}` instead of plain
         /// text, for callers that parse the output (e.g. the opencode
-        /// plugin). Still pops: use `--count` for a non-destructive peek.
+        /// plugin). Still pops unless `--peek` is set.
         #[arg(long, conflicts_with = "count")]
         json: bool,
         /// Print the number of pending messages without removing anything,
@@ -807,7 +807,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 let report = InboxReport::from_peek(&peeked, &display_book(&mut relay, &redial));
                 json::write_line(&mut out, &report)?;
             } else {
-                if peeked.messages.is_empty() {
+                if peeked.messages.is_empty() && peeked.rejected.is_empty() {
                     writeln!(out, "inbox empty")?;
                 }
                 let book = display_book(&mut relay, &redial);
