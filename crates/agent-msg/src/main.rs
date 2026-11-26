@@ -168,7 +168,7 @@ enum Cmd {
     },
     /// Read pending messages; without `--peek`, remove them from the inbox.
     Inbox {
-        /// Most messages to take.
+        /// Maximum messages to read; ordinary inbox removes them, while `--peek` leaves them queued.
         #[arg(long, default_value = "50")]
         max: NonZeroUsize,
         /// Print `{"messages": [...], "rejected": [...]}` instead of plain

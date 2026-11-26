@@ -88,6 +88,8 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | FR-012 | FR-012-AC-3 | TC-012-03 | ✅ written (model: `tc_012_01_the_store_matches_the_queue_model_over_generated_operation_sequences`, budgeted and unbudgeted pops; Redis lane) |
 | FR-012 | FR-012-AC-4 | TC-012-04 | ✅ written (existing untagged `concurrent_consumers_never_deliver_a_message_twice`: four consumers, 200 messages, each exactly once) |
 | FR-012 | FR-012-AC-5 | TC-012-05 | ✅ written (model: `tc_012_01_the_store_matches_the_queue_model_over_generated_operation_sequences`, for entries that are not valid message JSON; a non-UTF-8 entry is rejected and its neighbours survive, `tc_012_05_a_non_utf8_entry_is_rejected_and_the_neighbouring_messages_survive`; found and fixed) |
+| FR-012 | FR-012-AC-6 | TC-012-06 | ✅ written (`tc_012_06_peek_lists_messages_without_consuming_them`; Redis lane) |
+| FR-012 | FR-012-AC-7 | TC-012-07 | ✅ written (`tc_012_07_peek_as_resolves_only_a_unique_verified_address`; Redis lane) |
 | FR-013 | FR-013-AC-1 | TC-013-01 | ✅ written (model: `tc_012_01_the_store_matches_the_queue_model_over_generated_operation_sequences`, pop then requeue by either of two consumers, no loss, no duplicate, in order) |
 | FR-013 | FR-013-AC-2 | TC-013-02 | ✅ written (existing untagged `prompt_rejected_before_input_is_requeued_in_order`; `tc_014_01_the_watcher_prompts_only_when_sessions_status_and_sequence_all_agree` asserts the requeue equals the popped batch in every combination) |
 | FR-013 | FR-013-AC-3 | TC-013-03 | ✅ written (existing untagged `prompt_ambiguous_failure_is_not_requeued_and_notifies`; `tc_014_01_*` asserts no requeue and one notification in every combination) |
@@ -517,6 +519,8 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | TC-012-03 | Every budgeted pop over any inbox contents reports a remaining count equal to the inbox length immediately … | Property | FR-012-AC-3 | ✅ written |
 | TC-012-04 | Given N concurrent consumers popping one inbox of M messages until it is empty, every message is returned … | Integration | FR-012-AC-4 | ✅ written |
 | TC-012-05 | Given a batch whose second entry is not valid message JSON, the pop returns the first and third messages … | Unit | FR-012-AC-5 | ✅ written |
+| TC-012-06 | `inbox --peek` and `inbox --peek --json` report the oldest queued messages without removing them; repeated peeks agree, normal inbox still returns them, and undecodable entries stay queued. | Integration | FR-012-AC-6 | ✅ written (`tc_012_06_peek_lists_messages_without_consuming_them`; Redis lane) |
+| TC-012-07 | `inbox --peek --as <address>` reads only the queue for a unique verified address and refuses unavailable, absent, or ambiguous addresses. | Integration | FR-012-AC-7 | ✅ written (`tc_012_07_peek_as_resolves_only_a_unique_verified_address`; Redis lane) |
 | TC-013-01 | Every pop over any inbox contents, followed by a requeue of the popped messages, leaves the inbox contents … | Property | FR-013-AC-1 | ✅ written |
 | TC-013-02 | Given herdr reports `agent_blocked` for the prompt, the inbox afterwards holds the batch ahead of any … | Unit | FR-013-AC-2 | ✅ written |
 | TC-013-03 | Given herdr times out on the prompt, the batch is not requeued and one notification naming the lead is raised. | Unit | FR-013-AC-3 | ✅ written |
@@ -827,7 +831,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 
 | Gap ID | Description | Risk Level | Mitigation |
 |--------|-------------|------------|------------|
-| GAP-001 | 289 of 387 rows have a written test; changed 0.3.0 obligations have replacement evidence above. Retired alias tests are not evidence for the new contract. Remaining pending/partial rows require their stated evidence. | High | Complete remaining evidence without claiming full coverage. |
+| GAP-001 | 291 of 389 rows have a written test; changed 0.3.0 obligations have replacement evidence above. Retired alias tests are not evidence for the new contract. Remaining pending/partial rows require their stated evidence. | High | Complete remaining evidence without claiming full coverage. |
 | GAP-002 | 15 rows still say `red on main`: obligations of requirements `main` does not yet meet, red when written (FR-031, FR-033-AC-2, FR-034-AC-4, FR-035, FR-037). The rest of FR-032..FR-034 are written or partial since the relink work (FR-043). | High | AGE-2033 (AGE-2032 landed; the NFR-001 stdin row landed under AGE-2033). |
 | GAP-003 | No `herdr` stub or blackholed-Redis harness exists yet for the fault-injection and benchmark rows. | Medium | Build with the NFR-001..003 suites. |
 
@@ -838,7 +842,7 @@ to fail until the named ticket lands; the ticket is given on each such row.
 | Benchmark | 8 | 5 | 0 | 0 | 0 | 0 | 62% |
 | Fuzz | 3 | 0 | 3 | 0 | 0 | 0 | 0% |
 | Inspection | 3 | 0 | 0 | 0 | 0 | 0 | 0% |
-| Integration | 212 | 152 | 0 | 12 | 0 | 0 | 72% |
+| Integration | 214 | 154 | 0 | 12 | 0 | 0 | 72% |
 | Property | 38 | 29 | 0 | 5 | 0 | 0 | 76% |
 | Static | 2 | 0 | 2 | 0 | 0 | 0 | 0% |
 | Unit | 121 | 93 | 0 | 3 | 0 | 0 | 76% |
