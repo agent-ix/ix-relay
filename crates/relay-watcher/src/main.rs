@@ -534,6 +534,13 @@ fn refresh_places(
         return Ok(HashSet::new());
     }
     state.last_place_refresh = Some(Instant::now());
+    // Allocate the observation fence before asking herdr so a delayed complete
+    // snapshot cannot be overtaken by a later failed-layout fallback.
+    let directory_revision = if herdr.directory_observations() {
+        Some(relay.begin_directory_observation(machine)?)
+    } else {
+        None
+    };
     let layout = match herdr.layout(machine) {
         Ok(layout) => {
             if let Some(collector) = &mut state.fleet {
@@ -561,24 +568,20 @@ fn refresh_places(
             }
             // Keep a complete last verified snapshot through its lease. If none exists,
             // publish only canonical registrations with a verified live socket session;
-            // a failed layout cannot justify publishing terminal-route addresses.
-            if herdr.directory_observations() && !relay.directory_available(machine)? {
+            // the atomic absent-only publish cannot replace a concurrent full snapshot.
+            if let Some(revision) = directory_revision {
                 let alive = alive_leads(herdr, regs, machine);
                 let socket_only = last_verified(regs, &alive, &[]);
                 if !socket_only.is_empty() {
-                    let revision = relay.begin_directory_observation(machine)?;
-                    relay.publish_directory(machine, revision, &socket_only)?;
+                    relay.publish_directory_if_absent(machine, revision, &socket_only)?;
                 }
             }
             return Ok(HashSet::new());
         }
     };
-    let directory_revision = if herdr.directory_observations() {
+    if directory_revision.is_some() {
         relay.take_directory_refresh(machine)?;
-        Some(relay.begin_directory_observation(machine)?)
-    } else {
-        None
-    };
+    }
     // Entries of herdr's listings this binary could not decode: reported once per
     // episode (until a listing decodes whole again), not on every refresh.
     let dropped = herdr.dropped_entries();

@@ -1,6 +1,7 @@
 //! Leased authoritative local topology snapshots, resolved through Redis only.
 use std::time::Duration;
 
+use ix_trace_rs::implements;
 use redis::Commands;
 use serde::{Deserialize, Serialize};
 
@@ -78,6 +79,29 @@ impl Relay {
         revision: u64,
         registrations: &[Registration],
     ) -> Result<bool> {
+        self.publish_directory_with_mode(machine, revision, registrations, false)
+    }
+
+    /// Publish an incomplete socket-only projection only if no leased snapshot exists.
+    /// The absence check and publication share one Redis script, so this cannot replace
+    /// a complete snapshot that appeared after the caller's preliminary check.
+    pub fn publish_directory_if_absent(
+        &mut self,
+        machine: &MachineName,
+        revision: u64,
+        registrations: &[Registration],
+    ) -> Result<bool> {
+        self.publish_directory_with_mode(machine, revision, registrations, true)
+    }
+
+    #[implements("FR-036-AC-9")]
+    fn publish_directory_with_mode(
+        &mut self,
+        machine: &MachineName,
+        revision: u64,
+        registrations: &[Registration],
+        only_if_absent: bool,
+    ) -> Result<bool> {
         validate_entries(machine, registrations)?;
         let publication = Publication {
             revision,
@@ -89,6 +113,7 @@ impl Relay {
             .arg(
                 r#"
                 if redis.call('GET', KEYS[2]) ~= ARGV[1] then return 0 end
+                if ARGV[4] == '1' and redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
                 local committed = redis.call('GET', KEYS[3])
                 if committed and tonumber(committed) >= tonumber(ARGV[1]) then return 0 end
                 redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
@@ -103,6 +128,7 @@ impl Relay {
             .arg(revision)
             .arg(encode(&publication))
             .arg(DIRECTORY_LEASE.as_secs())
+            .arg(if only_if_absent { 1 } else { 0 })
             .query(&mut self.conn)?;
         Ok(accepted)
     }

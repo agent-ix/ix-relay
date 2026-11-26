@@ -2583,6 +2583,7 @@ fn tc_036_09_a_blocked_herdr_stops_only_the_leads_it_types_into() {
 ///
 /// With herdr's listing unreadable, the directory still resolves the address of a live
 /// socket session, as last verified, and of no lead herdr types into.
+#[trace("FR-036-AC-9")]
 #[test]
 fn tc_036_09_an_unreadable_listing_keeps_a_live_socket_session_addressable() {
     let Some(mut w) = Watching::new("herdr-unlisted") else {
