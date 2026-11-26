@@ -57,6 +57,9 @@ selected registered lanes.
 
 - The system SHALL assign one request identifier to each accepted status request
   and include that identifier in the request result and each recipient notice.
+- For `status-request all`, the system SHALL select only registrations present in a current,
+  verified machine directory snapshot; it SHALL skip registrations with an unavailable or
+  expired snapshot so a handed-off or dead registration receives no duplicate status notice.
 - `agent-msg status-reply <request-id>` SHALL let a selected registered lane
   submit all required reply fields. Its four list options are repeatable and may
   be omitted to submit empty arrays; `--state` and `--spare-coder-slots` are
@@ -76,7 +79,7 @@ selected registered lanes.
 
 | ID | Criteria | Verification |
 |----|----------|--------------|
-| FR-056-AC-1 | Given a status request for `all` or selected registered lanes, `agent-msg status-request` returns JSON with exactly `request_id` (1–64 ASCII letters, digits, `-` or `_`), `created_at_ms` (unsigned Unix milliseconds), `requested` (array of at most 128 registered lane identifiers), and one `{agent, outcome}` string object per requested lane in `deliveries`; `all` excludes the requester and empty arrays remain present. | Test |
+| FR-056-AC-1 | Given a status request for `all` or selected registered lanes, `agent-msg status-request` returns JSON with exactly `request_id` (1–64 ASCII letters, digits, `-` or `_`), `created_at_ms` (unsigned Unix milliseconds), `requested` (array of at most 128 lane identifiers), and one `{agent, outcome}` string object per requested lane in `deliveries`; `all` excludes the requester and includes only registrations in current verified directory snapshots, excluding dead or handed-off registrations and machines with unavailable or expired snapshots; empty arrays remain present. | Test |
 | FR-056-AC-2 | Every queued notice for one request names the same request identifier and gives the recipient the command needed to submit the fixed form. | Test |
 | FR-056-AC-3 | A selected registered lead can submit the fixed form; the stored and returned reply JSON object has exactly the required `StatusReply` fields and types defined above, including all four present arrays (0–64 valid strings each; blocker IDs match `[A-Z]+-[0-9]+`); omitting a list option submits an empty array, while omitting `--state` or `--spare-coder-slots` is refused. | Test |
 | FR-056-AC-4 | Repeating a lane's reply for the same request identifier leaves the first stored reply unchanged and reports that it was already recorded. | Test |
