@@ -6,6 +6,7 @@
 
 mod support;
 
+use ix_trace_rs::trace;
 use relay_core::{AgentName, HerdrPlaceIds, Message, Place, Registration, Relay, Target};
 use std::time::Duration;
 
@@ -184,7 +185,7 @@ fn count_reports_pending_messages_without_popping_them() {
     assert_eq!(stdout.trim(), "0");
 }
 
-/// Trace: FR-012-AC-6
+#[trace("FR-012-AC-6")]
 #[test]
 fn tc_012_06_peek_lists_messages_without_consuming_them() {
     let Some(url) = test_url() else { return };
@@ -268,7 +269,7 @@ fn tc_012_06_peek_lists_messages_without_consuming_them() {
     assert_eq!(parsed["rejected"].as_array().unwrap().len(), 1);
 }
 
-/// Trace: FR-012-AC-7
+#[trace("FR-012-AC-7")]
 #[test]
 fn tc_012_07_peek_as_resolves_only_a_unique_verified_address() {
     let Some(url) = test_url() else { return };
