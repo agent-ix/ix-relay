@@ -5,7 +5,11 @@ type: FR
 relationships:
   - target: "ix://agent-ix/ix-relay/FR-033"
     type: "depends_on"
+  - target: "ix://agent-ix/ix-relay/FR-044"
+    type: "depends_on"
   - target: "ix://agent-ix/ix-relay/FR-047"
+    type: "depends_on"
+  - target: "ix://agent-ix/ix-relay/FR-053"
     type: "depends_on"
 ---
 # FR-074: An operator can bind a socket-verified session to a named Herdr pane
@@ -48,7 +52,7 @@ window-to-job attachment.
 | ID | Criteria | Verification |
 |----|----------|--------------|
 | FR-074-AC-1 | Given a live Claude background job whose own process has a live, socket-verified session record and an operator-named Herdr pane, the claim command atomically registers that session at the named address and pane, removes the stale session cache, retains the stale registration while its inbox has mail, and `whoami` resolves the new address; inherited pane variables alone, a missing or reused process, an absent or unusable socket, an unknown pane, or an ambiguous address is refused without changing the registry. | Test |
-| FR-074-AC-2 | Given the claimed session and queued mail, the session receives mail over its own socket, `send` from it resolves the claimed address, FR-053 forwards the old session's queued mail to the new holder, and no command types into any pane. | Integration |
+| FR-074-AC-2 | Given the claimed session and queued mail, the session receives mail over its own socket, `send` from it resolves the claimed address, FR-053 forwards the old session's queued mail to the new holder, and no command types into any pane. | Test |
 | FR-074-AC-3 | Given a live socket-verified caller with a stale launcher registration and no matching Herdr session association, `agent-msg doctor` names the recovery command form but does not guess the address or pane. | Test |
 
 ## Dependencies
