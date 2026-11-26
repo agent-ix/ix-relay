@@ -33,7 +33,7 @@ mod stdin;
 mod work;
 
 use std::{
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     num::NonZeroUsize,
     process::ExitCode,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -1104,6 +1104,7 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
         }
         Cmd::Register { kind, claim, pane } => {
             if let Some(address) = claim {
+                require_interactive_claim(io::stdin().is_terminal(), io::stdout().is_terminal())?;
                 let pane = pane
                     .ok_or("--pane is required with --claim")?
                     .parse::<PaneId>()?;
@@ -1236,6 +1237,18 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
         }
     }
     Ok(())
+}
+
+#[implements("FR-074-AC-1")]
+fn require_interactive_claim(
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+) -> Result<(), &'static str> {
+    if stdin_is_terminal && stdout_is_terminal {
+        Ok(())
+    } else {
+        Err("--claim is available only from an interactive terminal")
+    }
 }
 
 /// [`identity::derive`], with a way out added to the collision error: the
@@ -1501,4 +1514,25 @@ fn order_spec(
     };
     let ms = i64::try_from(age.0.as_millis()).unwrap_or(i64::MAX);
     Ok(relay_core::receipts::OrderSpec::new(ms, expect_ticket)?)
+}
+
+#[cfg(test)]
+mod claim_terminal_tests {
+    use ix_trace_rs::trace;
+
+    use super::require_interactive_claim;
+
+    #[trace("FR-074-AC-1")]
+    #[test]
+    fn socket_placement_claim_requires_an_interactive_terminal() {
+        assert!(require_interactive_claim(true, true).is_ok());
+        assert_eq!(
+            require_interactive_claim(false, true),
+            Err("--claim is available only from an interactive terminal")
+        );
+        assert_eq!(
+            require_interactive_claim(true, false),
+            Err("--claim is available only from an interactive terminal")
+        );
+    }
 }
