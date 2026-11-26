@@ -6,6 +6,7 @@ use std::{
 };
 
 use clap::Args;
+use ix_trace_rs::implements;
 use relay_core::{
     AgentName, LaneState, MachineName, Message, StatusItem, StatusReply, StatusRequestId, Target,
 };
@@ -39,6 +40,7 @@ pub(super) struct StatusReplyArgs {
 }
 
 /// Opens a request, snapshots its recipients, then enqueues one notice per lane.
+#[implements("FR-056-AC-1")]
 pub(super) fn request(
     lanes: String,
     relay: &mut relay_core::Relay,
@@ -50,10 +52,20 @@ pub(super) fn request(
         eprintln!("agent-msg status-request: skipped {skipped}");
     });
     let expected_agents = if lanes.eq_ignore_ascii_case("all") {
+        let mut live = BTreeSet::new();
+        let mut machines = BTreeSet::new();
+        for registration in &registrations {
+            machines.insert(registration.machine.clone());
+        }
+        for machine in machines {
+            if let Some(entries) = relay.directory_entries(&machine)? {
+                live.extend(entries.into_iter().map(|registration| registration.name));
+            }
+        }
         registrations
             .iter()
             .map(|registration| registration.name.clone())
-            .filter(|agent| agent != &requester)
+            .filter(|agent| agent != &requester && live.contains(agent))
             .collect::<Vec<_>>()
     } else {
         let mut selected = Vec::new();

@@ -1100,6 +1100,27 @@ fn receipts_count_bound_marks_an_evicted_continuation_incomplete() {
 }
 
 #[test]
+#[trace("FR-044-AC-22")]
+fn receiver_gone_redelivery_adds_the_redelivery_marker() {
+    let Some(mut bus) = bus() else { return };
+    send(&mut bus);
+    let at = now(&mut bus);
+    let batch = claim(&mut bus, at).batch.unwrap();
+    assert_eq!(
+        bus.relay
+            .redeliver_batch(&name("receiver"), batch, Popper::Watcher)
+            .unwrap(),
+        1
+    );
+    let result = claim(&mut bus, at + 1);
+    assert_eq!(result.redelivered, [true]);
+    assert_eq!(
+        result.messages[0].text,
+        "secret body credential=private transcript"
+    );
+}
+
+#[test]
 #[trace("FR-067-AC-2", "FR-067-AC-8")]
 fn receipts_plain_pop_requeue_preserves_original_without_inventing_delivery() {
     let Some(mut bus) = bus() else { return };

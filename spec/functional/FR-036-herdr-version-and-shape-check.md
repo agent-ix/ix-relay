@@ -35,8 +35,11 @@ expects.
   decoded, the watcher shall keep the address of a session whose own live Claude Code
   process vouches for it, move none of its queued mail, and publish its address as last
   verified.
-- While herdr's listing cannot be read at all, the watcher shall publish the last verified
-  address of each live socket session, and of no other lead.
+- While herdr's listing cannot be read at all, the watcher shall keep the last verified
+  directory snapshot unchanged for its normal 90-second lease. Socket sessions may refresh
+  their own last-seen time from their live process, but this shall not replace or narrow the
+  directory snapshot. When the snapshot lease expires, only live socket sessions remain
+  resolvable from their own verified process records.
 - While that member fails to decode, the watcher shall refresh the last-seen time of a
   live socket session from its own process, without asking herdr, and shall not prune it.
 - While that member fails to decode, the watcher shall name in its heartbeat the leads
@@ -80,7 +83,7 @@ expects.
 | FR-036-AC-6 | Given a herdr whose `agent list` has a claude pane with no `agent_session` beside one that has it, the check passes and does not block delivery. | Test |
 | FR-036-AC-7 | Given that herdr, a watcher tick types the healthy lead's mail into its pane and keeps the other lead's queued; given a member the watcher cannot type without failing to decode, the same tick types into no pane; given only an advisory finding, it delivers. | Test |
 | FR-036-AC-8 | Given a check that hangs, the watcher's loop is not delayed and one check is outstanding at a time. | Test |
-| FR-036-AC-9 | While the shape check blocks, a lead on the socket receives its mail and stays registered past the prune age without herdr being asked, a lead on the terminal route is not typed into, keeps its mail and is named in the heartbeat and by `doctor`; with the listing unreadable the address of a live socket session still resolves and that of a lead herdr types into does not. | Test |
+| FR-036-AC-9 | While the shape check blocks, a lead on the socket receives its mail and stays registered past the prune age without herdr being asked, a lead on the terminal route is not typed into, keeps its mail and is named in the heartbeat and by `doctor`; with the listing unreadable the last verified directory snapshot (including typed leads) remains resolvable during its 90-second lease, then only a live socket session remains resolvable from its own verified process record. | Test |
 
 ## Dependencies
 

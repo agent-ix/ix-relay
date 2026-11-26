@@ -1,5 +1,7 @@
 //! Atomic session enrollment and hook cache updates.
-use super::{AgentName, Registration, Relay, Result, SESSION_TTL_SECS, SessionId, encode};
+use super::{AgentName, Error, Registration, Relay, Result, SESSION_TTL_SECS, SessionId, encode};
+use crate::CLAUDE_OPERATOR_DISPLACED_KIND;
+use ix_trace_rs::implements;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 /// Verified enrollment changes applied together.
@@ -15,6 +17,85 @@ pub struct IdentityCommit {
 /// Successful atomic enrollment outcome.
 pub struct CommitOutcome;
 impl Relay {
+    /// Atomically records an operator-approved socket session at a verified
+    /// pane while retaining the former registration for stranded-mail
+    /// forwarding. The old session cache is removed only if it still points
+    /// at the displaced registration.
+    #[implements("FR-074-AC-1")]
+    pub fn claim_socket_placement(
+        &mut self,
+        displaced: &Registration,
+        claimed: &Registration,
+    ) -> Result<()> {
+        let old_session =
+            displaced
+                .session_id
+                .as_ref()
+                .ok_or_else(|| Error::UnverifiedEnrollment {
+                    reason: "displaced registration has no session".into(),
+                })?;
+        if displaced.name != AgentName::for_session(&displaced.machine, old_session)
+            || displaced.verified_place().is_none()
+        {
+            return Err(Error::UnverifiedEnrollment {
+                reason: "displaced registration must be a verified canonical session queue".into(),
+            });
+        }
+        let new_session =
+            claimed
+                .session_id
+                .as_ref()
+                .ok_or_else(|| Error::UnverifiedEnrollment {
+                    reason: "claim has no session".into(),
+                })?;
+        if claimed.name != AgentName::for_session(&claimed.machine, new_session)
+            || claimed.kind != crate::CLAUDE_OPERATOR_CLAIM_KIND
+            || claimed.verified_place().is_none()
+        {
+            return Err(Error::UnverifiedEnrollment {
+                reason:
+                    "claim requires a canonical Claude session with explicit verified placement"
+                        .into(),
+            });
+        }
+        let mut displaced_marked = displaced.clone();
+        displaced_marked.kind = CLAUDE_OPERATOR_DISPLACED_KIND.to_owned();
+        let script = r#"
+            local old = redis.call('HGET', KEYS[1], ARGV[1])
+            if old ~= ARGV[2] then return 0 end
+            local existing = redis.call('HGET', KEYS[1], ARGV[3])
+            if existing and ARGV[3] ~= ARGV[1] then return -1 end
+            local cached = redis.call('GET', KEYS[2])
+            if cached == ARGV[1] then redis.call('DEL', KEYS[2]) end
+            redis.call('HSET', KEYS[1], ARGV[1], ARGV[5])
+            redis.call('HSET', KEYS[1], ARGV[3], ARGV[4])
+            redis.call('SET', KEYS[3], ARGV[3], 'EX', ARGV[6])
+            return 1
+        "#;
+        let result: i64 = redis::cmd("EVAL")
+            .arg(script)
+            .arg(3)
+            .arg(self.keys.agents_key())
+            .arg(self.keys.session_key(old_session))
+            .arg(self.keys.session_key(new_session))
+            .arg(displaced.name.as_str())
+            .arg(encode(displaced))
+            .arg(claimed.name.as_str())
+            .arg(encode(claimed))
+            .arg(encode(&displaced_marked))
+            .arg(SESSION_TTL_SECS)
+            .query(&mut self.conn)?;
+        match result {
+            1 => Ok(()),
+            0 => Err(Error::UnverifiedEnrollment {
+                reason: "displaced registration changed during claim".into(),
+            }),
+            _ => Err(Error::UnverifiedEnrollment {
+                reason: "claimed session is already registered".into(),
+            }),
+        }
+    }
+
     /// Commit registration and session cache together without partial writes.
     pub fn commit_identity(&mut self, commit: &IdentityCommit) -> Result<CommitOutcome> {
         // One request and one reply: a MULTI pipeline can wait out the socket

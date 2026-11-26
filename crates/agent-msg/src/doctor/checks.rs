@@ -22,6 +22,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use ix_trace_rs::implements;
 use relay_core::ScanCut;
 use relay_core::hook_skips;
 use relay_core::moves::{MoveEvent, MoveKind};
@@ -1899,6 +1900,7 @@ fn registrations(f: &Facts, up: &RedisUp, checks: &mut Vec<Check>) {
     }
 }
 
+#[implements("FR-074-AC-1", "FR-074-AC-3")]
 fn registration_problems(
     f: &Facts,
     up: &RedisUp,
@@ -1921,6 +1923,17 @@ fn registration_problems(
         return;
     }
     if *machine != f.machine {
+        return;
+    }
+    if reg.kind == relay_core::CLAUDE_OPERATOR_DISPLACED_KIND {
+        checks.push(Check::warn(
+            Family::Registration,
+            Code::RegistrationPaneGone,
+            Some(name),
+            format!("{name} handed off its launcher registration; its queued mail is being forwarded"),
+            "the launcher registration no longer owns this address",
+            "from the resumed Claude session, choose the exact address and pane, then run `agent-msg register --claim <server:workspace:tab> --pane <pane-id>`",
+        ));
         return;
     }
     let Some(pane) = reg.herdr_pane.as_ref() else {
@@ -3460,6 +3473,28 @@ mod tests {
         let moved = cause(vec![empty_inbox("a")]).unwrap();
         assert!(!moved.contains("waits"), "{moved}");
         assert!(moved.contains("nothing is queued"), "{moved}");
+    }
+
+    #[trace("FR-074-AC-3")]
+    #[test]
+    fn doctor_names_operator_claim_form_without_guessing_address_or_pane() {
+        let mut displaced = reg("a", "hub", Some("w9:p9"), 2 * HOUR_MS);
+        displaced.kind = relay_core::CLAUDE_OPERATOR_DISPLACED_KIND.into();
+        let mut facts = healthy();
+        up(&mut facts).registrations = Ok((vec![displaced], 0));
+        let check = evaluate(&facts)
+            .into_iter()
+            .find(|check| check.code == Code::RegistrationPaneGone)
+            .expect("doctor reports the displaced launcher registration");
+        let action = check.fix.expect("doctor gives the claim command form");
+        assert!(
+            action.contains("agent-msg register --claim <server:workspace:tab> --pane <pane-id>"),
+            "{action}"
+        );
+        assert!(
+            !action.contains("EA:1") && !action.contains("w9:p9"),
+            "{action}"
+        );
     }
 
     /// A lock-skip count warns only while it grew in the last 24 hours and then reads as

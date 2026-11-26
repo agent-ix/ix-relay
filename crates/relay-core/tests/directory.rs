@@ -1,5 +1,6 @@
 //! Directory state machine refinement tests against real Redis.
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test fixtures")]
+use ix_trace_rs::trace;
 use relay_core::{
     AgentName, DirectoryRead, HerdrPlaceIds, IdentityCommit, Message, Place, Registration, Target,
 };
@@ -122,6 +123,41 @@ fn delayed_and_replayed_publications_cannot_restore_expired_ownership() {
         DirectoryRead::Unavailable
     ));
 }
+
+#[trace("FR-036-AC-9")]
+#[test]
+fn socket_only_fallback_does_not_replace_a_snapshot_published_after_the_absence_check() {
+    let Some(mut bus) = Bus::connect("directory-fallback-if-absent") else {
+        return;
+    };
+    let machine = "terra".parse().unwrap();
+    let complete = registration("layout-session", "plan");
+    let fallback = registration("socket-session", "plan");
+    let complete_revision = bus.relay.begin_directory_observation(&machine).unwrap();
+    assert!(
+        bus.relay
+            .publish_directory(&machine, complete_revision, std::slice::from_ref(&complete))
+            .unwrap()
+    );
+
+    // Simulate a complete layout observation publishing after the watcher checked
+    // for a directory snapshot but before its socket-only fallback reaches Redis.
+    let fallback_revision = bus.relay.begin_directory_observation(&machine).unwrap();
+    assert!(
+        !bus.relay
+            .publish_directory_if_absent(
+                &machine,
+                fallback_revision,
+                std::slice::from_ref(&fallback)
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        bus.relay.directory_entries(&machine).unwrap().unwrap(),
+        vec![complete]
+    );
+}
+
 #[test]
 fn expired_or_ambiguous_directory_does_not_route_even_with_a_registry_record() {
     let Some(mut bus) = Bus::connect("directory-ambiguity-expiry") else {

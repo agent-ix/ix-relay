@@ -33,7 +33,7 @@ mod stdin;
 mod work;
 
 use std::{
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     num::NonZeroUsize,
     process::ExitCode,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -289,6 +289,12 @@ enum Cmd {
         /// Harness kind.
         #[arg(long, default_value = "manual")]
         kind: String,
+        /// Explicitly claim a full server:workspace:tab address for this live Claude socket.
+        #[arg(long, requires = "pane")]
+        claim: Option<String>,
+        /// Herdr pane id named by the operator (for example w1:p1).
+        #[arg(long, requires = "claim")]
+        pane: Option<String>,
     },
     /// Print this session's verified server:workspace:tab identity.
     /// An unverified session prints not a lead; aliases never supply identity.
@@ -1096,7 +1102,23 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 }
             }
         }
-        Cmd::Register { kind } => {
+        Cmd::Register { kind, claim, pane } => {
+            if let Some(address) = claim {
+                require_interactive_claim(io::stdin().is_terminal(), io::stdout().is_terminal())?;
+                let pane = pane
+                    .ok_or("--pane is required with --claim")?
+                    .parse::<PaneId>()?;
+                let address = relay_ops::enrollment::validate_address(&address)?;
+                let registration = identity::claim_socket_placement(
+                    &mut relay,
+                    &settings.machine.value,
+                    &address,
+                    &pane,
+                )?;
+                let address = display_book(&mut relay, &redial).label(&registration.name);
+                writeln!(out, "claimed {address}")?;
+                return Ok(());
+            }
             let _ = kind;
             let name = me(None, &mut relay, &settings.machine.value)?;
             let address = display_book(&mut relay, &redial).label(&name);
@@ -1215,6 +1237,18 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
         }
     }
     Ok(())
+}
+
+#[implements("FR-074-AC-1")]
+fn require_interactive_claim(
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+) -> Result<(), &'static str> {
+    if stdin_is_terminal && stdout_is_terminal {
+        Ok(())
+    } else {
+        Err("--claim is available only from an interactive terminal")
+    }
 }
 
 /// [`identity::derive`], with a way out added to the collision error: the
@@ -1480,4 +1514,25 @@ fn order_spec(
     };
     let ms = i64::try_from(age.0.as_millis()).unwrap_or(i64::MAX);
     Ok(relay_core::receipts::OrderSpec::new(ms, expect_ticket)?)
+}
+
+#[cfg(test)]
+mod claim_terminal_tests {
+    use ix_trace_rs::trace;
+
+    use super::require_interactive_claim;
+
+    #[trace("FR-074-AC-1")]
+    #[test]
+    fn socket_placement_claim_requires_an_interactive_terminal() {
+        assert!(require_interactive_claim(true, true).is_ok());
+        assert_eq!(
+            require_interactive_claim(false, true),
+            Err("--claim is available only from an interactive terminal")
+        );
+        assert_eq!(
+            require_interactive_claim(true, false),
+            Err("--claim is available only from an interactive terminal")
+        );
+    }
 }

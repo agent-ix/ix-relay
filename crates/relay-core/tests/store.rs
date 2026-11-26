@@ -10,9 +10,12 @@
 
 use std::{collections::HashSet, num::NonZeroUsize, thread, time::Duration};
 
+use ix_trace_rs::trace;
 use relay_core::{
-    AgentName, Claim, Error, Escalation, EscalationFiling, EscalationStatus, HookHealthEntry,
-    IdentityCommit, Message, PaneRef, PlaceRefresh, Popper, Registration, Relay, Target,
+    AgentName, CLAUDE_OPERATOR_CLAIM_KIND, CLAUDE_OPERATOR_DISPLACED_KIND, Claim, DirectoryRead,
+    Error, Escalation, EscalationFiling, EscalationStatus, HerdrPlaceIds, HookHealthEntry,
+    IdentityCommit, MachineName, Message, PaneId, PaneRef, Place, PlaceRefresh, Popper,
+    Registration, Relay, SessionId, Target,
 };
 
 fn relay(test: &str) -> Option<Relay> {
@@ -490,6 +493,79 @@ fn session_name_round_trips_through_commit_identity() {
     assert_eq!(
         r.probe_session(&"sid-2".parse().unwrap()).unwrap().name,
         None
+    );
+}
+
+#[trace("FR-074-AC-1")]
+#[test]
+fn operator_socket_claim_replaces_address_owner_and_keeps_the_old_queue_record() {
+    let Some(mut r) = relay("operator-socket-claim") else {
+        return;
+    };
+    let old = Registration {
+        machine: "node-a".parse::<MachineName>().unwrap(),
+        name: AgentName::for_session(
+            &"node-a".parse::<MachineName>().unwrap(),
+            &"launcher-session".parse::<SessionId>().unwrap(),
+        ),
+        kind: "claude".into(),
+        session_id: Some("launcher-session".parse::<SessionId>().unwrap()),
+        cwd: None,
+        herdr_pane: Some("w1:p1".parse::<PaneId>().unwrap()),
+        place: Some(Place {
+            workspace: "dev".into(),
+            tab: "code".into(),
+            herdr_ids: Some(HerdrPlaceIds {
+                workspace: "w1".parse().unwrap(),
+                tab: "w1:t1".parse().unwrap(),
+                pane: "w1:p1".parse().unwrap(),
+                session_id: "launcher-session".parse().unwrap(),
+                verified_at_ms: 10,
+            }),
+        }),
+        last_seen_ms: 10,
+    };
+    let claimed = Registration {
+        name: AgentName::for_session(&old.machine, &"job-session".parse().unwrap()),
+        machine: old.machine.clone(),
+        kind: CLAUDE_OPERATOR_CLAIM_KIND.into(),
+        session_id: Some("job-session".parse().unwrap()),
+        cwd: None,
+        herdr_pane: old.herdr_pane.clone(),
+        place: old.place.clone(),
+        last_seen_ms: 20,
+    };
+    r.commit_identity(&IdentityCommit {
+        registration: Some(old.clone()),
+        session_name: Some((old.session_id.clone().unwrap(), old.name.clone())),
+        ..Default::default()
+    })
+    .unwrap();
+    r.claim_socket_placement(&old, &claimed).unwrap();
+    let revision = r.begin_directory_observation(&old.machine).unwrap();
+    r.publish_directory(&old.machine, revision, std::slice::from_ref(&claimed))
+        .unwrap();
+    let list = r.agents().unwrap().registrations;
+    let prior = list.iter().find(|entry| entry.name == old.name).unwrap();
+    assert_eq!(prior.kind, CLAUDE_OPERATOR_DISPLACED_KIND);
+    assert!(list.contains(&claimed));
+    assert_eq!(
+        r.probe_session(&"launcher-session".parse().unwrap())
+            .unwrap()
+            .name,
+        None
+    );
+    assert_eq!(
+        r.probe_session(&"job-session".parse().unwrap())
+            .unwrap()
+            .name,
+        Some(claimed.name.clone())
+    );
+    let routed = r
+        .directory_recipient(&"node-a:dev:code".parse().unwrap())
+        .unwrap();
+    assert!(
+        matches!(routed, DirectoryRead::Unique(recipient) if recipient.registration.name == claimed.name)
     );
 }
 

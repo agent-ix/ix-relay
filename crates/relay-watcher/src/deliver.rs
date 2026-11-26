@@ -138,6 +138,9 @@ pub enum SettleAction {
     AckUnconfirmed,
     /// It was certainly not delivered: put it back, unmarked.
     Requeue,
+    /// The receiver process disappeared; transcript evidence may have been unavailable,
+    /// so the message is put back with its redelivery marker.
+    Redeliver,
     /// It will never be delivered (the receiver's user denied it, or nobody answered
     /// its approval prompt in time): dead-letter it.
     DeadLetter,

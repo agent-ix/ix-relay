@@ -44,6 +44,7 @@ use claude_wire::{
     ControlLine, Envelope, LineShape, Receipt, Scan, TranscriptMatch, Verdict, line_shape,
     parse_control_line, wrap,
 };
+use ix_trace_rs::implements;
 use relay_core::{
     BatchId,
     socket_status::{
@@ -118,10 +119,9 @@ const REBIND_MAX: Duration = Duration::from_secs(5 * 60);
 /// while Claude Code still holds the message.
 pub const HELD_RENEW_LEASE: Duration = Duration::from_secs(120);
 
-/// The longest a batch is kept in flight for an approval that never comes. At the
-/// end of it the batch is dead-lettered (reason `hold_expired`), never posted again.
-/// A posted batch that is still not consumed after as long is reported and kept.
-pub const MAX_HOLD: Duration = Duration::from_secs(30 * 60);
+/// When a live receiver has not settled an approval hold, report it once while
+/// continuing to renew it; age never makes the batch terminal.
+const LONG_HELD_NOTICE_AFTER: Duration = Duration::from_secs(30 * 60);
 
 /// How often the process a pending batch was posted to is looked at: a look can fork
 /// `ps`.
@@ -192,10 +192,10 @@ pub struct SocketConfig {
     pub held_quiet: Duration,
     /// See [`REBIND_START`].
     pub rebind_start: Duration,
-    /// See [`MAX_HOLD`].
-    pub max_hold: Duration,
     /// See [`TICK_BUDGET`].
     pub tick_budget: Duration,
+    /// Age after which a live held batch is reported once, without settling it.
+    pub long_held_notice_after: Duration,
     /// See [`DELIVERED_GRACE`].
     pub delivered_grace: Duration,
     /// See [`DEAD_NOTE_AGE`].
@@ -230,8 +230,8 @@ impl SocketConfig {
             dedupe_window: DEDUPE_WINDOW,
             held_quiet: HELD_QUIET,
             rebind_start: REBIND_START,
-            max_hold: MAX_HOLD,
             tick_budget: TICK_BUDGET,
+            long_held_notice_after: LONG_HELD_NOTICE_AFTER,
             delivered_grace: DELIVERED_GRACE,
             dead_note_age: DEAD_NOTE_AGE,
             settle_backoff: SETTLE_BACKOFF,
@@ -736,6 +736,7 @@ impl SocketDeliverer {
                 "ack" => SettleAction::Ack,
                 "ack_unconfirmed" => SettleAction::AckUnconfirmed,
                 "requeue" => SettleAction::Requeue,
+                "redeliver" => SettleAction::Redeliver,
                 "dead_letter" => SettleAction::DeadLetter,
                 _ => continue,
             };
@@ -1563,9 +1564,10 @@ impl SocketDeliverer {
     /// The pending posts whose receiving process no longer exists. Each is looked at
     /// once per [`SocketConfig::liveness_every`], one look per process, with the state
     /// unlocked: a look can fork `ps`.
+    #[implements("FR-044-AC-22")]
     fn gone_receivers(&self) -> HashSet<String> {
         let every = self.config.liveness_every;
-        let due: Vec<(String, (u32, String))> = self
+        let due: Vec<(String, (u32, String), String)> = self
             .lock()
             .pending
             .iter_mut()
@@ -1576,17 +1578,26 @@ impl SocketDeliverer {
                 }
                 let process = p.process.clone()?;
                 p.looked_at = Some(Instant::now());
-                Some((id.clone(), process))
+                Some((id.clone(), process, p.session.clone()))
             })
             .collect();
-        let mut seen: HashMap<(u32, String), bool> = HashMap::new();
+        let mut seen: HashMap<(u32, String, String), bool> = HashMap::new();
         due.into_iter()
-            .filter(|(_, process)| {
+            .filter(|(_, process, session)| {
+                let sessions_dir = &self.config.sessions_dir;
                 *seen
-                    .entry(process.clone())
-                    .or_insert_with(|| self.procs.gone(process.0, &process.1))
+                    .entry((process.0, process.1.clone(), session.clone()))
+                    .or_insert_with(|| {
+                        self.procs.gone(process.0, &process.1)
+                            || session::session_changed(
+                                sessions_dir,
+                                session,
+                                process.0,
+                                &process.1,
+                            )
+                    })
             })
-            .map(|(id, _)| id)
+            .map(|(id, _, _)| id)
             .collect()
     }
 
@@ -1600,6 +1611,7 @@ impl SocketDeliverer {
     /// what the caller must now do. Every send with a decision is returned again on
     /// each tick until [`SocketDeliverer::applied`] reports the write done, and every
     /// held batch has its lease renewed on each.
+    #[implements("FR-044-AC-5", "FR-044-AC-22")]
     pub fn settle(&self) -> Vec<Settlement> {
         let started = Instant::now();
         let mut out = Vec::new();
@@ -1657,19 +1669,12 @@ impl SocketDeliverer {
         state.settle_cursor = state
             .settle_cursor
             .wrapping_add(TRANSCRIPT_CHECKS_PER_SETTLE);
-        let max_hold = self.config.max_hold;
         // The sends a decision is about to be made on: their transcripts are read to the
         // end first, so that silence is never decided on a part of the file.
         let deciding: HashSet<String> = state
             .pending
             .iter()
-            .filter(|(id, p)| {
-                p.resolution.is_none()
-                    && (gone.contains(*id)
-                        || (p.delivered_at.is_none()
-                            && !p.awaiting_consumption
-                            && p.held_since.is_some_and(|s| s.elapsed() >= max_hold)))
-            })
+            .filter(|(id, p)| p.resolution.is_none() && gone.contains(*id))
             .map(|(id, _)| id.clone())
             .collect();
         let mut checks = picked;
@@ -1747,8 +1752,7 @@ impl SocketDeliverer {
         // Decisions by time and by the receiver: an approved message whose transcript line
         // never shows up is acknowledged after the grace (Claude Code itself said
         // delivered); a post whose receiver exited without recording it goes back to the
-        // inbox; a hold nobody answers is dead-lettered at the maximum hold; a post a
-        // live receiver has not consumed by then is reported and kept.
+        // inbox. An unanswered approval hold remains in flight while its receiver is live.
         let grace = self.config.delivered_grace;
         let mut unconfirmed: Vec<(String, String)> = Vec::new();
         let mut requeued: Vec<(String, String)> = Vec::new();
@@ -1758,7 +1762,9 @@ impl SocketDeliverer {
             .iter_mut()
             .filter(|(_, p)| p.resolution.is_none())
         {
-            let overdue = p.held_since.is_some_and(|s| s.elapsed() >= max_hold);
+            let long_held = p
+                .held_since
+                .is_some_and(|s| s.elapsed() >= self.config.long_held_notice_after);
             if p.delivered_at.is_some_and(|at| at.elapsed() >= grace) {
                 unconfirmed.push((p.lead.clone(), p.version.clone()));
                 p.resolution = Some(Resolution {
@@ -1772,28 +1778,14 @@ impl SocketDeliverer {
             } else if p.delivered_at.is_none() && gone.contains(id) {
                 requeued.push((p.lead.clone(), p.session.clone()));
                 p.resolution = Some(Resolution {
-                    action: SettleAction::Requeue,
+                    action: SettleAction::Redeliver,
                     why: "receiver_gone: the process the message was posted to exited and its \
                           transcript does not show the message"
                         .to_owned(),
                     notice: None,
                     reason: None,
                 });
-            } else if p.delivered_at.is_none() && overdue && !p.awaiting_consumption {
-                let lead = p.lead.clone();
-                p.resolution = Some(Resolution {
-                    action: SettleAction::DeadLetter,
-                    why: "hold_expired: nobody answered the approval prompt in time".to_owned(),
-                    notice: Some((
-                        format!("ix-relay: a message to {lead} was never approved"),
-                        "Claude Code held it behind an approval prompt that nobody answered; it \
-                         was dead-lettered (reason hold_expired) and will not be posted again. \
-                         Set crossSessionInbound to accept in that session's settings."
-                            .to_owned(),
-                    )),
-                    reason: Some("hold_expired"),
-                });
-            } else if p.delivered_at.is_none() && overdue && !p.told_unconsumed {
+            } else if long_held && !p.told_unconsumed {
                 p.told_unconsumed = true;
                 unconsumed.push((p.lead.clone(), p.batch.get()));
             }
@@ -1856,6 +1848,10 @@ impl SocketDeliverer {
                 });
             }
         }
+        // Explicitly requeued batches are LPUSHed one at a time. Applying newer batch ids
+        // first leaves the oldest batch at the front, preserving mail order for a receiver
+        // whose process ended with several sends in flight.
+        out.sort_by_key(|settlement| std::cmp::Reverse(settlement.batch.get()));
         // The checks above count against the tick's budget.
         state.tick_spent = started.elapsed();
         if !out.is_empty() || !state.pending.is_empty() {
@@ -2050,6 +2046,7 @@ impl SocketDeliverer {
                             SettleAction::Ack => "ack",
                             SettleAction::AckUnconfirmed => "ack_unconfirmed",
                             SettleAction::Requeue => "requeue",
+                            SettleAction::Redeliver => "redeliver",
                             SettleAction::DeadLetter => "dead_letter",
                             SettleAction::Renew(_) => return None,
                         }

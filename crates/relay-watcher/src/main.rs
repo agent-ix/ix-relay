@@ -27,6 +27,13 @@
 //! clean stop on SIGTERM or SIGINT, noticed at the next turn of the loop (a call the
 //! signal interrupts is not logged or recorded as a failure).
 
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        let timestamp = jiff::Timestamp::now().strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+        std::eprintln!("[{timestamp}] {}", format_args!($($arg)*));
+    }};
+}
+
 mod deliver;
 mod episodes;
 mod fleet;
@@ -54,6 +61,7 @@ use std::{
 };
 
 use clap::Parser;
+use ix_trace_rs::implements;
 use relay_core::{
     AddressBook, AgentName, Claim, MachineName, Now, PaneId, PlaceRefresh, Popper, Relay, SessionId,
 };
@@ -480,12 +488,14 @@ fn alive_leads(
 /// The registrations of `alive` that the directory can carry as last verified: a
 /// canonical session queue with a verified address, and a session `listed` does not
 /// already name.
+#[implements("FR-074-AC-1")]
 fn last_verified(
     regs: &[relay_core::Registration],
     alive: &HashSet<AgentName>,
     listed: &[relay_core::Registration],
 ) -> Vec<relay_core::Registration> {
     regs.iter()
+        .filter(|r| r.kind != relay_core::CLAUDE_OPERATOR_DISPLACED_KIND)
         .filter(|r| alive.contains(&r.name) && r.verified_place().is_some())
         .filter(|r| {
             r.session_id.as_ref().is_some_and(|s| {
@@ -507,6 +517,8 @@ fn last_verified(
 /// registered before addresses existed its first one. Failures are logged and
 /// skipped: address freshness never blocks delivery. Only a connection-level
 /// Redis error is returned (see [`per_lead`]).
+#[implements("FR-036-AC-9")]
+#[implements("FR-074-AC-1")]
 fn refresh_places(
     relay: &mut Relay,
     herdr: &impl Herdr,
@@ -522,8 +534,9 @@ fn refresh_places(
         return Ok(HashSet::new());
     }
     state.last_place_refresh = Some(Instant::now());
+    // Allocate the observation fence before asking herdr so a delayed complete
+    // snapshot cannot be overtaken by a later failed-layout fallback.
     let directory_revision = if herdr.directory_observations() {
-        relay.take_directory_refresh(machine)?;
         Some(relay.begin_directory_observation(machine)?)
     } else {
         None
@@ -553,20 +566,22 @@ fn refresh_places(
                      panes: {e}"
                 ));
             }
-            // The directory still carries the sessions that are alive, as last verified,
-            // so mail can be addressed to them.
+            // Keep a complete last verified snapshot through its lease. If none exists,
+            // publish only canonical registrations with a verified live socket session;
+            // the atomic absent-only publish cannot replace a concurrent full snapshot.
             if let Some(revision) = directory_revision {
                 let alive = alive_leads(herdr, regs, machine);
-                let kept = last_verified(regs, &alive, &[]);
-                if !kept.is_empty()
-                    && let Err(e) = relay.publish_directory(machine, revision, &kept)
-                {
-                    per_lead(e, "could not publish the addresses of live sessions")?;
+                let socket_only = last_verified(regs, &alive, &[]);
+                if !socket_only.is_empty() {
+                    relay.publish_directory_if_absent(machine, revision, &socket_only)?;
                 }
             }
             return Ok(HashSet::new());
         }
     };
+    if directory_revision.is_some() {
+        relay.take_directory_refresh(machine)?;
+    }
     // Entries of herdr's listings this binary could not decode: reported once per
     // episode (until a listing decodes whole again), not on every refresh.
     let dropped = herdr.dropped_entries();
@@ -617,8 +632,21 @@ fn refresh_places(
                 }
                 if let Some(revision) = directory_revision {
                     let kept = last_verified(regs, &protected, &live);
+                    let socket_alive = alive_leads(herdr, regs, machine);
+                    let claims: Vec<_> = regs
+                        .iter()
+                        .filter(|r| r.kind == relay_core::CLAUDE_OPERATOR_CLAIM_KIND)
+                        .filter(|r| socket_alive.contains(&r.name) && r.verified_place().is_some())
+                        .cloned()
+                        .collect();
                     let mut publication = live;
                     publication.extend(kept);
+                    publication.retain(|r| {
+                        !claims
+                            .iter()
+                            .any(|claim| claim.full_address() == r.full_address())
+                    });
+                    publication.extend(claims);
                     relay.publish_directory(machine, revision, &publication)?;
                 }
             }
@@ -1416,6 +1444,7 @@ fn apply_settlements<H: Herdr + Deliverer>(
                     .map(usize::from)
             }
             SettleAction::Requeue => relay.requeue_batch(&lead, s.batch, Popper::Watcher),
+            SettleAction::Redeliver => relay.redeliver_batch(&lead, s.batch, Popper::Watcher),
             SettleAction::DeadLetter => relay.dead_letter_batch(
                 &lead,
                 s.batch,
@@ -1442,7 +1471,9 @@ fn apply_settlements<H: Herdr + Deliverer>(
             Ok(moved) => {
                 if moved > 0 {
                     match s.action {
-                        SettleAction::Requeue => waits.undelivered(&lead, &s.why, Instant::now()),
+                        SettleAction::Requeue | SettleAction::Redeliver => {
+                            waits.undelivered(&lead, &s.why, Instant::now())
+                        }
                         SettleAction::Ack | SettleAction::AckUnconfirmed => waits.delivered(&lead),
                         SettleAction::DeadLetter | SettleAction::Renew(_) => {}
                     }
@@ -2051,6 +2082,116 @@ mod tests {
         fn deliver(&self, _pane: &PaneId, _text: &str) -> Result<(), DeliverError> {
             Ok(())
         }
+    }
+
+    struct FailedLayoutWithLiveSocket;
+
+    impl Herdr for FailedLayoutWithLiveSocket {
+        fn directory_observations(&self) -> bool {
+            true
+        }
+        fn get(&self, _pane: &PaneId) -> Result<Option<AgentGet>, ProcessError> {
+            Ok(None)
+        }
+        fn notify(&self, _title: &str, _body: &str) -> Result<(), ProcessError> {
+            Ok(())
+        }
+        fn layout(&self, _machine: &MachineName) -> Result<crate::herdr::Layout, ProcessError> {
+            Err(ProcessError::Timeout {
+                program: "herdr".into(),
+                secs: 10,
+            })
+        }
+        fn session_alive(&self, session: &SessionId) -> bool {
+            session.as_str() == "socket-session"
+        }
+    }
+
+    impl Deliverer for FailedLayoutWithLiveSocket {
+        fn deliver(&self, _pane: &PaneId, _text: &str) -> Result<(), DeliverError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    #[trace("FR-036-AC-9")]
+    fn unreadable_layout_keeps_the_complete_last_verified_directory_snapshot() {
+        let Some(mut relay) = test_relay("layout-failure-directory-preserved") else {
+            eprintln!("skipping: IX_RELAY_TEST_URL unset (run `make test-redis`)");
+            return;
+        };
+        let machine: MachineName = "here".parse().unwrap();
+        let view = relay_ops::find::MachineView {
+            machine: machine.clone(),
+            agents: vec![
+                relay_ops::find::HerdrAgent {
+                    kind: "codex".into(),
+                    pane_id: "w1:p1".parse().unwrap(),
+                    tab_id: "w1:t1".parse().unwrap(),
+                    workspace_id: "w1".parse().unwrap(),
+                    status: "idle".into(),
+                    session_name: None,
+                    session_id: Some("codex-session".parse().unwrap()),
+                },
+                relay_ops::find::HerdrAgent {
+                    kind: "claude".into(),
+                    pane_id: "w1:p2".parse().unwrap(),
+                    tab_id: "w1:t2".parse().unwrap(),
+                    workspace_id: "w1".parse().unwrap(),
+                    status: "idle".into(),
+                    session_name: None,
+                    session_id: Some("socket-session".parse().unwrap()),
+                },
+            ],
+            workspaces: vec![relay_ops::find::HerdrWorkspace {
+                workspace_id: "w1".parse().unwrap(),
+                label: "EA".into(),
+                tab_count: 2,
+            }],
+            tabs: vec![
+                relay_ops::find::HerdrTab {
+                    tab_id: "w1:t1".parse().unwrap(),
+                    label: "code".into(),
+                },
+                relay_ops::find::HerdrTab {
+                    tab_id: "w1:t2".parse().unwrap(),
+                    label: "socket".into(),
+                },
+            ],
+            dropped: 0,
+        };
+        let registrations = relay_ops::enrollment::registrations(&view).unwrap();
+        for registration in &registrations {
+            relay.register(registration).unwrap();
+        }
+        let revision = relay.begin_directory_observation(&machine).unwrap();
+        relay
+            .publish_directory(&machine, revision, &registrations)
+            .unwrap();
+        let before = relay.directory_entries(&machine).unwrap().unwrap();
+        assert_eq!(before.len(), 2);
+
+        let mut regs = relay.agents().unwrap().registrations;
+        let mut state = WatcherState {
+            last_place_refresh: None,
+            ..WatcherState::default()
+        };
+        refresh_places(
+            &mut relay,
+            &FailedLayoutWithLiveSocket,
+            &mut regs,
+            &machine,
+            &mut state,
+            &mut |_| {},
+        )
+        .unwrap();
+
+        let after = relay.directory_entries(&machine).unwrap().unwrap();
+        assert_eq!(
+            after.iter().map(|r| &r.name).collect::<HashSet<_>>(),
+            before.iter().map(|r| &r.name).collect::<HashSet<_>>(),
+            "an unreadable layout keeps typed and socket leads in the same snapshot"
+        );
     }
 
     /// A publisher that hands each request body it is asked to send to `bodies`,

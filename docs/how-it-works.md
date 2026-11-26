@@ -44,7 +44,7 @@ A Claude Code session that has an inbox socket gets its mail from `relay-watcher
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/delivery-dark.svg">
-  <img alt="A send looks up the recipient in the directory and queues the message in the recipient's inbox. A working lead gets it from a hook, a starting lead from the SessionStart hook, an idle lead from relay-watcher, and a blocked lead keeps it queued while the operator is notified once." src="images/delivery-light.svg">
+  <img alt="A send resolves a verified address and queues the recipient's session inbox. Claude sessions with an inbox socket receive mail through it at any activity level; hooks deliver for sessions without a socket while working or starting, and relay-watcher prompts only an idle session without a socket. Approval-held mail stays in flight until the receiver settles or exits." src="images/delivery-light.svg">
 </picture>
 
 | Lead state (no socket) | Delivered by |
@@ -128,7 +128,7 @@ Which route a Claude Code lead is on:
 | A live session older than 60 s whose record names no socket, with no socket file for its process | Terminal (typed through Herdr, hooks deliver) |
 | Anything else: no session ID, no record, no live record, several processes, an unsupported version, an unusable or unpublished socket, a parked session, an unbound reply socket | Wait: nothing is popped or typed, and `doctor` shows the reason |
 
-A session is parked when its process handed the terminal to a background job, for example after `/resume`. Its socket still accepts mail but nothing reads it, and its pane shows the other conversation. Its mail waits until it is resumed.
+A session is parked when its process handed the terminal to a background job, for example after `/resume`. Its socket still accepts mail but nothing reads it, and its pane shows the other conversation. Mail waits until the operator explicitly runs `agent-msg register --claim <server:workspace:tab> --pane <pane-id>` from the live background session. The claim checks that session's own live socket and the named Herdr pane; the watcher does not infer window-to-job attachment.
 
 `[watcher] delivery = "herdr"` switches sockets off for the whole machine. Every lead is then typed into, Claude Code sessions with a socket included. `agent-msg doctor` warns while it is set. Only set it deliberately.
 
@@ -138,17 +138,17 @@ How the socket path behaves:
 - The watcher binds its own reply socket at `$XDG_RUNTIME_DIR/cc-socks/<pid>.sock` on Linux and `/tmp/cc-socks/<pid>.sock` on macOS.
 - The socket belongs to the session. A lead of any kind whose session has one is posted to. A Codex or opencode lead, whose session no record names, goes straight to Herdr.
 - A hook of a session with a socket (`CLAUDE_CODE_MESSAGING_SOCKET`, or a registry record naming one) registers the lead and records activity, and leaves its mail for the watcher. While the watcher is stopped that mail stays queued.
-- A refused connection, or a receipt of `refused` or `dropped`, puts the batch back to be posted again.
+- A refused connection, or a receipt of `refused` or `dropped`, puts the batch back to be posted again. If the receiver exits before the transcript confirms it, the batch is marked redelivered and returned to the inbox.
 - A batch is acknowledged when its message ID appears at the end of the lead's transcript (`~/.claude/projects/.../<session>.jsonl`, read only). The watcher waits up to 3 s and posts only when the tick's 8 s socket budget covers the worst case of 7 s. A batch not yet consumed stays in flight and is not posted again. After 30 minutes it is noted and one notification is shown; it is kept. If the process it was posted to exits and the transcript does not show the message, the batch goes back to the inbox. A restarted watcher adopts open posts and reads each transcript from where the message was posted.
-- Receipts are matched by exact status. `delivered` lets the transcript acknowledge the batch, `denied` dead-letters it, and a hold timeout returns it unmarked.
-- While Claude Code holds a message behind an approval prompt, the watcher renews the batch's lease every tick. After 30 minutes without an answer the batch is dead-lettered with the reason `hold_expired` and one notification is shown.
+- Receipts are matched by exact status. `delivered` lets the transcript acknowledge the batch and `denied` dead-letters it. A live approval hold remains in flight and does not expire by age.
+- While Claude Code holds a message behind an approval prompt, the watcher renews the batch's lease every tick. A live receiver keeps the batch queued regardless of age; after 30 minutes the watcher reports the still-held batch once. It settles only when the receiver answers or its process is verified gone.
 - A decision about a batch is kept until its write to the bus succeeds. The write is retried with a growing wait from 5 s to 5 minutes, and five failures raise one notification.
 - Mail that has waited 5 minutes because a socket could not take it raises one notification with the reason. Nothing is typed.
 - If sockets cannot be used on a host (for example `XDG_RUNTIME_DIR` is not set on Linux), socket sessions wait and `doctor` warns with the reason.
 - A Herdr whose output the watcher cannot read (a failed shape check) stops typing only. Socket sessions keep receiving, stay registered and keep their last verified address. Leads that are typed into keep their mail queued, `doctor` names them, and one notification names the field Herdr changed. A session that starts during the outage cannot enroll until Herdr is readable.
 - Status files are in `~/.ix/relay/state/socket/`, created with mode 0700. Each file is created with mode 0600, and dead-letter reasons in it age out after 24 hours.
 
-A Claude Code session in bypass mode holds every message from another session behind a Deny or Deliver prompt unless `crossSessionInbound: "accept"` is set in its user settings, `--settings` or managed settings. Plugins and project settings cannot set it, and the watcher never writes Claude Code files. For such a lead, the batch stays in flight for ten minutes with no more mail popped, the operator gets one notification per episode and `doctor` warns. Set `crossSessionInbound` to `accept` for that lead.
+A Claude Code session in bypass mode holds every message from another session behind a Deny or Deliver prompt unless `crossSessionInbound: "accept"` is set in its user settings, `--settings` or managed settings. Plugins and project settings cannot set it, and the watcher never writes Claude Code files. For such a lead, the batch stays in flight until the receiver answers or its process is verified gone; no more mail is popped for that lead while it is held. After 30 minutes the operator gets one notification for the held batch and `doctor` warns. Set `crossSessionInbound` to `accept` for that lead.
 
 ### Wire formats
 

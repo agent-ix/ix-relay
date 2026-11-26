@@ -73,6 +73,10 @@ the sender wrote it to a session whose context the new holder does not share.
   the mail stays queued until the new session registers or the replaced registration
   reaches the pruning age (see "Nothing holds the address"), and an ambiguous address is
   never resolved by guessing ([FR-004](./FR-004-resolution-never-guesses.md)).
+- While a valid handoff has a live, verified successor that can receive the mail, the watcher
+  shall preserve the queued mail without an age-based dead-letter. The existing 24-hour
+  terminal dead-letter rule applies only when the old registration is gone or replaced, no
+  verified address holder can receive the mail, and the registration reaches the pruning age.
 - The move shall be one atomic bus operation per batch of messages: each message shall
   be in exactly one of the two inboxes at every instant a reader can observe, and a
   crash of the watcher or a second watcher running the same pass shall leave every
