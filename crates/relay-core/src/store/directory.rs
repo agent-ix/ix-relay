@@ -73,6 +73,7 @@ impl Relay {
 
     /// Publish one complete topology observation. Ambiguous bindings are retained
     /// so resolution rejects them. Expiry uses Redis time, not host wall clocks.
+    #[implements("FR-036-AC-9")]
     pub fn publish_directory(
         &mut self,
         machine: &MachineName,
@@ -85,6 +86,7 @@ impl Relay {
     /// Publish an incomplete socket-only projection only if no leased snapshot exists.
     /// The absence check and publication share one Redis script, so this cannot replace
     /// a complete snapshot that appeared after the caller's preliminary check.
+    #[implements("FR-036-AC-9")]
     pub fn publish_directory_if_absent(
         &mut self,
         machine: &MachineName,
