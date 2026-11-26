@@ -210,12 +210,21 @@ fn tc_012_06_peek_lists_messages_without_consuming_them() {
     let _: () = redis::Commands::rpush(&mut redis, format!("{prefix}inbox:{receiver}"), "not json")
         .unwrap();
 
-    let text = agent_msg(&["inbox", "--peek"], "hub:EA:code", &url, &prefix);
+    let mut cmd = support::base_cmd(&["inbox", "--peek"], Some("hub:EA:code"));
+    cmd.env("IX_RELAY_URL", &url)
+        .env("IX_RELAY_PREFIX", &prefix);
+    let text = support::run(cmd, "");
+    assert_eq!(text.status, 0, "{}", text.stderr);
     assert!(
-        text.find("first").unwrap() < text.find("second").unwrap(),
-        "{text}"
+        text.stdout.find("first").unwrap() < text.stdout.find("second").unwrap(),
+        "{}",
+        text.stdout
     );
-    assert!(text.contains("unreadable inbox entry"), "{text}");
+    assert!(
+        text.stderr.contains("unreadable inbox entry"),
+        "{}",
+        text.stderr
+    );
     let first_only = agent_msg(
         &["inbox", "--peek", "--max", "1"],
         "hub:EA:code",
