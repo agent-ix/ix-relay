@@ -31,10 +31,11 @@ window-to-job attachment.
   caller session. The operator's explicit claim supplies that relationship.
 - The command shall refuse when another live registration already owns the requested address,
   when the named pane or caller session is ambiguous, or when either verification fails.
-- The command shall atomically replace the stale registration for that address with one
-  registration for the verified caller session and the named pane's current Herdr identity.
-  It shall remove the stale registration's session-to-name cache and shall leave its queued
-  messages with the stale session; ordinary stranded-mail handling remains owned by FR-053.
+- The command shall atomically register the verified caller session at the requested address
+  and the named pane's current Herdr identity, and remove the stale session's session-to-name
+  cache. It shall retain the stale registration while its inbox has mail, so FR-053 can
+  forward that queue to the new verified address holder; the stale registration is pruned
+  under FR-053 after its inbox is empty.
 - The new registration shall preserve socket-only delivery and session-bound queue identity
   from FR-033, FR-044 and FR-047. The command shall not type into the pane.
 - When a session is live and verified by its socket but has no matching Herdr session
@@ -46,8 +47,8 @@ window-to-job attachment.
 
 | ID | Criteria | Verification |
 |----|----------|--------------|
-| FR-074-AC-1 | Given a live Claude background job whose own process has a live, socket-verified session record and an operator-named Herdr pane, the claim command atomically registers that session at the named address and pane, removes the stale registration and session cache, and `whoami` resolves the new address; inherited pane variables alone, a missing or reused process, an absent or unusable socket, an unknown pane, or an ambiguous address is refused without changing the registry. | Test |
-| FR-074-AC-2 | Given the claimed session and queued mail, the session receives mail over its own socket, `send` from it resolves the claimed address, the old session's queued mail is handled only by FR-053, and no command types into any pane. | Integration |
+| FR-074-AC-1 | Given a live Claude background job whose own process has a live, socket-verified session record and an operator-named Herdr pane, the claim command atomically registers that session at the named address and pane, removes the stale session cache, retains the stale registration while its inbox has mail, and `whoami` resolves the new address; inherited pane variables alone, a missing or reused process, an absent or unusable socket, an unknown pane, or an ambiguous address is refused without changing the registry. | Test |
+| FR-074-AC-2 | Given the claimed session and queued mail, the session receives mail over its own socket, `send` from it resolves the claimed address, FR-053 forwards the old session's queued mail to the new holder, and no command types into any pane. | Integration |
 | FR-074-AC-3 | Given a live socket-verified caller with a stale launcher registration and no matching Herdr session association, `agent-msg doctor` names the recovery command form but does not guess the address or pane. | Test |
 
 ## Dependencies
