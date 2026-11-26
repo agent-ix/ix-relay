@@ -20,6 +20,7 @@
 
 use std::{cell::Cell, collections::HashMap, num::NonZeroUsize, time::Duration};
 
+use ix_trace_rs::implements;
 use redis::{Commands, IntoConnectionInfo, streams::StreamRangeReply};
 
 use crate::{
@@ -697,6 +698,18 @@ return added
         Ok(len)
     }
 
+    /// Reads up to `max` pending messages without changing `agent`'s inbox.
+    /// Entries are returned oldest first; undecodable entries are reported and
+    /// remain queued.
+    #[implements("FR-012-AC-6")]
+    pub fn peek_inbox(&mut self, agent: &AgentName, max: NonZeroUsize) -> Result<PeekResult> {
+        let key = self.keys.inbox_key(agent);
+        let stop = isize::try_from(max.get() - 1).unwrap_or(isize::MAX);
+        let raw: Vec<Vec<u8>> = self.conn.lrange(&key, 0, stop)?;
+        let (messages, rejected) = decode_entries(&key, raw);
+        Ok(PeekResult { messages, rejected })
+    }
+
     /// How many messages wait in each of `agents`' inboxes, in one pipelined
     /// request, in the order given (AGE-2028): a poller checking every lead pays
     /// one round trip, not one per lead. A failure on one inbox (a key of the
@@ -1308,6 +1321,16 @@ pub struct PopResult {
     pub messages: Vec<crate::receipts::InboxEntry>,
     /// Entries popped alongside `messages` that failed to decode. Also already
     /// removed from Redis; the caller decides how to surface them.
+    pub rejected: Vec<Error>,
+}
+
+/// What a non-destructive inbox peek found: the messages that decoded cleanly,
+/// and any raw entries that did not. No entries are removed from Redis.
+#[derive(Debug, Default)]
+pub struct PeekResult {
+    /// Messages waiting in the inbox, oldest first.
+    pub messages: Vec<crate::receipts::InboxEntry>,
+    /// Entries that failed to decode and remain in the inbox.
     pub rejected: Vec<Error>,
 }
 

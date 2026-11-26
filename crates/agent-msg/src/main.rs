@@ -166,14 +166,14 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Print and remove your pending messages.
+    /// Read pending messages; without `--peek`, remove them from the inbox.
     Inbox {
-        /// Most messages to take.
+        /// Maximum messages to read; ordinary inbox removes them, while `--peek` leaves them queued.
         #[arg(long, default_value = "50")]
         max: NonZeroUsize,
         /// Print `{"messages": [...], "rejected": [...]}` instead of plain
         /// text, for callers that parse the output (e.g. the opencode
-        /// plugin). Still pops: use `--count` for a non-destructive peek.
+        /// plugin). Still pops unless `--peek` is set.
         #[arg(long, conflicts_with = "count")]
         json: bool,
         /// Print the number of pending messages without removing anything,
@@ -181,6 +181,12 @@ enum Cmd {
         /// them (the opencode plugin's idle path does this).
         #[arg(long)]
         count: bool,
+        /// Read and display pending messages without removing them.
+        #[arg(long, conflicts_with_all = ["count", "dead", "in_flight"])]
+        peek: bool,
+        /// Peek at a lead's queue by its full verified server:workspace:tab address.
+        #[arg(long = "as", value_name = "ADDRESS", requires = "peek")]
+        as_address: Option<relay_core::Address>,
         /// Print your dead letters (messages whose redeliveries ran out)
         /// instead of popping, oldest first, and leave them where they are.
         #[arg(long, conflicts_with_all = ["count", "json"])]
@@ -540,6 +546,8 @@ fn core_flags(cli: &Cli) -> relay_core::config::CoreFlags {
 pub(crate) type BoxError = Box<dyn std::error::Error>;
 
 #[implements("FR-071-AC-12")]
+#[implements("FR-012-AC-6")]
+#[implements("FR-012-AC-7")]
 fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxError> {
     let redial = retry::Redial::new(&settings.url.value, &settings.prefix.value);
     let mut out = io::stdout().lock();
@@ -782,6 +790,41 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
             }
         }
         Cmd::Inbox {
+            peek: true,
+            max,
+            json,
+            as_address,
+            ..
+        } => {
+            let name = inbox_peek_target(
+                &mut relay,
+                &redial,
+                as_address.as_ref(),
+                &settings.machine.value,
+            )?;
+            let peeked = relay.peek_inbox(&name, max)?;
+            if json {
+                let report = InboxReport::from_peek(&peeked, &display_book(&mut relay, &redial));
+                json::write_line(&mut out, &report)?;
+            } else {
+                if peeked.messages.is_empty() && peeked.rejected.is_empty() {
+                    writeln!(out, "inbox empty")?;
+                }
+                let book = display_book(&mut relay, &redial);
+                for message in &peeked.messages {
+                    writeln!(
+                        out,
+                        "{} {}",
+                        clock(message.sent_at_ms),
+                        book.render(message)
+                    )?;
+                }
+                for error in &peeked.rejected {
+                    eprintln!("agent-msg: unreadable inbox entry: {error}");
+                }
+            }
+        }
+        Cmd::Inbox {
             in_flight: true, ..
         } => {
             let backlog = relay.backlog()?;
@@ -836,11 +879,18 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
             writeln!(out, "{n}")?;
         }
         Cmd::Inbox {
+            as_address: Some(_),
+            peek: false,
+            ..
+        } => return Err("--as is only valid with --peek".into()),
+        Cmd::Inbox {
             max,
             json,
             count: false,
             dead: false,
             in_flight: false,
+            peek: false,
+            as_address: None,
         } => {
             let name = me(None, &mut relay, &settings.machine.value)?;
             let popped = relay.pop_inbox(&name, max)?;
@@ -1197,6 +1247,32 @@ fn me(
             "no verified lead location; run the genuine terminal session in Herdr (Codex requires --no-daemon)"
                 .into(),
         ),
+    }
+}
+
+/// Resolves a peek target from its exact address in the verified directory;
+/// without `--as`, it uses this invocation's verified lead identity.
+#[implements("FR-012-AC-7")]
+fn inbox_peek_target(
+    relay: &mut Relay,
+    redial: &retry::Redial,
+    address: Option<&relay_core::Address>,
+    machine: &MachineName,
+) -> Result<AgentName, BoxError> {
+    let Some(address) = address else {
+        return me(None, relay, machine);
+    };
+    match retry::read(relay, redial, |r| Ok(r.directory_recipient(address)?))? {
+        relay_core::DirectoryRead::Unique(recipient) => Ok(recipient.registration.name),
+        relay_core::DirectoryRead::Unavailable => {
+            Err(format!("verified directory for {} is unavailable", address.server()).into())
+        }
+        relay_core::DirectoryRead::Absent => {
+            Err(format!("no lead at verified address {address}").into())
+        }
+        relay_core::DirectoryRead::Ambiguous => {
+            Err(format!("verified address {address} is ambiguous").into())
+        }
     }
 }
 

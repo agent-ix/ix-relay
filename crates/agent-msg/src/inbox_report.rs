@@ -1,10 +1,11 @@
-//! The JSON shape `agent-msg inbox --json` prints: a stable CLI output struct,
-//! not `relay_core::Message` itself, so a caller that parses it (the opencode
-//! plugin) is insulated from the storage type's own fields and only has to
-//! trust the one field it actually needs (`rendered`) instead of re-deriving
-//! the sender-line format itself.
+//! The JSON shape `agent-msg inbox --json` and `inbox --peek --json` print: a
+//! stable CLI output struct, not `relay_core::Message` itself, so a caller
+//! that parses it (the opencode plugin) is insulated from the storage type's
+//! own fields and only has to trust the one field it actually needs
+//! (`rendered`) instead of re-deriving the sender-line format itself.
 
-use relay_core::{AddressBook, Error, Message, PopResult};
+use ix_trace_rs::implements;
+use relay_core::{AddressBook, Error, Message, PeekResult, PopResult};
 use serde::Serialize;
 
 /// One message as the CLI reports it.
@@ -40,27 +41,42 @@ impl InboxMessage {
     }
 }
 
-/// What `inbox --json` prints: the messages that decoded cleanly, and a
-/// human-readable line per entry that didn't (so it's at least visible in the
-/// JSON a caller parses, not only on stderr).
+/// What `inbox --json` and `inbox --peek --json` print: the messages that
+/// decoded cleanly, and a human-readable line per entry that didn't (so it's
+/// at least visible in the JSON a caller parses, not only on stderr).
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct InboxReport {
-    /// Delivered messages, oldest first.
+    /// Messages returned by the inbox read, oldest first.
     pub messages: Vec<InboxMessage>,
-    /// One `Display` line per entry that was popped but failed to decode.
+    /// One `Display` line per entry that failed to decode.
     pub rejected: Vec<String>,
 }
 
 impl InboxReport {
     /// The report for `popped`, with senders shown per `book`.
+    #[implements("FR-049-AC-1")]
     pub fn new(popped: &PopResult, book: &AddressBook) -> Self {
+        Self::from_parts(&popped.messages, &popped.rejected, book)
+    }
+
+    /// The report for `peeked`, with senders shown per `book`.
+    #[implements("FR-012-AC-6")]
+    pub fn from_peek(peeked: &PeekResult, book: &AddressBook) -> Self {
+        Self::from_parts(&peeked.messages, &peeked.rejected, book)
+    }
+
+    #[implements("FR-012-AC-6", "FR-049-AC-1")]
+    fn from_parts(
+        messages: &[relay_core::receipts::InboxEntry],
+        rejected: &[Error],
+        book: &AddressBook,
+    ) -> Self {
         Self {
-            messages: popped
-                .messages
+            messages: messages
                 .iter()
                 .map(|m| InboxMessage::new(m, book))
                 .collect(),
-            rejected: popped.rejected.iter().map(Error::to_string).collect(),
+            rejected: rejected.iter().map(Error::to_string).collect(),
         }
     }
 }
