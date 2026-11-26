@@ -1,5 +1,6 @@
 //! Location identities backed by genuine harness session associations.
 use crate::{budget::Budget, hook::Event};
+use ix_trace_rs::implements;
 use relay_core::{AgentName, IdentityCommit, MachineName, Relay, SessionId, SessionProbe};
 use relay_ops::enrollment;
 use std::time::Duration;
@@ -91,7 +92,8 @@ fn process_registration(
 
 /// A Claude CLI inherits its harness as an ancestor. Match that process's own
 /// record and start time; inherited pane variables never establish ownership.
-fn caller_claude_session() -> Option<SessionId> {
+#[implements("FR-074-AC-1")]
+fn caller_claude_record() -> Option<claude_wire::SessionRecord> {
     use herdr_cli::ProcessRunner;
     let output = herdr_cli::RealProcessRunner
         .run(
@@ -113,8 +115,12 @@ fn caller_claude_session() -> Option<SessionId> {
             Some((pid, (parent, fields.collect::<Vec<_>>().join(" "))))
         })
         .collect();
-    let home = std::env::var_os("HOME")?;
-    let directory = std::path::PathBuf::from(home).join(".claude/sessions");
+    let directory = std::env::var_os("IX_RELAY_CLAUDE_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".claude"))
+        })?
+        .join("sessions");
     let mut pid = std::process::id();
     for _ in 0..32 {
         let (parent, _mac_start) = processes.get(&pid)?;
@@ -131,7 +137,7 @@ fn caller_claude_session() -> Option<SessionId> {
                 let same_start =
                     record.proc_start == relay_core::socket_status::proc_start_time(pid);
                 if record.pid == pid && same_start {
-                    return record.session_id.parse().ok();
+                    return Some(record);
                 }
             }
         }
@@ -141,6 +147,91 @@ fn caller_claude_session() -> Option<SessionId> {
         pid = *parent;
     }
     None
+}
+
+fn caller_claude_session() -> Option<SessionId> {
+    caller_claude_record()?.session_id.parse().ok()
+}
+
+/// Verify the explicit placement recovery from the caller's own live socket
+/// record and the operator-named Herdr pane.
+#[implements("FR-074-AC-1")]
+pub fn claim_socket_placement(
+    relay: &mut Relay,
+    machine: &MachineName,
+    address: &relay_core::Address,
+    pane: &relay_core::PaneId,
+) -> Result<relay_core::Registration, Box<dyn std::error::Error>> {
+    let record = caller_claude_record().ok_or("caller has no verified Claude process record")?;
+    #[cfg(unix)]
+    let socket_ok = caller_socket_is_private(&record);
+    #[cfg(not(unix))]
+    let socket_ok = false;
+    if !matches!(record.verdict(), claude_wire::RecordVerdict::Supported) || !socket_ok {
+        return Err("caller session does not have its own verified live inbox socket".into());
+    }
+    let session: SessionId = record.session_id.parse()?;
+    enrollment::claim_socket_placement(
+        relay,
+        machine,
+        &session,
+        address,
+        pane,
+        SESSION_START_HERDR_BUDGET,
+    )
+}
+
+#[cfg(unix)]
+#[implements("FR-074-AC-1")]
+fn caller_socket_is_private(record: &claude_wire::SessionRecord) -> bool {
+    use std::os::unix::{
+        ffi::OsStrExt,
+        fs::{FileTypeExt, MetadataExt},
+    };
+    let Some(path) = record.messaging_socket_path.as_ref() else {
+        return false;
+    };
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return false;
+    };
+    let Ok(home_meta) = std::fs::metadata(home) else {
+        return false;
+    };
+    let uid = home_meta.uid();
+    let Some(file_name) = path.file_name() else {
+        return false;
+    };
+    if file_name.as_bytes() != format!("{}.sock", record.pid).as_bytes() {
+        return false;
+    }
+    let mut roots = Vec::new();
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
+        roots.push(std::path::PathBuf::from(runtime).join("cc-socks"));
+    }
+    #[cfg(target_os = "macos")]
+    roots.push(std::path::PathBuf::from("/tmp/cc-socks"));
+    #[cfg(target_os = "linux")]
+    roots.push(std::path::PathBuf::from(format!("/tmp/cc-socks-{uid}")));
+    let Some(root) = roots
+        .iter()
+        .find(|root| path.parent() == Some(root.as_path()))
+    else {
+        return false;
+    };
+    let Ok(root_meta) = std::fs::symlink_metadata(root) else {
+        return false;
+    };
+    if root_meta.file_type().is_symlink()
+        || !root_meta.is_dir()
+        || root_meta.mode() & 0o077 != 0
+        || root_meta.uid() != uid
+    {
+        return false;
+    }
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    meta.file_type().is_socket() && meta.uid() == uid && meta.mode() & 0o077 == 0
 }
 
 /// Interactive commands heal their own enrollment from live session evidence.

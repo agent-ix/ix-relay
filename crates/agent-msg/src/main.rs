@@ -289,6 +289,12 @@ enum Cmd {
         /// Harness kind.
         #[arg(long, default_value = "manual")]
         kind: String,
+        /// Explicitly claim a full server:workspace:tab address for this live Claude socket.
+        #[arg(long, requires = "pane")]
+        claim: Option<String>,
+        /// Herdr pane id named by the operator (for example w1:p1).
+        #[arg(long, requires = "claim")]
+        pane: Option<String>,
     },
     /// Print this session's verified server:workspace:tab identity.
     /// An unverified session prints not a lead; aliases never supply identity.
@@ -1096,7 +1102,22 @@ fn run(cli: Cli, settings: &relay_core::config::CoreSettings) -> Result<(), BoxE
                 }
             }
         }
-        Cmd::Register { kind } => {
+        Cmd::Register { kind, claim, pane } => {
+            if let Some(address) = claim {
+                let pane = pane
+                    .ok_or("--pane is required with --claim")?
+                    .parse::<PaneId>()?;
+                let address = relay_ops::enrollment::validate_address(&address)?;
+                let registration = identity::claim_socket_placement(
+                    &mut relay,
+                    &settings.machine.value,
+                    &address,
+                    &pane,
+                )?;
+                let address = display_book(&mut relay, &redial).label(&registration.name);
+                writeln!(out, "claimed {address}")?;
+                return Ok(());
+            }
             let _ = kind;
             let name = me(None, &mut relay, &settings.machine.value)?;
             let address = display_book(&mut relay, &redial).label(&name);

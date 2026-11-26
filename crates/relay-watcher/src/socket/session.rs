@@ -16,6 +16,7 @@ use std::{
 };
 
 use claude_wire::{KNOWN_PEER_PROTOCOL, MIN_VERSION, RecordVerdict, SessionRecord};
+use ix_trace_rs::implements;
 
 /// The most bytes read from one registry file.
 const MAX_RECORD_BYTES: u64 = 64 * 1024;
@@ -40,6 +41,24 @@ pub trait Procs {
     fn gone(&self, pid: u32, started: &str) -> bool {
         self.start_time(pid).as_deref() != Some(started)
     }
+}
+
+/// Whether this still-live process's registry record now names another session,
+/// for example after `/clear` changed `sessionId` in the same process. An unreadable,
+/// malformed or reused-pid record is inconclusive and returns false; only a matching
+/// pid and start time can prove that the old session stopped belonging to this process.
+#[implements("FR-044-AC-22")]
+pub fn session_changed(sessions_dir: &Path, session_id: &str, pid: u32, proc_start: &str) -> bool {
+    let Ok(file) = fs::File::open(sessions_dir.join(format!("{pid}.json"))) else {
+        return false;
+    };
+    let Ok(record) = serde_json::from_reader::<_, SessionRecord>(file.take(MAX_RECORD_BYTES))
+    else {
+        return false;
+    };
+    record.pid == pid
+        && record.proc_start.as_deref() == Some(proc_start)
+        && record.session_id != session_id
 }
 
 /// Operating-system process identity, matching Claude Code's session records.

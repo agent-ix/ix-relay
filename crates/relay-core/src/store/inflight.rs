@@ -49,6 +49,7 @@
 
 use std::{collections::BTreeMap, fmt, num::NonZeroUsize, sync::LazyLock, time::Duration};
 
+use ix_trace_rs::implements;
 use redis::Value;
 
 use super::{BudgetPopResult, LOG_CAP, PopResult, Relay, decode_entries};
@@ -542,6 +543,28 @@ impl Relay {
         batch: BatchId,
         popper: Popper,
     ) -> Result<usize> {
+        self.requeue_batch_with_marker(agent, batch, popper, false)
+    }
+
+    /// Requeues a batch after its receiver disappeared, marking every entry as
+    /// redelivered because transcript confirmation may have been unavailable.
+    #[implements("FR-044-AC-22")]
+    pub fn redeliver_batch(
+        &mut self,
+        agent: &AgentName,
+        batch: BatchId,
+        popper: Popper,
+    ) -> Result<usize> {
+        self.requeue_batch_with_marker(agent, batch, popper, true)
+    }
+
+    fn requeue_batch_with_marker(
+        &mut self,
+        agent: &AgentName,
+        batch: BatchId,
+        popper: Popper,
+        redelivered: bool,
+    ) -> Result<usize> {
         let moved: i64 = redis::cmd("EVAL")
             .arg(REQUEUE_SCRIPT.as_str())
             .arg(3)
@@ -552,6 +575,11 @@ impl Relay {
             .arg(agent.as_str())
             .arg(LOG_CAP)
             .arg(popper.letter().to_string())
+            .arg(if redelivered {
+                "receiver_gone"
+            } else {
+                "definitely_not_sent"
+            })
             .arg(self.keys.receipt_stream_key())
             .arg(self.keys.receipt_meta_key())
             .query(&mut self.conn)?;

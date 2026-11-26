@@ -22,6 +22,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use ix_trace_rs::implements;
 use relay_core::ScanCut;
 use relay_core::hook_skips;
 use relay_core::moves::{MoveEvent, MoveKind};
@@ -1899,6 +1900,7 @@ fn registrations(f: &Facts, up: &RedisUp, checks: &mut Vec<Check>) {
     }
 }
 
+#[implements("FR-074-AC-1")]
 fn registration_problems(
     f: &Facts,
     up: &RedisUp,
@@ -1921,6 +1923,24 @@ fn registration_problems(
         return;
     }
     if *machine != f.machine {
+        return;
+    }
+    if reg.kind == relay_core::CLAUDE_OPERATOR_DISPLACED_KIND {
+        let address = reg
+            .full_address()
+            .map_or_else(|| "the prior address".to_owned(), |a| a.to_string());
+        let pane = reg
+            .herdr_pane
+            .as_ref()
+            .map_or_else(|| "<pane-id>".to_owned(), ToString::to_string);
+        checks.push(Check::warn(
+            Family::Registration,
+            Code::RegistrationPaneGone,
+            Some(name),
+            format!("{name} handed off its placement at {address}; its queued mail is being forwarded"),
+            "the launcher registration no longer owns this address",
+            &format!("from the resumed Claude session, run `agent-msg register --claim {address} --pane {pane}`"),
+        ));
         return;
     }
     let Some(pane) = reg.herdr_pane.as_ref() else {

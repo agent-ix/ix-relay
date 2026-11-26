@@ -71,9 +71,12 @@ original agent to become idle.
    and the verified resume ID in the original pane. Quote argv safely; preserve
    cwd and environment. Never clear `AGENT_MSG_NAME`, inject the helper's pane
    variables, or fabricate registration. Verify the new process has the flag.
-5. After the original Codex is ready, submit one recovery-verification prompt
-   using `herdr agent prompt <original-pane>`. SessionStart can occur on this
-   first prompt rather than the welcome screen. Ask the resumed agent to record
+5. After the original Codex is ready, check `agent-msg find <address>` from the
+   helper. If the resumed session is registered, send the verification request
+   through `agent-msg send <full-address>`. If it is not registered yet, use one
+   `herdr agent prompt <original-pane>` to start the Codex turn so SessionStart
+   can register it; Codex has no inbox socket, but never use Herdr prompting for
+   a session whose inbox socket can receive mail. Ask the resumed agent to record
    `agent-msg whoami --json`, its genuine `CODEX_THREAD_ID`, and current Herdr
    session association in the private receipt file. Resume may produce a new
    harness session ID; verify that exact genuine ID, not a guessed old ID.

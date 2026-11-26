@@ -2697,6 +2697,7 @@ dependencies = [
  "host-probe",
  "ix-cli-kit",
  "ix-trace-rs",
+ "jiff",
  "libc",
  "nix",
  "proptest",

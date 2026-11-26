@@ -11,6 +11,7 @@ mod support;
 use std::time::Duration;
 use std::{collections::BTreeSet, num::NonZeroUsize};
 
+use ix_trace_rs::trace;
 use relay_core::{Place, Registration, Relay};
 
 fn test_url() -> Option<String> {
@@ -45,6 +46,7 @@ fn assert_json_keys(value: &serde_json::Value, expected: &[&str]) {
 
 /// Trace: FR-056-AC-1, FR-056-AC-2, FR-056-AC-3, FR-056-AC-4, FR-056-AC-5, FR-056-AC-7
 #[test]
+#[trace("FR-056-AC-1")]
 fn tc_056_status_commands_parse_arguments_and_report_the_collection_contract() {
     let Some(url) = test_url() else { return };
     let prefix = format!("test:{}:program-review-status:", std::process::id());
@@ -71,6 +73,16 @@ fn tc_056_status_commands_parse_arguments_and_report_the_collection_contract() {
             }),
             last_seen_ms: 1,
         })
+        .unwrap();
+    let hub: relay_core::MachineName = "hub".parse().unwrap();
+    let code_name = relay_core::AgentName::for_session(&hub, &"s1".parse().unwrap());
+    let live_code = relay
+        .agent(&code_name)
+        .unwrap()
+        .expect("registered code lead");
+    let revision = relay.begin_directory_observation(&hub).unwrap();
+    relay
+        .publish_directory(&hub, revision, &[live_code])
         .unwrap();
 
     for target in ["hub:EA:missing", "hub:EA:code,hub:EA:code", "hub:EA:sender"] {
@@ -100,13 +112,11 @@ fn tc_056_status_commands_parse_arguments_and_report_the_collection_contract() {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     );
-    let hub: relay_core::MachineName = "hub".parse().unwrap();
-    let code_name = relay_core::AgentName::for_session(&hub, &"s1".parse().unwrap());
     let sender_name = relay_core::AgentName::for_session(&hub, &"sender-session".parse().unwrap());
     let all_requested = all["requested"].as_array().unwrap();
     assert!(all_requested.len() <= 128);
-    assert_eq!(all_requested.len(), 2);
-    assert!(all_requested.contains(&serde_json::json!("review-lane")));
+    assert_eq!(all_requested.len(), 1);
+    assert!(!all_requested.contains(&serde_json::json!("review-lane")));
     assert!(all_requested.contains(&serde_json::json!(code_name.as_str())));
     assert!(!all_requested.contains(&serde_json::json!(sender_name.as_str())));
     assert!(
@@ -122,20 +132,18 @@ fn tc_056_status_commands_parse_arguments_and_report_the_collection_contract() {
         assert!(delivery["outcome"].as_str().is_some());
     }
     let review_lane: relay_core::AgentName = "review-lane".parse().unwrap();
-    for recipient in [&code_name, &review_lane] {
-        let notice = relay
-            .pop_inbox(recipient, NonZeroUsize::new(1).unwrap())
-            .unwrap();
-        let message = notice.messages.first().expect("one queued status notice");
-        assert!(message.text.contains(all_request_id), "{}", message.text);
-        assert!(
-            message
-                .text
-                .contains(&format!("agent-msg status-reply {all_request_id}")),
-            "{}",
-            message.text
-        );
-    }
+    let notice = relay
+        .pop_inbox(&code_name, NonZeroUsize::new(1).unwrap())
+        .unwrap();
+    let message = notice.messages.first().expect("one queued status notice");
+    assert!(message.text.contains(all_request_id), "{}", message.text);
+    assert!(
+        message
+            .text
+            .contains(&format!("agent-msg status-reply {all_request_id}")),
+        "{}",
+        message.text
+    );
 
     let requested_args = ["status-request", "hub:EA:code"];
     let requested = run(&requested_args, "hub:EA:sender", &url, &prefix);

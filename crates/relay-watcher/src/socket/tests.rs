@@ -19,6 +19,7 @@ use std::{
 use claude_wire::{
     ControlLine, DriftReason, Ignored, TranscriptMatch, Verdict, parse_control_line,
 };
+use ix_trace_rs::trace;
 use relay_core::{
     BatchId, PaneId, SessionId, receipts::DeliveryEvidence, socket_status::SocketStatus,
 };
@@ -107,7 +108,7 @@ impl Home {
             dedupe_window: Duration::from_secs(35),
             held_quiet: Duration::from_secs(600),
             rebind_start: Duration::from_millis(50),
-            max_hold: Duration::from_secs(600),
+            long_held_notice_after: Duration::from_secs(600),
             tick_budget: Duration::from_secs(30),
             delivered_grace: Duration::from_secs(600),
             dead_note_age: Duration::from_secs(600),
@@ -287,11 +288,15 @@ impl Rig {
     }
 
     fn send(&self, text: &str) -> Result<(), SocketError> {
+        self.send_batch(1, text)
+    }
+
+    fn send_batch(&self, batch: u64, text: &str) -> Result<(), SocketError> {
         self.deliverer
             .deliver(
                 &BatchTarget {
                     kind: "claude",
-                    batch: BatchId::new(1),
+                    batch: BatchId::new(batch),
                     lead: "ea",
                     session: Some(&self.session),
                     senders: "hub:EA:1",
@@ -2679,7 +2684,9 @@ fn tc_044_18_pending_consumption_survives_watcher_restart_without_an_approval_ho
 /// the operator is told once; it is acknowledged when the transcript shows it.
 #[test]
 fn tc_044_18_a_long_unconsumed_post_is_kept_and_reported_once() {
-    let rig = Rig::tuned(Act::Silent, |c| c.max_hold = Duration::from_millis(20));
+    let rig = Rig::tuned(Act::Silent, |c| {
+        c.long_held_notice_after = Duration::from_millis(20)
+    });
     assert!(matches!(rig.send("pending"), Err(SocketError::Pending(_))));
     for _ in 0..3 {
         let got = rig.deliverer.settle();
@@ -2718,6 +2725,7 @@ fn tc_044_18_a_long_unconsumed_post_is_kept_and_reported_once() {
 /// does not show the message: the batch goes back to the inbox. One it does show is
 /// acknowledged.
 #[test]
+#[trace("FR-044-AC-22")]
 fn tc_044_22_a_post_whose_receiver_is_gone_is_queued_again_unless_consumed() {
     for reused in [false, true] {
         let (rig, procs) = rig_with_procs(Act::Silent);
@@ -2725,10 +2733,34 @@ fn tc_044_22_a_post_whose_receiver_is_gone_is_queued_again_unless_consumed() {
         assert!(without_renewals(rig.deliverer.settle()).is_empty());
         procs.set(4242, reused.then_some("2000"));
         let decision = only(without_renewals(rig.deliverer.settle()));
-        assert_eq!(decision.action, SettleAction::Requeue, "reused {reused}");
+        assert_eq!(decision.action, SettleAction::Redeliver, "reused {reused}");
         assert!(decision.why.contains("receiver_gone"), "{decision:?}");
         assert!(decision.dead_letter_reason.is_none());
     }
+    // `/clear` can replace the session id in the same live process. The old socket
+    // session no longer receives, so its uncertain batch is redelivered.
+    let (rig, _procs) = rig_with_procs(Act::Silent);
+    assert!(matches!(
+        rig.send_batch(1, "pending before clear one"),
+        Err(SocketError::Pending(_))
+    ));
+    assert!(matches!(
+        rig.send_batch(2, "pending before clear two"),
+        Err(SocketError::Pending(_))
+    ));
+    rig.home
+        .record(4242, "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb", |_| {});
+    let decisions = without_renewals(rig.deliverer.settle());
+    assert_eq!(
+        decisions
+            .iter()
+            .map(|decision| (decision.action, decision.batch.get()))
+            .collect::<Vec<_>>(),
+        [(SettleAction::Redeliver, 2), (SettleAction::Redeliver, 1)],
+        "newest batch is requeued first so the oldest lands at the inbox front"
+    );
+    assert!(decisions.iter().all(|d| d.why.contains("receiver_gone")));
+
     let (rig, procs) = rig_with_procs(Act::Silent);
     assert!(matches!(rig.send("read"), Err(SocketError::Pending(_))));
     let id = rig.claude.received()[0]["msg_id"]
@@ -2815,7 +2847,7 @@ fn tc_044_23_an_old_post_is_adopted_and_judged_by_its_whole_transcript() {
         }
         dead_status(&home, vec![batch], vec![]);
         let mut config = home.config();
-        config.max_hold = Duration::from_secs(30 * 60);
+        config.long_held_notice_after = Duration::from_secs(30 * 60);
         let restarted = SocketDeliverer::start(config, Box::new(FakeProcs::with(&[4242])));
         assert!(restarted.open("ea"), "adopted");
         let got = restarted.settle();
@@ -3172,17 +3204,16 @@ fn tc_044_05_a_denial_after_the_lease_would_have_expired_dead_letters_once_and_n
 /// Tracing: TC-044-05
 /// ACs: FR-044-AC-5
 ///
-/// Nobody answers the prompt: the batch is posted once and stays in flight on renewed
-/// leases, and at the maximum hold it is dead-lettered with the reason `hold_expired`
-/// (in the status file, never silent), one notification is shown, and nothing more is
-/// posted for it.
+/// Nobody answers the prompt: after the former 30-minute expiry point, a live receiver's
+/// batch remains in flight, is not posted again or dead-lettered, and stays renewable.
 #[test]
-fn tc_044_05_a_prompt_nobody_answers_is_posted_once_and_dead_lettered_at_the_maximum_hold() {
-    let Some(mut w) = Watching::new("hold-expires") else {
+#[trace("FR-044-AC-5")]
+fn tc_044_05_a_prompt_nobody_answers_stays_queued_past_the_old_expiry() {
+    let Some(mut w) = Watching::new("hold-stays") else {
         return;
     };
     let rig = Rig::tuned(Act::Receipt("held", None), |c| {
-        c.max_hold = Duration::from_millis(300);
+        c.long_held_notice_after = Duration::from_millis(300);
     });
     let Rig {
         home,
@@ -3195,13 +3226,14 @@ fn tc_044_05_a_prompt_nobody_answers_is_posted_once_and_dead_lettered_at_the_max
     w.send("first");
     w.tick(&routed);
     assert_eq!(w.in_flight(), 1);
-    w.tick_until(&routed, "the hold expires", |w| w.dead() == 1);
+    thread::sleep(Duration::from_millis(350));
+    w.tick(&routed);
     for _ in 0..5 {
         w.tick(&routed);
     }
     assert_eq!(
         (w.dead(), w.in_flight(), w.inbox()),
-        (1, 0, 0),
+        (0, 1, 0),
         "{:?}",
         w.log
     );
@@ -3213,15 +3245,14 @@ fn tc_044_05_a_prompt_nobody_answers_is_posted_once_and_dead_lettered_at_the_max
     let told = herdr.notified.lock().unwrap().clone();
     assert!(
         told.iter()
-            .filter(|(t, _)| t.contains("never approved"))
+            .filter(|(t, _)| t.contains("has not read"))
             .count()
             == 1,
         "{told:?}"
     );
     let status = SocketStatus::read(&home.status()).unwrap();
-    assert_eq!(status.dead_lettered.len(), 1, "{status:?}");
-    assert_eq!(status.dead_lettered[0].reason, "hold_expired");
-    assert!(status.held_batches.is_empty());
+    assert!(status.dead_lettered.is_empty(), "{status:?}");
+    assert_eq!(status.held_batches.len(), 1, "{status:?}");
 }
 
 /// Tracing: TC-044-05
@@ -4011,7 +4042,7 @@ fn tc_044_11_a_failing_write_is_retried_after_a_growing_wait() {
 fn tc_044_12_a_delivered_message_with_no_transcript_line_is_acked_after_the_grace() {
     let rig = Rig::tuned(Act::Receipt("held", None), |c| {
         c.delivered_grace = Duration::from_millis(200);
-        c.max_hold = Duration::from_millis(100); // shorter than the grace: delivered wins
+        c.long_held_notice_after = Duration::from_millis(100); // notice only; delivered wins
     });
     assert!(matches!(rig.send("one"), Err(SocketError::Held(_))));
     receipt(&rig, status_of(&rig, "delivered", None, json!({})));
@@ -4310,7 +4341,7 @@ fn tc_044_12_an_approved_batch_adopted_after_a_restart_continues_its_grace() {
     held.delivered_since_ms = Some(now - 50);
     dead_status(&home, vec![held], vec![]);
     let mut config = home.config();
-    config.max_hold = Duration::from_millis(400);
+    config.long_held_notice_after = Duration::from_millis(400);
     config.delivered_grace = Duration::from_millis(900);
     let d = SocketDeliverer::start(config, Box::new(FakeProcs::with(&[])));
     let mut acked = None;
@@ -4697,7 +4728,7 @@ fn tc_044_11_owed_decisions_are_persisted_and_applied_after_a_restart() {
     drop(d);
     as_dead_watcher(&home);
     let mut config = home.config();
-    config.max_hold = Duration::from_secs(600);
+    config.long_held_notice_after = Duration::from_secs(600);
     let d2 = SocketDeliverer::start(config, Box::new(FakeProcs::with(&[4242])));
     let again = d2
         .settle()

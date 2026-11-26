@@ -27,6 +27,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use ix_trace_rs::implements;
 use relay_core::moves::PaneReplaced;
 use relay_core::{AgentName, MachineName, PaneId, PaneRef, Registration, Relay, SessionId};
 
@@ -85,19 +86,28 @@ pub fn judge(
 }
 
 /// Whether Herdr currently confirms the claimed pane and its workspace/tab for
-/// this exact harness session. A missing Herdr session id is unknown evidence,
-/// not confirmation.
+/// this exact harness session, or the operator explicitly claimed a distinct
+/// canonical Claude socket session there. A missing ordinary Herdr session id
+/// is unknown evidence, not confirmation.
 #[must_use]
+#[implements("FR-074-AC-1")]
 pub fn pane_has_current_location(reg: &Registration, layout: &Layout) -> bool {
     let (Some(pane), Some(session)) = (reg.herdr_pane.as_ref(), reg.session_id.as_ref()) else {
         return false;
     };
-    layout
+    let pane_ids_match = layout
         .places
         .get(pane)
         .and_then(|place| place.herdr_ids.as_ref())
-        .is_some_and(|ids| &ids.session_id == session && &ids.pane == pane)
-        && matches!(layout.sessions.get(pane), Some(Some(live)) if live == session)
+        .is_some_and(|ids| {
+            &ids.pane == pane
+                && (&ids.session_id == session
+                    || (reg.kind == relay_core::CLAUDE_OPERATOR_CLAIM_KIND
+                        && reg.name == relay_core::AgentName::for_session(&reg.machine, session)))
+        });
+    pane_ids_match
+        && (reg.kind == relay_core::CLAUDE_OPERATOR_CLAIM_KIND
+            || matches!(layout.sessions.get(pane), Some(Some(live)) if live == session))
 }
 
 /// What was already reported, so a condition that lasts is logged once per

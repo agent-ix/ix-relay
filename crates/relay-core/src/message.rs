@@ -1,5 +1,6 @@
 //! What travels on the bus and what the registry stores.
 
+use ix_trace_rs::implements;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
@@ -156,15 +157,20 @@ fn forwarded_time(sent_at_ms: i64) -> String {
 
 impl Registration {
     /// Classifies location evidence without treating absence of a
-    /// contradiction as verification.
+    /// contradiction as verification. An operator claim may bind a distinct
+    /// canonical Claude session to the explicitly named, verified pane.
     #[must_use]
+    #[implements("FR-074-AC-1")]
     pub fn placement_state(&self) -> PlacementState<'_> {
         match (&self.herdr_pane, &self.session_id, &self.place) {
             (None, _, None) => PlacementState::Unplaced,
             (Some(pane), _, None) => PlacementState::Claimed { pane },
             (Some(_), Some(session), Some(place))
                 if place.herdr_ids.as_ref().is_some_and(|ids| {
-                    &ids.session_id == session && Some(&ids.pane) == self.herdr_pane.as_ref()
+                    Some(&ids.pane) == self.herdr_pane.as_ref()
+                        && (&ids.session_id == session
+                            || (self.kind == CLAUDE_OPERATOR_CLAIM_KIND
+                                && self.name == AgentName::for_session(&self.machine, session)))
                 }) =>
             {
                 PlacementState::Verified { place }
@@ -176,10 +182,9 @@ impl Registration {
         }
     }
 
-    /// Returns only a place carrying Herdr's stable location and the same
-    /// harness session ID as the registration. The watcher creates this
-    /// session-bound evidence only after joining the exact session to the
-    /// claimed pane in a current Herdr layout.
+    /// Returns only a place carrying Herdr's stable location and either the
+    /// registration's harness session ID or an explicit operator placement
+    /// claim. Ordinary watcher enrollment is session-bound to the current layout.
     #[must_use]
     pub fn verified_place(&self) -> Option<&Place> {
         match self.placement_state() {
@@ -232,15 +237,23 @@ pub enum PlacementState<'a> {
     },
 }
 
-/// The harness kind of a Claude Code lead: the only kind whose inbox socket the watcher
-/// tries (FR-054).
+/// The normal harness kind of a Claude Code lead (FR-054).
 pub const CLAUDE_KIND: &str = "claude";
 
+/// Harness marker for an explicit operator placement claim backed by the
+/// caller's own live Claude socket and a named, verified Herdr pane.
+pub const CLAUDE_OPERATOR_CLAIM_KIND: &str = "claude-operator-claimed";
+
+/// Marker for the former queue owner retained only until stranded mail moves.
+pub const CLAUDE_OPERATOR_DISPLACED_KIND: &str = "claude-operator-displaced";
+
 /// Whether the watcher tries Claude Code's inbox socket for a lead of harness `kind`
-/// (FR-054): `claude` does; any other value, an unknown or empty one included, does not.
+/// (FR-054): normal Claude registrations and explicit socket-backed operator claims do;
+/// unknown harness values do not.
 #[must_use]
+#[implements("FR-074-AC-1")]
 pub fn tries_socket(kind: &str) -> bool {
-    kind == CLAUDE_KIND
+    kind == CLAUDE_KIND || kind == CLAUDE_OPERATOR_CLAIM_KIND
 }
 
 /// A lead's entry in the registry: where it runs and what session it is.
@@ -269,8 +282,9 @@ pub struct Registration {
     /// Where the pane sits in Herdr (workspace and tab labels), when known:
     /// what `server:workspace:tab` addressing resolves against. A
     /// place is routable only when its stable Herdr identity is verified against
-    /// this registration's exact session and pane. Unverified records cannot
-    /// supply public identity or routing.
+    /// this registration's exact session and pane, or an explicit operator claim
+    /// names the pane for a distinct canonical Claude socket session. Unverified
+    /// records cannot supply public identity or routing.
     pub place: Option<Place>,
     /// When the lead last registered or, while its pane is alive in herdr, when
     /// `relay-watcher` last saw it there, Unix milliseconds (FR-042).
@@ -350,6 +364,7 @@ impl<'de> Deserialize<'de> for Registration {
 
 #[cfg(test)]
 mod tests {
+    use ix_trace_rs::trace;
     use proptest::prelude::Strategy;
 
     use super::*;
@@ -539,6 +554,40 @@ mod tests {
             PlacementState::Unverifiable { .. }
         ));
         assert!(reg.verified_place().is_none());
+    }
+
+    #[trace("FR-074-AC-1", "FR-074-AC-2")]
+    #[test]
+    fn an_operator_claim_is_socket_routable_at_its_explicit_pane() {
+        let machine: MachineName = "hub".parse().unwrap();
+        let session: SessionId = "background-job-session".parse().unwrap();
+        let pane: PaneId = "w1:p1".parse().unwrap();
+        let registration = Registration {
+            name: AgentName::for_session(&machine, &session),
+            machine,
+            kind: CLAUDE_OPERATOR_CLAIM_KIND.into(),
+            session_id: Some(session),
+            cwd: None,
+            herdr_pane: Some(pane.clone()),
+            place: Some(Place {
+                workspace: "EA".into(),
+                tab: "code".into(),
+                herdr_ids: Some(HerdrPlaceIds {
+                    workspace: "w1".parse().unwrap(),
+                    tab: "w1:t1".parse().unwrap(),
+                    pane,
+                    session_id: "launcher-session".parse().unwrap(),
+                    verified_at_ms: 10,
+                }),
+            }),
+            last_seen_ms: 20,
+        };
+        assert!(matches!(
+            registration.placement_state(),
+            PlacementState::Verified { .. }
+        ));
+        assert!(registration.verified_place().is_some());
+        assert!(tries_socket(&registration.kind));
     }
 
     #[test]

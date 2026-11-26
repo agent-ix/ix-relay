@@ -1,7 +1,8 @@
 -- KEYS: inflight, inbox, log
--- ARGV: batch id, lead name, log cap, popper letter
+-- ARGV: batch id, lead name, log cap, popper letter, requeue reason
 -- Moves the rows of exactly that batch, popped by that popper, back to the front of the inbox in their
--- original order, entries (and so redelivery counts) as they were, and wakes a
+-- original order, preserving redelivery counts for certain non-delivery and incrementing them
+-- when the receiver disappeared, and wakes a
 -- watcher on the log. Returns how many it moved, or -1 when a key is of the wrong
 -- type (nothing is changed then).
 if not (readable(KEYS[1], 'list') and readable(KEYS[2], 'list') and readable(KEYS[3], 'stream')) or not receipt_ready() then
@@ -13,9 +14,10 @@ local back, rows = {}, {}
 for _, row in ipairs(redis.call('LRANGE', KEYS[1], 0, -1)) do
     local id, who, deadline, entry = parse(row)
     if id == target and who == ARGV[4] then
-        receipt_append(entry, 'requeued', now, nil, 'definitely_not_sent')
+        receipt_append(entry, 'requeued', now, nil, ARGV[5])
         receipt_finish(entry, now, false)
-        back[#back + 1] = entry
+        local core, n = split_count(entry)
+        back[#back + 1] = core .. string.rep(' ', n + (ARGV[5] == 'receiver_gone' and 1 or 0))
         rows[#rows + 1] = row
     end
 end

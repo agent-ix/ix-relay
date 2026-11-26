@@ -1,6 +1,10 @@
 //! Session-bound enrollment from current Herdr topology. No names or aliases.
 use crate::find::{self, MachineView, RealFindHerdr};
-use relay_core::{Address, AgentName, MachineName, Registration, Relay, SessionId};
+use ix_trace_rs::implements;
+use relay_core::{
+    Address, AgentName, CLAUDE_OPERATOR_CLAIM_KIND, MachineName, PaneId, Registration, Relay,
+    SessionId,
+};
 use std::time::Duration;
 
 /// Failure to verify a live lead or enroll its session.
@@ -124,6 +128,78 @@ pub fn current(
         return Err("multiple live leads share this tab; use separate tabs".into());
     }
     Ok(found.clone())
+}
+
+/// Claim an explicitly named live pane for a distinct, socket-backed Claude
+/// session. The operator's pane/address choice is the attachment assertion;
+/// this function verifies both endpoints and never infers a window-to-job link.
+#[implements("FR-074-AC-1")]
+pub fn claim_socket_placement(
+    relay: &mut Relay,
+    machine: &MachineName,
+    session: &SessionId,
+    address: &Address,
+    pane: &PaneId,
+    timeout: Duration,
+) -> Result<Registration, EnrollmentError> {
+    if address.server() != machine.as_str() || address.tab().is_none() || address.pane().is_some() {
+        return Err("claim address must be this machine's server:workspace:tab address".into());
+    }
+    let view = find::gather_machine_view(&RealFindHerdr::new(), None, machine, timeout)?;
+    if view.dropped != 0 {
+        return Err("Herdr topology contains undecodable entries; cannot verify the pane".into());
+    }
+    if !view.agents.iter().any(|agent| &agent.pane_id == pane) {
+        return Err("the named pane is not present in the current Herdr layout".into());
+    }
+    let place = find::places(&view)
+        .remove(pane)
+        .ok_or("the named pane has no verified workspace and tab")?;
+    if place.tab_address(machine) != *address {
+        return Err(format!(
+            "the named pane currently resolves to {}, not {address}",
+            place.tab_address(machine)
+        )
+        .into());
+    }
+    let pane_ref = relay_core::PaneRef::new(machine.clone(), pane.clone());
+    let mut same_pane = relay.registrations_for_pane(&pane_ref)?;
+    same_pane.retain(|r| r.full_address().as_ref() == Some(address));
+    if same_pane.len() != 1 {
+        return Err(
+            "the named address must have exactly one prior registration in this pane".into(),
+        );
+    }
+    let displaced = same_pane.remove(0);
+    if displaced.session_id.as_ref() == Some(session) {
+        return Err("the caller is already registered at this placement".into());
+    }
+    let named: Vec<_> = relay
+        .agents()?
+        .registrations
+        .into_iter()
+        .filter(|r| r.machine == *machine && r.full_address().as_ref() == Some(address))
+        .collect();
+    if named.len() != 1 || named[0] != displaced {
+        return Err("the named address has multiple or conflicting registrations".into());
+    }
+    let claimed = Registration {
+        name: AgentName::for_session(machine, session),
+        machine: machine.clone(),
+        kind: CLAUDE_OPERATOR_CLAIM_KIND.to_owned(),
+        session_id: Some(session.clone()),
+        cwd: None,
+        herdr_pane: Some(pane.clone()),
+        place: Some(place),
+        last_seen_ms: now_ms(),
+    };
+    relay.claim_socket_placement(&displaced, &claimed)?;
+    let revision = relay.begin_directory_observation(machine)?;
+    let mut publication = registrations(&view)?;
+    publication.retain(|r| r.full_address().as_ref() != Some(address));
+    publication.push(claimed.clone());
+    relay.publish_directory(machine, revision, &publication)?;
+    Ok(claimed)
 }
 
 /// Publish a complete verified LOCAL observation for cold fallback recovery.

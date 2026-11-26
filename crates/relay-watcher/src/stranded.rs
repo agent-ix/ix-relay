@@ -27,7 +27,10 @@ use std::{
     path::PathBuf,
 };
 
-use relay_core::{Address, AgentName, Buried, MachineName, Registration, Relay};
+use ix_trace_rs::implements;
+use relay_core::{
+    Address, AgentName, Buried, CLAUDE_OPERATOR_DISPLACED_KIND, MachineName, Registration, Relay,
+};
 
 use crate::{
     herdr::Layout,
@@ -69,7 +72,11 @@ enum Left {
 
 /// Whether, and how, the listing shows `reg`'s session to have left its pane. `None`
 /// for a session that is home and for everything herdr's answer leaves unknown.
+#[implements("FR-074-AC-1")]
 fn left(reg: &Registration, layout: &Layout) -> Option<Left> {
+    if reg.kind == CLAUDE_OPERATOR_DISPLACED_KIND {
+        return (!layout.sessions.is_empty()).then_some(Left::Replaced);
+    }
     let (session, pane) = (reg.session_id.as_ref()?, reg.herdr_pane.as_ref()?);
     // herdr listed no agent at all (it is restarting): everything is unknown.
     if layout.sessions.is_empty() {
@@ -219,6 +226,7 @@ fn address_of(
 /// # Errors
 ///
 /// A connection-level Redis error.
+#[implements("FR-074-AC-1")]
 pub fn pass(
     state: &mut Stranded,
     relay: &mut Relay,
@@ -240,7 +248,16 @@ pub fn pass(
     let lens = relay.inbox_lens(&names)?;
     let mut pruned = Vec::new();
     for ((reg, how), len) in candidates.iter().zip(lens) {
-        // An inbox that cannot be read is not an empty one: left for the next refresh.
+        // A displaced queue owner is retained only until both queued and in-flight mail
+        // have moved. An unreadable inbox is not empty, so leave it for the next pass.
+        if matches!(len, Ok(0)) && reg.kind == CLAUDE_OPERATOR_DISPLACED_KIND {
+            if relay.inflight_len(&reg.name)? == 0
+                && relay.prune(&reg.name, reg.last_seen_ms)?.is_some()
+            {
+                pruned.push(reg.name.clone());
+            }
+            continue;
+        }
         if !matches!(len, Ok(n) if n > 0) {
             continue;
         }
@@ -343,6 +360,7 @@ fn bury(
 mod tests {
     use std::{cell::RefCell, num::NonZeroUsize, time::Duration};
 
+    use ix_trace_rs::trace;
     use redis::Commands;
     use relay_core::{
         Claim, HerdrPlaceIds, Message, Now, PaneId, Place, Popper, SessionId, Target,
@@ -593,6 +611,42 @@ mod tests {
         assert!(queued(&mut bus, "old-lead").is_empty());
         assert_eq!(queued(&mut bus, "new-lead"), ["one", "two"]);
         assert!(registered(&mut bus, "old-lead"));
+    }
+
+    #[trace("FR-074-AC-1", "FR-074-AC-2")]
+    #[test]
+    fn operator_claim_receives_mail_from_the_displaced_launcher_queue() {
+        let Some(mut bus) = Bus::connect("stranded-operator-claim") else {
+            return;
+        };
+        let mut old = reg("old-launcher", "launcher", "w1:p1", "code", 0);
+        old.kind = CLAUDE_OPERATOR_DISPLACED_KIND.into();
+        let mut claimed = reg("background-job", "job-session", "w1:p1", "code", 0);
+        claimed.name = relay_core::AgentName::for_session(&hub(), &sid("job-session"));
+        claimed.kind = relay_core::CLAUDE_OPERATOR_CLAIM_KIND.into();
+        claimed.place = Some(place_of("w1:p1", "launcher", "code"));
+        put(&mut bus, &[&old, &claimed]);
+        send(&mut bus, old.name.as_str(), &["queued before claim"]);
+        let mut regs = vec![old.clone(), claimed.clone()];
+        let mut state = Stranded::default();
+        state.observe(&regs, &hub());
+        let mut log = Vec::new();
+        pass(
+            &mut state,
+            &mut bus.relay,
+            &layout(&[("w1:p1", Some("launcher"), "code")]),
+            &mut regs,
+            &hub(),
+            &mut |line| log.push(line),
+        )
+        .unwrap();
+        let popped = bus
+            .relay
+            .pop_inbox(&claimed.name, NonZeroUsize::new(8).unwrap())
+            .unwrap();
+        assert_eq!(popped.messages.len(), 1);
+        assert!(popped.messages[0].forwarded);
+        assert!(log.iter().any(|line| line.contains("forwarded 1")));
     }
 
     /// Tracing: TC-053-15
