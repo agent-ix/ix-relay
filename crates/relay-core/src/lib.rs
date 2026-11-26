@@ -63,7 +63,7 @@ pub use store::{
     DirectoryRecipient, HERDR_FAILED_TTL_SECS, HOOK_LEASE, Heartbeats, HookHealth, HookHealthEntry,
     INFLIGHT_ROW_OVERHEAD, IdentityCommit, InboxOverview, LaneLists, LeadBacklog, LeadOverview,
     LeaseState, MAX_HEARTBEAT_KEYS, MAX_INFLIGHT_BATCHES, MAX_INFLIGHT_BYTES, MAX_LEASE,
-    MAX_MESSAGE_BYTES, MAX_REDELIVERIES, Moves, Now, PanesReplaced, PlaceRefresh, PopResult,
+    MAX_MESSAGE_BYTES, MAX_REDELIVERIES, Moves, Now, PanesReplaced, PeekResult, PlaceRefresh, PopResult,
     Popper, Reaped, RecipientProbe, Relay, ReplyOutcome, Salvage, Salvaged, ScanCut, SessionProbe,
     SkippedRegistration, Sweep, WATCHER_LEASE,
 };

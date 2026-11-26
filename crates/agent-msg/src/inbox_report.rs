@@ -4,7 +4,7 @@
 //! trust the one field it actually needs (`rendered`) instead of re-deriving
 //! the sender-line format itself.
 
-use relay_core::{AddressBook, Error, Message, PopResult};
+use relay_core::{AddressBook, Error, Message, PeekResult, PopResult};
 use serde::Serialize;
 
 /// One message as the CLI reports it.
@@ -54,13 +54,25 @@ pub struct InboxReport {
 impl InboxReport {
     /// The report for `popped`, with senders shown per `book`.
     pub fn new(popped: &PopResult, book: &AddressBook) -> Self {
+        Self::from_parts(&popped.messages, &popped.rejected, book)
+    }
+
+    /// The report for `peeked`, with senders shown per `book`.
+    pub fn from_peek(peeked: &PeekResult, book: &AddressBook) -> Self {
+        Self::from_parts(&peeked.messages, &peeked.rejected, book)
+    }
+
+    fn from_parts(
+        messages: &[relay_core::receipts::InboxEntry],
+        rejected: &[Error],
+        book: &AddressBook,
+    ) -> Self {
         Self {
-            messages: popped
-                .messages
+            messages: messages
                 .iter()
                 .map(|m| InboxMessage::new(m, book))
                 .collect(),
-            rejected: popped.rejected.iter().map(Error::to_string).collect(),
+            rejected: rejected.iter().map(Error::to_string).collect(),
         }
     }
 }

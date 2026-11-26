@@ -6,6 +6,9 @@
 
 mod support;
 
+use relay_core::{AgentName, HerdrPlaceIds, Message, Place, Registration, Relay, Target};
+use std::time::Duration;
+
 /// Runs `agent-msg` with `args` and `AGENT_MSG_NAME`/`IX_RELAY_URL`/`IX_RELAY_PREFIX`
 /// set from the given options, returning its stdout. Isolated the same way
 /// `tests/hook.rs`'s cases are, via `support::agent_msg` / `support::base_cmd`
@@ -179,6 +182,150 @@ fn count_reports_pending_messages_without_popping_them() {
 
     let stdout = agent_msg(&["inbox", "--count"], "hub:EA:code", &url, &prefix);
     assert_eq!(stdout.trim(), "0");
+}
+
+/// Trace: FR-012-AC-6
+#[test]
+fn tc_012_06_peek_lists_messages_without_consuming_them() {
+    let Some(url) = test_url() else { return };
+    let prefix = format!("test:{}:inboxjson:peek:", std::process::id());
+    agent_msg(&["register"], "hub:EA:code", &url, &prefix);
+    agent_msg(
+        &["send", "hub:EA:code", "first"],
+        "hub:EA:sender",
+        &url,
+        &prefix,
+    );
+    agent_msg(
+        &["send", "hub:EA:code", "second"],
+        "hub:EA:sender",
+        &url,
+        &prefix,
+    );
+    let receiver = AgentName::for_session(
+        &"hub".parse().unwrap(),
+        &"s1".parse().unwrap(),
+    );
+    let mut redis = redis::Client::open(url.clone())
+        .unwrap()
+        .get_connection()
+        .unwrap();
+    let _: () = redis::Commands::rpush(
+        &mut redis,
+        format!("{prefix}inbox:{receiver}"),
+        "not json",
+    )
+    .unwrap();
+
+    let text = agent_msg(&["inbox", "--peek"], "hub:EA:code", &url, &prefix);
+    assert!(text.find("first").unwrap() < text.find("second").unwrap(), "{text}");
+    assert!(text.contains("unreadable inbox entry"), "{text}");
+    let first_only =
+        agent_msg(&["inbox", "--peek", "--max", "1"], "hub:EA:code", &url, &prefix);
+    assert!(first_only.contains("first"), "{first_only}");
+    assert!(!first_only.contains("second"), "{first_only}");
+
+    let peeked = agent_msg(&["inbox", "--peek", "--json"], "hub:EA:code", &url, &prefix);
+    let parsed: serde_json::Value = serde_json::from_str(peeked.trim()).expect("peek JSON");
+    assert_eq!(
+        parsed["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["text"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    assert_eq!(parsed["rejected"].as_array().unwrap().len(), 1);
+    assert!(parsed["rejected"][0].as_str().unwrap().contains("corrupt record"));
+
+    let popped = agent_msg(&["inbox", "--json"], "hub:EA:code", &url, &prefix);
+    let parsed: serde_json::Value = serde_json::from_str(popped.trim()).expect("inbox JSON");
+    assert_eq!(
+        parsed["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["text"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["first", "second"],
+        "ordinary inbox still returns the entries after peek"
+    );
+    assert_eq!(parsed["rejected"].as_array().unwrap().len(), 1);
+}
+
+/// Trace: FR-012-AC-7
+#[test]
+fn tc_012_07_peek_as_resolves_only_a_unique_verified_address() {
+    let Some(url) = test_url() else { return };
+    let prefix = format!("test:{}:inboxjson:peek-as:", std::process::id());
+    let machine: relay_core::MachineName = "hub".parse().unwrap();
+    let registration = |session: &str, pane: &str| {
+        let session: relay_core::SessionId = session.parse().unwrap();
+        Registration {
+            name: AgentName::for_session(&machine, &session),
+            machine: machine.clone(),
+            kind: "codex".into(),
+            session_id: Some(session.clone()),
+            cwd: None,
+            herdr_pane: Some(pane.parse().unwrap()),
+            place: Some(Place {
+                workspace: "EA".into(),
+                tab: "code".into(),
+                herdr_ids: Some(HerdrPlaceIds {
+                    workspace: "w1".parse().unwrap(),
+                    tab: "w1:t1".parse().unwrap(),
+                    pane: pane.parse().unwrap(),
+                    session_id: session,
+                    verified_at_ms: 1,
+                }),
+            }),
+            last_seen_ms: 1,
+        }
+    };
+    let first = registration("s1", "w1:p1");
+    let mut relay = Relay::connect(&url, Duration::from_secs(2))
+        .unwrap()
+        .with_prefix(prefix.clone());
+    relay.register(&first).unwrap();
+    relay
+        .send(&Message {
+            from: "sender".parse().unwrap(),
+            to: Target::Agent(first.name.clone()),
+            text: "inspect this queue".into(),
+            sent_at_ms: 42,
+            forwarded: false,
+        })
+        .unwrap();
+    let revision = relay.begin_directory_observation(&machine).unwrap();
+    assert!(relay
+        .publish_directory(&machine, revision, std::slice::from_ref(&first))
+        .unwrap());
+
+    let mut cmd = support::base_cmd(&["inbox", "--peek", "--as", "hub:EA:code"], None);
+    cmd.env("IX_RELAY_URL", &url).env("IX_RELAY_PREFIX", &prefix);
+    let output = support::run(cmd, "");
+    assert_eq!(output.status, 0, "{}", output.stderr);
+    assert!(output.stdout.contains("inspect this queue"), "{}", output.stdout);
+
+    let mut cmd = support::base_cmd(&["inbox", "--peek", "--as", "hub:EA:missing"], None);
+    cmd.env("IX_RELAY_URL", &url).env("IX_RELAY_PREFIX", &prefix);
+    let output = support::run(cmd, "");
+    assert_eq!(output.status, 1);
+    assert!(output.stdout.is_empty());
+
+    let second = registration("s2", "w1:p2");
+    relay.register(&second).unwrap();
+    let revision = relay.begin_directory_observation(&machine).unwrap();
+    assert!(relay
+        .publish_directory(&machine, revision, &[first, second])
+        .unwrap());
+    let mut cmd = support::base_cmd(&["inbox", "--peek", "--as", "hub:EA:code"], None);
+    cmd.env("IX_RELAY_URL", &url).env("IX_RELAY_PREFIX", &prefix);
+    let output = support::run(cmd, "");
+    assert_eq!(output.status, 1);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.contains("ambiguous"), "{}", output.stderr);
 }
 
 /// AGE-2026 review: `log` printed a message's text raw, so a legal embedded
