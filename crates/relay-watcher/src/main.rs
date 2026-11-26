@@ -559,8 +559,17 @@ fn refresh_places(
                      panes: {e}"
                 ));
             }
-            // Keep the complete last verified directory snapshot through its lease. Do not
-            // replace it with a socket-only projection when the layout read failed.
+            // Keep a complete last verified snapshot through its lease. If none exists,
+            // publish only canonical registrations with a verified live socket session;
+            // a failed layout cannot justify publishing terminal-route addresses.
+            if herdr.directory_observations() && !relay.directory_available(machine)? {
+                let alive = alive_leads(herdr, regs, machine);
+                let socket_only = last_verified(regs, &alive, &[]);
+                if !socket_only.is_empty() {
+                    let revision = relay.begin_directory_observation(machine)?;
+                    relay.publish_directory(machine, revision, &socket_only)?;
+                }
+            }
             return Ok(HashSet::new());
         }
     };

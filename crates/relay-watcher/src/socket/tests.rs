@@ -2642,6 +2642,10 @@ fn tc_036_09_an_unreadable_listing_keeps_a_live_socket_session_addressable() {
         read(&mut w, "node-a:EA:plan"),
         relay_core::DirectoryRead::Absent
     ));
+    assert!(
+        herdr.typed.lock().unwrap().is_empty(),
+        "no pane typing on a failed layout"
+    );
 }
 
 /// Tracing: TC-044-18
