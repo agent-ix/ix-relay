@@ -23,11 +23,11 @@ make ci             # fmt-check + lint + test-redis + deny + audit-unsafe + docs
 
 Backported from `agent-ix/ecaz`:
 
-- `clippy.toml` pins MSRV to `1.98.1` (ix-cli-kit's floor, AGE-2017; `rust-toolchain.toml` and `[workspace.package].rust-version` move with it) and caps cognitive complexity / arg count
+- `clippy.toml` pins MSRV to `1.98.1` (ix-cli-kit's floor, AGE-2017; `[workspace.package].rust-version` agrees with it) and caps cognitive complexity / arg count
 - `deny.toml` allow-lists licenses and denies unknown registries/git sources
 - `scripts/check_unsafe_comments.sh` runs in CI and locally via `make audit-unsafe`. Every `unsafe {` block must have a `// SAFETY:` comment within the 3 preceding lines, or be listed in `scripts/unsafe_comment_baseline.txt`. Update the baseline with `bash scripts/check_unsafe_comments.sh --update-baseline`.
 - `rustfmt.toml` uses 100-char width and `StdExternalCrate` import grouping. CI fails on drift.
-- `rust-toolchain.toml` pins to `1.98.1` + rustfmt + clippy.
+- `rust-toolchain.toml` pins the development and CI compiler to `1.100.0` + rustfmt + clippy.
 
 ## Layout
 
