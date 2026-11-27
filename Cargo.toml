@@ -6,8 +6,8 @@ members = ["crates/*"]
 version = "0.6.0"
 edition = "2024"
 # ix-cli-kit's own rust-version is 1.98.1 (see relay-core's dependency below);
-# cargo refuses to build a dependency newer than the active toolchain, so this
-# floor and rust-toolchain.toml's pin move together.
+# this compatibility floor is independent of the compiler pinned in
+# rust-toolchain.toml.
 rust-version = "1.98.1"
 authors = ["Agent IX"]
 license = "AGPL-3.0-or-later"
